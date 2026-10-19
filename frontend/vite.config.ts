@@ -12,12 +12,10 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    proxy: {
-      "/api": "http://127.0.0.1:8080",
-      "/library": "http://127.0.0.1:8080",
-      "/login": "http://127.0.0.1:8080",
-      "/logout": "http://127.0.0.1:8080",
-      "/static": "http://127.0.0.1:8080",
-    },
+    // Keep the browser's Host (changeOrigin: false) so the backend's same-origin CSRF check
+    // accepts writes from :5173. That only applies with LECTERN_INSECURE_HTTP=1.
+    proxy: Object.fromEntries(
+      ["/api", "/library", "/login", "/logout", "/setup", "/static"].map((p) => [p, { target: "http://127.0.0.1:8080", changeOrigin: false }]),
+    ),
   },
 });

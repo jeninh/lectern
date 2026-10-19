@@ -54,13 +54,15 @@ export function Shell({ children }: { children: ReactNode }) {
   const loc = useLocation();
   const isOwner = me?.user.role === "owner";
 
+  // Sheet sub-routes (/app/library/12, /app/devices/new) belong to their section; opening or
+  // closing them must not steal focus from the sheet or from the element that opened it.
+  const section = loc.pathname.replace(/\/(\d+|new)$/, "");
   useEffect(() => {
-    // Move focus to the main region on route change so screen readers announce the new page,
-    // unless the route opened a sheet, which has already focused its own content.
+    // Move focus to the main region on navigation so screen readers announce the new page.
     if (document.querySelector('[aria-modal="true"]')) return;
     document.getElementById("main")?.focus({ preventScroll: true });
     window.scrollTo({ top: 0 });
-  }, [loc.pathname]);
+  }, [section]);
 
   const toggleTheme = () => setTheme(resolvedTheme === "dark" ? "light" : "dark");
 

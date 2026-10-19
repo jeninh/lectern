@@ -21,15 +21,18 @@ set `LECTERN_INSECURE_HTTP=1` and `LECTERN_BASE_URL=http://localhost:8080`.
 
 ## Adding books
 
-Drop `.epub` files into `library/_inbox/`. Within a few seconds each one is read (OPF
-metadata via lxml), hashed (SHA-256 and KOReader's partial MD5), matched to an existing
-work by ISBN or fuzzy title + author, and moved to `library/<Author>/<Title>/book.epub`
-with `cover.jpg`. Rejected files land in `library/_inbox/_rejected/`.
+Upload EPUBs from the web app (**Upload** in the Library, or "Upload book" in the
+Cmd/Ctrl+K palette), or drop `.epub` files into `library/_inbox/`. Within a few seconds each
+one is read (OPF metadata via lxml), hashed (SHA-256 and KOReader's partial MD5), matched to an
+existing work by ISBN or fuzzy title + author, and moved to `library/<Author>/<Title>/book.epub`
+with `cover.jpg`. Rejected files land in `library/_inbox/_rejected/`. Browser uploads are
+limited to owners and members and capped by `LECTERN_UPLOAD_MAX_BYTES`.
 
 ## KOReader
 
-On the Account page create one **sync key** per device and one **OPDS app password** per
-device. Each is shown once and can be revoked individually.
+Open **Devices → Add device** (or press `N`). Each device gets a KOReader sync key and an OPDS
+app password together. Both are shown once and revoked together. The sheet shows the exact
+values to enter, then waits and confirms the device's first sync live.
 
 - Progress sync: Tools → Progress sync → Custom sync server → `https://lectern.example/`,
   then **Login** (not Register) with your Lectern username and the sync key.
@@ -50,10 +53,14 @@ device. Each is shown once and can be revoked individually.
 | `LECTERN_LOGIN_MAX_FAILURES` | 5 | Failures per account before lockout |
 | `LECTERN_LOGIN_LOCKOUT_SECONDS` | 900 | Lockout window |
 | `LECTERN_RATE_LIMIT_PER_MINUTE` | 60 | Per-IP limit on OPDS/sync auth attempts |
+| `LECTERN_UPLOAD_MAX_BYTES` | 200 MiB | Largest EPUB accepted by browser upload |
 
 ## Security model
 
-- Every route except `/healthz`, `/login`, and `/setup` requires authentication.
+- Every route except `/healthz`, `/login`, and `/setup` requires authentication. The
+  exception is `/app/assets/*`: content-hashed JS, CSS, and fonts built from `frontend/`,
+  with no data or configuration in them. The app shell at `/app` and every `/api` route
+  require a session.
 - Owner password: argon2id. TOTP optional. Passkeys preferred.
 - Sessions, sync keys, app passwords, and the setup token are 256-bit random secrets;
   only their SHA-256 digests are stored.
@@ -73,3 +80,26 @@ uv sync --extra dev
 uv run pytest
 LECTERN_DATA_DIR=./data LECTERN_LIBRARY_DIR=./library LECTERN_INSECURE_HTTP=1 uv run lectern
 ```
+
+### Web app
+
+The UI is a React + Vite single-page app in `frontend/`, built into `src/lectern/static/app`
+(git-ignored; the Docker image builds it) and served at `/app` behind the session cookie. It
+talks only to the authenticated JSON API under `/api`; every write sends the per-session
+`X-CSRF-Token` header. Setup and login stay server-rendered.
+
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run build      # one-off build that FastAPI serves at /app
+
+# Live reload: run the backend as above on :8080, then
+npm --prefix frontend run dev        # http://localhost:5173/app/
+```
+
+`npm run dev` proxies `/api`, `/login`, `/logout`, `/setup`, `/library`, and `/static` to
+`http://127.0.0.1:8080` and keeps the browser's `Host`. With `LECTERN_INSECURE_HTTP=1`, as in
+the command above, cookies and the CSRF/same-origin checks behave as in production. Sign in at
+`http://localhost:5173/login`.
+
+Keyboard: `⌘/Ctrl K` search, `/` filter, `N` add device, `G` then `H`/`L`/`D`/`S`/`A`,
+`T` theme, `[` sidebar, `Esc` close, `?` all shortcuts. Screenshots: `docs/screenshots/`.

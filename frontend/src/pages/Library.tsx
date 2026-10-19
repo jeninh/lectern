@@ -122,7 +122,11 @@ export function LibraryPage() {
                 e.stopPropagation();
                 if (q) setParam("q", "", "");
                 else input.current?.blur();
-              } else if (e.key === "Enter" && filtered[0]) open(filtered[0]);
+              } else if (e.key === "Enter" && filtered[0]) {
+                // Without this the Enter keypress lands on the sheet's freshly focused Close button.
+                e.preventDefault();
+                open(filtered[0]);
+              }
             }}
             autoComplete="off"
             spellCheck={false}
