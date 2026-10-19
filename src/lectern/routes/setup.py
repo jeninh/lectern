@@ -81,6 +81,6 @@ def setup_submit(
     )
     session_token = create_session(db, user, request, settings)
     db.commit()
-    response = RedirectResponse("/account?welcome=1", status_code=status.HTTP_303_SEE_OTHER)
+    response = RedirectResponse("/app?welcome=1", status_code=status.HTTP_303_SEE_OTHER)
     set_session_cookie(response, session_token, settings)
     return response

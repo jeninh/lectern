@@ -16,7 +16,7 @@ from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
 from lectern.migrate import upgrade_to_head
-from lectern.routes import account, admin, auth, health, kosync, library, opds, setup
+from lectern.routes import api, auth, health, kosync, library, opds, setup, spa
 from lectern.security.deps import LoginRequired
 from lectern.security.ratelimit import SlidingWindowLimiter
 from lectern.security.webauthn import ChallengeStore
@@ -35,12 +35,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
         h.setdefault("Referrer-Policy", "same-origin")
-        h.setdefault("Cache-Control", "no-store")
+        if request.url.path.startswith("/app/assets/"):
+            # Hashed, content-addressed build output; safe to cache hard.
+            h["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            h.setdefault("Cache-Control", "no-store")
         if not request.url.path.startswith(("/opds", "/syncs", "/users")):
+            # style-src allows inline *attributes* only (cover tints are per-card CSS variables);
+            # scripts stay strictly same-origin.
             h.setdefault(
                 "Content-Security-Policy",
-                "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-                "frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+                "form-action 'self'; base-uri 'none'",
             )
         settings: Settings = request.app.state.settings
         if settings.is_https:
@@ -114,19 +121,34 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
 
     app.add_middleware(SecurityHeadersMiddleware)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app_assets = STATIC_DIR / "app" / "assets"
+    if app_assets.is_dir():
+        app.mount("/app/assets", StaticFiles(directory=str(app_assets)), name="app-assets")
 
     app.include_router(health.router)
     app.include_router(setup.router)
     app.include_router(auth.router)
-    app.include_router(account.router)
-    app.include_router(admin.router)
+    app.include_router(api.router)
+    app.include_router(spa.router)
     app.include_router(library.router)
     app.include_router(opds.router)
     app.include_router(kosync.router)
 
+    @app.get("/library", include_in_schema=False)
+    @app.get("/account", include_in_schema=False)
+    @app.get("/admin/users", include_in_schema=False)
+    @app.get("/admin/audit", include_in_schema=False)
+    async def _legacy_redirect(request: Request):
+        target = {"/library": "/app/library", "/account": "/app/devices"}.get(
+            request.url.path,
+            "/app/users" if request.url.path == "/admin/users" else "/app/activity",
+        )
+        return RedirectResponse(target, status_code=status.HTTP_308_PERMANENT_REDIRECT)
+
     @app.exception_handler(LoginRequired)
     async def _login_required(request: Request, _exc: LoginRequired):
-        if "text/html" in request.headers.get("accept", "") and request.method == "GET":
+        wants_html = "text/html" in request.headers.get("accept", "")
+        if wants_html and request.method == "GET" and not request.url.path.startswith("/api/"):
             nxt = request.url.path
             return RedirectResponse(f"/login?next={nxt}", status_code=status.HTTP_303_SEE_OTHER)
         return JSONResponse(

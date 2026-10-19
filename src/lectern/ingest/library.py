@@ -11,6 +11,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lectern.ingest.cover import dominant_tint
 from lectern.ingest.epub import EpubMetadata, extract_cover
 from lectern.ingest.matching import find_matching_work, sort_author, sort_title
 from lectern.models import BookFile, FileKind, Work
@@ -89,6 +90,8 @@ def ingest_epub(
     if not work.has_cover and meta.cover_href:
         if extract_cover(dest, meta.cover_href, work_dir / "cover.jpg"):
             work.has_cover = True
+            work.cover_tint = dominant_tint(work_dir / "cover.jpg")
+            work.cover_tint = dominant_tint(work_dir / "cover.jpg")
 
     book = BookFile(
         work_id=work.id,

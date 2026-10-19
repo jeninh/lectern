@@ -1,6 +1,6 @@
 """KOReader sync protocol: wire format, auth, two-device round trip, revocation."""
 
-from tests.conftest import ko_headers, make_sync_key, post_form
+from tests.conftest import api_post, ko_headers, login, make_sync_key, make_sync_key_full, post_form
 
 DOC = "d41d8cd98f00b204e9800998ecf8427e"
 
@@ -71,41 +71,32 @@ def test_progress_is_per_user(client, owner):
         "/syncs/progress", json={"document": DOC, "progress": "p", "percentage": 0.9}, headers=kobo
     )
     # Create a second user and give them a key.
-    r = post_form(
+    r = api_post(
         client,
-        "/admin/users",
-        {
-            "username": "reader",
-            "role": "reader",
-            "password": "reader password 123",
-            "csrf_token": owner["csrf"],
-        },
+        "/api/admin/users",
+        owner["csrf"],
+        {"username": "reader", "role": "reader", "password": "reader password 123"},
     )
-    assert r.status_code == 200
-    r = post_form(client, "/logout", {"csrf_token": owner["csrf"]})
-    r = post_form(client, "/login", {"username": "reader", "password": "reader password 123"})
-    assert r.status_code == 200
-    from tests.conftest import csrf_of
-
-    csrf = csrf_of(client.get("/account").text)
+    assert r.status_code == 201, r.text
+    post_form(client, "/logout", {"csrf_token": owner["csrf"]})
+    csrf = login(client, "reader", "reader password 123")
     reader_key = ko_headers("reader", make_sync_key(client, csrf, "kindle"))
     assert client.get(f"/syncs/progress/{DOC}", headers=reader_key).json() == {}
 
 
 def test_revoked_key_stops_working(client, owner):
-    secret = make_sync_key(client, owner["csrf"], "kobo")
-    h = ko_headers("owner", secret)
+    created = make_sync_key_full(client, owner["csrf"], "kobo")
+    h = ko_headers("owner", created["secret"])
     assert client.get("/users/auth", headers=h).status_code == 200
-    page = client.get("/account").text
-    import re
-
-    key_id = re.search(r"/account/sync-keys/(\d+)/revoke", page).group(1)
-    r = post_form(client, f"/account/sync-keys/{key_id}/revoke", {"csrf_token": owner["csrf"]})
-    assert r.status_code == 200
+    key_id = created["sync_key"]["id"]
+    r = api_post(client, f"/api/devices/sync-keys/{key_id}/revoke", owner["csrf"])
+    assert r.status_code == 200 and r.json()["sync_key"]["revoked_at"]
     assert client.get("/users/auth", headers=h).status_code == 401
     assert (
         client.put(
-            "/syncs/progress", json={"document": DOC, "progress": "p", "percentage": 0.1}, headers=h
+            "/syncs/progress",
+            json={"document": DOC, "progress": "p", "percentage": 0.1},
+            headers=h,
         ).status_code
         == 401
     )

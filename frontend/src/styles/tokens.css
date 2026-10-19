@@ -1,0 +1,67 @@
+/* Lectern visual system: warm paper, one deep ink-blue accent, warm-dark counterpart. */
+:root {
+  color-scheme: light;
+  --paper: #f5efe4;
+  --paper-2: #ede5d6;
+  --surface: #fffcf6;
+  --surface-2: #f9f4ea;
+  --ink: #221d17;
+  --ink-2: #4d453b;
+  --muted: #7a7064;
+  --line: #e3d9c7;
+  --line-2: #d2c6b0;
+  --accent: #1f3a93;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(31, 58, 147, 0.1);
+  --accent-ring: rgba(31, 58, 147, 0.35);
+  --danger: #a4382c;
+  --danger-soft: rgba(164, 56, 44, 0.1);
+  --ok: #2f6b3a;
+  --ok-soft: rgba(47, 107, 58, 0.12);
+  --warn: #8a5a00;
+  --warn-soft: rgba(138, 90, 0, 0.12);
+  --shadow: 0 1px 2px rgba(60, 40, 10, 0.06), 0 8px 24px -12px rgba(60, 40, 10, 0.25);
+  --shadow-lg: 0 2px 6px rgba(60, 40, 10, 0.08), 0 24px 60px -20px rgba(60, 40, 10, 0.4);
+  --radius: 10px;
+  --radius-lg: 16px;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --dur: 180ms;
+  --dur-slow: 320ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --nav-w: 232px;
+  --tint: var(--accent);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #18140f;
+  --paper-2: #120f0b;
+  --surface: #211c16;
+  --surface-2: #2a241d;
+  --ink: #efe6d6;
+  --ink-2: #c9bfae;
+  --muted: #9a8f7f;
+  --line: #352d24;
+  --line-2: #4a4034;
+  --accent: #8fa6ff;
+  --accent-ink: #0f1a4d;
+  --accent-soft: rgba(143, 166, 255, 0.14);
+  --accent-ring: rgba(143, 166, 255, 0.45);
+  --danger: #e07b6e;
+  --danger-soft: rgba(224, 123, 110, 0.14);
+  --ok: #7fc48d;
+  --ok-soft: rgba(127, 196, 141, 0.14);
+  --warn: #e3b457;
+  --warn-soft: rgba(227, 180, 87, 0.14);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.7);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.5), 0 24px 60px -20px rgba(0, 0, 0, 0.9);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur: 0ms;
+    --dur-slow: 0ms;
+  }
+}

@@ -200,6 +200,7 @@ class Work(Base):
     published: Mapped[str | None] = mapped_column(String(32), default=None)
     dir_path: Mapped[str] = mapped_column(String(1024), unique=True)  # relative to library
     has_cover: Mapped[bool] = mapped_column(Boolean, default=False)
+    cover_tint: Mapped[str | None] = mapped_column(String(7), default=None)  # "#rrggbb"
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
