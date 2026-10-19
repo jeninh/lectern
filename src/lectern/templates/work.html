@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ work.title }} · Lectern{% endblock %}
+{% block content %}
+<article class="work">
+  {% if work.has_cover %}<img class="cover" src="/library/works/{{ work.id }}/cover.jpg" alt="">{% endif %}
+  <div>
+    <h1>{{ work.title }}</h1>
+    <p class="muted">{{ work.author }}{% if work.published %} · {{ work.published[:10] }}{% endif %}{% if work.language %} · {{ work.language }}{% endif %}</p>
+    {% if work.isbn %}<p class="muted">ISBN {{ work.isbn }}</p>{% endif %}
+    {% if work.description %}<p>{{ work.description[:2000] }}</p>{% endif %}
+    <h2>Files</h2>
+    <ul>
+    {% for f in work.files %}
+      <li><a href="/library/files/{{ f.id }}/download">{{ f.rel_path }}</a> <span class="muted">{{ (f.size / 1024) | round | int }} KB · KOReader id {{ f.partial_md5 }}</span></li>
+    {% endfor %}
+    </ul>
+    <p class="muted">Stored at <code>{{ work.dir_path }}</code></p>
+  </div>
+</article>
+{% endblock %}

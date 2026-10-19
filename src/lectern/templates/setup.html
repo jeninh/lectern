@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Set up Lectern{% endblock %}
+{% block content %}
+<h1>Create the owner account</h1>
+<p>This is a one-time step. Registration closes as soon as the owner exists.</p>
+<form method="post" action="/setup" class="card">
+  <input type="hidden" name="token" value="{{ token }}">
+  <label>Username <input name="username" required pattern="[a-z0-9][a-z0-9._-]{1,31}" value="{{ username or '' }}" autocomplete="username"></label>
+  <label>Display name <input name="display_name" maxlength="128"></label>
+  <label>Password (12+ characters) <input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
+  <label>Confirm password <input name="password_confirm" type="password" required minlength="12" autocomplete="new-password"></label>
+  <button type="submit">Create owner</button>
+</form>
+<p class="muted">After this you can add a passkey and TOTP from the Account page.</p>
+{% endblock %}
