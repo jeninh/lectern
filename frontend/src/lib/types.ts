@@ -132,3 +132,21 @@ export interface SyncKeyStatus {
     at: string | null;
   } | null;
 }
+
+/** A KOReader sync key and/or OPDS app password issued together. */
+export interface Device {
+  id: string;
+  label: string;
+  created_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  sync_key: SyncKey | null;
+  app_password: AppPassword | null;
+}
+
+export interface CreatedDevice {
+  device: Device;
+  username: string;
+  sync_secret: string;
+  opds_secret: string;
+}

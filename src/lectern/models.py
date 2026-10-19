@@ -141,6 +141,10 @@ class AppPassword(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # Set when both credentials were issued together as one device.
+    sync_key_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sync_keys.id", ondelete="SET NULL"), default=None, index=True
+    )
 
     user: Mapped[User] = relationship(back_populates="app_passwords")
 

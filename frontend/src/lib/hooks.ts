@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
@@ -108,13 +108,30 @@ export function useHotkeys(hotkeys: Hotkey[]) {
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-/** Traps Tab inside the element and restores focus on unmount. */
+let inertDepth = 0;
+/**
+ * While any overlay is open, the app root is inert: hidden from assistive tech and unreachable
+ * by Tab or click. Overlays portal to <body>, outside #root. Returns the undo function.
+ */
+export function makeBackgroundInert(): () => void {
+  const root = document.getElementById("root");
+  inertDepth += 1;
+  root?.setAttribute("inert", "");
+  return () => {
+    inertDepth -= 1;
+    if (inertDepth === 0) root?.removeAttribute("inert");
+  };
+}
+
+/** Traps Tab inside the element, makes the page behind it inert, and restores focus on unmount. */
 export function useFocusTrap(active: boolean) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  // Layout effect: capture the opener and set initial focus before children's effects run.
+  useLayoutEffect(() => {
     if (!active || !ref.current) return;
     const root = ref.current;
     const prev = document.activeElement as HTMLElement | null;
+    const undoInert = makeBackgroundInert();
     const first = root.querySelector<HTMLElement>("[data-autofocus]") ?? root.querySelector<HTMLElement>(FOCUSABLE);
     (first ?? root).focus();
     const onKey = (e: KeyboardEvent) => {
@@ -134,6 +151,7 @@ export function useFocusTrap(active: boolean) {
     root.addEventListener("keydown", onKey);
     return () => {
       root.removeEventListener("keydown", onKey);
+      undoInert();
       prev?.focus?.();
     };
   }, [active]);

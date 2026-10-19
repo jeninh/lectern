@@ -24,13 +24,17 @@
   --shadow-lg: 0 2px 6px rgba(60, 40, 10, 0.08), 0 24px 60px -20px rgba(60, 40, 10, 0.4);
   --radius: 10px;
   --radius-lg: 16px;
-  --font-ui: system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
-  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --font-ui: "Inter Variable", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --dur: 180ms;
   --dur-slow: 320ms;
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
-  --nav-w: 232px;
+  /* Quick spring: slight overshoot, settles fast. Used for sheets, palette, cards, lists. */
+  --spring: cubic-bezier(0.34, 1.36, 0.5, 1);
+  --dur-spring: 380ms;
+  --nav-w: 240px;
+  --nav-w-collapsed: 68px;
   --tint: var(--accent);
 }
 
@@ -63,5 +67,6 @@
   :root {
     --dur: 0ms;
     --dur-slow: 0ms;
+    --dur-spring: 0ms;
   }
 }

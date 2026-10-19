@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useFocusTrap } from "../lib/hooks";
 import { Close } from "./Icons";
 
@@ -39,7 +40,7 @@ export function Sheet({ open, onClose, title, children, variant = "sheet", label
       </button>
     </div>
   );
-  return (
+  return createPortal(
     <>
       <div className="scrim" onClick={onClose} aria-hidden="true" />
       {variant === "sheet" ? (
@@ -55,6 +56,7 @@ export function Sheet({ open, onClose, title, children, variant = "sheet", label
           </div>
         </div>
       )}
-    </>
+    </>,
+    document.body,
   );
 }

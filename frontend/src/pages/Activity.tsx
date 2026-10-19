@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { EmptyState } from "../components/EmptyState";
-import { Alert, Download, Key, Login, Logout, Pulse, Shield, Sync, Users } from "../components/Icons";
+import { Alert, Devices, Download, Key, Login, Logout, Pulse, Shield, Sync, Upload, Users } from "../components/Icons";
 import { PageTitle } from "../components/Shell";
 import { get } from "../lib/api";
 import { absoluteTime, percent, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
+import { useStore } from "../lib/store";
 import type { ActivityEvent } from "../lib/types";
 
 function describe(e: ActivityEvent): { icon: JSX.Element; cls: string; text: JSX.Element } {
@@ -58,6 +59,12 @@ function describe(e: ActivityEvent): { icon: JSX.Element; cls: string; text: JSX
       return { icon: <Users />, cls: "warn", text: <>{who} disabled <strong>{e.target}</strong></> };
     case "user.enable":
       return { icon: <Users />, cls: "ok", text: <>{who} re-enabled <strong>{e.target}</strong></> };
+    case "device.create":
+      return { icon: <Devices />, cls: "ok", text: <>{who} added device <strong>{e.target}</strong></> };
+    case "device.revoke":
+      return { icon: <Devices />, cls: "warn", text: <>{who} revoked device <strong>{e.target}</strong></> };
+    case "book.upload":
+      return { icon: <Upload />, cls: "", text: <>{who} uploaded <strong>{e.target}</strong></> };
     case "setup.owner_created":
       return { icon: <Users />, cls: "ok", text: <>Owner account <strong>{e.target}</strong> created</> };
     default:
@@ -69,6 +76,7 @@ export function ActivityFeed({ limit = 50, compact = false }: { limit?: number; 
   const [events, setEvents] = useState<ActivityEvent[] | null>(null);
   const since = useRef<string | null>(null);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
+  const { now } = useStore();
 
   const load = useCallback(async () => {
     if (since.current) {
@@ -76,6 +84,7 @@ export function ActivityFeed({ limit = 50, compact = false }: { limit?: number; 
       since.current = d.now;
       if (d.events.length) {
         setFresh(new Set(d.events.map((e) => e.id)));
+        window.setTimeout(() => setFresh(new Set()), 4000);
         setEvents((prev) => [...d.events, ...(prev ?? []).filter((p) => !d.events.some((n) => n.id === p.id))].slice(0, limit));
       }
     } else {
@@ -107,7 +116,7 @@ export function ActivityFeed({ limit = 50, compact = false }: { limit?: number; 
               {d.text}
               {!compact && e.ip && <span> · {e.ip}</span>}
             </div>
-            <time dateTime={e.at ?? undefined} title={absoluteTime(e.at)}>{relativeTime(e.at)}</time>
+            <time dateTime={e.at ?? undefined} title={absoluteTime(e.at)}>{relativeTime(e.at, now)}</time>
           </article>
         );
       })}

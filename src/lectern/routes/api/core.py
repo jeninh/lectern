@@ -132,6 +132,9 @@ _ACTIVITY_ACTIONS = {
     "user.create",
     "user.disable",
     "user.enable",
+    "device.create",
+    "device.revoke",
+    "book.upload",
     "setup.owner_created",
 }
 

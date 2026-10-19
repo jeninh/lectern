@@ -53,6 +53,22 @@ export async function post<T>(path: string, body?: unknown): Promise<T> {
   return (await parse(res)) as T;
 }
 
+/** Streams one EPUB to the inbox. The body is the raw file; its name rides in a header. */
+export async function uploadBook(file: File): Promise<{ queued: string; size: number }> {
+  const res = await fetch("/api/books/upload", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/epub+zip",
+      "x-csrf-token": csrfToken,
+      "x-filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  return (await parse(res)) as { queued: string; size: number };
+}
+
 export function logout() {
   const form = document.createElement("form");
   form.method = "post";

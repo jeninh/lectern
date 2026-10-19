@@ -1,5 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { get, setCsrfToken } from "./api";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { get, setCsrfToken, uploadBook } from "./api";
 import { useLocalStorage } from "./hooks";
 import type { Me, Work } from "./types";
 
@@ -26,6 +26,11 @@ interface Store {
   setPaletteOpen: (v: boolean) => void;
   helpOpen: boolean;
   setHelpOpen: (v: boolean) => void;
+  /** Wall clock that ticks every 20 s so relative times re-render on their own. */
+  now: number;
+  canUpload: boolean;
+  /** Opens the file picker; chosen EPUBs are streamed to the inbox. */
+  pickBooks: () => void;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -43,6 +48,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [now, setNow] = useState(Date.now);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 20000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const refreshMe = useCallback(async () => {
     const data = await get<Me>("/api/me");
@@ -79,6 +91,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3800);
   }, []);
 
+  const canUpload = me?.user.role === "owner" || me?.user.role === "member";
+  const pickBooks = useCallback(() => fileInput.current?.click(), []);
+  const onFiles = async (files: FileList | null) => {
+    const list = Array.from(files ?? []);
+    if (fileInput.current) fileInput.current.value = "";
+    if (!list.length) return;
+    let ok = 0;
+    for (const f of list) {
+      try {
+        await uploadBook(f);
+        ok++;
+      } catch (e) {
+        toast(`${f.name}: ${(e as Error).message}`, "error");
+      }
+    }
+    if (!ok) return;
+    toast(ok === 1 ? `Uploaded ${list[0].name}. Filing it now…` : `Uploaded ${ok} books. Filing them now…`);
+    // The inbox watcher picks files up within a few seconds; refresh until they land.
+    for (const delay of [2500, 5000, 9000, 15000]) window.setTimeout(() => refreshLibrary().catch(() => {}), delay);
+  };
+
   const value = useMemo<Store>(
     () => ({
       me,
@@ -95,10 +128,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setPaletteOpen,
       helpOpen,
       setHelpOpen,
+      now,
+      canUpload,
+      pickBooks,
     }),
-    [me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, paletteOpen, helpOpen],
+    [me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, paletteOpen, helpOpen, now, canUpload, pickBooks],
   );
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={value}>
+      {children}
+      {canUpload && (
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".epub,application/epub+zip"
+          multiple
+          hidden
+          aria-hidden="true"
+          tabIndex={-1}
+          onChange={(e) => onFiles(e.target.files)}
+        />
+      )}
+    </Ctx.Provider>
+  );
 }
 
 export function useStore(): Store {

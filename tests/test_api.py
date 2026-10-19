@@ -1,8 +1,10 @@
 """JSON API used by the single-page app."""
 
 import base64
+from urllib.parse import quote
 
 from tests.conftest import (
+    ORIGIN,
     OWNER_PASSWORD,
     api_post,
     csrf_of,
@@ -161,6 +163,107 @@ def test_devices_list_and_app_password_revoke(client, owner):
         == 422
     )
     assert api_post(client, "/api/devices/sync-keys/999/revoke", owner["csrf"]).status_code == 404
+
+
+def test_device_issues_paired_credentials_and_revokes_together(client, owner):
+    legacy = api_post(client, "/api/devices/app-passwords", owner["csrf"], {"label": "Thorium"})
+    r = api_post(client, "/api/devices", owner["csrf"], {"label": " Kobo Clara "})
+    assert r.status_code == 201
+    out = r.json()
+    dev = out["device"]
+    assert dev["label"] == "Kobo Clara" and dev["id"] == f"k{dev['sync_key']['id']}"
+    assert dev["app_password"]["label"] == "Kobo Clara"
+    assert out["sync_secret"] != out["opds_secret"]
+
+    ko = ko_headers("owner", out["sync_secret"])
+    opds = {
+        "authorization": "Basic "
+        + base64.b64encode(f"owner:{out['opds_secret']}".encode()).decode()
+    }
+    assert client.get("/users/auth", headers=ko).status_code == 200
+    assert client.get("/opds", headers=opds).status_code == 200
+    # Each secret works only for its own protocol.
+    wrong_ko = ko_headers("owner", out["opds_secret"])
+    assert client.get("/users/auth", headers=wrong_ko).status_code == 401
+    assert (
+        client.get(
+            "/opds",
+            headers={
+                "authorization": "Basic "
+                + base64.b64encode(f"owner:{out['sync_secret']}".encode()).decode()
+            },
+        ).status_code
+        == 401
+    )
+
+    devices = client.get("/api/devices").json()["devices"]
+    assert [d["label"] for d in devices] == ["Kobo Clara", "Thorium"]
+    assert devices[0]["last_used_at"] is not None
+    assert devices[1]["sync_key"] is None
+    assert devices[1]["id"] == f"p{legacy.json()['app_password']['id']}"
+
+    # Revoking via the app-password half still takes the whole device down.
+    pw_half = f"p{dev['app_password']['id']}"
+    r = api_post(client, f"/api/devices/{pw_half}/revoke", owner["csrf"])
+    assert r.status_code == 200 and r.json()["device"]["revoked_at"] is not None
+    assert client.get("/users/auth", headers=ko).status_code == 401
+    assert client.get("/opds", headers=opds).status_code == 401
+    actions = [e["action"] for e in client.get("/api/activity").json()["events"]]
+    assert actions[:2] == ["device.revoke", "device.create"]
+
+    assert api_post(client, "/api/devices/x1/revoke", owner["csrf"]).status_code == 404
+    assert api_post(client, "/api/devices/k999/revoke", owner["csrf"]).status_code == 404
+    assert (
+        client.post("/api/devices", json={"label": "x"}, headers={"origin": ORIGIN}).status_code
+        == 403
+    )
+
+
+def _upload(client, csrf, data: bytes, name="My Book.epub", ctype="application/epub+zip"):
+    headers = {"origin": ORIGIN, "content-type": ctype, "x-filename": quote(name)}
+    if csrf:
+        headers["x-csrf-token"] = csrf
+    return client.post("/api/books/upload", content=data, headers=headers)
+
+
+def test_upload_streams_into_inbox_and_ingests(client, owner, settings, tmp_path):
+    epub = make_epub(
+        tmp_path / "src.epub", title="Uploaded Tale", authors=["Ida Upload"]
+    ).read_bytes()
+    assert _upload(client, "", epub).status_code == 403  # CSRF required
+    assert _upload(client, owner["csrf"], b"not a zip").status_code == 422
+    assert _upload(client, owner["csrf"], epub, ctype="application/pdf").status_code == 415
+    r = _upload(client, owner["csrf"], epub, name="../../Évil name.epub")
+    assert r.status_code == 202, r.text
+    queued = settings.inbox_path / r.json()["queued"]
+    assert queued.parent == settings.inbox_path and queued.name.startswith("Evil name-")
+    assert sorted(p.name for p in settings.inbox_path.iterdir()) == [queued.name]
+
+    w = InboxWatcher(settings.inbox_path, settings.library_dir, session_factory(), 0.01)
+    w.scan_once()
+    w.scan_once()
+    titles = [x["title"] for x in client.get("/api/library").json()["works"]]
+    assert titles == ["Uploaded Tale"]
+
+
+def test_upload_limits_and_roles(client, owner, settings, tmp_path):
+    settings.upload_max_bytes = 1000
+    big = b"PK\x03\x04" + b"x" * 2000
+    assert _upload(client, owner["csrf"], big).status_code == 413  # by Content-Length
+    chunks = (big[i : i + 300] for i in range(0, len(big), 300))  # chunked: no length
+    assert _upload(client, owner["csrf"], chunks).status_code == 413
+    assert list(settings.inbox_path.iterdir()) == []  # partial upload cleaned up
+    api_post(
+        client,
+        "/api/admin/users",
+        owner["csrf"],
+        {"username": "rdr", "role": "reader", "password": "reader password 123"},
+    )
+    post_form(client, "/logout", {"csrf_token": owner["csrf"]})
+    csrf = login(client, "rdr", "reader password 123")
+    assert _upload(client, csrf, b"PK\x03\x04").status_code == 403
+    post_form(client, "/logout", {"csrf_token": csrf})
+    assert _upload(client, csrf, b"PK\x03\x04").status_code == 401
 
 
 def test_activity_scopes_and_since(client, owner, settings):

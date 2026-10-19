@@ -75,3 +75,27 @@ export const Command = (p: P) => (
 export const Help = (p: P) => (
   <svg {...base} {...p}><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 1-1 1.7M12 17h.01" /></svg>
 );
+export const Headphones = (p: P) => (
+  <svg {...base} {...p}><path d="M4 15v-3a8 8 0 0 1 16 0v3" /><rect x="3" y="14" width="4" height="7" rx="1.5" /><rect x="17" y="14" width="4" height="7" rx="1.5" /></svg>
+);
+export const Highlighter = (p: P) => (
+  <svg {...base} {...p}><path d="m14 4 6 6-8.5 8.5H6v-5.5z" /><path d="M4 21h8" /></svg>
+);
+export const Upload = (p: P) => (
+  <svg {...base} {...p}><path d="M12 16V4M7 9l5-5 5 5" /><path d="M4 19h16" /></svg>
+);
+export const Sidebar = (p: P) => (
+  <svg {...base} {...p}><rect x="3" y="4" width="18" height="16" rx="2.5" /><path d="M9 4v16" /></svg>
+);
+export const More = (p: P) => (
+  <svg {...base} {...p}><circle cx="5" cy="12" r="1.3" fill="currentColor" /><circle cx="12" cy="12" r="1.3" fill="currentColor" /><circle cx="19" cy="12" r="1.3" fill="currentColor" /></svg>
+);
+export const Gear = (p: P) => (
+  <svg {...base} {...p}><circle cx="12" cy="12" r="3" /><path d="M12 2.5v3M12 18.5v3M4.2 6l2.1 2.1M17.7 15.9l2.1 2.1M2.5 12h3M18.5 12h3M4.2 18l2.1-2.1M17.7 8.1l2.1-2.1" /></svg>
+);
+export const Reader = (p: P) => (
+  <svg {...base} {...p}><rect x="5" y="2.5" width="14" height="19" rx="2.5" /><path d="M8.5 7h7M8.5 10.5h7M8.5 14h4" /></svg>
+);
+export const Person = (p: P) => (
+  <svg {...base} {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
+);

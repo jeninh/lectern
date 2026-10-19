@@ -2,98 +2,147 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { createPortal } from "react-dom";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { logout } from "../lib/api";
-import { useHotkeys } from "../lib/hooks";
-import { useStore } from "../lib/store";
 import { initials } from "../lib/format";
+import { useHotkeys, useLocalStorage } from "../lib/hooks";
+import { useStore } from "../lib/store";
 import { CommandPalette } from "./CommandPalette";
-import { Devices, Help, Home, Library, Logout, Moon, Pulse, Search, Shield, Sun, Users } from "./Icons";
+import { Devices, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun } from "./Icons";
 import { Sheet } from "./Sheet";
 
-const NAV = [
-  { to: "/app", label: "Home", icon: <Home />, key: "g h", end: true },
-  { to: "/app/library", label: "Library", icon: <Library />, key: "g l" },
-  { to: "/app/devices", label: "Devices", icon: <Devices />, key: "g d" },
-  { to: "/app/security", label: "Security", icon: <Shield />, key: "g s" },
-  { to: "/app/activity", label: "Activity", icon: <Pulse />, key: "g a" },
+interface NavEntry {
+  to: string;
+  label: string;
+  icon: JSX.Element;
+  keys?: string;
+  end?: boolean;
+  soon?: boolean;
+}
+
+const READ: NavEntry[] = [
+  { to: "/app", label: "Home", icon: <Home />, keys: "g h", end: true },
+  { to: "/app/library", label: "Library", icon: <Library />, keys: "g l" },
+  { to: "/app/listening", label: "Listening", icon: <Headphones />, soon: true },
+  { to: "/app/highlights", label: "Highlights", icon: <Highlighter />, soon: true },
 ];
+const MANAGE: NavEntry[] = [
+  { to: "/app/devices", label: "Devices", icon: <Devices />, keys: "g d" },
+  { to: "/app/security", label: "Security", icon: <Shield />, keys: "g s" },
+  { to: "/app/activity", label: "Activity", icon: <Pulse />, keys: "g a" },
+];
+const ADMIN: NavEntry = { to: "/app/admin", label: "Admin", icon: <Gear />, keys: "g u" };
+
+export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+export const MOD = isMac ? "⌘" : "Ctrl";
 
 const TitleSlot = createContext<HTMLElement | null>(null);
 
+function NavItem({ n, collapsed }: { n: NavEntry; collapsed: boolean }) {
+  return (
+    <NavLink to={n.to} end={n.end} className="nav-item" title={collapsed ? n.label : undefined}>
+      {n.icon}
+      <span className="label">{n.label}</span>
+      {n.soon ? <span className="soon">Soon</span> : n.keys && <kbd aria-hidden="true">{n.keys.toUpperCase()}</kbd>}
+    </NavLink>
+  );
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   const { me, resolvedTheme, setTheme, toasts, setPaletteOpen, helpOpen, setHelpOpen } = useStore();
+  const [collapsed, setCollapsed] = useLocalStorage("lectern.sidebarCollapsed", false);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const nav = useNavigate();
   const loc = useLocation();
-  const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+  const isOwner = me?.user.role === "owner";
 
   useEffect(() => {
-    // Move focus to the main region on route change so screen readers announce the new page.
+    // Move focus to the main region on route change so screen readers announce the new page,
+    // unless the route opened a sheet, which has already focused its own content.
+    if (document.querySelector('[aria-modal="true"]')) return;
     document.getElementById("main")?.focus({ preventScroll: true });
+    window.scrollTo({ top: 0 });
   }, [loc.pathname]);
 
   const toggleTheme = () => setTheme(resolvedTheme === "dark" ? "light" : "dark");
 
   useHotkeys([
     { keys: "mod+k", handler: () => setPaletteOpen(true), inInputs: true },
-    { keys: "/", handler: () => setPaletteOpen(true) },
+    {
+      // "/" focuses the page's filter when it has one (Library), otherwise opens search.
+      keys: "/",
+      handler: () => {
+        const filter = document.querySelector<HTMLInputElement>("[data-page-filter]");
+        if (filter) {
+          filter.focus();
+          filter.select();
+        } else setPaletteOpen(true);
+      },
+    },
     { keys: "?", handler: () => setHelpOpen(true) },
     { keys: "t", handler: toggleTheme },
+    { keys: "[", handler: () => setCollapsed(!collapsed) },
     { keys: "n", handler: () => nav("/app/devices/new") },
     { keys: "g h", handler: () => nav("/app") },
     { keys: "g l", handler: () => nav("/app/library") },
     { keys: "g d", handler: () => nav("/app/devices") },
     { keys: "g s", handler: () => nav("/app/security") },
     { keys: "g a", handler: () => nav("/app/activity") },
-    { keys: "g u", handler: () => me?.user.role === "owner" && nav("/app/users") },
+    { keys: "g u", handler: () => isOwner && nav("/app/admin") },
   ]);
 
-  const items = me?.user.role === "owner" ? [...NAV, { to: "/app/users", label: "Users", icon: <Users />, key: "g u" }] : NAV;
+  const manage = isOwner ? [...MANAGE, ADMIN] : MANAGE;
+  const name = me?.user.display_name || me?.user.username || "";
 
   return (
-    <div className="shell">
+    <div className="shell" data-collapsed={collapsed || undefined}>
       <a className="skip-link" href="#main">Skip to content</a>
-      <aside className="sidebar" aria-label="Primary">
-        <NavLink to="/app" className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M5 5h14v2H5zm0 5h14v2H5zm0 5h9v2H5z" /></svg>
-          </span>
-          Lectern
-        </NavLink>
-        <div className="nav-section">Read</div>
-        {items.slice(0, 2).map((n) => (
-          <NavLink key={n.to} to={n.to} end={n.end} className="nav-item">
-            {n.icon}
-            {n.label}
-            <kbd>{n.key}</kbd>
+      <aside className="sidebar" aria-label="Sidebar">
+        <div className="brand-row">
+          <NavLink to="/app" className="brand" aria-label="Lectern home">
+            <span className="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M6 4h9a3 3 0 0 1 3 3v13l-4.5-2.5L9 20V4.5" opacity=".55" /><path d="M6 4h3v16l-3-1.7z" /></svg>
+            </span>
+            <span className="label">Lectern</span>
           </NavLink>
-        ))}
-        <div className="nav-section">Manage</div>
-        {items.slice(2).map((n) => (
-          <NavLink key={n.to} to={n.to} className="nav-item">
-            {n.icon}
-            {n.label}
-            <kbd>{n.key}</kbd>
-          </NavLink>
-        ))}
-        <div className="sidebar-footer">
-          <button className="nav-item" onClick={() => setHelpOpen(true)}>
-            <Help />
-            Shortcuts
-            <kbd>?</kbd>
+          <button
+            className="icon-btn ghost collapse-btn"
+            onClick={() => setCollapsed(!collapsed)}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
+            title={`${collapsed ? "Expand" : "Collapse"} sidebar ([)`}
+          >
+            <Sidebar />
           </button>
-          <button className="nav-item" onClick={toggleTheme} aria-pressed={resolvedTheme === "dark"}>
+        </div>
+        <button className="sidebar-search" onClick={() => setPaletteOpen(true)} aria-label="Search books, pages, and actions" aria-keyshortcuts="Meta+K Control+K" title={collapsed ? `Search (${MOD} K)` : undefined}>
+          <Search />
+          <span className="label">Search</span>
+          <kbd aria-hidden="true">{MOD} K</kbd>
+        </button>
+        <nav className="nav-groups" aria-label="Primary">
+          <div className="nav-section" aria-hidden={collapsed || undefined}>Read</div>
+          {READ.map((n) => <NavItem key={n.to} n={n} collapsed={collapsed} />)}
+          <div className="nav-section" aria-hidden={collapsed || undefined}>Manage</div>
+          {manage.map((n) => <NavItem key={n.to} n={n} collapsed={collapsed} />)}
+        </nav>
+        <div className="sidebar-footer">
+          <button className="nav-item" onClick={() => setHelpOpen(true)} title={collapsed ? "Keyboard shortcuts (?)" : undefined}>
+            <Help />
+            <span className="label">Shortcuts</span>
+            <kbd aria-hidden="true">?</kbd>
+          </button>
+          <button className="nav-item" onClick={toggleTheme} title={collapsed ? "Toggle theme (T)" : undefined}>
             {resolvedTheme === "dark" ? <Sun /> : <Moon />}
-            {resolvedTheme === "dark" ? "Light theme" : "Dark theme"}
-            <kbd>t</kbd>
+            <span className="label">{resolvedTheme === "dark" ? "Light theme" : "Dark theme"}</span>
+            <kbd aria-hidden="true">T</kbd>
           </button>
           {me && (
             <div className="user-chip">
-              <span className="avatar" aria-hidden="true">{initials(me.user.display_name || me.user.username)}</span>
-              <div className="meta">
-                <strong>{me.user.display_name || me.user.username}</strong>
-                <span>{me.user.role}</span>
+              <span className="avatar" aria-hidden="true">{initials(name)}</span>
+              <div className="meta label">
+                <strong>{name}</strong>
+                <span>@{me.user.username} · {me.user.role}</span>
               </div>
-              <button className="icon-btn" style={{ marginLeft: "auto", width: 32, height: 32 }} onClick={logout} aria-label="Sign out" title="Sign out">
+              <button className="icon-btn ghost sm" onClick={logout} aria-label="Sign out" title="Sign out">
                 <Logout />
               </button>
             </div>
@@ -102,54 +151,57 @@ export function Shell({ children }: { children: ReactNode }) {
       </aside>
 
       <main className="main" id="main" tabIndex={-1}>
-        <div className="topbar" id="topbar">
-          <div id="page-title" ref={setSlot} style={{ display: "contents" }} />
-          <div className="spacer" />
-          <button className="search-btn" onClick={() => setPaletteOpen(true)} aria-label="Search and commands">
+        <header className="topbar">
+          <div className="title-slot" ref={setSlot} />
+          <button className="icon-btn mobile-only" onClick={() => setPaletteOpen(true)} aria-label="Search books, pages, and actions">
             <Search />
-            <span>Search or jump to…</span>
-            <kbd>{isMac ? "⌘" : "Ctrl"} K</kbd>
           </button>
-        </div>
+        </header>
         <TitleSlot.Provider value={slot}>{children}</TitleSlot.Provider>
       </main>
 
       <nav className="bottom-nav" aria-label="Primary">
-        {items.slice(0, 5).map((n) => (
+        {[READ[0], READ[1], MANAGE[0], MANAGE[1], MANAGE[2]].map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end}>
             {n.icon}
-            {n.label}
+            <span>{n.label}</span>
           </NavLink>
         ))}
       </nav>
 
       <CommandPalette />
       <Sheet open={helpOpen} onClose={() => setHelpOpen(false)} title="Keyboard shortcuts" variant="dialog" labelledBy="help-title">
-        <div className="shortcut-list">
-          <span><kbd>{isMac ? "⌘" : "Ctrl"}</kbd><kbd>K</kbd> or <kbd>/</kbd></span><span>Search books, pages, and actions</span>
-          <span><kbd>g</kbd><kbd>h</kbd></span><span>Home</span>
-          <span><kbd>g</kbd><kbd>l</kbd></span><span>Library</span>
-          <span><kbd>g</kbd><kbd>d</kbd></span><span>Devices</span>
-          <span><kbd>g</kbd><kbd>s</kbd></span><span>Security</span>
-          <span><kbd>g</kbd><kbd>a</kbd></span><span>Activity</span>
-          <span><kbd>n</kbd></span><span>Add a device</span>
-          <span><kbd>t</kbd></span><span>Toggle theme</span>
-          <span><kbd>f</kbd></span><span>Focus the library filter</span>
-          <span><kbd>Esc</kbd></span><span>Close sheet or palette</span>
-          <span><kbd>?</kbd></span><span>This help</span>
-        </div>
+        <dl className="shortcut-list">
+          <dt><kbd>{MOD}</kbd><kbd>K</kbd></dt><dd>Search books, authors, devices, settings, and actions</dd>
+          <dt><kbd>/</kbd></dt><dd>Filter the library (search elsewhere)</dd>
+          <dt><kbd>N</kbd></dt><dd>Add a device</dd>
+          <dt><kbd>G</kbd> then <kbd>H</kbd></dt><dd>Home</dd>
+          <dt><kbd>G</kbd> then <kbd>L</kbd></dt><dd>Library</dd>
+          <dt><kbd>G</kbd> then <kbd>D</kbd></dt><dd>Devices</dd>
+          <dt><kbd>G</kbd> then <kbd>S</kbd></dt><dd>Security</dd>
+          <dt><kbd>G</kbd> then <kbd>A</kbd></dt><dd>Activity</dd>
+          {isOwner && <><dt><kbd>G</kbd> then <kbd>U</kbd></dt><dd>Admin</dd></>}
+          <dt><kbd>T</kbd></dt><dd>Toggle light / dark</dd>
+          <dt><kbd>[</kbd></dt><dd>Collapse or expand the sidebar</dd>
+          <dt><kbd>Esc</kbd></dt><dd>Close a sheet, menu, or the palette</dd>
+          <dt><kbd>?</kbd></dt><dd>This list</dd>
+        </dl>
       </Sheet>
-      <div className="toasts" aria-live="polite" aria-atomic="false">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast ${t.kind ?? ""}`}>{t.text}</div>
-        ))}
-      </div>
+      {createPortal(
+        // Outside #root so announcements still reach screen readers while a sheet makes #root inert.
+        <div className="toasts" role="status" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className={`toast ${t.kind ?? ""}`}>{t.text}</div>
+          ))}
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
 
 /** Renders the page title (and optional actions) into the top bar. */
-export function PageTitle({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
+export function PageTitle({ children, aside, sub }: { children: ReactNode; aside?: ReactNode; sub?: ReactNode }) {
   const slot = useContext(TitleSlot);
   useEffect(() => {
     const text = typeof children === "string" ? children : "";
@@ -158,8 +210,11 @@ export function PageTitle({ children, aside }: { children: ReactNode; aside?: Re
   if (!slot) return null;
   return createPortal(
     <>
-      <h1>{children}</h1>
-      {aside && <div className="row" style={{ marginLeft: 12 }}>{aside}</div>}
+      <div className="title-text">
+        <h1>{children}</h1>
+        {sub && <p className="page-sub">{sub}</p>}
+      </div>
+      {aside && <div className="title-actions">{aside}</div>}
     </>,
     slot,
   );

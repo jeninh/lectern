@@ -1,37 +1,56 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { EmptyState } from "../components/EmptyState";
-import { Devices as DevicesIcon, Plus } from "../components/Icons";
+import { Book, Close, Plus, Reader, Sync } from "../components/Icons";
+import { OverflowMenu } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
 import { get, post } from "../lib/api";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
-import type { AppPassword, SyncKey } from "../lib/types";
+import type { Device } from "../lib/types";
+import { AddDeviceFlow } from "./AddDevice";
+
+const ACTIVE_MS = 5 * 60 * 1000;
+
+export function deviceStatus(d: Device, now = Date.now()): { tone: "live" | "ok" | "waiting" | "off"; text: string } {
+  if (d.revoked_at) return { tone: "off", text: "Revoked" };
+  if (!d.last_used_at) return { tone: "waiting", text: "Waiting for first sync" };
+  if (now - new Date(d.last_used_at).getTime() < ACTIVE_MS) return { tone: "live", text: "Active now" };
+  return { tone: "ok", text: "Connected" };
+}
 
 export function DevicesPage() {
-  const { toast, me } = useStore();
-  const [keys, setKeys] = useState<SyncKey[] | null>(null);
-  const [pws, setPws] = useState<AppPassword[] | null>(null);
-  const [confirm, setConfirm] = useState<{ kind: "sync" | "opds"; row: SyncKey } | null>(null);
+  const { toast, now } = useStore();
+  const nav = useNavigate();
+  const loc = useLocation();
+  const adding = loc.pathname.endsWith("/new");
+  const [devices, setDevices] = useState<Device[] | null>(null);
+  const [confirm, setConfirm] = useState<Device | null>(null);
+  const [showRevoked, setShowRevoked] = useState(false);
 
   const load = useCallback(async () => {
-    const d = await get<{ sync_keys: SyncKey[]; app_passwords: AppPassword[] }>("/api/devices");
-    setKeys(d.sync_keys);
-    setPws(d.app_passwords);
+    const d = await get<{ devices: Device[] }>("/api/devices");
+    setDevices(d.devices);
   }, []);
   useEffect(() => {
     load().catch(() => {});
   }, [load]);
-  useVisiblePolling(() => load().catch(() => {}), 15000);
+  useVisiblePolling(() => load().catch(() => {}), adding ? 4000 : 15000);
+
+  // Deep link from the palette: /app/devices#k12 scrolls to and briefly highlights that card.
+  const target = loc.hash.slice(1);
+  useEffect(() => {
+    if (!target || !devices) return;
+    document.getElementById(`device-${target}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [target, devices]);
 
   const revoke = async () => {
     if (!confirm) return;
-    const path = confirm.kind === "sync" ? `/api/devices/sync-keys/${confirm.row.id}/revoke` : `/api/devices/app-passwords/${confirm.row.id}/revoke`;
     try {
-      await post(path);
-      toast(`Revoked “${confirm.row.label}”`);
+      await post(`/api/devices/${confirm.id}/revoke`);
+      toast(`Revoked “${confirm.label}”`);
       setConfirm(null);
       await load();
     } catch (e) {
@@ -39,46 +58,66 @@ export function DevicesPage() {
     }
   };
 
-  const active = (keys ?? []).filter((k) => !k.revoked_at);
-  const empty = keys && pws && keys.length === 0 && pws.length === 0;
+  const active = (devices ?? []).filter((d) => !d.revoked_at);
+  const revoked = (devices ?? []).filter((d) => d.revoked_at);
+  const liveCount = active.filter((d) => deviceStatus(d, now).tone === "live").length;
+  const openAdd = () => nav("/app/devices/new");
 
   return (
     <>
-      <PageTitle aside={<Link className="btn primary" to="/app/devices/new"><Plus /> Add a device</Link>}>Devices</PageTitle>
-      {empty ? (
-        <EmptyState
-          icon={<DevicesIcon />}
-          title="No devices yet"
-          action={<Link className="btn primary" to="/app/devices/new"><Plus /> Add your first device</Link>}
-        >
-          Each device gets its own credentials so you can revoke one without touching the others. The guided flow walks you through KOReader.
+      <PageTitle
+        sub={devices ? `${active.length} active${liveCount ? ` · ${liveCount} syncing now` : ""}` : undefined}
+        aside={<button className="btn primary" onClick={openAdd} aria-keyshortcuts="N"><Plus /> Add device <kbd className="kbd-inline" aria-hidden="true">N</kbd></button>}
+      >
+        Devices
+      </PageTitle>
+
+      {devices === null ? (
+        <div className="device-grid" aria-busy="true" aria-label="Loading"><div className="device-card skeleton" /><div className="device-card skeleton" /></div>
+      ) : active.length === 0 && revoked.length === 0 ? (
+        <EmptyState icon={<Reader />} title="No devices yet" action={<button className="btn primary" onClick={openAdd}><Plus /> Add your first device</button>}>
+          Each e-reader or phone gets its own sync key and catalogue password, so you can revoke one without touching the others.
         </EmptyState>
       ) : (
         <div className="stack">
-          <section className="card" aria-labelledby="sync-h">
-            <h2 id="sync-h">Progress sync</h2>
-            <p className="sub">
-              KOReader sync keys. {active.length} active · server <code style={{ fontFamily: "var(--font-mono)" }}>{me?.sync_url}</code>
-            </p>
-            <Table rows={keys} kind="sync" onRevoke={(row) => setConfirm({ kind: "sync", row })} />
-          </section>
-          <section className="card" aria-labelledby="opds-h">
-            <h2 id="opds-h">Catalogue access</h2>
-            <p className="sub">
-              OPDS app passwords for browsing and downloading · <code style={{ fontFamily: "var(--font-mono)" }}>{me?.opds_url}</code>
-            </p>
-            <Table rows={pws} kind="opds" onRevoke={(row) => setConfirm({ kind: "opds", row })} />
-          </section>
+          {active.length === 0 ? (
+            <EmptyState icon={<Reader />} title="No active devices" action={<button className="btn primary" onClick={openAdd}><Plus /> Add a device</button>}>
+              Every device has been revoked. Add one to start syncing again.
+            </EmptyState>
+          ) : (
+            <ul className="device-grid" aria-label="Active devices">
+              {active.map((d) => (
+                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} onRevoke={() => setConfirm(d)} />
+              ))}
+            </ul>
+          )}
+          {revoked.length > 0 && (
+            <section aria-labelledby="revoked-h">
+              <button className="disclosure" aria-expanded={showRevoked} aria-controls="revoked-list" onClick={() => setShowRevoked((v) => !v)} id="revoked-h">
+                Revoked ({revoked.length})
+              </button>
+              {showRevoked && (
+                <ul className="device-grid" id="revoked-list">
+                  {revoked.map((d) => (
+                    <DeviceCard key={d.id} d={d} now={now} />
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
         </div>
       )}
-      <Sheet open={!!confirm} onClose={() => setConfirm(null)} title={`Revoke “${confirm?.row.label}”?`} variant="dialog" labelledBy="revoke-title">
+
+      <Sheet open={adding} onClose={() => nav("/app/devices")} title="Add a device" labelledBy="add-device-title">
+        <AddDeviceFlow onDone={() => nav("/app/devices")} onCreated={() => load().catch(() => {})} />
+      </Sheet>
+
+      <Sheet open={!!confirm} onClose={() => setConfirm(null)} title={`Revoke “${confirm?.label}”?`} variant="dialog" labelledBy="revoke-title">
         <p style={{ marginTop: 0 }}>
-          {confirm?.kind === "sync"
-            ? "That device will stop syncing immediately. Its saved positions stay on the server."
-            : "That device will no longer be able to browse or download from the catalogue."}
+          It stops syncing and loses catalogue access immediately. Saved reading positions stay on the server, and you can add the device again later.
         </p>
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button className="btn" onClick={() => setConfirm(null)}>Keep</button>
+        <div className="sheet-actions">
+          <button className="btn ghost" onClick={() => setConfirm(null)}>Keep device</button>
           <button className="btn danger" onClick={revoke} data-autofocus>Revoke</button>
         </div>
       </Sheet>
@@ -86,56 +125,39 @@ export function DevicesPage() {
   );
 }
 
-function Table({ rows, kind, onRevoke }: { rows: SyncKey[] | null; kind: "sync" | "opds"; onRevoke: (r: SyncKey) => void }) {
-  if (rows === null) return <div className="hint">Loading…</div>;
-  if (rows.length === 0)
-    return (
-      <div className="hint">
-        None yet. <Link to="/app/devices/new">Add a device</Link> to create one.
-      </div>
-    );
+function DeviceCard({ d, now, highlight, onRevoke }: { d: Device; now: number; highlight?: boolean; onRevoke?: () => void }) {
+  const s = deviceStatus(d, now);
   return (
-    <table className="list">
-      <thead>
-        <tr>
-          <th scope="col">Device</th>
-          <th scope="col">Status</th>
-          <th scope="col">Last used</th>
-          <th scope="col"><span className="sr-only">Actions</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => {
-          const recent = r.last_used_at && Date.now() - new Date(r.last_used_at).getTime() < 5 * 60 * 1000;
-          return (
-            <tr key={r.id} className={r.revoked_at ? "revoked" : ""}>
-              <td>
-                <strong>{r.label}</strong>
-                <div className="hint">added {relativeTime(r.created_at)}</div>
-              </td>
-              <td>
-                {r.revoked_at ? (
-                  <span className="badge">revoked {relativeTime(r.revoked_at)}</span>
-                ) : recent ? (
-                  <span className="badge ok"><span className="live-dot" aria-hidden="true" /> active now</span>
-                ) : r.last_used_at ? (
-                  <span className="badge ok">connected</span>
-                ) : (
-                  <span className="badge warn">never used</span>
-                )}
-              </td>
-              <td title={absoluteTime(r.last_used_at)}>{relativeTime(r.last_used_at)}</td>
-              <td style={{ textAlign: "right" }}>
-                {!r.revoked_at && (
-                  <button className="btn sm danger" onClick={() => onRevoke(r)} aria-label={`Revoke ${kind === "sync" ? "sync key" : "app password"} ${r.label}`}>
-                    Revoke
-                  </button>
-                )}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <li className="device-card" id={`device-${d.id}`} data-tone={s.tone} data-highlight={highlight || undefined}>
+      <div className="device-head">
+        <span className="device-icon" aria-hidden="true"><Reader /></span>
+        <div className="device-name">
+          <h3>{d.label}</h3>
+          <span className={`status ${s.tone}`}>
+            <span className={`status-dot ${s.tone}`} aria-hidden="true" />
+            {s.text}
+          </span>
+        </div>
+        {onRevoke && <OverflowMenu label={`Actions for ${d.label}`} actions={[{ label: "Revoke device", icon: <Close />, danger: true, onSelect: onRevoke }]} />}
+      </div>
+      <dl className="device-meta">
+        <div>
+          <dt>Last sync</dt>
+          <dd title={absoluteTime(d.sync_key?.last_used_at)}>{d.sync_key ? relativeTime(d.sync_key.last_used_at, now) : "—"}</dd>
+        </div>
+        <div>
+          <dt>Catalogue</dt>
+          <dd title={absoluteTime(d.app_password?.last_used_at)}>{d.app_password ? relativeTime(d.app_password.last_used_at, now) : "—"}</dd>
+        </div>
+        <div>
+          <dt>{d.revoked_at ? "Revoked" : "Added"}</dt>
+          <dd title={absoluteTime(d.revoked_at ?? d.created_at)}>{relativeTime(d.revoked_at ?? d.created_at, now)}</dd>
+        </div>
+      </dl>
+      <div className="caps" aria-label="Capabilities">
+        {d.sync_key && <span className="cap"><Sync /> Progress sync</span>}
+        {d.app_password && <span className="cap"><Book /> Catalogue</span>}
+      </div>
+    </li>
   );
 }

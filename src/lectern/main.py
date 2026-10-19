@@ -141,7 +141,7 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
     async def _legacy_redirect(request: Request):
         target = {"/library": "/app/library", "/account": "/app/devices"}.get(
             request.url.path,
-            "/app/users" if request.url.path == "/admin/users" else "/app/activity",
+            "/app/admin" if request.url.path == "/admin/users" else "/app/activity",
         )
         return RedirectResponse(target, status_code=status.HTTP_308_PERMANENT_REDIRECT)
 

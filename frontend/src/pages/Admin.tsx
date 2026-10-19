@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Plus, Users as UsersIcon } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -7,10 +8,12 @@ import { relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { User } from "../lib/types";
 
-export function UsersPage() {
+export function AdminPage() {
   const { toast, me } = useStore();
   const [users, setUsers] = useState<User[] | null>(null);
-  const [open, setOpen] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const open = params.get("new") === "1";
+  const setOpen = (v: boolean) => setParams(v ? { new: "1" } : {}, { replace: true });
   const load = useCallback(() => get<{ users: User[] }>("/api/admin/users").then((d) => setUsers(d.users)), []);
   useEffect(() => {
     load().catch(() => {});
@@ -28,8 +31,10 @@ export function UsersPage() {
 
   return (
     <>
-      <PageTitle aside={<button className="btn primary" onClick={() => setOpen(true)}><Plus /> Add user</button>}>Users</PageTitle>
-      <div className="card">
+      <PageTitle aside={<button className="btn primary" onClick={() => setOpen(true)}><Plus /> Add user</button>}sub={me ? `Server ${me.base_url} · ${me.counts.works} books · ${me.counts.users} ${me.counts.users === 1 ? "user" : "users"}` : undefined}>Admin</PageTitle>
+      <section className="card" aria-labelledby="users-h">
+        <h2 id="users-h">Users</h2>
+        <p className="sub">Members read and sync; readers get the same today and fewer rights later.</p>
         {users === null ? (
           <div className="hint">Loading…</div>
         ) : (
@@ -53,7 +58,7 @@ export function UsersPage() {
             </tbody>
           </table>
         )}
-      </div>
+      </section>
       <Sheet open={open} onClose={() => setOpen(false)} title="Add a user" variant="dialog" labelledBy="add-user">
         <NewUserForm
           onDone={() => {

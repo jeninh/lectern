@@ -1,5 +1,6 @@
 import QRCode from "qrcode";
 import { useCallback, useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { Check, Key, Shield } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -14,6 +15,10 @@ export function SecurityPage() {
   const [sec, setSec] = useState<SecurityOverview | null>(null);
   const [dialog, setDialog] = useState<"password" | "totp" | "totp-off" | "passkey" | null>(null);
   const load = useCallback(() => get<SecurityOverview>("/api/security").then(setSec), []);
+  const hash = useLocation().hash.slice(1);
+  useEffect(() => {
+    if (sec && hash) document.getElementById(hash)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [sec, hash]);
   useEffect(() => {
     load().catch(() => {});
   }, [load]);
@@ -41,7 +46,7 @@ export function SecurityPage() {
               : "Your account relies on a password alone. Add a passkey or two-factor codes."}
         </div>
 
-        <section className="card" aria-labelledby="pk-h">
+        <section className="card" id="passkeys" aria-labelledby="pk-h" data-highlight={hash === "passkeys" || undefined}>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
               <h2 id="pk-h">Passkeys</h2>
@@ -75,7 +80,7 @@ export function SecurityPage() {
           )}
         </section>
 
-        <section className="card" aria-labelledby="totp-h">
+        <section className="card" id="totp" aria-labelledby="totp-h" data-highlight={hash === "totp" || undefined}>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
               <h2 id="totp-h">Two-factor codes</h2>
@@ -92,7 +97,7 @@ export function SecurityPage() {
           </div>
         </section>
 
-        <section className="card" aria-labelledby="pw-h">
+        <section className="card" id="password" aria-labelledby="pw-h" data-highlight={hash === "password" || undefined}>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
               <h2 id="pw-h">Password</h2>
@@ -102,7 +107,7 @@ export function SecurityPage() {
           </div>
         </section>
 
-        <section className="card" aria-labelledby="ses-h">
+        <section className="card" id="sessions" aria-labelledby="ses-h" data-highlight={hash === "sessions" || undefined}>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
               <h2 id="ses-h">Sessions</h2>

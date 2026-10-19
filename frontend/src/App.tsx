@@ -2,12 +2,12 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/Shell";
 import { StoreProvider, useStore } from "./lib/store";
 import { ActivityPage } from "./pages/Activity";
-import { AddDevicePage } from "./pages/AddDevice";
 import { DevicesPage } from "./pages/Devices";
 import { HomePage } from "./pages/Home";
 import { LibraryPage } from "./pages/Library";
 import { SecurityPage } from "./pages/Security";
-import { UsersPage } from "./pages/Users";
+import { AdminPage } from "./pages/Admin";
+import { HighlightsPage, ListeningPage } from "./pages/Placeholder";
 
 function OwnerOnly({ children }: { children: JSX.Element }) {
   const { me } = useStore();
@@ -24,10 +24,13 @@ export default function App() {
           <Route path="/app/library" element={<LibraryPage />} />
           <Route path="/app/library/:id" element={<LibraryPage />} />
           <Route path="/app/devices" element={<DevicesPage />} />
-          <Route path="/app/devices/new" element={<AddDevicePage />} />
+          <Route path="/app/devices/new" element={<DevicesPage />} />
+          <Route path="/app/listening" element={<ListeningPage />} />
+          <Route path="/app/highlights" element={<HighlightsPage />} />
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
-          <Route path="/app/users" element={<OwnerOnly><UsersPage /></OwnerOnly>} />
+          <Route path="/app/admin" element={<OwnerOnly><AdminPage /></OwnerOnly>} />
+          <Route path="/app/users" element={<Navigate to="/app/admin" replace />} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
       </Shell>
