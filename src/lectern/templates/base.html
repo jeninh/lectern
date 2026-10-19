@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Lectern{% endblock %}</title>
+  <link rel="stylesheet" href="/static/lectern.css">
+  {% if csrf_token %}<meta name="csrf-token" content="{{ csrf_token }}">{% endif %}
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/library">Lectern</a>
+  {% if current_user %}
+  <nav>
+    <a href="/library">Library</a>
+    <a href="/account">Account</a>
+    {% if current_user.role.value == "owner" %}<a href="/admin/users">Users</a><a href="/admin/audit">Audit</a>{% endif %}
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="link">Sign out ({{ current_user.username }})</button>
+    </form>
+  </nav>
+  {% endif %}
+</header>
+<main>
+  {% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

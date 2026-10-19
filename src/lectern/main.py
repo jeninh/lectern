@@ -1,0 +1,155 @@
+"""Application factory."""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import HTTPException, RequestValidationError
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from lectern import __version__
+from lectern.config import Settings, get_settings
+from lectern.db import init_engine, session_factory
+from lectern.ingest.watcher import InboxWatcher
+from lectern.migrate import upgrade_to_head
+from lectern.routes import account, admin, auth, health, kosync, library, opds, setup
+from lectern.security.deps import LoginRequired
+from lectern.security.ratelimit import SlidingWindowLimiter
+from lectern.security.webauthn import ChallengeStore
+from lectern.setup_state import ensure_setup_token, print_setup_banner
+from lectern.templating import TEMPLATES_DIR
+
+log = logging.getLogger("lectern")
+
+STATIC_DIR = TEMPLATES_DIR.parent / "static"
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        h = response.headers
+        h.setdefault("X-Content-Type-Options", "nosniff")
+        h.setdefault("X-Frame-Options", "DENY")
+        h.setdefault("Referrer-Policy", "same-origin")
+        h.setdefault("Cache-Control", "no-store")
+        if not request.url.path.startswith(("/opds", "/syncs", "/users")):
+            h.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+                "frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+            )
+        settings: Settings = request.app.state.settings
+        if settings.is_https:
+            h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
+
+
+def _configure_logging(settings: Settings) -> None:
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def create_app(settings: Settings | None = None, *, start_watcher: bool | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    _configure_logging(settings)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        engine = init_engine(settings)
+        upgrade_to_head(engine)
+        settings.resolve_secret_key()
+        with session_factory()() as db:
+            token = ensure_setup_token(db, settings)
+        if token:
+            print_setup_banner(token, settings)
+        if not settings.is_https and not settings.insecure_http:
+            log.warning(
+                "LECTERN_BASE_URL is not https; cookies are marked Secure and passkeys will not work. "
+                "Set LECTERN_INSECURE_HTTP=1 for local development only."
+            )
+        watcher = None
+        run_watcher = settings.ingest_enabled if start_watcher is None else start_watcher
+        if run_watcher:
+            settings.library_dir.mkdir(parents=True, exist_ok=True)
+            watcher = InboxWatcher(
+                settings.inbox_path,
+                settings.library_dir,
+                session_factory(),
+                settings.inbox_poll_seconds,
+            )
+            watcher.start()
+            log.info("watching inbox %s", settings.inbox_path)
+        app.state.watcher = watcher
+        log.info("Lectern %s ready on %s", __version__, settings.base_url)
+        try:
+            yield
+        finally:
+            if watcher:
+                watcher.stop()
+            engine.dispose()
+
+    app = FastAPI(
+        title="Lectern",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    app.state.settings = settings
+    app.state.limiters = {
+        "login": SlidingWindowLimiter(limit=10, window_seconds=60),
+        "setup": SlidingWindowLimiter(limit=5, window_seconds=60),
+        "basic": SlidingWindowLimiter(limit=settings.rate_limit_per_minute, window_seconds=60),
+        "kosync": SlidingWindowLimiter(limit=settings.rate_limit_per_minute * 2, window_seconds=60),
+        "webauthn": SlidingWindowLimiter(limit=20, window_seconds=60),
+    }
+    app.state.challenges = ChallengeStore()
+
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    app.include_router(health.router)
+    app.include_router(setup.router)
+    app.include_router(auth.router)
+    app.include_router(account.router)
+    app.include_router(admin.router)
+    app.include_router(library.router)
+    app.include_router(opds.router)
+    app.include_router(kosync.router)
+
+    @app.exception_handler(LoginRequired)
+    async def _login_required(request: Request, _exc: LoginRequired):
+        if "text/html" in request.headers.get("accept", "") and request.method == "GET":
+            nxt = request.url.path
+            return RedirectResponse(f"/login?next={nxt}", status_code=status.HTTP_303_SEE_OTHER)
+        return JSONResponse(
+            {"detail": "Authentication required"}, status_code=status.HTTP_401_UNAUTHORIZED
+        )
+
+    @app.exception_handler(HTTPException)
+    async def _http_exc(request: Request, exc: HTTPException):
+        detail = exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail}
+        return JSONResponse(detail, status_code=exc.status_code, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation(request: Request, exc: RequestValidationError):
+        if request.url.path.startswith(("/syncs", "/users")):
+            return JSONResponse(
+                {"message": "Invalid request"}, status_code=status.HTTP_400_BAD_REQUEST
+            )
+        return JSONResponse(
+            {"detail": "Invalid request"}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+        )
+
+    return app
+
+
+def app_factory() -> FastAPI:
+    return create_app()

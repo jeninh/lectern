@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Audit log · Lectern{% endblock %}
+{% block content %}
+<h1>Audit log <span class="muted">(latest 200)</span></h1>
+<table class="card">
+  <tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>IP</th><th>Detail</th></tr>
+  {% for r in rows %}
+  <tr><td>{{ r.at.strftime('%Y-%m-%d %H:%M:%S') }}</td><td>{{ users.get(r.actor_user_id, '') }}</td><td>{{ r.action }}</td><td>{{ r.target or '' }}</td><td>{{ r.ip or '' }}</td><td>{{ r.detail or '' }}</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

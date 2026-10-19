@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Users · Lectern{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<table class="card">
+  <tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr>
+  {% for u in users %}
+  <tr>
+    <td>{{ u.username }}</td><td>{{ u.display_name }}</td><td>{{ u.role.value }}</td>
+    <td>{{ 'active' if u.is_active else 'disabled' }}</td>
+    <td>{{ u.last_login_at.strftime('%Y-%m-%d %H:%M') if u.last_login_at else 'never' }}</td>
+    <td>{% if u.role.value != 'owner' %}
+      {% if u.is_active %}<form method="post" action="/admin/users/{{ u.id }}/disable" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link danger">Disable</button></form>
+      {% else %}<form method="post" action="/admin/users/{{ u.id }}/enable" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link">Enable</button></form>{% endif %}
+    {% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+<section class="card">
+  <h2>Add a user</h2>
+  <form method="post" action="/admin/users">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username <input name="username" required pattern="[a-z0-9][a-z0-9._-]{1,31}"></label>
+    <label>Display name <input name="display_name" maxlength="128"></label>
+    <label>Role <select name="role"><option value="member">member</option><option value="reader">reader</option></select></label>
+    <label>Initial password (12+) <input name="password" type="password" required minlength="12"></label>
+    <button type="submit">Create user</button>
+  </form>
+  <p class="muted">Tell them the password out of band; they should change it and add a passkey on first sign-in.</p>
+</section>
+{% endblock %}

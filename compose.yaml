@@ -1,0 +1,26 @@
+services:
+  lectern:
+    build: .
+    image: lectern:local
+    container_name: lectern
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # put a TLS-terminating reverse proxy in front; passkeys need HTTPS
+    environment:
+      LECTERN_BASE_URL: ${LECTERN_BASE_URL:-https://lectern.example}
+      # Set to "1" only for local http testing; it un-sets the Secure cookie flag.
+      LECTERN_INSECURE_HTTP: ${LECTERN_INSECURE_HTTP:-0}
+      LECTERN_LOG_LEVEL: ${LECTERN_LOG_LEVEL:-INFO}
+    volumes:
+      - lectern-data:/data
+      - ./library:/library
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  lectern-data:
