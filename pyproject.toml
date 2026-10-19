@@ -43,6 +43,7 @@ packages = ["src/lectern"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
 filterwarnings = ["error::DeprecationWarning:lectern.*"]
 
