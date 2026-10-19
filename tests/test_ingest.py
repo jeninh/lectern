@@ -190,12 +190,14 @@ def test_opds_feed_lists_ingested_book(client, owner, settings):
     entry = entries[0]
     assert entry.findtext("a:title", namespaces=ns) == "Dune"
     acq = [
-        ln for ln in entry.findall("a:link", ns) if ln.get("rel") == "http://opds-spec.org/acquisition"
+        ln
+        for ln in entry.findall("a:link", ns)
+        if ln.get("rel") == "http://opds-spec.org/acquisition"
     ][0]
     assert acq.get("type") == "application/epub+zip" and acq.get("href") == "/opds/files/1/download"
-    img = [ln for ln in entry.findall("a:link", ns) if ln.get("rel") == "http://opds-spec.org/image"][
-        0
-    ]
+    img = [
+        ln for ln in entry.findall("a:link", ns) if ln.get("rel") == "http://opds-spec.org/image"
+    ][0]
     assert client.get(img.get("href"), headers=auth).headers["content-type"] == "image/jpeg"
     dl = client.get(acq.get("href"), headers=auth)
     assert dl.status_code == 200 and dl.content[:2] == b"PK"
