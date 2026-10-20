@@ -30,8 +30,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"  # noqa: S104 - container default; bind narrower via env if needed
     port: int = 8080
 
-    # Comma-separated IPs/CIDRs of reverse proxies whose CF-Connecting-IP / X-Forwarded-For
-    # headers are believed, e.g. "127.0.0.1,172.18.0.0/16". Empty = trust nobody (default).
+    # Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For (or CF-Connecting-IP)
+    # is believed, e.g. "127.0.0.1" for `tailscale serve` on the same host or in a sidecar
+    # sharing the network namespace. Empty = trust nobody (default).
     trusted_proxies: str = Field(default="")
 
     session_ttl_seconds: int = 60 * 60 * 24 * 30

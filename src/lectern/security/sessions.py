@@ -20,7 +20,7 @@ def client_ip(request: Request) -> str | None:
     """The client's address: the socket peer, unless the peer is a configured trusted proxy.
 
     Everything that keys on an address (rate limits, lockout records, audit rows, sessions)
-    must use this so a deployment behind cloudflared sees the same IP everywhere.
+    must use this so a deployment behind `tailscale serve` sees the same IP everywhere.
     """
     peer = request.client.host if request.client else None
     settings: Settings = request.app.state.settings

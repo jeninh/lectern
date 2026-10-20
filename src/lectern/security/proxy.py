@@ -1,9 +1,16 @@
-"""Client IP resolution behind a trusted reverse proxy (cloudflared, Caddy, nginx).
+"""Client IP resolution behind a trusted reverse proxy (``tailscale serve``, Caddy, nginx).
 
 Forwarding headers are honoured only when the socket peer is inside one of the networks in
-``LECTERN_TRUSTED_PROXIES``. Precedence for a trusted peer: ``CF-Connecting-IP``, then the
-first valid ``X-Forwarded-For`` hop, then the peer itself. An untrusted peer's headers are
-ignored entirely, so a client talking to Lectern directly cannot pick its own address.
+``LECTERN_TRUSTED_PROXIES``. An untrusted peer's headers are ignored entirely, so a client
+talking to Lectern directly cannot pick its own address.
+
+For a trusted peer, ``X-Forwarded-For`` is read **right to left**: the rightmost hop was
+appended by the proxy that connected to us and is the only one it vouches for. Hops that are
+themselves trusted proxies are skipped, and the first untrusted address is the client. The
+leftmost entry is whatever the client chose to send and is never believed on its own. A
+malformed hop ends the walk (nothing to its left is verifiable) and the peer is used.
+``CF-Connecting-IP`` takes precedence when present, for the documented Cloudflare Tunnel
+alternative; cloudflared sets it to the visitor and strips any copy the visitor sent.
 
 Every consumer of a client address (rate limits, login records, audit log, session rows) goes
 through :func:`lectern.security.sessions.client_ip`, which calls :func:`resolve_client_ip`.
@@ -65,8 +72,11 @@ def resolve_client_ip(
     forwarded = parse_ip(headers.get(CF_HEADER, ""))
     if forwarded:
         return forwarded
-    for hop in headers.get(XFF_HEADER, "").split(","):
-        forwarded = parse_ip(hop)
-        if forwarded:
-            return forwarded
+    xff = headers.get(XFF_HEADER, "")
+    for hop in reversed(xff.split(",")) if xff.strip() else ():
+        addr = parse_ip(hop)
+        if addr is None:
+            break
+        if not is_trusted_peer(addr, trusted):
+            return addr
     return peer

@@ -16,7 +16,8 @@ from lectern.main import create_app
 from lectern.models import AuditLog
 from lectern.security.proxy import parse_ip, parse_networks, resolve_client_ip
 
-LOOPBACK = parse_networks("127.0.0.0/8, ::1")
+LOOPBACK = parse_networks("127.0.0.0/8, ::1")  # `tailscale serve` on the host or in a sidecar
+CHAIN = parse_networks("127.0.0.0/8, ::1, 10.0.0.0/8")  # serve behind an internal proxy tier
 CLOUDFLARED = parse_networks("172.18.0.0/16")
 
 
@@ -32,35 +33,85 @@ def _resolve(peer, trusted=LOOPBACK, **headers):
 def test_untrusted_peer_headers_are_ignored():
     assert _resolve("203.0.113.9", cf_connecting_ip="198.51.100.1") == "203.0.113.9"
     assert _resolve("203.0.113.9", x_forwarded_for="198.51.100.1") == "203.0.113.9"
-    assert _resolve("203.0.113.9", trusted=[], cf_connecting_ip="198.51.100.1") == "203.0.113.9"
+    assert _resolve("203.0.113.9", trusted=[], x_forwarded_for="198.51.100.1") == "203.0.113.9"
+    # A tailnet peer reaching port 8080 directly (an e-reader) is not the proxy.
+    assert _resolve("100.101.102.103", x_forwarded_for="198.51.100.1") == "100.101.102.103"
     # Not an IP at all (unix socket, test client): never trusted, returned as-is.
-    assert _resolve("testclient", cf_connecting_ip="198.51.100.1") == "testclient"
-    assert _resolve(None, cf_connecting_ip="198.51.100.1") is None
+    assert _resolve("testclient", x_forwarded_for="198.51.100.1") == "testclient"
+    assert _resolve(None, x_forwarded_for="198.51.100.1") is None
 
 
-def test_trusted_peer_precedence_cf_then_first_xff_hop_then_peer():
+def test_tailscale_serve_single_hop():
+    # serve replaces X-Forwarded-For with the caller's tailnet address.
+    assert _resolve("127.0.0.1", x_forwarded_for="100.101.102.103") == "100.101.102.103"
+    assert _resolve("::1", x_forwarded_for="fd7a:115c:a1e0::1") == "fd7a:115c:a1e0::1"
+    assert _resolve("127.0.0.1") == "127.0.0.1"  # no header: the proxy itself
+
+
+def test_xff_is_read_right_to_left_so_the_leftmost_entry_cannot_spoof():
+    # The client sent "X-Forwarded-For: 192.0.2.5"; the proxy appended the real address.
+    assert _resolve("127.0.0.1", x_forwarded_for="192.0.2.5, 198.51.100.7") == "198.51.100.7"
+    # Spoofed entries in any number are still ignored.
+    assert _resolve("127.0.0.1", x_forwarded_for="1.1.1.1, 2.2.2.2, 198.51.100.7") == (
+        "198.51.100.7"
+    )
+    # Trusted hops to the right are skipped, the first untrusted one from the right wins.
+    assert (
+        _resolve("127.0.0.1", trusted=CHAIN, x_forwarded_for="192.0.2.5, 198.51.100.7, 10.0.0.2")
+        == "198.51.100.7"
+    )
+    # An intermediate proxy that is NOT trusted is the client: nothing to its left is believed.
+    assert _resolve("127.0.0.1", x_forwarded_for="198.51.100.7, 10.0.0.2") == "10.0.0.2"
+
+
+def test_all_trusted_chain_falls_back_to_peer():
+    assert _resolve("127.0.0.1", x_forwarded_for="127.0.0.1") == "127.0.0.1"
+    assert _resolve("127.0.0.1", trusted=CHAIN, x_forwarded_for="10.0.0.2, 10.0.0.3") == (
+        "127.0.0.1"
+    )
+    assert _resolve("10.0.0.9", trusted=CHAIN, x_forwarded_for="127.0.0.1, 10.0.0.2") == "10.0.0.9"
+
+
+def test_malformed_hops_stop_the_walk_and_fall_back_to_peer():
+    # Rightmost hop is junk: the proxy did not append an address, so trust nothing.
+    assert _resolve("127.0.0.1", x_forwarded_for="198.51.100.7, unknown") == "127.0.0.1"
+    assert _resolve("127.0.0.1", x_forwarded_for="198.51.100.7, 999.1.1.1") == "127.0.0.1"
+    assert _resolve("127.0.0.1", x_forwarded_for="198.51.100.7, ") == "127.0.0.1"
+    assert _resolve("127.0.0.1", x_forwarded_for="<script>") == "127.0.0.1"
+    assert _resolve("127.0.0.1", x_forwarded_for=";;") == "127.0.0.1"
+    assert _resolve("127.0.0.1", x_forwarded_for="   ") == "127.0.0.1"
+    # Junk to the LEFT of the trusted-appended hop is irrelevant.
+    assert _resolve("127.0.0.1", x_forwarded_for="unknown, , 198.51.100.7") == "198.51.100.7"
+    # A junk hop between trusted ones ends the walk too.
+    assert _resolve("127.0.0.1", trusted=CHAIN, x_forwarded_for="198.51.100.7, bad, 10.0.0.2") == (
+        "127.0.0.1"
+    )
+
+
+def test_xff_accepts_port_and_bracket_forms_and_mixed_families():
+    assert _resolve("127.0.0.1", x_forwarded_for="192.0.2.5, 198.51.100.7:51234") == (
+        "198.51.100.7"
+    )
+    assert _resolve("127.0.0.1", x_forwarded_for="192.0.2.5, [2001:db8::9]:443") == "2001:db8::9"
+    assert _resolve("127.0.0.1", x_forwarded_for="2001:db8::9, 198.51.100.7") == "198.51.100.7"
+    assert _resolve("::1", trusted=CHAIN, x_forwarded_for="2001:DB8::9, 10.0.0.2") == "2001:db8::9"
+
+
+def test_cf_connecting_ip_only_behind_a_trusted_peer_and_before_xff():
+    assert (
+        _resolve("172.18.0.7", trusted=CLOUDFLARED, cf_connecting_ip="2001:db8::9") == "2001:db8::9"
+    )
     assert (
         _resolve("127.0.0.1", cf_connecting_ip="198.51.100.1", x_forwarded_for="192.0.2.5")
         == "198.51.100.1"
     )
-    assert _resolve("127.0.0.1", x_forwarded_for="192.0.2.5, 10.0.0.2, 127.0.0.1") == "192.0.2.5"
-    assert _resolve("127.0.0.1") == "127.0.0.1"
-    assert _resolve("172.18.0.7", trusted=CLOUDFLARED, cf_connecting_ip="2001:db8::9") == (
-        "2001:db8::9"
+    # Bad CF header -> XFF rule; untrusted peer -> ignored.
+    assert _resolve("127.0.0.1", cf_connecting_ip="nope", x_forwarded_for="192.0.2.5") == (
+        "192.0.2.5"
     )
     assert _resolve("172.19.0.7", trusted=CLOUDFLARED, cf_connecting_ip="2001:db8::9") == (
         "172.19.0.7"
     )
-
-
-def test_malformed_headers_fall_through():
-    # Bad CF header -> XFF; bad XFF hops skipped; nothing valid -> peer.
-    assert _resolve("127.0.0.1", cf_connecting_ip="nope", x_forwarded_for="192.0.2.5") == (
-        "192.0.2.5"
-    )
-    assert _resolve("127.0.0.1", x_forwarded_for="unknown, , 999.1.1.1, 192.0.2.5") == "192.0.2.5"
-    assert _resolve("127.0.0.1", cf_connecting_ip="", x_forwarded_for=";;") == "127.0.0.1"
-    assert _resolve("127.0.0.1", x_forwarded_for="<script>") == "127.0.0.1"
 
 
 @pytest.mark.parametrize(
@@ -72,6 +123,7 @@ def test_malformed_headers_fall_through():
         ("2001:DB8::1", "2001:db8::1"),
         ("192.0.2.5/24", None),
         ("example.com", None),
+        ("unknown", None),
         ("", None),
     ],
 )
@@ -91,13 +143,13 @@ def test_settings_reject_bad_networks(tmp_path):
 
 @pytest.fixture
 def proxied(tmp_path):
-    """App behind a trusted proxy at 127.0.0.1 with setup done; the client is the proxy peer."""
+    """App behind `tailscale serve` on loopback with setup done; the client is the proxy peer."""
     settings = Settings(
         data_dir=tmp_path / "data",
         library_dir=tmp_path / "library",
         base_url=ORIGIN,
         insecure_http=True,
-        trusted_proxies="127.0.0.0/8",
+        trusted_proxies="127.0.0.1",
     )
     app = create_app(settings, start_watcher=False)
     app.state.limiters["login"].limit = 2
@@ -131,25 +183,19 @@ def _audit_ips(action: str) -> list[str | None]:
 
 
 def test_trusted_proxy_rate_limits_and_audits_the_forwarded_address(proxied):
-    cf = {"cf_connecting_ip": "198.51.100.1"}
+    a = {"x_forwarded_for": "100.101.102.103"}
     # Two failures allowed per address, the third is throttled...
-    assert [_failed_login(proxied, **cf) for _ in range(3)] == [401, 401, 429]
-    # ...but a different forwarded client is not, even though the peer socket is the same;
-    # CF-Connecting-IP wins over X-Forwarded-For.
-    assert (
-        _failed_login(proxied, cf_connecting_ip="198.51.100.2", x_forwarded_for="198.51.100.1")
-        == 401
-    )
-    # Without the Cloudflare header the first XFF hop is the key.
-    xff = {"x_forwarded_for": "198.51.100.3, 10.0.0.2"}
-    assert [_failed_login(proxied, **xff) for _ in range(3)] == [401, 401, 429]
+    assert [_failed_login(proxied, **a) for _ in range(3)] == [401, 401, 429]
+    # ...but a different forwarded client is not, even though the peer socket is the same.
+    assert _failed_login(proxied, x_forwarded_for="100.101.102.104") == 401
+    # A client-supplied leftmost entry does not move it into a fresh bucket: the rightmost,
+    # proxy-appended hop is the key, and it is already throttled.
+    assert _failed_login(proxied, x_forwarded_for="198.51.100.9, 100.101.102.103") == 429
     # Audit rows carry the forwarded address, never the proxy's.
     assert _audit_ips("login.failed") == [
-        "198.51.100.1",
-        "198.51.100.1",
-        "198.51.100.2",
-        "198.51.100.3",
-        "198.51.100.3",
+        "100.101.102.103",
+        "100.101.102.103",
+        "100.101.102.104",
     ]
 
 
@@ -159,9 +205,11 @@ def test_untrusted_peer_cannot_pick_its_own_address(tmp_path):
         library_dir=tmp_path / "library",
         base_url=ORIGIN,
         insecure_http=True,
+        trusted_proxies="127.0.0.1",
     )
     app = create_app(settings, start_watcher=False)
     app.state.limiters["login"].limit = 2
-    with TestClient(app, client=("203.0.113.9", 40000)) as c:
-        codes = [_failed_login(c, cf_connecting_ip=f"198.51.100.{i}") for i in range(3)]
-    assert codes[-1] == 429  # all three keyed on the real peer despite distinct headers
+    with TestClient(app, client=("100.64.0.9", 40000)) as c:
+        codes = [_failed_login(c, x_forwarded_for=f"198.51.100.{i}") for i in range(3)]
+    assert codes == [401, 401, 429]  # all keyed on the real peer despite distinct headers
+    assert _audit_ips("login.failed") == ["100.64.0.9"] * 2  # the throttled one is not logged

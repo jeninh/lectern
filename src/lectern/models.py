@@ -589,7 +589,7 @@ class Job(Base):
 
 # --- Resumable browser uploads (contract for milestone 2) --------------------------------------
 
-UPLOAD_CHUNK_MAX_BYTES = 50 * 1024 * 1024  # each request stays under Cloudflare's 100 MB cap
+UPLOAD_CHUNK_MAX_BYTES = 50 * 1024 * 1024  # under common proxy body caps (Cloudflare: 100 MB)
 
 
 class UploadStatus(enum.StrEnum):

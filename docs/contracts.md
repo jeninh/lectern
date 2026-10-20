@@ -170,7 +170,8 @@ players seek with `Range`.
 
 #### Optional low-bitrate variant (milestone 2 may implement)
 
-Over a tunnel from home, a 320 kb/s MP3 audiobook is slow to seek. Milestone 2 *may* add a
+Away from home, every byte still crosses the home uplink (over Tailscale or any other route), so
+a 320 kb/s MP3 audiobook is slow to seek on a phone. Milestone 2 *may* add a
 `variant=low` query parameter that streams a once-generated ~64 kb/s Opus (fallback AAC)
 rendition. The contract leaves room for it without requiring it:
 
@@ -347,9 +348,10 @@ Owner-only management; the sign-up page is the only unauthenticated route added.
 
 ### Resumable uploads — `/api/uploads`
 
-`POST /api/books/upload` (one request, whole file) stays for small EPUBs. Behind Cloudflare
-Tunnel every request body is capped at 100 MB, and a home uplink drops long transfers, so
-milestone 2 adds a resumable session upload for EPUBs and audiobooks. The schema
+`POST /api/books/upload` (one request, whole file) stays for small EPUBs. A home uplink drops
+long transfers, and some proxies cap request bodies (Cloudflare: 100 MB; Tailscale has no such
+cap, but the 50 MiB chunk limit keeps one contract for every deployment), so milestone 2 adds a
+resumable session upload for EPUBs and audiobooks. The schema
 (`upload_sessions`, migration `0005`) is in place; the routes are M2's. **The inbox folder
 remains the path for very large local imports** (a 2 GB audiobook on the same LAN is a file
 copy, not an upload).
@@ -545,33 +547,46 @@ creates a new one. History is kept: finished jobs are not deleted with their lea
 
 ## Client addresses behind a proxy (implemented)
 
-Lectern is meant to sit behind a reverse proxy or tunnel (see
-[`deploy-cloudflare-tunnel.md`](deploy-cloudflare-tunnel.md)), so the socket peer is often the
-proxy, not the reader. `lectern.security.proxy.resolve_client_ip` decides what counts as the
-client address, and **every** consumer uses it through `lectern.security.sessions.client_ip`:
-the per-IP rate limiters (login, setup, WebAuthn, OPDS Basic auth, KOReader sync), the
-`ip` stored on sessions and audit rows, and anything milestone 2+ adds (invites, uploads,
-streaming). Account lockout is per username and does not use the address.
+Lectern is meant to sit behind a TLS-terminating reverse proxy, in the documented deployment
+`tailscale serve` (see [`deploy-tailscale.md`](deploy-tailscale.md)), so the socket peer is
+often the proxy, not the reader. `lectern.security.proxy.resolve_client_ip` decides what
+counts as the client address, and **every** consumer uses it through
+`lectern.security.sessions.client_ip`: the per-IP rate limiters (login, setup, WebAuthn, OPDS
+Basic auth, KOReader sync), the `ip` stored on sessions and audit rows, and anything
+milestone 2+ adds (invites, uploads, streaming). Account lockout is per username and does not
+use the address. The address never affects *authentication*; a wrong address means a wrong
+rate-limit bucket or audit row, nothing more. Lectern's own sign-in stays mandatory however
+private the network in front of it is (a tailnet is a trusted network, not an identity).
 
 Rules:
 
 1. `LECTERN_TRUSTED_PROXIES` is a comma-separated list of IPs or CIDRs (default empty). A
    peer is *trusted* only if `request.client.host` parses as an IP inside one of them. Unix
-   sockets and non-IP peers are never trusted.
-2. For an **untrusted** peer the client address is the peer. `CF-Connecting-IP` and
-   `X-Forwarded-For` are ignored completely, so a client that reaches Lectern directly cannot
+   sockets and non-IP peers are never trusted. For `tailscale serve` on the same host, or in a
+   sidecar container whose network namespace Lectern shares, the value is `127.0.0.1`
+   (serve dials its backend from loopback).
+2. For an **untrusted** peer the client address is the peer. `X-Forwarded-For` and
+   `CF-Connecting-IP` are ignored completely, so a client that reaches Lectern directly cannot
    choose which bucket it is throttled in or what the audit log records.
-3. For a **trusted** peer: `CF-Connecting-IP`, if it is a valid IP, wins (cloudflared sets it
-   to the visitor and strips any copy the visitor sent); otherwise the **first valid hop** of
-   `X-Forwarded-For` (leftmost; `host:port` and `[v6]:port` forms are accepted, junk entries
-   are skipped); otherwise the peer itself.
-4. uvicorn's own `--proxy-headers` handling is disabled (`lectern.cli`), so the rule above is
+3. For a **trusted** peer, `X-Forwarded-For` is read **right to left**. The rightmost hop was
+   appended by the proxy that connected to us and is the only one it vouches for; hops that are
+   themselves inside `LECTERN_TRUSTED_PROXIES` are skipped, and the first untrusted address is
+   the client. The leftmost entry is whatever the client sent and is never used on its own.
+   `host:port` and `[v6]:port` forms are accepted. A malformed hop (`unknown`, junk, empty)
+   ends the walk, because nothing to its left can be verified, and the peer is used; an
+   all-trusted chain or an absent header also yields the peer. `tailscale serve` *replaces*
+   the header with the caller's tailnet address, so in the documented deployment the header
+   has exactly one hop.
+4. `CF-Connecting-IP`, if present and valid, takes precedence over `X-Forwarded-For`, and only
+   behind a trusted peer. It exists for the one-line Cloudflare Tunnel alternative in the
+   deployment guide (cloudflared sets it to the visitor and strips any copy the visitor sent);
+   nothing else should set it.
+5. uvicorn's own `--proxy-headers` handling is disabled (`lectern.cli`), so the rule above is
    the only place forwarding headers are interpreted.
 
-The leftmost-hop rule is right for a *single* trusted proxy that appends the real client, which
-is the deployment this project documents. A chain of proxies where only the last is trusted
-would need right-to-left stripping; that is deliberately not implemented, and the guide tells
-people to point the tunnel straight at Lectern. Tests: `tests/test_proxy.py`.
+Tests: `tests/test_proxy.py` (spoofed leftmost entries, all-trusted chains, malformed hops,
+IPv4/IPv6 and port forms, trusted and untrusted peers, and the rate-limit buckets and audit
+rows through the app).
 
 ## `lectern.positions` interface
 
