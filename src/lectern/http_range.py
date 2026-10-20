@@ -5,6 +5,10 @@
 - a start beyond the end, or ``-0``: ``416`` with ``Content-Range: bytes */size``
 - several ranges, or a malformed header: ignored, so ``200`` (allowed by RFC 9110 14.2)
 - ``If-None-Match`` matching the ETag: ``304``; ``If-Range`` not matching: ``200``
+
+``on_complete`` is called once a single response has handed *every* byte of the file to the
+server: a ``200``, or a ``206`` whose range is the whole file. Partial ranges, ``304``,
+``416``, and bodies the client abandons never call it (the queue's delivery rule).
 """
 
 from __future__ import annotations
@@ -76,6 +80,18 @@ def _metered(blocks: Iterator[bytes], on_sent: Callable[[int], bool]) -> Iterato
             return
 
 
+def _completed(blocks: Iterator[bytes], length: int, done: Callable[[], None]) -> Iterator[bytes]:
+    """Call ``done`` after the server took the last of ``length`` bytes. Like ``_metered``,
+    the generator resumes past a ``yield`` only once that block was written; a disconnect
+    closes it there, so an interrupted transfer never completes."""
+    sent = 0
+    for block in blocks:
+        yield block
+        sent += len(block)
+    if sent == length:
+        done()
+
+
 def _etag_matches(header: str, etag: str) -> bool:
     tags = [t.strip() for t in header.split(",")]
     bare = etag.removeprefix("W/")
@@ -91,6 +107,7 @@ def file_response(
     cache_control: str = "private, max-age=3600",
     headers: dict[str, str] | None = None,
     on_sent: Callable[[int], bool] | None = None,
+    on_complete: Callable[[], None] | None = None,
 ) -> Response:
     st = os.stat(path)
     size = st.st_size
@@ -122,7 +139,10 @@ def file_response(
 
     def body(start: int, length: int) -> Iterator[bytes]:
         blocks = _iter_file(path, start, length)
-        return blocks if on_sent is None else _metered(blocks, on_sent)
+        blocks = blocks if on_sent is None else _metered(blocks, on_sent)
+        if on_complete is not None and start == 0 and length == size:
+            blocks = _completed(blocks, length, on_complete)
+        return blocks
 
     try:
         rng = parse_range(range_header, size)

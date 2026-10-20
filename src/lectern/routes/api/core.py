@@ -27,6 +27,7 @@ from lectern.models import (
     Work,
     WorkProgress,
 )
+from lectern.reading_lists import continue_items
 from lectern.routes.api.serializers import iso, progress_json, user_json, work_json
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 
@@ -233,35 +234,10 @@ def continue_reading(auth: Auth, db: DbDep, limit: int = Query(default=8, ge=1, 
     Merges KOReader sync progress (per document hash) with the canonical position the web
     reader and audio player keep; each item says which one is newer (``latest``).
     """
-    rows = db.execute(
-        select(ReadingProgress, SyncKey, BookFile)
-        .join(BookFile, BookFile.partial_md5 == ReadingProgress.document)
-        .outerjoin(SyncKey, SyncKey.id == ReadingProgress.sync_key_id)
-        .where(ReadingProgress.user_id == auth.user.id)
-        .order_by(ReadingProgress.updated_at.desc())
-        .limit(limit * 2)
-    ).all()
-    latest: dict[int, tuple[str, object]] = {}
-    ko: dict[int, tuple] = {}
-    for p, key, f in rows:
-        if f.work_id in ko:
-            continue
-        ko[f.work_id] = (p, key, f)
-        latest[f.work_id] = (iso(p.updated_at) or "", "koreader")
-    canon = db.scalars(
-        select(WorkProgress)
-        .where(WorkProgress.user_id == auth.user.id)
-        .order_by(WorkProgress.received_at.desc())
-        .limit(limit * 2)
-    ).all()
-    for r in canon:
-        at = iso(r.received_at) or ""
-        if r.work_id not in latest or at > latest[r.work_id][0]:
-            latest[r.work_id] = (at, "canonical")
-    ordered = sorted(latest.items(), key=lambda kv: kv[1][0], reverse=True)
-    ids = [w for w, _ in ordered]
-    visible = set(db.scalars(select(Work.id).where(Work.id.in_(ids), visible_works(auth.user))))
-    ids = [w for w in ids if w in visible][:limit]
+    found = continue_items(db, auth.user, limit)
+    ids = [w for w, _, _ in found]
+    latest = {w: kind for w, kind, _ in found}
+    ko = {w: row for w, _, row in found if row is not None}
     works = {
         w.id: w
         for w in db.scalars(select(Work).options(selectinload(Work.files)).where(Work.id.in_(ids)))
@@ -277,7 +253,7 @@ def continue_reading(auth: Auth, db: DbDep, limit: int = Query(default=8, ge=1, 
             wj["progress_file_id"] = f.id
         else:
             wj["progress"] = None
-        wj["latest"] = latest[wid][1]
+        wj["latest"] = latest[wid]
         items.append(wj)
     return {"items": items}
 
@@ -337,6 +313,9 @@ _ACTIVITY_ACTIONS = {
     "metadata.lookup",
     "settings.change",
     "readaloud.regenerate",
+    "queue.add",
+    "queue.remove",
+    "queue.delivered",
 }
 
 

@@ -9,18 +9,20 @@ streaming for playback does not.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from lectern import device_queue
 from lectern.access import can_see_work, visible_works
 from lectern.http_range import file_response
 from lectern.ingest.library import safe_component
 from lectern.ingest.sentences import primary_epub
 from lectern.jobs import MEDIA_TYPE, find_variant, variant_sha256
-from lectern.models import AudioTrack, BookFile, User, Work
+from lectern.models import AudioTrack, BookFile, FileKind, User, Work
 from lectern.readaloud.cache import Unavailable, gather_inputs
 from lectern.readaloud.overlay import OverlayError
 from lectern.security import audit, downloads
@@ -92,6 +94,7 @@ def resolve_track(
 
 
 def download_response(
+    request: Request,
     db: Session,
     settings,
     book: BookFile,
@@ -100,13 +103,44 @@ def download_response(
     device: downloads.Device,
     ip: str | None,
     via: str,
-) -> FileResponse:
+) -> Response:
+    """A whole-file download: counted against the caps and audited, served with ranges and
+    the file's SHA-256 as its ETag. ``If-None-Match`` with that ETag is a ``304`` that is
+    neither counted nor a delivery. When an OPDS device (app password) receives the whole EPUB
+    in one response, the work's pending item in that device's queue becomes delivered
+    (lectern.device_queue); a probe, a partial range, or an interrupted transfer does not."""
+    etag = f'"{book.sha256}"'
+    inm = request.headers.get("if-none-match")
+    if inm and etag in [t.strip() for t in inm.split(",")]:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-store"})
     downloads.admit(db, settings, user, device, f"file:{book.id}", ip)
     work = db.get(Work, book.work_id)
     audit.record(db, "download", actor_user_id=user.id, target=f"file:{book.id}", ip=ip, detail=via)
     db.commit()
     filename = f"{work.author} - {work.title}.epub".replace("/", "-")[:200]
-    return FileResponse(path, media_type=book.media_type, filename=filename)
+    quoted = quote(filename)
+    disposition = (
+        f"attachment; filename*=utf-8''{quoted}"
+        if quoted != filename
+        else f'attachment; filename="{filename}"'
+    )
+    on_complete = None
+    pw_id = device.app_password_id
+    if pw_id is not None and book.kind == FileKind.EBOOK:
+        file_id = book.id
+
+        def on_complete() -> None:
+            device_queue.mark_delivered(pw_id, file_id, ip)
+
+    return file_response(
+        request,
+        path,
+        book.media_type,
+        book.sha256,
+        cache_control="no-store",
+        headers={"Content-Disposition": disposition},
+        on_complete=on_complete,
+    )
 
 
 @router.get("/library/works/{work_id}/cover.jpg", include_in_schema=False)
@@ -123,7 +157,7 @@ def work_download(
     book, path = resolve_file(db, settings, file_id, auth.user)
     via = "web" if auth.device.credential.startswith("session:") else "opds"
     return download_response(
-        db, settings, book, path, auth.user, auth.device, client_ip(request), via
+        request, db, settings, book, path, auth.user, auth.device, client_ip(request), via
     )
 
 
