@@ -16,7 +16,8 @@ from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
 from lectern.migrate import upgrade_to_head
-from lectern.routes import api, auth, health, kosync, library, opds, setup, spa
+from lectern.readaloud.cache import ReadAloudBuilder
+from lectern.routes import api, auth, health, kosync, library, media, opds, setup, spa
 from lectern.security.deps import LoginRequired
 from lectern.security.ratelimit import SlidingWindowLimiter
 from lectern.security.webauthn import ChallengeStore
@@ -99,6 +100,7 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
         finally:
             if watcher:
                 watcher.stop()
+            app.state.readaloud.shutdown()
             engine.dispose()
 
     app = FastAPI(
@@ -118,6 +120,7 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
         "webauthn": SlidingWindowLimiter(limit=20, window_seconds=60),
     }
     app.state.challenges = ChallengeStore()
+    app.state.readaloud = ReadAloudBuilder()
 
     app.add_middleware(SecurityHeadersMiddleware)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -131,6 +134,7 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
     app.include_router(api.router)
     app.include_router(spa.router)
     app.include_router(library.router)
+    app.include_router(media.router)  # interim milestone 2 routes; see lectern.routes.media
     app.include_router(opds.router)
     app.include_router(kosync.router)
 

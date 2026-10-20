@@ -10,6 +10,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from lectern.models import BookFile, User, Work
+from lectern.readaloud.cache import Unavailable, gather_inputs
+from lectern.readaloud.overlay import OverlayError
+from lectern.routes.api.readalong import visible_work
 from lectern.security import audit
 from lectern.security.deps import Auth, DbDep, SettingsDep
 from lectern.security.sessions import client_ip
@@ -77,3 +80,30 @@ def work_cover(auth: Auth, db: DbDep, settings: SettingsDep, work_id: int):
 def work_download(request: Request, auth: Auth, db: DbDep, settings: SettingsDep, file_id: int):
     book, path = resolve_file(db, settings, file_id)
     return download_response(db, book, path, auth.user, client_ip(request), "web")
+
+
+@router.get("/library/works/{work_id}/read-aloud.epub", include_in_schema=False)
+def read_aloud_download(
+    request: Request, auth: Auth, db: DbDep, settings: SettingsDep, work_id: int
+) -> FileResponse:
+    """The work's EPUB with Media Overlays. Built on first request if not cached
+    (docs/contracts.md); the plain ``book.epub`` is never touched."""
+    work = visible_work(db, auth.user, work_id)
+    try:
+        inputs = gather_inputs(db, settings, work)
+        request.app.state.readaloud.ensure(inputs)
+    except Unavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, exc.code) from exc
+    except OverlayError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    audit.record(
+        db,
+        "download",
+        actor_user_id=auth.user.id,
+        target=f"read-aloud:{work.id}",
+        ip=client_ip(request),
+        detail="web read-aloud",
+    )
+    db.commit()
+    filename = f"{work.author} - {work.title} (read-aloud).epub".replace("/", "-")[:200]
+    return FileResponse(inputs.output, media_type="application/epub+zip", filename=filename)
