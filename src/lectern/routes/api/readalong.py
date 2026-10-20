@@ -1,4 +1,6 @@
-"""Read-along and read-aloud API (milestone 4): sentences, progress, spine text, EPUB export.
+"""Read-along and read-aloud API (milestone 4): spine text and the read-aloud EPUB.
+
+Sentences, progress, and tracks live in :mod:`lectern.routes.api.works` (milestone 2).
 
 Shapes follow docs/contracts.md. Every route checks visibility with
 :func:`lectern.access.can_see_work` and answers ``404`` for a work the caller may not see.
@@ -8,11 +10,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select
+from fastapi import APIRouter, HTTPException, Request, status
+from sqlalchemy import select
 
 from lectern.access import can_see_work
 from lectern.ingest.epub import EpubError, read_spine
@@ -21,22 +21,14 @@ from lectern.models import (
     AlignmentStatus,
     BookFile,
     FileKind,
-    ProgressSource,
-    Sentence,
     User,
     Work,
-    WorkProgress,
-    utcnow,
 )
-from lectern.positions import SentenceIndex, SentencePos, TextPos
 from lectern.readaloud.cache import ReadAloudBuilder, Unavailable, gather_inputs
 from lectern.readaloud.text import SpineText
-from lectern.routes.api.serializers import iso
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 
 router = APIRouter()
-
-MAX_SENTENCES = 2000
 
 
 def visible_work(db, user: User, work_id: int) -> Work:
@@ -52,73 +44,8 @@ def alignment_json(a: Alignment | None) -> dict | None:
     return {"status": a.status.value, "model": a.model, "coverage": a.coverage}
 
 
-def sentence_json(s: Sentence) -> dict:
-    return {
-        "n": s.n,
-        "spine_index": s.spine_index,
-        "char_start": s.char_start,
-        "char_end": s.char_end,
-        "audio_start_s": s.audio_start_s,
-        "audio_end_s": s.audio_end_s,
-        "matched": s.matched,
-    }
-
-
 def current_alignment(db, work_id: int) -> Alignment | None:
     return db.scalar(select(Alignment).where(Alignment.work_id == work_id))
-
-
-def _rows(db, work_id: int) -> list[Sentence]:
-    return list(
-        db.scalars(select(Sentence).where(Sentence.work_id == work_id).order_by(Sentence.n))
-    )
-
-
-# --- sentences -------------------------------------------------------------------------------
-
-
-@router.get("/works/{work_id}/sentences")
-def sentences(
-    auth: Auth,
-    db: DbDep,
-    work_id: int,
-    from_: int | None = Query(default=None, alias="from", ge=0),
-    to: int | None = Query(default=None, ge=0),
-    t: float | None = Query(default=None, ge=0),
-    around: int = Query(default=10, ge=0, le=50),
-    spine: int | None = Query(default=None, ge=0),
-    char: int | None = Query(default=None, ge=0),
-) -> dict:
-    visible_work(db, auth.user, work_id)
-    modes = [from_ is not None, t is not None, spine is not None]
-    if sum(modes) != 1 or (spine is not None) != (char is not None):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "use exactly one of from, t, or spine+char"
-        )
-    count = db.scalar(select(func.count()).where(Sentence.work_id == work_id)) or 0
-    base = select(Sentence).where(Sentence.work_id == work_id).order_by(Sentence.n)
-    if from_ is not None:
-        end = from_ + 500 if to is None else to
-        if end < from_ or end - from_ > MAX_SENTENCES:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"at most {MAX_SENTENCES} per call")
-        rows = db.scalars(base.where(Sentence.n >= from_, Sentence.n < end)).all()
-    else:
-        index = SentenceIndex(_rows(db, work_id))
-        pos = index.at_time(t) if t is not None else index.at_text(TextPos(spine, char))  # type: ignore[arg-type]
-        if pos is None:
-            rows = []
-        elif t is not None:
-            rows = db.scalars(
-                base.where(Sentence.n >= pos.n - around, Sentence.n <= pos.n + around)
-            ).all()
-        else:
-            rows = db.scalars(base.where(Sentence.n >= pos.n, Sentence.n <= pos.n + 100)).all()
-    return {
-        "work_id": work_id,
-        "count": count,
-        "alignment": alignment_json(current_alignment(db, work_id)),
-        "sentences": [sentence_json(s) for s in rows],
-    }
 
 
 # --- spine text --------------------------------------------------------------------------------
@@ -173,115 +100,6 @@ def spine_text(
     except (EpubError, ValueError, KeyError) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unreadable spine item") from exc
     return {"work_id": work_id, "file_id": book.id, "spine_index": spine_index, **data}
-
-
-# --- progress --------------------------------------------------------------------------------
-
-
-def _progress_json(work_id: int, row: WorkProgress | None, index: SentenceIndex) -> dict:
-    out: dict = {
-        "work_id": work_id,
-        "position": None,
-        "source": None,
-        "raw": None,
-        "device": None,
-        "received_at": None,
-        "text": None,
-        "audio_s": None,
-        "percent": None,
-    }
-    if row is None:
-        return out
-    n = min(row.sentence_n, len(index) - 1) if len(index) else None
-    pos = SentencePos(n, row.sentence_offset) if n is not None else None
-    text = index.to_text(pos) if pos is not None else None
-    out.update(
-        position={"sentence_n": row.sentence_n, "offset": row.sentence_offset},
-        source=row.source.value,
-        raw=row.raw,
-        device=row.device,
-        received_at=iso(row.received_at),
-        text={"spine_index": text.spine_index, "char": text.char} if text else None,
-        audio_s=index.to_time(pos) if pos is not None else None,
-        percent=(row.sentence_n / len(index)) if len(index) else None,
-    )
-    return out
-
-
-@router.get("/works/{work_id}/progress")
-def get_progress(auth: Auth, db: DbDep, work_id: int) -> dict:
-    visible_work(db, auth.user, work_id)
-    row = db.scalar(
-        select(WorkProgress).where(
-            WorkProgress.user_id == auth.user.id, WorkProgress.work_id == work_id
-        )
-    )
-    return _progress_json(work_id, row, SentenceIndex(_rows(db, work_id)))
-
-
-class ProgressIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source: Literal["web", "audio"]
-    device: str = Field(default="", max_length=128)
-    sentence_n: int | None = Field(default=None, ge=0)
-    offset: int | None = Field(default=None, ge=0)
-    audio_s: float | None = Field(default=None, ge=0)
-    spine_index: int | None = Field(default=None, ge=0)
-    char: int | None = Field(default=None, ge=0)
-
-    @model_validator(mode="after")
-    def _one_form(self) -> ProgressIn:
-        forms = [
-            self.sentence_n is not None,
-            self.audio_s is not None,
-            self.spine_index is not None or self.char is not None,
-        ]
-        if sum(forms) != 1:
-            raise ValueError("exactly one position form")
-        if self.offset is not None and self.sentence_n is None:
-            raise ValueError("offset goes with sentence_n")
-        if (self.spine_index is None) != (self.char is None):
-            raise ValueError("spine_index and char go together")
-        return self
-
-
-@router.put("/works/{work_id}/progress")
-def put_progress(auth: AuthCsrf, db: DbDep, work_id: int, body: ProgressIn) -> dict:
-    """Last write wins; ``received_at`` is the server clock (docs/contracts.md)."""
-    visible_work(db, auth.user, work_id)
-    index = SentenceIndex(_rows(db, work_id))
-    if not len(index):
-        raise HTTPException(status.HTTP_409_CONFLICT, "no_sentences")
-    if body.sentence_n is not None:
-        if body.sentence_n >= len(index):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "sentence_n out of range")
-        s = index.sentence(body.sentence_n)
-        pos = SentencePos(body.sentence_n, min(body.offset or 0, s.char_end - s.char_start))
-        raw = f"{pos.n}:{pos.offset}"
-    elif body.audio_s is not None:
-        found = index.at_time(body.audio_s)
-        if found is None:
-            raise HTTPException(status.HTTP_409_CONFLICT, "no_alignment")
-        pos, raw = found, repr(round(body.audio_s, 3))
-    else:
-        pos = index.at_text(TextPos(body.spine_index, body.char))  # type: ignore[arg-type]
-        raw = f"{body.spine_index}:{body.char}"
-    row = db.scalar(
-        select(WorkProgress).where(
-            WorkProgress.user_id == auth.user.id, WorkProgress.work_id == work_id
-        )
-    )
-    if row is None:
-        row = WorkProgress(user_id=auth.user.id, work_id=work_id)
-        db.add(row)
-    row.sentence_n, row.sentence_offset = pos.n, pos.offset
-    row.source = ProgressSource(body.source)
-    row.raw = raw
-    row.device = body.device or "Web"
-    row.received_at = utcnow()
-    db.commit()
-    return _progress_json(work_id, row, index)
 
 
 # --- read-aloud EPUB ---------------------------------------------------------------------------

@@ -32,14 +32,14 @@ export function candidates(p: WorkProgressResponse): HandoffCandidate[] {
 
 /**
  * The position to offer, or null. ``here`` is where this device is now, in the units of
- * ``mode`` (percent of the book for reading, seconds for listening); offers that would move
+ * ``mode`` (fraction of the book for reading, seconds for listening); offers that would move
  * less than ``minMove`` are not worth interrupting for.
  */
 export function pickHandoff(
   p: WorkProgressResponse,
   mark: LocalMark,
   self: { device: string; mode: "read" | "listen"; here: number | null },
-  minMove = self.mode === "read" ? 0.5 : 20,
+  minMove = self.mode === "read" ? 0.005 : 20,
 ): HandoffCandidate | null {
   for (const c of candidates(p)) {
     if (mark.seenAt && (c.received_at ?? "") <= mark.seenAt) return null; // nothing newer

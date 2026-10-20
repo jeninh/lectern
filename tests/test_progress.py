@@ -66,7 +66,7 @@ def test_sentences_are_built_at_ingest(client, magi_work):
     assert len(r["sentences"]) == 101
     r = client.get(f"/api/works/{wid}/sentences", params={"t": 3.0, "around": 2}).json()
     assert r["sentences"] == []  # nothing aligned yet
-    assert client.get(f"/api/works/{wid}/sentences").status_code == 422
+    assert client.get(f"/api/works/{wid}/sentences").status_code == 400
 
 
 def test_progress_put_get_last_write_wins_and_is_per_user(client, owner, magi_work):
@@ -87,7 +87,7 @@ def test_progress_put_get_last_write_wins_and_is_per_user(client, owner, magi_wo
     assert p["text"] == {"spine_index": 2, "char": 40}
     assert p["source"] == "web" and p["device"] == "Firefox on macOS"
     assert p["raw"] == "epubcfi(/6/6!/4/2/1:40)" and p["received_at"].endswith("Z")
-    assert p["audio_s"] is None and 0 < p["percent"] < 100
+    assert p["audio_s"] is None and 0 < p["percent"] < 1
 
     flat = client.get(f"/api/works/{wid}/sentences", params={"spine": 2, "char": 721}).json()
     m = flat["sentences"][0]["n"]
@@ -143,7 +143,7 @@ def test_koreader_progress_is_reported_for_handoff_and_left_untouched(
     p = client.get(f"/api/works/{wid}/progress").json()
     k = p["koreader"]
     assert k["device"] == "Kindle" and k["raw"] == xp and k["estimated"] is True
-    assert k["text"]["spine_index"] == 2 and k["percent"] == 50.0
+    assert k["text"]["spine_index"] == 2 and k["percent"] == 0.5
     assert k["received_at"] >= p["received_at"]
     # The canonical position did not move: hand-off is the client's (and the reader's) choice.
     assert p["position"]["sentence_n"] == 2 and p["source"] == "web"

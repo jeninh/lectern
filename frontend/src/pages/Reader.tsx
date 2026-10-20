@@ -219,7 +219,7 @@ export function ReaderPage() {
         } else await v.init({ showTextStart: true });
         if (cancelled) return;
         if (!mark && prog.received_at) writeMark(id, { cfi: "", seenAt: prog.received_at });
-        const here = view.current ? (lastFraction() ?? 0) * 100 : null;
+        const here = view.current ? lastFraction() ?? 0 : null;
         setHandoff(mark ? pickHandoff(prog, { seenAt: mark.seenAt }, { device: deviceName, mode: "read", here }) : null);
         setLoading(false);
         window.setTimeout(() => (ready.current = true), 600);
@@ -315,7 +315,7 @@ export function ReaderPage() {
       {handoff && (
         <div className="handoff reader-handoff" role="status">
           <span>
-            <strong>{handoff.device}</strong>, {relativeTime(handoff.received_at, now)}: {handoff.percent != null ? `${Math.round(handoff.percent)}%` : "elsewhere"}
+            <strong>{handoff.device}</strong>, {relativeTime(handoff.received_at, now)}: {handoff.percent != null ? `${Math.round(handoff.percent * 100)}%` : "elsewhere"}
             {handoff.source === "audio" ? " while listening" : ""}
             {handoff.estimated && <span className="hint"> (estimated)</span>}. Continue here?
           </span>

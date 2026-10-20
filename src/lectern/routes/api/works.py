@@ -125,7 +125,7 @@ def sentences(
     _visible_work(db, auth.user, work_id)
     modes = [from_ is not None, t is not None, spine is not None]
     if sum(modes) != 1 or (spine is not None and char is None):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "exactly one query mode")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "exactly one query mode")
     base = select(Sentence).where(Sentence.work_id == work_id)
     count = db.scalar(select(func.count()).select_from(Sentence).where(Sentence.work_id == work_id))
     if from_ is not None:

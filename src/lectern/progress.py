@@ -196,7 +196,7 @@ def progress_json(db: Session, user_id: int, work_id: int) -> dict:
         t = wt.index.to_text(pos)
         out["position"] = {"sentence_n": pos.n, "offset": pos.offset}
         out["text"] = {"spine_index": t.spine_index, "char": t.char}
-        out["percent"] = round(pos.n / wt.count * 100, 2)
+        out["percent"] = pos.n / wt.count
         if audio_raw is not None:
             out["audio_s"] = audio_raw
             out["estimated"] = not wt.matched
@@ -205,7 +205,7 @@ def progress_json(db: Session, user_id: int, work_id: int) -> dict:
     elif audio_raw is not None:  # audiobook without text
         out["audio_s"] = audio_raw
         if tl.total_s:
-            out["percent"] = round(min(1.0, audio_raw / tl.total_s) * 100, 2)
+            out["percent"] = min(1.0, audio_raw / tl.total_s)
     return out
 
 
@@ -245,7 +245,7 @@ def koreader_candidate(
         "source": "koreader",
         "device": p.device or (key.label if key else "KOReader"),
         "received_at": iso(p.updated_at),
-        "percent": round(p.percentage * 100, 2),
+        "percent": p.percentage,
         "raw": p.progress,
         "text": {"spine_index": text.spine_index, "char": text.char} if text else None,
         "audio_s": audio_s,
