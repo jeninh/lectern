@@ -130,16 +130,20 @@ def post_form(client: TestClient, url: str, data: dict, **kw):
     return client.post(url, data=data, headers={"origin": ORIGIN}, **kw)
 
 
-def csrf_of(html: str) -> str:
-    m = re.search(r'name="csrf-token" content="([^"]+)"', html)
-    assert m, "no csrf token in page"
-    return m.group(1)
+def csrf_of(client: TestClient) -> str:
+    r = client.get("/api/me")
+    assert r.status_code == 200, r.text
+    return r.json()["csrf_token"]
 
 
-def secret_of(html: str) -> str:
-    m = re.search(r'class="secret">([^<]+)<', html)
-    assert m, "no secret in page"
-    return m.group(1)
+def api_post(client: TestClient, url: str, csrf: str, json: dict | None = None, **kw):
+    """A write from the SPA: same-origin Origin header plus the per-session CSRF token."""
+    return client.post(
+        url,
+        json=json if json is not None else {},
+        headers={"origin": ORIGIN, "x-csrf-token": csrf},
+        **kw,
+    )
 
 
 @pytest.fixture
@@ -154,21 +158,39 @@ def owner(client: TestClient):
             "password": OWNER_PASSWORD,
             "password_confirm": OWNER_PASSWORD,
         },
+        follow_redirects=False,
     )
-    assert r.status_code == 200, r.text
-    return {"username": "owner", "csrf": csrf_of(client.get("/account").text)}
+    assert r.status_code == 303 and r.headers["location"].startswith("/app"), r.text
+    return {"username": "owner", "csrf": csrf_of(client)}
 
 
 def make_sync_key(client: TestClient, csrf: str, label: str) -> str:
-    r = post_form(client, "/account/sync-keys", {"label": label, "csrf_token": csrf})
-    assert r.status_code == 200, r.text
-    return secret_of(r.text)
+    r = api_post(client, "/api/devices/sync-keys", csrf, {"label": label})
+    assert r.status_code == 201, r.text
+    return r.json()["secret"]
+
+
+def make_sync_key_full(client: TestClient, csrf: str, label: str) -> dict:
+    r = api_post(client, "/api/devices/sync-keys", csrf, {"label": label})
+    assert r.status_code == 201, r.text
+    return r.json()
 
 
 def make_app_password(client: TestClient, csrf: str, label: str) -> str:
-    r = post_form(client, "/account/app-passwords", {"label": label, "csrf_token": csrf})
-    assert r.status_code == 200, r.text
-    return secret_of(r.text)
+    r = api_post(client, "/api/devices/app-passwords", csrf, {"label": label})
+    assert r.status_code == 201, r.text
+    return r.json()["secret"]
+
+
+def login(client: TestClient, username: str, password: str, totp: str = "") -> str:
+    r = post_form(
+        client,
+        "/login",
+        {"username": username, "password": password, "totp": totp},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    return csrf_of(client)
 
 
 def ko_headers(username: str, secret: str) -> dict[str, str]:

@@ -8,3 +8,5 @@ tests
 .amp
 *.md
 !README.md
+frontend/node_modules
+src/lectern/static/app

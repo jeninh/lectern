@@ -40,7 +40,32 @@ class InboxWatcher:
         if self._thread:
             self._thread.join(timeout=5)
 
+    def backfill_tints(self) -> int:
+        """Compute cover tints for works ingested before tints existed. Returns count updated."""
+        from sqlalchemy import select
+
+        from lectern.ingest.cover import dominant_tint
+        from lectern.models import Work
+
+        updated = 0
+        with self.session_factory() as db:
+            for work in db.scalars(
+                select(Work).where(Work.has_cover.is_(True), Work.cover_tint.is_(None))
+            ):
+                tint = dominant_tint(self.library / work.dir_path / "cover.jpg")
+                if tint:
+                    work.cover_tint = tint
+                    updated += 1
+            db.commit()
+        return updated
+
     def _run(self) -> None:
+        try:
+            n = self.backfill_tints()
+            if n:
+                log.info("computed cover tints for %d works", n)
+        except Exception:  # noqa: BLE001
+            log.exception("cover tint backfill failed")
         while not self._stop.is_set():
             try:
                 self.scan_once()

@@ -68,6 +68,8 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # UI preference: reveal KOReader xpointers, partial-MD5 ids, and storage paths.
+    show_technical_details: Mapped[bool] = mapped_column(Boolean, default=False)
 
     passkeys: Mapped[list[Passkey]] = relationship(back_populates="user", cascade="all, delete")
     sync_keys: Mapped[list[SyncKey]] = relationship(back_populates="user", cascade="all, delete")
@@ -141,6 +143,10 @@ class AppPassword(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # Set when both credentials were issued together as one device.
+    sync_key_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sync_keys.id", ondelete="SET NULL"), default=None, index=True
+    )
 
     user: Mapped[User] = relationship(back_populates="app_passwords")
 
@@ -200,6 +206,7 @@ class Work(Base):
     published: Mapped[str | None] = mapped_column(String(32), default=None)
     dir_path: Mapped[str] = mapped_column(String(1024), unique=True)  # relative to library
     has_cover: Mapped[bool] = mapped_column(Boolean, default=False)
+    cover_tint: Mapped[str | None] = mapped_column(String(7), default=None)  # "#rrggbb"
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 

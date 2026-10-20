@@ -1,0 +1,324 @@
+import QRCode from "qrcode";
+import { useCallback, useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
+import { Check, Key, Shield } from "../components/Icons";
+import { Sheet } from "../components/Sheet";
+import { PageTitle } from "../components/Shell";
+import { get, post } from "../lib/api";
+import { absoluteTime, relativeTime } from "../lib/format";
+import { useStore } from "../lib/store";
+import type { SecurityOverview } from "../lib/types";
+import { passkeysSupported, registerPasskey } from "../lib/webauthn";
+
+export function SecurityPage() {
+  const { toast, refreshMe, me, setPreference } = useStore();
+  const showTech = !!me?.preferences.show_technical_details;
+  const [sec, setSec] = useState<SecurityOverview | null>(null);
+  const [dialog, setDialog] = useState<"password" | "totp" | "totp-off" | "passkey" | null>(null);
+  const load = useCallback(() => get<SecurityOverview>("/api/security").then(setSec), []);
+  const hash = useLocation().hash.slice(1);
+  useEffect(() => {
+    if (sec && hash) document.getElementById(hash)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [sec, hash]);
+  useEffect(() => {
+    load().catch(() => {});
+  }, [load]);
+
+  const done = async (msg: string) => {
+    toast(msg);
+    setDialog(null);
+    await Promise.all([load(), refreshMe()]);
+  };
+
+  if (!sec) return <><PageTitle>Security</PageTitle><div className="hint">Loading…</div></>;
+  const score = (sec.passkeys.length > 0 ? 1 : 0) + (sec.totp_enabled ? 1 : 0);
+
+  return (
+    <>
+      <PageTitle>Security</PageTitle>
+      <div className="stack">
+        <div className={`alert ${score === 2 ? "ok" : score === 1 ? "warn" : "error"}`} role="status">
+          {score === 2
+            ? "Strong: passkey sign-in and two-factor codes are both set up."
+            : score === 1
+              ? sec.passkeys.length
+                ? "Good: you have a passkey. Add two-factor codes to protect the password fallback too."
+                : "Good: two-factor codes are on. Add a passkey for phishing-resistant sign-in."
+              : "Your account relies on a password alone. Add a passkey or two-factor codes."}
+        </div>
+
+        <section className="card" id="passkeys" aria-labelledby="pk-h" data-highlight={hash === "passkeys" || undefined}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <h2 id="pk-h">Passkeys</h2>
+              <p className="sub">Sign in with Face ID, Touch ID, Windows Hello, or a security key. Preferred.</p>
+            </div>
+            <button className="btn primary" disabled={!sec.passkeys_possible || !passkeysSupported()} onClick={() => setDialog("passkey")}>
+              <Key /> Add passkey
+            </button>
+          </div>
+          {!sec.passkeys_possible && <div className="alert warn">Passkeys need Lectern served over HTTPS (set LECTERN_BASE_URL to an https origin).</div>}
+          {sec.passkeys.length === 0 ? (
+            <div className="hint">No passkeys yet.</div>
+          ) : (
+            <table className="list">
+              <tbody>
+                {sec.passkeys.map((p) => (
+                  <tr key={p.id}>
+                    <td>
+                      <strong>{p.label}</strong>
+                      <div className="hint">added {relativeTime(p.created_at)} · last used {relativeTime(p.last_used_at)}{p.backed_up ? " · synced passkey" : ""}</div>
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <button className="btn sm danger" onClick={() => post(`/api/security/passkeys/${p.id}/delete`).then(() => done(`Removed ${p.label}`)).catch((e) => toast(e.message, "error"))}>
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+
+        <section className="card" id="totp" aria-labelledby="totp-h" data-highlight={hash === "totp" || undefined}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <h2 id="totp-h">Two-factor codes</h2>
+              <p className="sub">Required alongside the password when you are not using a passkey.</p>
+            </div>
+            {sec.totp_enabled ? (
+              <div className="row">
+                <span className="badge ok"><Check width={12} height={12} /> enabled</span>
+                <button className="btn sm danger" onClick={() => setDialog("totp-off")}>Disable</button>
+              </div>
+            ) : (
+              <button className="btn" onClick={() => setDialog("totp")}><Shield /> Enable</button>
+            )}
+          </div>
+        </section>
+
+        <section className="card" id="display" aria-labelledby="disp-h" data-highlight={hash === "display" || undefined}>
+          <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+            <div>
+              <h2 id="disp-h">Show technical details</h2>
+              <p className="sub" id="disp-sub">KOReader positions, document ids, and storage paths on book cards and in the library. Off by default.</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              className="switch"
+              aria-checked={showTech}
+              aria-labelledby="disp-h"
+              aria-describedby="disp-sub"
+              onClick={() => setPreference("show_technical_details", !showTech)}
+            >
+              <span aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+
+        <section className="card" id="password" aria-labelledby="pw-h" data-highlight={hash === "password" || undefined}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <h2 id="pw-h">Password</h2>
+              <p className="sub">Argon2id-hashed. Changing it signs out every browser session.</p>
+            </div>
+            <button className="btn" onClick={() => setDialog("password")}>Change password</button>
+          </div>
+        </section>
+
+        <section className="card" id="sessions" aria-labelledby="ses-h" data-highlight={hash === "sessions" || undefined}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <h2 id="ses-h">Sessions</h2>
+              <p className="sub">Browsers currently signed in as you.</p>
+            </div>
+            {sec.sessions.length > 1 && (
+              <button className="btn sm danger" onClick={() => post("/api/security/sessions/revoke-others").then(() => done("Other sessions signed out")).catch((e) => toast(e.message, "error"))}>
+                Sign out others
+              </button>
+            )}
+          </div>
+          <table className="list">
+            <tbody>
+              {sec.sessions.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    <strong>{s.user_agent ? ua(s.user_agent) : "Unknown browser"}</strong> {s.current && <span className="badge accent">this browser</span>}
+                    <div className="hint">{s.ip ?? "?"} · signed in {relativeTime(s.created_at)} · expires {absoluteTime(s.expires_at)}</div>
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {!s.current && (
+                      <button className="btn sm" onClick={() => post(`/api/security/sessions/${s.id}/revoke`).then(() => done("Session signed out")).catch((e) => toast(e.message, "error"))}>
+                        Sign out
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <Sheet open={dialog === "password"} onClose={() => setDialog(null)} title="Change password" variant="dialog" labelledBy="pw-dialog">
+        <PasswordForm onDone={() => (window.location.href = "/login")} />
+      </Sheet>
+      <Sheet open={dialog === "totp"} onClose={() => setDialog(null)} title="Enable two-factor codes" variant="dialog" labelledBy="totp-dialog">
+        <TotpEnroll onDone={() => done("Two-factor codes enabled")} />
+      </Sheet>
+      <Sheet open={dialog === "totp-off"} onClose={() => setDialog(null)} title="Disable two-factor codes" variant="dialog" labelledBy="totp-off-dialog">
+        <PasswordConfirm path="/api/security/totp/disable" cta="Disable" onDone={() => done("Two-factor codes disabled")} />
+      </Sheet>
+      <Sheet open={dialog === "passkey"} onClose={() => setDialog(null)} title="Add a passkey" variant="dialog" labelledBy="pk-dialog">
+        <PasskeyEnroll onDone={(label) => done(`Passkey “${label}” added`)} />
+      </Sheet>
+    </>
+  );
+}
+
+function ua(s: string): string {
+  if (/iPhone|iPad/.test(s)) return "Safari on iOS";
+  if (/Android/.test(s)) return /Firefox/.test(s) ? "Firefox on Android" : "Chrome on Android";
+  const os = /Mac OS/.test(s) ? "macOS" : /Windows/.test(s) ? "Windows" : /Linux/.test(s) ? "Linux" : "";
+  const br = /Firefox/.test(s) ? "Firefox" : /Edg\//.test(s) ? "Edge" : /Chrome/.test(s) ? "Chrome" : /Safari/.test(s) ? "Safari" : "Browser";
+  return os ? `${br} on ${os}` : br;
+}
+
+function PasswordForm({ onDone }: { onDone: () => void }) {
+  const { toast } = useStore();
+  const [cur, setCur] = useState("");
+  const [nw, setNw] = useState("");
+  const [nw2, setNw2] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (nw !== nw2) return setErr("New passwords do not match.");
+        setBusy(true);
+        try {
+          await post("/api/security/password", { current_password: cur, new_password: nw });
+          toast("Password changed; sign in again");
+          onDone();
+        } catch (ex) {
+          setErr((ex as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
+      <label className="field"><span>Current password</span><input className="input" type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required data-autofocus /></label>
+      <label className="field"><span>New password (12+ characters)</span><input className="input" type="password" autoComplete="new-password" minLength={12} value={nw} onChange={(e) => setNw(e.target.value)} required /></label>
+      <label className="field"><span>Confirm new password</span><input className="input" type="password" autoComplete="new-password" minLength={12} value={nw2} onChange={(e) => setNw2(e.target.value)} required /></label>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn primary" disabled={busy}>Change password</button>
+      </div>
+    </form>
+  );
+}
+
+function PasswordConfirm({ path, cta, onDone }: { path: string; cta: string; onDone: () => void }) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        try {
+          await post(path, { password: pw });
+          onDone();
+        } catch (ex) {
+          setErr((ex as Error).message);
+        }
+      }}
+    >
+      {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
+      <label className="field"><span>Confirm with your password</span><input className="input" type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} required data-autofocus /></label>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn danger">{cta}</button>
+      </div>
+    </form>
+  );
+}
+
+function TotpEnroll({ onDone }: { onDone: () => void }) {
+  const [data, setData] = useState<{ secret: string; uri: string } | null>(null);
+  const [qr, setQr] = useState<string>("");
+  const [code, setCode] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    post<{ secret: string; uri: string }>("/api/security/totp/begin")
+      .then(async (d) => {
+        setData(d);
+        setQr(await QRCode.toDataURL(d.uri, { margin: 0, width: 360, color: { dark: "#1f3a93", light: "#ffffff" } }));
+      })
+      .catch((e) => setErr(e.message));
+  }, []);
+  if (err) return <div className="alert error" role="alert">{err}</div>;
+  if (!data) return <div className="hint">Preparing…</div>;
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        try {
+          await post("/api/security/totp/confirm", { code });
+          onDone();
+        } catch (ex) {
+          setErr(null);
+          setCode("");
+          (e.target as HTMLFormElement).querySelector("input")?.focus();
+          setErr((ex as Error).message);
+        }
+      }}
+    >
+      <div style={{ display: "grid", gridTemplateColumns: "180px 1fr", gap: 18, alignItems: "start" }}>
+        {qr && <img className="qr" src={qr} alt="QR code for your authenticator app" />}
+        <div>
+          <p style={{ marginTop: 0 }}>Scan with your authenticator app, or enter the key by hand:</p>
+          <div className="secret"><code>{data.secret}</code></div>
+        </div>
+      </div>
+      <label className="field" style={{ marginTop: 16 }}>
+        <span>Enter the 6-digit code it shows</span>
+        <input className="input" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={(e) => setCode(e.target.value)} required data-autofocus />
+      </label>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn primary">Turn on</button>
+      </div>
+    </form>
+  );
+}
+
+function PasskeyEnroll({ onDone }: { onDone: (label: string) => void }) {
+  const [label, setLabel] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setErr(null);
+        try {
+          await registerPasskey(label.trim() || "Passkey");
+          onDone(label.trim() || "Passkey");
+        } catch (ex) {
+          setErr((ex as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
+      <label className="field"><span>Label</span><input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="MacBook Touch ID, YubiKey…" maxLength={128} data-autofocus /></label>
+      <p className="hint">Your browser will prompt for Face ID, Touch ID, a PIN, or a security key.</p>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn primary" disabled={busy}>{busy ? "Waiting for browser…" : "Create passkey"}</button>
+      </div>
+    </form>
+  );
+}

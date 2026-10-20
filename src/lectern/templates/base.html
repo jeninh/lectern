@@ -9,12 +9,13 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/library">Lectern</a>
+  <a class="brand" href="/app">Lectern</a>
   {% if current_user %}
   <nav>
-    <a href="/library">Library</a>
-    <a href="/account">Account</a>
-    {% if current_user.role.value == "owner" %}<a href="/admin/users">Users</a><a href="/admin/audit">Audit</a>{% endif %}
+    <a href="/app/library">Library</a>
+    <a href="/app/devices">Devices</a>
+    <a href="/app/security">Security</a>
+    {% if current_user.role.value == "owner" %}<a href="/app/admin">Admin</a>{% endif %}
     <form method="post" action="/logout" class="inline">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="link">Sign out ({{ current_user.username }})</button>
