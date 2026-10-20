@@ -12,9 +12,10 @@ pull, so the queue is just a personal shelf for one catalogue password.
 - **One book:** open it in the Library and choose **Send to device**. The dialog lists the
   devices you can send to, which ones already have the book waiting, and remembers your last
   choice.
-- **Several books:** in the Library choose **Select**, tap the books (books without an EPUB
-  cannot be selected), then **Send to device…**. The toast says what happened to each book:
-  sent, already waiting, not shared with that person, or without an EPUB.
+- **Several books:** in the Library choose **Select**, tap the books, then **Send to device**
+  in the selection bar (the same bar as bulk edit; readers see only **Send to device**). The
+  toast says what happened to each book: sent, already waiting, not shared with that person,
+  or without an EPUB.
 - **The queue:** on **Devices**, each device with a catalogue password shows how many books
   are waiting; **Open queue** lists them in catalogue order. Move them up or down, remove one,
   or queue a delivered or removed book again from **Recently**.
@@ -31,6 +32,7 @@ pull, so the queue is just a personal shelf for one catalogue password.
 | --- | --- |
 | ![Queue sheet](screenshots/m5-queues-sheet.png) | ![Queue sheet on a phone](screenshots/m5-queues-sheet-mobile-dark.png) |
 | ![Send dialog](screenshots/m5-queues-send-dialog.png) | ![Selecting books on a phone](screenshots/m5-queues-library-select-mobile.png) |
+| ![Selecting books: Send to device in the bulk bar](screenshots/m5-queues-library-select.png) | |
 
 ## Who can send what to whom
 
