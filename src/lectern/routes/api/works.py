@@ -6,6 +6,8 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import threading
+from collections import OrderedDict
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -239,6 +241,28 @@ def set_progress(auth: AuthCsrf, db: DbDep, work_id: int, body: ProgressIn) -> d
 
 _SILENCE_END = re.compile(r"silence_end: (-?\d+(?:\.\d+)?)")
 REWIND_WINDOW_S = 25.0
+# (track sha256, position to 0.1 s) -> rewind point; ffmpeg runs once per pair.
+_rewind_cache: OrderedDict[tuple[str, float], float | None] = OrderedDict()
+_rewind_lock = threading.Lock()
+REWIND_CACHE_SIZE = 512
+
+
+def _cached_silence_rewind(request: Request, user_id: int, settings, track, path, local_t: float):
+    """:func:`_silence_rewind` behind a per-track cache and a per-user rate limit (ffmpeg
+    decodes up to 25 s of audio). The route is a plain ``def``, so this runs in the threadpool."""
+    key = (track.sha256, round(local_t, 1))
+    with _rewind_lock:
+        if key in _rewind_cache:
+            _rewind_cache.move_to_end(key)
+            return _rewind_cache[key]
+    if not request.app.state.limiters["rewind"].allow(f"user:{user_id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
+    found = _silence_rewind(settings, path, key[1])
+    with _rewind_lock:
+        _rewind_cache[key] = found
+        while len(_rewind_cache) > REWIND_CACHE_SIZE:
+            _rewind_cache.popitem(last=False)
+    return found
 
 
 def _silence_rewind(settings, path, local_t: float) -> float | None:
@@ -278,7 +302,12 @@ def _silence_rewind(settings, path, local_t: float) -> float | None:
 
 @router.get("/works/{work_id}/rewind-point")
 def rewind_point(
-    auth: Auth, db: DbDep, settings: SettingsDep, work_id: int, t: Annotated[float, Query(ge=0)]
+    request: Request,
+    auth: Auth,
+    db: DbDep,
+    settings: SettingsDep,
+    work_id: int,
+    t: Annotated[float, Query(ge=0)],
 ) -> dict:
     """Where the sleep timer should leave the listener: the start of the sentence heard last.
 
@@ -302,8 +331,13 @@ def rewind_point(
     )
     if track is not None:
         local = t - track.offset_s
-        found = _silence_rewind(
-            settings, settings.library_dir / work.dir_path / track.rel_path, local
+        found = _cached_silence_rewind(
+            request,
+            auth.user.id,
+            settings,
+            track,
+            settings.library_dir / work.dir_path / track.rel_path,
+            local,
         )
         if found is not None:
             return {"t": round(track.offset_s + found, 3), "method": "silence"}

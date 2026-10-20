@@ -18,7 +18,8 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
-_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+# At most 19 digits (fits in 64 bits): longer numbers do not match and the header is ignored.
+_RANGE = re.compile(r"^bytes=(\d{0,19})-(\d{0,19})$")
 CHUNK = 64 * 1024
 
 

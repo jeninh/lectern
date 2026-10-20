@@ -214,3 +214,49 @@ def test_describe_user_agent():
         == "Edge on Windows"
     )
     assert describe_user_agent(None) == "Browser"
+
+
+def test_cap_check_and_insert_are_atomic_under_concurrency(client, owner, settings):
+    """Many threads racing for the last download slot: exactly the cap gets through."""
+    import threading
+
+    from fastapi import HTTPException
+
+    from lectern.db import session_factory
+    from lectern.models import DownloadEvent, User
+    from lectern.security import downloads
+
+    settings.download_cap_per_hour = 3
+    settings.download_burst_count = 0
+    results: list[int] = []
+    start = threading.Barrier(8)
+
+    def grab(i):
+        with session_factory()() as db:
+            user = db.query(User).filter_by(username="owner").one()
+            start.wait()
+            try:
+                downloads.admit(
+                    db, settings, user, downloads.Device(f"session:{i}", "t"), "x", None
+                )
+                results.append(200)
+            except HTTPException as exc:
+                results.append(exc.status_code)
+
+    threads = [threading.Thread(target=grab, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == [200] * 3 + [429] * 5
+    with session_factory()() as db:
+        assert db.query(DownloadEvent).filter_by(blocked=False).count() == 3
+
+
+def test_range_parser_rejects_absurd_numbers():
+    """Ranges are parsed for metered streams; a 30-digit number must not reach int()."""
+    from lectern.http_range import parse_range
+
+    assert parse_range("bytes=" + "9" * 30 + "-", 100) is None
+    assert parse_range("bytes=0-" + "1" * 20, 100) is None
+    assert parse_range("bytes=0-" + "9" * 19, 100) == (0, 99)

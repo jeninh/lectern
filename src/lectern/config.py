@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     # Alert the user and the owner when this many downloads happen within the window.
     download_burst_count: int = 20
     download_burst_window_seconds: int = 600
+    # A streamed track counts as one download per credential per hour once this many bytes
+    # were served in that hour (so seeking and short previews are free).
+    stream_meter_bytes: int = 8 * 1024 * 1024
 
     # Audio
     ffmpeg_path: str = "ffmpeg"

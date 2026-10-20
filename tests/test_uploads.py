@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 from datetime import timedelta
 
 import pytest
@@ -248,6 +250,11 @@ def test_sweeper_expires_cleans_orphans_and_forgets_old_rows(client, owner, sett
     old_done = create(client, csrf, b"c" * 10).json()["id"]
     orphan = part_path(settings, "no-such-session-xxxxxx")
     orphan.write_bytes(b"left behind")
+    young = part_path(settings, "being-created-right-now")  # row not visible yet: keep it
+    young.write_bytes(b"")
+    hour_ago = time.time() - 3600
+    for p in (orphan, part_path(settings, old_done)):
+        os.utime(p, (hour_ago, hour_ago))
     with session_factory()() as db:
         rows = {r.public_id: r for r in db.query(UploadSession)}
         rows[stale].expires_at = utcnow() - timedelta(minutes=1)
@@ -258,6 +265,7 @@ def test_sweeper_expires_cleans_orphans_and_forgets_old_rows(client, owner, sett
     assert counts == {"expired": 1, "orphans": 2, "forgotten": 1}  # old_done's part + orphan
     assert part_path(settings, live).exists()
     assert not part_path(settings, stale).exists() and not orphan.exists()
+    assert young.exists()
     assert client.get(f"/api/uploads/{stale}").json()["status"] == "expired"
     assert client.get(f"/api/uploads/{old_done}").status_code == 404
     r = chunk(client, csrf, stale, 0, b"b" * 10)
@@ -277,3 +285,67 @@ def test_direct_epub_upload_keeps_its_own_cap(client, owner, settings, tmp_path)
         },
     )
     assert r.status_code == 413
+
+
+def test_sweeper_runs_with_ingest_disabled(settings):
+    """The hourly upload sweep lives in the job runner, which must start even without ingest."""
+    from fastapi.testclient import TestClient
+
+    from lectern.main import create_app
+
+    settings.ingest_enabled = False
+    app = create_app(settings)
+    with TestClient(app):
+        assert app.state.watcher is None
+        assert app.state.jobs is not None and app.state.jobs._thread.is_alive()
+
+
+def test_session_row_is_committed_before_its_part_file(client, owner, settings, monkeypatch):
+    """A sweep in another thread never sees a fresh .part file without its session row."""
+    from pathlib import Path
+
+    seen = []
+    real_touch = Path.touch
+
+    def touch(self, *a, **kw):
+        if self.suffix == ".part":
+            with session_factory()() as db:
+                seen.append(db.query(UploadSession).filter_by(public_id=self.stem).count())
+        return real_touch(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "touch", touch)
+    assert create(client, owner["csrf"], b"x" * 10).status_code == 201
+    assert seen == [1]
+
+
+def test_chunk_storage_runs_off_the_event_loop(client, owner, monkeypatch):
+    """Database, hashing, and file work for a chunk happen in the threadpool."""
+    import asyncio
+
+    from lectern.routes.api import uploads as route
+
+    loops = []
+    real_open, real_store = route._open_session, route._store_chunk
+
+    def probe():
+        try:
+            asyncio.get_running_loop()
+            loops.append("event loop")
+        except RuntimeError:
+            loops.append("worker")
+
+    def open_session(*a):
+        probe()
+        return real_open(*a)
+
+    def store(*a):
+        probe()
+        return real_store(*a)
+
+    monkeypatch.setattr(route, "_open_session", open_session)
+    monkeypatch.setattr(route, "_store_chunk", store)
+    data = b"y" * 10
+    uid = create(client, owner["csrf"], data).json()["id"]
+    r = chunk(client, owner["csrf"], uid, 0, data)
+    assert r.status_code == 204 and r.headers["upload-offset"] == "10"
+    assert loops == ["worker", "worker"]

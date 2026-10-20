@@ -378,6 +378,7 @@ def activity(
         .join(BookFile, BookFile.partial_md5 == ReadingProgress.document)
         .join(Work, Work.id == BookFile.work_id)
         .outerjoin(SyncKey, SyncKey.id == ReadingProgress.sync_key_id)
+        .where(visible_works(auth.user))
     )
     if auth.user.role != Role.OWNER:
         sync_stmt = sync_stmt.where(ReadingProgress.user_id == auth.user.id)

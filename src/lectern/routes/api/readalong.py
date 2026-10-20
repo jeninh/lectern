@@ -26,7 +26,9 @@ from lectern.models import (
 )
 from lectern.readaloud.cache import ReadAloudBuilder, Unavailable, gather_inputs
 from lectern.readaloud.text import SpineText
+from lectern.security import downloads
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
+from lectern.security.sessions import client_ip
 
 router = APIRouter()
 
@@ -72,13 +74,21 @@ def _spine_blocks(path: str, sha256: str, spine_index: int) -> dict:
 
 @router.get("/works/{work_id}/text/{spine_index}")
 def spine_text(
-    auth: Auth, db: DbDep, settings: SettingsDep, work_id: int, spine_index: int
+    request: Request,
+    auth: Auth,
+    db: DbDep,
+    settings: SettingsDep,
+    work_id: int,
+    spine_index: int,
 ) -> dict:
     """The text the read-along view shows, in the same coordinates as sentence maps.
 
     Blocks carry ``start`` (offset of their first character in the spine item's normalised
     text) so a client can place sentences without re-implementing the normalisation. Markup
     never reaches the browser.
+
+    The whole book's text is one download per session and work per hour (caps, audit, burst
+    alerts), charged on the first chapter; later chapters in that hour are free.
     """
     work = visible_work(db, auth.user, work_id)
     alignment = current_alignment(db, work_id)
@@ -99,6 +109,15 @@ def spine_text(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such spine item") from exc
     except (EpubError, ValueError, KeyError) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unreadable spine item") from exc
+    downloads.admit_once(
+        db,
+        settings,
+        auth.user,
+        downloads.Device.session(auth.session.id),
+        f"text:{work_id}",
+        client_ip(request),
+        "read-along text",
+    )
     return {"work_id": work_id, "file_id": book.id, "spine_index": spine_index, **data}
 
 

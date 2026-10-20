@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from lxml import etree
 from sqlalchemy import select
-from tests.conftest import ORIGIN, api_post, login, make_user
+from tests.conftest import ORIGIN, OWNER_PASSWORD, api_post, login, make_user
 
 from lectern.db import session_factory
 from lectern.ingest.epub import read_epub_metadata
@@ -626,3 +626,33 @@ def test_read_aloud_download_follows_visibility_and_caps(client, owner, settings
     assert client.get(url).status_code == 200
     r = client.get(url)
     assert r.status_code == 429 and r.json()["detail"] == "download_cap"
+
+
+def test_spine_text_is_one_metered_download_per_session_and_work(client, owner, settings, tmp_path):
+    """Chapter text adds up to the whole book, so it counts like a download: once per session
+    and work per hour (page turns are free), against the caps, and audited."""
+    work_id = seed_magi(settings, tmp_path)
+    csrf = owner["csrf"]
+    rita = make_user(client, csrf, "rita", "reader")
+    mia = make_user(client, csrf, "mia", "member")
+    api_post(client, f"/api/admin/users/{mia['id']}/download-cap", csrf, {"cap": 1})
+
+    login(client, "rita", rita["password"])
+    assert client.get(f"/api/works/{work_id}/text/2").status_code == 404
+    assert client.get("/api/security").json()["downloads"]["used"] == 0
+
+    login(client, "mia", mia["password"])
+    for n in (2, 2, 0):
+        assert client.get(f"/api/works/{work_id}/text/{n}").status_code == 200
+    assert client.get("/api/security").json()["downloads"]["used"] == 1
+    login(client, "mia", mia["password"])  # a new session is a new credential; the cap is spent
+    r = client.get(f"/api/works/{work_id}/text/2")
+    assert r.status_code == 429 and r.json()["scope"] == "user"
+    client.cookies.clear()
+    assert client.get(f"/api/works/{work_id}/text/2").status_code == 401
+
+    login(client, "owner", OWNER_PASSWORD)
+    rows = client.get("/api/admin/audit").json()["rows"]
+    text_rows = [r for r in rows if r["target"] == f"text:{work_id}"]
+    assert [r["action"] for r in text_rows] == ["download.blocked", "download"]
+    assert text_rows[1]["detail"] == "read-along text"

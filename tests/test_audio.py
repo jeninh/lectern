@@ -11,10 +11,12 @@ from tests.conftest import (
     MAGI,
     api_post,
     drain_inbox,
+    login,
     make_app_password,
     make_epub,
     make_m4b,
     make_mp3,
+    make_user,
     needs_ffmpeg,
 )
 
@@ -192,7 +194,12 @@ def test_range_streaming_semantics(client, owner, magi_track):
     r = client.get(url, headers={"range": "bytes=0-9", "if-range": '"stale"'})
     assert r.status_code == 200 and len(r.content) == size
 
-    # Streaming is not a download: it is neither audited nor counted.
+    # Numbers too long for 64 bits are not a valid range: the header is ignored, never a 500.
+    for huge in ("bytes=" + "9" * 30 + "-", "bytes=0-" + "9" * 30, "bytes=-" + "9" * 30):
+        r = client.get(url, headers={"range": huge})
+        assert r.status_code == 200 and len(r.content) == size, huge
+
+    # The excerpt is far below the stream threshold, so playback alone is not a download.
     actions = [e["action"] for e in client.get("/api/activity").json()["events"]]
     assert "download" not in actions
     assert client.get("/library/tracks/999999/stream").status_code == 404
@@ -283,3 +290,77 @@ def test_track_rows_after_ingest_are_consistent(client, owner, settings, magi_tr
         (t,) = db.query(AudioTrack).all()
         assert t.rel_path.startswith("audio/D01-T000 ") and t.offset_s == 0.0
         assert (settings.library_dir / t.work.dir_path / t.rel_path).is_file()
+
+
+def _used(client):
+    return client.get("/api/security").json()["downloads"]["used"]
+
+
+def test_streams_are_metered_per_credential_and_track(client, owner, magi_track, settings):
+    _work_, track = magi_track
+    url, size = track["stream_url"], track["size"]
+    settings.stream_meter_bytes = 1000
+    settings.download_burst_count = 2
+    # Small range requests (player probing, seeking) are free below the threshold.
+    for start in (0, 300, 600):
+        assert client.get(url, headers={"range": f"bytes={start}-{start + 99}"}).status_code == 206
+    assert _used(client) == 0
+    # Crossing it charges the track once; later range requests in the hour are free.
+    assert client.get(url, headers={"range": "bytes=0-999"}).status_code == 206
+    assert _used(client) == 1
+    for _ in range(3):
+        assert client.get(url).status_code == 200
+    assert _used(client) == 1
+    rows = [e for e in client.get("/api/admin/audit").json()["rows"] if e["action"] == "download"]
+    assert [(r["target"], r["detail"]) for r in rows] == [(f"stream:{track['id']}", "stream")]
+
+    # An app password is another credential: it is charged separately, and caps apply.
+    def basic(secret):
+        return {"authorization": "Basic " + base64.b64encode(f"owner:{secret}".encode()).decode()}
+
+    phone = basic(make_app_password(client, owner["csrf"], "Phone"))
+    tablet = basic(make_app_password(client, owner["csrf"], "Tablet"))
+    cookies = dict(client.cookies)
+    client.cookies.clear()
+    assert client.get(url, headers=phone).status_code == 200  # whole file: over the threshold
+    settings.download_cap_per_hour = 2
+    assert client.get(url, headers={**phone, "range": "bytes=0-1"}).status_code == 206
+    assert client.get(url, headers={**tablet, "range": "bytes=0-99"}).status_code == 206
+    r = client.get(url, headers=tablet)
+    assert r.status_code == 429 and r.json()["detail"] == "download_cap"
+    assert r.json()["scope"] == "user" and "retry-after" in r.headers
+    client.cookies.update(cookies)
+    kinds = [i["kind"] for i in client.get("/api/notifications").json()["items"]]
+    assert "download.burst" in kinds and "download.cap" in kinds
+    audit = client.get("/api/admin/audit").json()["rows"]
+    assert any(a["action"] == "download.blocked" and "Tablet" in a["detail"] for a in audit)
+    assert size > 1000
+
+
+def test_rewind_point_is_cached_rate_limited_and_private(client, owner, magi_track, monkeypatch):
+    from lectern.routes.api import works
+    from lectern.security.ratelimit import SlidingWindowLimiter
+
+    work, _ = magi_track
+    url = f"/api/works/{work['id']}/rewind-point"
+    calls = []
+
+    def fake(_settings, _path, local_t):
+        calls.append(local_t)
+        return local_t - 2
+
+    monkeypatch.setattr(works, "_silence_rewind", fake)
+    client.app.state.limiters["rewind"] = SlidingWindowLimiter(limit=2, window_seconds=60)
+    assert client.get(url, params={"t": 40.0}).json() == {"t": 38.0, "method": "silence"}
+    assert client.get(url, params={"t": 40.04}).json()["t"] == 38.0  # same 0.1 s bucket
+    assert calls == [40.0]
+    assert client.get(url, params={"t": 41.0}).status_code == 200
+    assert client.get(url, params={"t": 42.0}).status_code == 429  # ffmpeg budget spent
+    assert client.get(url, params={"t": 40.0}).status_code == 200  # cache hits stay free
+    assert calls == [40.0, 41.0]
+
+    reader = make_user(client, owner["csrf"], "rex", "reader")
+    login(client, "rex", reader["password"])
+    assert client.get(url, params={"t": 40.0}).status_code == 404
+    client.cookies.clear()
+    assert client.get(url, params={"t": 40.0}).status_code == 401

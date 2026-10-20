@@ -169,9 +169,15 @@ players seek with `Range`.
   `416` with `Content-Range: bytes */size`.
 - `ETag: "<sha256>"`, `Last-Modified`, and `If-Range` are honoured; `If-None-Match` yields
   `304`. `Cache-Control: private, max-age=3600`. `Content-Type` is the track's `media_type`.
+- Byte positions longer than 19 digits are not a valid range: the header is ignored (`200`).
 - Visibility is checked through the track's work (`404` otherwise). Streaming is **not**
   written to the audit log per request (a player issues many); starting playback of a work is
   recorded once per session in milestone 2's player.
+- **Metering.** Bytes served are tallied per credential (session or app password) and track
+  for the hour. Once they reach `stream_meter_bytes` (default 8 MiB) the track counts as one
+  download for that credential for the hour: caps (`429 download_cap`), a `download` audit row
+  (`target stream:<track_id>`, `detail stream`), and burst alerts apply. Later range
+  requests in that hour are free, so seeking never multiplies the charge.
 
 #### Optional low-bitrate variant (implemented in milestone 2)
 
@@ -388,10 +394,10 @@ A role change takes effect on the next request.
 | `POST /api/shelves {name}` | owner, member | `201`; `409` on a duplicate name for that owner |
 | `PATCH /api/shelves/{id} {name}` / `DELETE` | shelf owner or the owner role | `DELETE` cascades items and grants, never works |
 | `GET /api/shelves/{id}` | anyone who can see it | shelf plus its works in `position` order (readers never see a shelf they are not granted) |
-| `PUT /api/shelves/{id}/items {work_ids: [...]}` | manager or `edit` grant | Replaces the whole ordered list; members may add any work, a reader with `edit` only works they can already see |
+| `PUT /api/shelves/{id}/items {work_ids: [...]}` | manager or `edit` grant | Replaces the whole ordered list; members may add any work, a reader with `edit` only works they can already see, and never to a shelf another reader is granted (`403 shelf_shared_with_readers`) |
 | `POST /api/shelves/{id}/items {work_id}` / `DELETE …/items/{work_id}` | manager or `edit` grant | Append / remove one |
 | `GET /api/shelves/{id}/grants` | manager | `[{user, permission, granted_by, created_at}]` |
-| `PUT /api/shelves/{id}/grants/{user_id} {permission}` / `DELETE` | manager | Upsert / revoke. Granting to an owner or member is allowed but has no effect on visibility (it still lists the shelf for them) |
+| `PUT /api/shelves/{id}/grants/{user_id} {permission}` / `DELETE` | manager | Upsert / revoke. Only the owner role may grant to a reader (`403 only_owner_grants_readers`). Granting to an owner or member is allowed but has no effect on visibility (it still lists the shelf for them) |
 
 Smart shelves: `rule` is reserved (JSON, `NULL` today). When implemented, a non-null rule is
 evaluated instead of `shelf_items`, and grants on a smart shelf expose whatever the rule
@@ -409,7 +415,10 @@ Owner-only management; the sign-up page is the only unauthenticated route added.
 - `GET /invite/{token}` renders the sign-up form; `POST /invite/{token} {username, password,
   password_confirm}` creates the user with the invite's role, marks the invite used, signs the
   user in, and redirects to `/app`. Used, expired, revoked, or unknown tokens all answer `404`
-  (not distinguished). The route shares the per-IP login rate limit. Passkeys/TOTP are set up
+  (not distinguished). The invite is claimed with one conditional `UPDATE` (unused, unrevoked,
+  unexpired) in the same transaction as the new account, so concurrent submissions create at
+  most one user; a username taken in the meantime is a `400` form error and leaves the link
+  usable. The route shares the per-IP login rate limit. Passkeys/TOTP are set up
   afterwards from the normal security settings.
 
 ### Resumable uploads — `/api/uploads`
@@ -445,7 +454,7 @@ gets `403`; a session that belongs to another user is `404`, so ids cannot be pr
 | Route | Behaviour |
 | --- | --- |
 | `POST /api/uploads` `{filename, size, media_type, sha256?}` | `201 {id, chunk_size, received_bytes: 0, expires_at}`. `size` ≤ `LECTERN_UPLOAD_MAX_BYTES` (`413` otherwise); `media_type` ∈ `application/epub+zip`, `audio/mpeg`, `audio/mp4`, `audio/ogg`, `audio/flac` (`415`). `chunk_size` is chosen by the server: `min(50 MiB, size)`. `sha256`, if given, is checked at finalize; if omitted it must be sent to finalize. `id` is `public_id`, 22 URL-safe chars. `expires_at = now + 24 h`, extended by each accepted chunk. |
-| `PUT /api/uploads/{id}/chunk` | Headers `Upload-Offset: <int>`, `X-Chunk-SHA256: <hex>`, raw body ≤ `chunk_size` bytes (a larger body is `413` before anything is written). Every chunk except the last must be exactly `chunk_size` long (`400 short_chunk`). `Upload-Offset` must equal `received_bytes` (`409 offset_mismatch` with the current `Upload-Offset` header; the client reads it and resumes). A replay with `Upload-Offset + len == received_bytes` and the same `X-Chunk-SHA256` as the recorded last chunk answers `204` without writing (idempotent retry after a lost response); any other overlap is `409`. The body is hashed while streaming to the `.part` file; a mismatch truncates the file back to the previous offset and answers `422 chunk_checksum`. Success: `204` with `Upload-Offset: <new received_bytes>`. |
+| `PUT /api/uploads/{id}/chunk` | Headers `Upload-Offset: <int>`, `X-Chunk-SHA256: <hex>`, raw body ≤ `chunk_size` bytes (a larger body is `413` before anything is written). Every chunk except the last must be exactly `chunk_size` long (`400 short_chunk`). `Upload-Offset` must equal `received_bytes` (`409 offset_mismatch` with the current `Upload-Offset` header; the client reads it and resumes). A replay with `Upload-Offset + len == received_bytes` and the same `X-Chunk-SHA256` as the recorded last chunk answers `204` without writing (idempotent retry after a lost response); any other overlap is `409`. The body is read (bounded by `chunk_size`), then hashed and written to the `.part` file in the threadpool, never on the event loop; a mismatch leaves the file at the previous offset and answers `422 chunk_checksum`. Success: `204` with `Upload-Offset: <new received_bytes>`. |
 | `GET /api/uploads/{id}` | `{id, filename, size, chunk_size, received_bytes, status, error, expires_at, inbox_name}`. The resume point is `received_bytes`. |
 | `GET /api/uploads` | The caller's sessions (owner: everyone's, with `user`), newest first, so the UI can offer to resume or discard. |
 | `POST /api/uploads/{id}/finalize` `{sha256?}` | Requires `received_bytes == size` (`409 incomplete` with `received_bytes`) and a declared or supplied `sha256` (`400 sha256_required`). The server hashes the whole `.part` and compares (`422 checksum_mismatch` → status `FAILED`, file deleted). For EPUBs the zip magic is checked as `/api/books/upload` does. Then the file is renamed into `<inbox>/<stem>-<hex>.<ext>` and the row becomes `COMPLETED` with `inbox_name`; the ordinary watcher ingests it. Response `200` with the status shape plus `queued` (the inbox name) and `title` when readable. Finalize is idempotent: on a `COMPLETED` session it returns the same `200`. |
@@ -459,9 +468,11 @@ Rules:
 - **Idempotency.** `POST /api/uploads` accepts an optional `Idempotency-Key` header
   (≤ 64 chars); a repeat with the same key and user within 24 h returns the existing session
   (`200`) instead of creating another. Chunk replay and finalize replay are defined above.
-- **Expiry and cleanup.** A sweeper (on startup and hourly) marks `ACTIVE` sessions past
-  `expires_at` as `EXPIRED` and deletes their `.part` files, deletes `.part` files with no
-  `ACTIVE` row, and deletes rows in a terminal state after 7 days. A chunk for an `EXPIRED`,
+- **Expiry and cleanup.** A sweeper (on startup and hourly, whether or not inbox ingest is
+  enabled) marks `ACTIVE` sessions past `expires_at` as `EXPIRED` and deletes their `.part`
+  files, deletes `.part` files with no `ACTIVE` row that are older than 10 minutes, and deletes
+  rows in a terminal state after 7 days. The session row is committed before its `.part` file
+  is created. A chunk for an `EXPIRED`,
   `CANCELLED`, `FAILED`, or `COMPLETED` session answers `410 gone`.
 - **Limits.** `size` and the running total are checked against `LECTERN_UPLOAD_MAX_BYTES`
   (which M2 raises to a value suitable for audiobooks, e.g. 4 GiB; the old 200 MiB default is
@@ -676,10 +687,14 @@ Tables `notifications`, `known_devices`, `download_events` and the cap columns
   `/library/works/{id}/read-aloud.epub`) are counted per user and, for OPDS app passwords,
   per device over a rolling hour. Over a cap: `429 {"detail": "download_cap", "message",
   "scope": "user"|"device", "limit", "retry_after"}` with `Retry-After`, an audit
-  `download.blocked`, and a `download.cap` notification. Streaming is not counted. Overrides:
-  `POST /api/admin/users/{id}/download-cap {cap}` (owner) and
+  `download.blocked`, and a `download.cap` notification. Streams count once per credential and
+  track per hour after `stream_meter_bytes` (see Streaming); read-along chapter text
+  (`GET /api/works/{id}/text/{n}`) counts once per session and work per hour on the first
+  chapter (`target text:<work_id>`). Counting and recording are atomic, so concurrent requests
+  cannot overshoot a cap. Overrides: `POST /api/admin/users/{id}/download-cap {cap}` (owner) and
   `POST /api/devices/app-passwords/{id}/download-cap {cap}` (that user); `null` means the
-  server default, `0` no cap. `GET /api/security` reports `downloads` usage and
+  server default, `0` no cap. Members and readers may only lower their own device's effective
+  cap (`403 only_owner_can_raise_cap` otherwise); the owner role may set any value. `GET /api/security` reports `downloads` usage and
   `known_devices`; `POST /api/security/known-devices/{id}/forget` forgets one.
 - **Reading them.** `GET /api/notifications?limit=` → `{items: [{id, kind, severity, title,
   body, data, created_at, read_at}], unread}`; `POST /api/notifications/read {ids?, all?}`.

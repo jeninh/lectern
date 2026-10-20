@@ -26,6 +26,9 @@ const MESSAGES: Record<string, string> = {
   ffmpeg_unavailable: "ffmpeg is not installed on the server.",
   no_sentences: "This book has no text to place a position in.",
   duplicate_name: "You already have a shelf with that name.",
+  only_owner_can_raise_cap: "You can only lower this device's limit. Ask the owner to raise it.",
+  only_owner_grants_readers: "Only the owner can share shelves with readers.",
+  shelf_shared_with_readers: "Other readers can see this shelf, so only the owner can add books to it.",
 };
 
 export class ApiError extends Error {

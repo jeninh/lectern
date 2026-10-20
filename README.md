@@ -91,7 +91,9 @@ are downloaded in a short time. Whole-file downloads (EPUBs, original audio, the
 narrated EPUBs) count against an hourly cap per account and per OPDS device; over the cap the
 download is refused with a clear message and a `download.blocked` audit event. The owner sets
 per-user caps under **Admin**, and each person sets per-device caps under **Devices**.
-Streaming audio for playback is not counted. Notifications are in-app only; email and webhook
+Streaming counts once per device and track per hour after 8 MiB have played (seeking is
+free), and read-along text once per book per hour. Members and readers can lower their own
+device caps; only the owner can raise them. Notifications are in-app only; email and webhook
 delivery can be added as a `lectern.notify` sink (see `docs/contracts.md`) without changing
 the callers.
 
@@ -146,6 +148,7 @@ validation with epubcheck are in [`docs/read-aloud.md`](docs/read-aloud.md).
 | `LECTERN_DOWNLOAD_CAP_PER_HOUR` | 120 | Whole-file downloads per account per hour (0 = no cap); per-user override in Admin |
 | `LECTERN_DOWNLOAD_DEVICE_CAP_PER_HOUR` | 60 | Downloads per OPDS device per hour (0 = no cap); per-device override in Devices |
 | `LECTERN_DOWNLOAD_BURST_COUNT` / `_WINDOW_SECONDS` | 20 / 600 | This many downloads within the window alerts the user and the owner |
+| `LECTERN_STREAM_METER_BYTES` | 8388608 | Bytes of one track streamed in an hour before it counts as a download |
 | `LECTERN_FFMPEG_PATH` / `LECTERN_FFPROBE_PATH` | `ffmpeg` / `ffprobe` | Audio metadata, data-saver copies, sleep-timer rewind (installed in the Docker image) |
 | `LECTERN_AUDIO_LOW_CODEC` | `aac` | Data-saver codec: `aac` (plays everywhere, iOS included) or `opus` |
 | `LECTERN_AUDIO_LOW_BITRATE_KBPS` | 64 | Data-saver bitrate |

@@ -15,7 +15,8 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from lectern import notify
 from lectern.models import Invite, Role, User, utcnow
@@ -193,16 +194,50 @@ def invite_accept(
             request, db, inv, token, 400, error=error, username=username, display_name=display_name
         )
 
+    pw_hash = hash_password(password)  # slow: before taking the write lock below
     user = User(
         username=username,
         display_name=display_name.strip() or username,
         role=inv.role,
-        password_hash=hash_password(password),
+        password_hash=pw_hash,
         webauthn_user_handle=secrets.token_bytes(32),
     )
     db.add(user)
-    db.flush()
-    inv.used_at, inv.used_by = utcnow(), user.id
+    try:
+        db.flush()
+    except IntegrityError:  # the username was taken since the check above
+        db.rollback()
+        inv = _usable(db, token)
+        if inv is None:
+            return _invalid(request)
+        return _form(
+            request,
+            db,
+            inv,
+            token,
+            400,
+            error="That username is taken.",
+            username=username,
+            display_name=display_name,
+        )
+    # Claim the invite atomically in the same transaction: of two concurrent accepts, only one
+    # updates the row; the other rolls back its new account and sees an invalid link.
+    now = utcnow()
+    claimed = db.execute(
+        update(Invite)
+        .where(
+            Invite.id == inv.id,
+            Invite.used_at.is_(None),
+            Invite.revoked_at.is_(None),
+            Invite.expires_at > now,
+        )
+        .values(used_at=now, used_by=user.id)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if claimed != 1:
+        db.rollback()
+        return _invalid(request)
+    db.refresh(inv)
     ip = client_ip(request)
     audit.record(
         db, "invite.accept", actor_user_id=user.id, target=username, ip=ip, detail=inv.role.value

@@ -102,6 +102,9 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
             )
             watcher.start()
             log.info("watching inbox %s", settings.inbox_path)
+        # Transcodes and the hourly upload sweep run even with ingest off. Tests that pass
+        # start_watcher=False opt out of every background thread.
+        if run_watcher or start_watcher is None:
             runner = JobRunner(session_factory(), settings)
             runner.start()
         app.state.watcher = watcher
@@ -136,6 +139,8 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
         "uploads": SlidingWindowLimiter(
             limit=settings.rate_limit_per_minute * 4, window_seconds=60
         ),
+        # Sleep-timer rewind points that need ffmpeg (cache misses), per user.
+        "rewind": SlidingWindowLimiter(limit=20, window_seconds=60),
     }
     app.state.challenges = ChallengeStore()
     app.state.readaloud = ReadAloudBuilder()

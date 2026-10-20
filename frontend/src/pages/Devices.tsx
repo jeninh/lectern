@@ -22,7 +22,7 @@ export function deviceStatus(d: Device, now = Date.now()): { tone: "live" | "ok"
 }
 
 export function DevicesPage() {
-  const { toast, now } = useStore();
+  const { me, toast, now } = useStore();
   const nav = useNavigate();
   const loc = useLocation();
   const adding = loc.pathname.endsWith("/new");
@@ -127,6 +127,7 @@ export function DevicesPage() {
           <CapForm
             initial={capFor.app_password.download_cap_per_hour ?? null}
             what="this device"
+            lowerOnly={me?.user.role !== "owner"}
             onSave={async (cap) => {
               await post(`/api/devices/app-passwords/${capFor.app_password!.id}/download-cap`, { cap });
               toast(`Limit for ${capFor.label} saved`);
@@ -141,7 +142,7 @@ export function DevicesPage() {
 }
 
 /** Hourly download cap: server default, a number, or no limit. Shared with Admin. */
-export function CapForm({ initial, what, onSave }: { initial: number | null; what: string; onSave: (cap: number | null) => Promise<void> }) {
+export function CapForm({ initial, what, onSave, lowerOnly = false }: { initial: number | null; what: string; onSave: (cap: number | null) => Promise<void>; lowerOnly?: boolean }) {
   const [mode, setMode] = useState<"default" | "custom" | "none">(initial === null ? "default" : initial === 0 ? "none" : "custom");
   const [n, setN] = useState(initial && initial > 0 ? initial : 30);
   const [err, setErr] = useState<string | null>(null);
@@ -165,9 +166,9 @@ export function CapForm({ initial, what, onSave }: { initial: number | null; wha
           <input className="input sm" type="number" min={1} max={100000} value={n} onChange={(e) => { setN(Number(e.target.value)); setMode("custom"); }} aria-label="Downloads per hour" style={{ width: 90 }} />
           per hour
         </label>
-        <label><input type="radio" name="cap" checked={mode === "none"} onChange={() => setMode("none")} /> No limit</label>
+        {!lowerOnly && <label><input type="radio" name="cap" checked={mode === "none"} onChange={() => setMode("none")} /> No limit</label>}
       </fieldset>
-      <p className="hint">Downloads over the limit are refused with a clear message and recorded in Activity.</p>
+      <p className="hint">Downloads over the limit are refused with a clear message and recorded in Activity.{lowerOnly && " You can lower this device's limit; only the owner can raise it."}</p>
       <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn primary">Save</button></div>
     </form>
   );

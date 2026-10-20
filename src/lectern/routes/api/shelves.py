@@ -179,6 +179,21 @@ def _check_work(db, user: User, work_id: int) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Work not found")
 
 
+def _check_reader_adding(db, user: User, shelf: Shelf) -> None:
+    """A reader with an edit grant may not add works to a shelf another reader can see: that
+    would widen the other reader's library with books only the owner should grant."""
+    if user.role != Role.READER:
+        return
+    shared = db.scalar(
+        select(func.count())
+        .select_from(ShelfGrant)
+        .join(User, User.id == ShelfGrant.user_id)
+        .where(ShelfGrant.shelf_id == shelf.id, User.id != user.id, User.role == Role.READER)
+    )
+    if shared:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "shelf_shared_with_readers")
+
+
 class ItemsIn(BaseModel):
     work_ids: list[int] = Field(max_length=5000)
 
@@ -189,6 +204,8 @@ def replace_items(
 ) -> dict:
     shelf = _editable(db, auth, shelf_id)
     ids = list(dict.fromkeys(body.work_ids))
+    if set(ids) - {i.work_id for i in shelf.items}:
+        _check_reader_adding(db, auth.user, shelf)
     for wid in ids:
         _check_work(db, auth.user, wid)
     shelf.items.clear()
@@ -209,6 +226,7 @@ def add_item(request: Request, auth: AuthCsrf, db: DbDep, shelf_id: int, body: I
     shelf = _editable(db, auth, shelf_id)
     _check_work(db, auth.user, body.work_id)
     if db.get(ShelfItem, (shelf.id, body.work_id)) is None:
+        _check_reader_adding(db, auth.user, shelf)
         last = db.scalar(select(func.max(ShelfItem.position)).where(ShelfItem.shelf_id == shelf.id))
         db.add(ShelfItem(shelf_id=shelf.id, work_id=body.work_id, position=(last or 0) + 1))
         _audit(db, request, auth, "shelf.add", shelf.name, f"work:{body.work_id}")
@@ -271,6 +289,9 @@ def put_grant(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if user.role == Role.READER and auth.user.role != Role.OWNER:
+        # What a reader may see is the owner's decision alone.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only_owner_grants_readers")
     grant = db.get(ShelfGrant, (shelf.id, user_id))
     if grant is None:
         grant = ShelfGrant(shelf_id=shelf.id, user_id=user_id, granted_by=auth.user.id,

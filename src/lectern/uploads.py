@@ -11,6 +11,7 @@ import logging
 import os
 import secrets
 import shutil
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from lectern.models import UploadSession, UploadStatus, utcnow
 log = logging.getLogger("lectern.uploads")
 
 TERMINAL_RETENTION = timedelta(days=7)
+ORPHAN_GRACE_S = 600  # .part files younger than this are never treated as orphans
 # media type -> (allowed extensions, default extension)
 MEDIA_TYPES: dict[str, tuple[tuple[str, ...], str]] = {
     "application/epub+zip": ((".epub",), ".epub"),
@@ -91,10 +93,17 @@ def sweep(db: Session, settings: Settings) -> dict[str, int]:
         )
     )
     orphans = 0
+    young = time.time() - ORPHAN_GRACE_S
     for f in uploads_dir(settings).glob("*.part"):
-        if f.stem not in active:
-            f.unlink(missing_ok=True)
-            orphans += 1
+        if f.stem in active:
+            continue
+        try:
+            if f.stat().st_mtime > young:
+                continue  # may belong to a session being created right now
+        except FileNotFoundError:
+            continue
+        f.unlink(missing_ok=True)
+        orphans += 1
     res = db.execute(
         delete(UploadSession).where(
             UploadSession.status != UploadStatus.ACTIVE,

@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import re
 import shutil
+import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -32,7 +33,8 @@ Uploader = Annotated[AuthContext, Depends(require_role(Role.OWNER, Role.MEMBER))
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _ZIP_MAGIC = b"PK\x03\x04"
-_locks: dict[str, asyncio.Lock] = {}
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
 
 
 def _err(code: int, detail: str, **extra) -> HTTPException:
@@ -127,6 +129,7 @@ def create(
         idempotency_key=idempotency_key,
     )
     db.add(row)
+    db.commit()  # the row exists before the file, so a concurrent sweep never sees an orphan
     part.touch()
     audit.record(
         db,
@@ -168,6 +171,65 @@ def _truncate(path: Path, size: int) -> None:
         fh.truncate(size)
 
 
+def _open_session(db, auth, settings, public_id: str) -> int:
+    """The session's chunk size, or 404/410. Runs in the threadpool (database work)."""
+    row = _own(db, auth, public_id)
+    _expire_if_due(db, settings, row)
+    if row.status != UploadStatus.ACTIVE:
+        raise _err(status.HTTP_410_GONE, "gone", status=row.status.value)
+    return row.chunk_size
+
+
+def _store_chunk(db, auth, settings, public_id: str, offset: int, digest: str, data: bytes):
+    """Check the offset and checksum and append ``data``. Runs in the threadpool: database,
+    hashing, and file work never block the event loop. One chunk at a time per session."""
+    with _locks_guard:
+        lock = _locks.setdefault(public_id, threading.Lock())
+    with lock:
+        row = _own(db, auth, public_id)
+        db.refresh(row)
+        if row.status != UploadStatus.ACTIVE:
+            raise _err(status.HTTP_410_GONE, "gone", status=row.status.value)
+        received = row.received_bytes
+        if offset != received:
+            if offset + len(data) == received and row.last_chunk_sha256 == digest:
+                return received  # a retry of the chunk we already have
+            raise _err(
+                status.HTTP_409_CONFLICT,
+                "offset_mismatch",
+                received_bytes=received,
+                headers={"Upload-Offset": str(received)},
+            )
+        if len(data) > min(row.chunk_size, row.size - received):
+            raise _err(
+                status.HTTP_413_CONTENT_TOO_LARGE, "chunk_too_large", chunk_size=row.chunk_size
+            )
+        if not data:
+            raise _err(status.HTTP_400_BAD_REQUEST, "empty_chunk")
+        if received + len(data) < row.size and len(data) != row.chunk_size:
+            raise _err(status.HTTP_400_BAD_REQUEST, "short_chunk", chunk_size=row.chunk_size)
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise _err(status.HTTP_422_UNPROCESSABLE_CONTENT, "chunk_checksum")
+        part = part_path(settings, public_id)
+        if not part.exists():
+            row.status, row.error = UploadStatus.FAILED, "partial file missing"
+            db.commit()
+            raise _err(status.HTTP_410_GONE, "gone", status=row.status.value)
+        try:
+            with part.open("r+b") as fh:
+                fh.seek(received)
+                fh.truncate()
+                fh.write(data)
+        except BaseException:
+            _truncate(part, received)
+            raise
+        row.received_bytes = received + len(data)
+        row.last_chunk_sha256 = digest
+        row.expires_at = utcnow() + timedelta(seconds=settings.upload_session_ttl_seconds)
+        db.commit()
+        return row.received_bytes
+
+
 @router.put("/{public_id}/chunk", status_code=status.HTTP_204_NO_CONTENT)
 async def put_chunk(
     public_id: str,
@@ -178,84 +240,30 @@ async def put_chunk(
     upload_offset: Annotated[str | None, Header()] = None,
     x_chunk_sha256: Annotated[str | None, Header()] = None,
 ):
+    """Only reading the body happens on the event loop (bounded by the chunk size, so at most
+    50 MiB is buffered per request); everything else runs in the threadpool."""
     ip = client_ip(request) or "?"
     if not request.app.state.limiters["uploads"].allow(ip):
         raise _err(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
-    row = _own(db, auth, public_id)
-    _expire_if_due(db, settings, row)
-    if row.status != UploadStatus.ACTIVE:
-        raise _err(status.HTTP_410_GONE, "gone", status=row.status.value)
-    if upload_offset is None or not upload_offset.isdigit():
+    chunk_size = await run_in_threadpool(_open_session, db, auth, settings, public_id)
+    if upload_offset is None or not upload_offset.isdigit() or len(upload_offset) > 19:
         raise _err(status.HTTP_400_BAD_REQUEST, "upload_offset_required")
     digest = (x_chunk_sha256 or "").lower()
     if not _HEX64.match(digest):
         raise _err(status.HTTP_400_BAD_REQUEST, "chunk_sha256_required")
     declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > row.chunk_size:
-        raise _err(status.HTTP_413_CONTENT_TOO_LARGE, "chunk_too_large", chunk_size=row.chunk_size)
-    offset = int(upload_offset)
-
-    lock = _locks.setdefault(public_id, asyncio.Lock())
-    async with lock:
-        db.refresh(row)
-        received = row.received_bytes
-        if offset != received:
-            length = int(declared) if declared and declared.isdigit() else None
-            if (
-                length is not None
-                and offset + length == received
-                and row.last_chunk_sha256 == digest
-            ):
-                return Response(
-                    status_code=status.HTTP_204_NO_CONTENT,
-                    headers={"Upload-Offset": str(received)},
-                )
-            raise _err(
-                status.HTTP_409_CONFLICT,
-                "offset_mismatch",
-                received_bytes=received,
-                headers={"Upload-Offset": str(received)},
-            )
-        limit = min(row.chunk_size, row.size - received)
-        part = part_path(settings, public_id)
-        if not part.exists():
-            row.status, row.error = UploadStatus.FAILED, "partial file missing"
-            db.commit()
-            raise _err(status.HTTP_410_GONE, "gone", status=row.status.value)
-        hasher = hashlib.sha256()
-        written = 0
-        try:
-            with part.open("r+b") as fh:
-                fh.seek(received)
-                fh.truncate()
-                async for block in request.stream():
-                    written += len(block)
-                    if written > limit:
-                        raise _err(
-                            status.HTTP_413_CONTENT_TOO_LARGE,
-                            "chunk_too_large",
-                            chunk_size=row.chunk_size,
-                        )
-                    hasher.update(block)
-                    fh.write(block)
-        except BaseException:
-            _truncate(part, received)
-            raise
-        if written == 0:
-            _truncate(part, received)
-            raise _err(status.HTTP_400_BAD_REQUEST, "empty_chunk")
-        if received + written < row.size and written != row.chunk_size:
-            _truncate(part, received)
-            raise _err(status.HTTP_400_BAD_REQUEST, "short_chunk", chunk_size=row.chunk_size)
-        if hasher.hexdigest() != digest:
-            _truncate(part, received)
-            raise _err(status.HTTP_422_UNPROCESSABLE_CONTENT, "chunk_checksum")
-        row.received_bytes = received + written
-        row.last_chunk_sha256 = digest
-        row.expires_at = utcnow() + timedelta(seconds=settings.upload_session_ttl_seconds)
-        db.commit()
+    if declared is not None and declared.isdigit() and int(declared) > chunk_size:
+        raise _err(status.HTTP_413_CONTENT_TOO_LARGE, "chunk_too_large", chunk_size=chunk_size)
+    body = bytearray()
+    async for block in request.stream():
+        body += block
+        if len(body) > chunk_size:
+            raise _err(status.HTTP_413_CONTENT_TOO_LARGE, "chunk_too_large", chunk_size=chunk_size)
+    received = await run_in_threadpool(
+        _store_chunk, db, auth, settings, public_id, int(upload_offset), digest, bytes(body)
+    )
     return Response(
-        status_code=status.HTTP_204_NO_CONTENT, headers={"Upload-Offset": str(row.received_bytes)}
+        status_code=status.HTTP_204_NO_CONTENT, headers={"Upload-Offset": str(received)}
     )
 
 

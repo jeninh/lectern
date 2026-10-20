@@ -310,3 +310,14 @@ def make_user(client: TestClient, owner_csrf: str, username: str, role: str) -> 
     )
     assert r.status_code == 201, r.text
     return {**r.json()["user"], "password": password}
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_caches():
+    """Per-process tallies keyed by ids that repeat across test databases."""
+    from lectern.routes.api import works
+    from lectern.security import downloads
+
+    downloads._streamed.clear()
+    works._rewind_cache.clear()
+    yield
