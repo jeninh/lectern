@@ -22,6 +22,7 @@ from lectern.routes import api, auth, health, invites, kosync, library, opds, se
 from lectern.security.deps import LoginRequired
 from lectern.security.ratelimit import SlidingWindowLimiter
 from lectern.security.webauthn import ChallengeStore
+from lectern.services import start_services
 from lectern.setup_state import ensure_setup_token, print_setup_banner
 from lectern.templating import TEMPLATES_DIR
 from lectern.uploads import sweep as upload_sweep
@@ -69,7 +70,14 @@ def _configure_logging(settings: Settings) -> None:
     )
 
 
-def create_app(settings: Settings | None = None, *, start_watcher: bool | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    start_watcher: bool | None = None,
+    start_background: bool | None = None,
+) -> FastAPI:
+    """``start_watcher`` / ``start_background`` override ``LECTERN_INGEST_ENABLED`` /
+    ``LECTERN_BACKGROUND_JOBS`` (tests run without threads and drive them by hand)."""
     settings = settings or get_settings()
     _configure_logging(settings)
 
@@ -109,10 +117,21 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
             runner.start()
         app.state.watcher = watcher
         app.state.jobs = runner
+        services: list = []
+        run_background = settings.background_jobs if start_background is None else start_background
+        if run_background:
+            services = start_services(session_factory(), settings)
+        app.state.services = services
         log.info("Lectern %s ready on %s", __version__, settings.base_url)
         try:
             yield
         finally:
+            # Workers first: a running alignment hands its job back before the engine goes.
+            for service in reversed(services):
+                try:
+                    service.stop()
+                except Exception:  # noqa: BLE001 - shutdown must reach engine.dispose()
+                    log.exception("stopping %s failed", type(service).__name__)
             if watcher:
                 watcher.stop()
             if runner:
@@ -141,6 +160,13 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
         ),
         # Sleep-timer rewind points that need ffmpeg (cache misses), per user.
         "rewind": SlidingWindowLimiter(limit=20, window_seconds=60),
+        # failed worker-credential checks per address, and requests per valid worker key
+        "worker_fail": SlidingWindowLimiter(
+            limit=settings.rate_limit_per_minute, window_seconds=60
+        ),
+        "worker": SlidingWindowLimiter(
+            limit=settings.worker_requests_per_minute, window_seconds=60
+        ),
     }
     app.state.challenges = ChallengeStore()
     app.state.readaloud = ReadAloudBuilder()

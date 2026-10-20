@@ -6,17 +6,21 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM python:3.12-slim-bookworm AS build
+# LECTERN_EXTRAS=align adds faster-whisper (~0.6 GB more image) so the server aligns itself;
+# the default image stays small and leaves alignment to `lectern worker` on another machine.
+ARG LECTERN_EXTRAS=""
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project ${LECTERN_EXTRAS:+--extra $LECTERN_EXTRAS}
 COPY src ./src
 COPY --from=ui /src/lectern/static/app ./src/lectern/static/app
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev ${LECTERN_EXTRAS:+--extra $LECTERN_EXTRAS}
 
 FROM python:3.12-slim-bookworm
 # ffmpeg/ffprobe: audiobook metadata and chapters, data-saver renditions, sleep-timer rewind.
+# (faster-whisper in the align image decodes through PyAV's own bundled FFmpeg.)
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 1000 lectern && useradd -u 1000 -g lectern -m -s /usr/sbin/nologin lectern \
@@ -27,7 +31,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     LECTERN_DATA_DIR=/data \
     LECTERN_LIBRARY_DIR=/library \
-    LECTERN_PORT=8080
+    LECTERN_PORT=8080 \
+    HF_HOME=/data/huggingface
 USER lectern
 VOLUME ["/data", "/library"]
 EXPOSE 8080

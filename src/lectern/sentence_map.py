@@ -45,7 +45,7 @@ def map_path(data_dir: Path, work_id: int) -> Path:
 
 
 class TrackRef(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     position: int = Field(ge=0)
     sha256: str = Field(pattern=_HEX64.pattern)
@@ -54,7 +54,7 @@ class TrackRef(BaseModel):
 
 
 class SentenceEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     n: int = Field(ge=0)
     spine_index: int = Field(ge=0)
@@ -82,7 +82,7 @@ class SentenceEntry(BaseModel):
 
 
 class SentenceMap(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     version: Literal[1]
     work_id: int = Field(ge=1)

@@ -560,13 +560,22 @@ def test_sentence_index_with_unmatched_sentences():
         SentenceIndex([rows[1]])
 
 
-def test_xpointer_stubs():
+def test_xpointer_conversions():
     assert xpointer_spine_index("/body/DocFragment[3]/body/p[2]/text().7") == 2
     assert xpointer_spine_index("/body/p[1]") is None
-    with pytest.raises(NotImplementedError):
-        xpointer_to_text("/body/DocFragment[3]/body/p[1]/text().0", b"<html/>")
-    with pytest.raises(NotImplementedError):
-        text_to_xpointer(TextPos(2, 0), b"<html/>")
+    xhtml = b"<html><body><h1>Title</h1>\n<p>One <i>two</i> three.</p>\n<p>Four.</p></body></html>"
+    # "Title One two three. Four."
+    assert xpointer_to_text("/body/DocFragment[3]/body/p[1]/text().0", xhtml) == TextPos(2, 6)
+    assert xpointer_to_text("/body/DocFragment[3]/body/p[1]/i/text().1", xhtml) == TextPos(2, 11)
+    assert xpointer_to_text("/body/DocFragment[3]/body/p[2]/text().2", xhtml) == TextPos(2, 23)
+    assert text_to_xpointer(TextPos(2, 0), xhtml) == "/body/DocFragment[3]/body/h1/text().0"
+    assert text_to_xpointer(TextPos(2, 11), xhtml) == "/body/DocFragment[3]/body/p[1]/i/text().1"
+    assert text_to_xpointer(TextPos(2, 23), xhtml) == "/body/DocFragment[3]/body/p[2]/text().2"
+    # tolerant: unknown paths clamp instead of failing; non-EPUB pointers are rejected
+    assert xpointer_to_text("/body/DocFragment[3]/body/div[9]/text().4", xhtml) == TextPos(2, 0)
+    assert xpointer_to_text("/body/DocFragment[3]/body/p[2]/text().99", xhtml) == TextPos(2, 26)
+    with pytest.raises(ValueError):
+        xpointer_to_text("/body/p[1]/text().0", xhtml)
 
 
 # --- access ------------------------------------------------------------------------------

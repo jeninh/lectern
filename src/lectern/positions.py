@@ -4,9 +4,9 @@ Everything positional in Lectern passes through sentence coordinates (``sentence
 character offset into that sentence), which is what ``work_progress`` stores. This module is
 the single place that knows how to get into and out of those coordinates.
 
-Status (Step 0): the coordinate types, the text normalisation that defines char offsets, and
-the in-memory sentence index are implemented and tested. The xpointer conversions, which need
-the EPUB's DOM, are declared here and implemented in milestone 4.
+The coordinate types, the text normalisation that defines char offsets, the in-memory
+sentence index, and the KOReader xpointer conversions (backed by :mod:`lectern.textmap`) are
+implemented and tested here.
 """
 
 from __future__ import annotations
@@ -59,9 +59,13 @@ def normalize_spine_text(xhtml: bytes) -> str:
     - leading and trailing whitespace is removed
     - no entity, case, or Unicode normalisation beyond what the XML parser does
     Offsets are Python ``str`` indices, i.e. code points.
+    - an item the parser cannot read at all (empty, binary, not XML) contributes no text
     """
     parser = etree.XMLParser(recover=True, resolve_entities=False, no_network=True, huge_tree=False)
-    root = etree.fromstring(xhtml, parser)
+    try:
+        root = etree.fromstring(xhtml, parser)
+    except (etree.LxmlError, ValueError):
+        return ""
     if root is None:
         return ""
     body = root.find(f".//{{{_XHTML_NS}}}body")
@@ -181,12 +185,23 @@ def xpointer_spine_index(xpointer: str) -> int | None:
 def xpointer_to_text(xpointer: str, spine_item_xhtml: bytes) -> TextPos:
     """Resolve a KOReader xpointer against the spine item it names.
 
-    Implemented in milestone 4: walks the DOM path, then maps the node's text offset onto the
-    normalised-text offset defined by :func:`normalize_spine_text`.
+    Walks the DOM path with :class:`lectern.textmap.SpineText`, then maps the node's text
+    offset onto the normalised-text offset defined by :func:`normalize_spine_text`. The
+    pointer must carry a ``DocFragment`` step (``ValueError`` otherwise); an unresolvable
+    path inside the item clamps to the nearest position that does resolve.
     """
-    raise NotImplementedError("xpointer_to_text lands in milestone 4")
+    from lectern.textmap import SpineText
+
+    spine_index = xpointer_spine_index(xpointer)
+    if spine_index is None:
+        raise ValueError(f"not a KOReader EPUB xpointer: {xpointer!r}")
+    tail = _XPOINTER_FRAGMENT.sub("", xpointer, count=1)
+    return TextPos(spine_index, SpineText(spine_item_xhtml).char_at(tail))
 
 
 def text_to_xpointer(pos: TextPos, spine_item_xhtml: bytes) -> str:
-    """Inverse of :func:`xpointer_to_text`. Implemented in milestone 4."""
-    raise NotImplementedError("text_to_xpointer lands in milestone 4")
+    """Inverse of :func:`xpointer_to_text`: ``/body/DocFragment[k]/body/.../text().offset``."""
+    from lectern.textmap import SpineText
+
+    tail = SpineText(spine_item_xhtml).xpointer_tail(pos.char)
+    return f"/body/DocFragment[{pos.spine_index + 1}]{tail}"

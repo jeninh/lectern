@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from lectern.routes.api import (
     admin,
+    align,
     books,
     core,
     devices,
@@ -14,6 +15,7 @@ from lectern.routes.api import (
     security,
     shelves,
     uploads,
+    worker,
     works,
 )
 
@@ -28,3 +30,5 @@ router.include_router(shelves.router)
 router.include_router(works.router)
 router.include_router(notifications.router)
 router.include_router(readalong.router)
+router.include_router(align.router)
+router.include_router(worker.router)
