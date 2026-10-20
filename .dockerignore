@@ -4,6 +4,10 @@
 .ruff_cache
 data
 library
+backups
+deploy
+.env
+.env.*
 tests
 .amp
 *.md

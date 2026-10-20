@@ -21,10 +21,22 @@ Put a TLS-terminating reverse proxy in front of port 8080. Passkeys require HTTP
 stable hostname; until then, password + TOTP sign-in works. For local plain-http testing
 set `LECTERN_INSECURE_HTTP=1` and `LECTERN_BASE_URL=http://localhost:8080`.
 
-Running at home without opening a port? See [`docs/deploy-tailscale.md`](docs/deploy-tailscale.md)
-for Lectern + Tailscale in one Compose file: `tailscale serve` gives you a trusted HTTPS
-address on your private tailnet (so passkeys work), nothing is published on the LAN or the
-Internet, and the guide covers Kindle/Kobo with KOReader. When a proxy sits in front, set
+Running at home without opening a port, for example on a Raspberry Pi? The repository ships
+a ready-to-use Lectern + Tailscale setup in [`deploy/tailscale/`](deploy/tailscale/compose.yaml);
+you only fill in `.env` and never edit tracked files, so `git pull` stays conflict-free:
+
+```sh
+mkdir -p library/_inbox data/lectern data/tailscale
+cp .env.example .env && chmod 600 .env   # set LECTERN_BASE_URL and TS_AUTHKEY
+docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build
+docker compose --env-file .env -f deploy/tailscale/compose.yaml logs lectern | grep -A3 "FIRST-RUN SETUP"
+```
+
+[`docs/deploy-tailscale.md`](docs/deploy-tailscale.md) walks through it: `tailscale serve`
+gives you a trusted HTTPS address on your private tailnet (so passkeys work), nothing is
+published on the LAN or the Internet, and it covers Raspberry Pi 4 specifics, cloning a
+private repository with a read-only deploy key, upgrades, backups, and Kindle/Kobo with
+KOReader. With any other reverse proxy in front, set
 `LECTERN_TRUSTED_PROXIES` to its address so rate limits and the audit log see your readers'
 IPs instead of the proxy's. Lectern's own sign-in is always required, private network or not.
 

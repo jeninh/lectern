@@ -40,6 +40,8 @@ jobs:
       - run: uv run pytest
         env:
           EPUBCHECK_REQUIRED: "1"
+          # tests/test_deploy_tailscale.py runs `docker compose config`; never skip it here.
+          COMPOSE_REQUIRED: "1"
   docker:
     runs-on: ubuntu-latest
     strategy:
@@ -52,3 +54,63 @@ jobs:
         run: |
           docker run --rm lectern:ci lectern worker --help
           docker run --rm lectern:ci python -c "from lectern.align.transcribe import transcription_available as t; print('faster-whisper:', t()); assert t() == ('${{ matrix.extras }}' == 'align')"
+  # The image a Raspberry Pi builds from deploy/tailscale/compose.yaml: default extras,
+  # linux/arm64 under QEMU. Blocking like every other job; nothing is pushed.
+  arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate deploy/tailscale (compose and serve.json)
+        run: |
+          docker compose version
+          for env in tests/fixtures/deploy/tailscale.env .env.example; do
+            docker compose --env-file "$env" -f deploy/tailscale/compose.yaml config --quiet
+          done
+          jq -e . deploy/tailscale/serve.json > /dev/null
+      - name: Recreate a deployed checkout (root-only Tailscale state in the build context)
+        run: |
+          mkdir -p data/lectern library/_inbox
+          sudo install -d -m 700 data/tailscale
+          sudo touch data/tailscale/tailscaled.state
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+      - name: Build linux/arm64 (default image)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: lectern:arm64
+          cache-from: type=gha,scope=lectern-arm64
+          cache-to: type=gha,scope=lectern-arm64,mode=max
+      - name: Smoke test on arm64 (emulated)
+        run: |
+          set -eu
+          test "$(docker image inspect lectern:arm64 --format '{{.Architecture}}')" = arm64
+          test "$(docker run --rm lectern:arm64 uname -m)" = aarch64
+          docker run --rm lectern:arm64 lectern worker --help > /dev/null
+          docker run --rm lectern:arm64 python -c "from lectern.align.transcribe import transcription_available as t; assert not t()"
+          # Run it the way deploy/tailscale/compose.yaml does: non-default UID/GID owning
+          # bind-mounted data and library, read-only root, no capabilities.
+          mkdir -p "$RUNNER_TEMP/smoke/data" "$RUNNER_TEMP/smoke/library"
+          sudo chown -R 1001:1002 "$RUNNER_TEMP/smoke"
+          docker run -d --name smoke --user 1001:1002 --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            -e LECTERN_BASE_URL=https://lectern.tail1234.ts.net -e LECTERN_TRUSTED_PROXIES=127.0.0.1 \
+            -v "$RUNNER_TEMP/smoke/data:/data" -v "$RUNNER_TEMP/smoke/library:/library" \
+            lectern:arm64
+          for i in $(seq 60); do
+            if docker exec smoke python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=3)" 2>/dev/null; then
+              break
+            fi
+            sleep 5
+          done
+          docker logs smoke 2>&1 | tail -n 40
+          docker exec smoke python -c "import urllib.request as u; assert u.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200"
+          docker logs smoke 2>&1 | grep -A3 "FIRST-RUN SETUP" | grep -q "https://lectern.tail1234.ts.net/setup?token="
+          sudo test -s "$RUNNER_TEMP/smoke/data/lectern.db"   # written as UID 1001 via the bind mount
+          docker rm -f smoke
