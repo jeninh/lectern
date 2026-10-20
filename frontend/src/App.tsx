@@ -5,6 +5,7 @@ import { ActivityPage } from "./pages/Activity";
 import { DevicesPage } from "./pages/Devices";
 import { HomePage } from "./pages/Home";
 import { LibraryPage } from "./pages/Library";
+import { ReadAlongPage } from "./pages/ReadAlong";
 import { SecurityPage } from "./pages/Security";
 import { AdminPage } from "./pages/Admin";
 import { HighlightsPage, ListeningPage } from "./pages/Placeholder";
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="/app" element={<HomePage />} />
           <Route path="/app/library" element={<LibraryPage />} />
           <Route path="/app/library/:id" element={<LibraryPage />} />
+          <Route path="/app/read/:id" element={<ReadAlongPage />} />
           <Route path="/app/devices" element={<DevicesPage />} />
           <Route path="/app/devices/new" element={<DevicesPage />} />
           <Route path="/app/listening" element={<ListeningPage />} />

@@ -99,3 +99,18 @@ export const Reader = (p: P) => (
 export const Person = (p: P) => (
   <svg {...base} {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
 );
+export const Play = (p: P) => (
+  <svg {...base} {...p}><path d="M7 4.5v15l12.5-7.5z" fill="currentColor" /></svg>
+);
+export const Pause = (p: P) => (
+  <svg {...base} {...p}><rect x="6" y="4.5" width="4" height="15" rx="1" fill="currentColor" /><rect x="14" y="4.5" width="4" height="15" rx="1" fill="currentColor" /></svg>
+);
+export const PrevSentence = (p: P) => (
+  <svg {...base} {...p}><path d="M6 5v14" /><path d="M18 5.5v13L9 12z" /></svg>
+);
+export const NextSentence = (p: P) => (
+  <svg {...base} {...p}><path d="M18 5v14" /><path d="M6 5.5v13L15 12z" /></svg>
+);
+export const Follow = (p: P) => (
+  <svg {...base} {...p}><path d="M4 6h10M4 10h16M4 14h8M4 18h12" /><circle cx="18.5" cy="16" r="2.5" /></svg>
+);

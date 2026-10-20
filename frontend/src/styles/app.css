@@ -2274,3 +2274,273 @@ details.tech .kv {
 details.tech .kv dt:not(:first-child) {
   margin-top: 8px;
 }
+
+/* ---------- read-along ---------- */
+.seg-text button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.seg-text button svg {
+  width: 16px;
+  height: 16px;
+}
+.ra {
+  /* Accent, not the cover tint: a pale tint would make the highlight and controls illegible. */
+  --ra-hl: color-mix(in srgb, var(--accent) 22%, transparent);
+  max-width: 46rem;
+  margin: 0 auto;
+}
+.ra-loading {
+  max-width: 40rem;
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+}
+.skeleton-line {
+  height: 18px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-2), var(--surface), var(--surface-2));
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+.skeleton-line:nth-child(3n) {
+  width: 72%;
+}
+.ra-text {
+  font-family: var(--font-display);
+  font-size: clamp(18px, 1.1rem + 0.25vw, 21px);
+  line-height: 1.7;
+  color: var(--ink);
+  padding-bottom: 40vh; /* the last sentence can still scroll to the reading line */
+}
+.ra-chapter + .ra-chapter {
+  margin-top: 2.5em;
+  padding-top: 2em;
+  border-top: 1px solid var(--line);
+}
+.ra-b {
+  margin: 0 0 0.9em;
+}
+.ra-h1,
+.ra-h2,
+.ra-h3,
+.ra-h4,
+.ra-h5,
+.ra-h6 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  line-height: 1.25;
+  margin: 1.4em 0 0.7em;
+}
+h2.ra-h1 {
+  font-size: 1.5em;
+}
+h3.ra-b {
+  font-size: 1.2em;
+}
+blockquote.ra-b {
+  margin-left: 1.2em;
+  padding-left: 1em;
+  border-left: 2px solid var(--line-2);
+  color: var(--ink-2);
+}
+pre.ra-b {
+  font: 0.85em/1.5 var(--font-mono);
+  white-space: pre-wrap;
+}
+.ra-s {
+  border-radius: 4px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 160ms var(--ease), box-shadow 160ms var(--ease);
+}
+.ra-s[data-m] {
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .ra-s[data-m]:hover {
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+  }
+}
+.ra-s.is-current,
+.ra-s.is-current:hover {
+  background: var(--ra-hl);
+  box-shadow: 0 0 0 2px var(--ra-hl);
+  color: var(--ink);
+}
+@media (forced-colors: active) {
+  .ra-s.is-current {
+    background: Mark;
+    color: MarkText;
+    forced-color-adjust: none;
+  }
+}
+.ra-listen {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) 1fr;
+  gap: 24px;
+  align-items: end;
+  padding: 8px 0 32px;
+}
+.ra-listen .cover {
+  box-shadow: var(--shadow-lg);
+}
+.ra-listen-title {
+  margin: 0 0 4px;
+  font: 500 26px/1.15 var(--font-display);
+}
+.ra-listen .hint {
+  margin: 4px 0 0;
+}
+.ra-bar {
+  position: sticky;
+  bottom: 16px;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "controls scrub options" "help help help";
+  align-items: center;
+  gap: 6px 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: var(--shadow-lg);
+}
+.ra[data-mode="listen"] .ra-bar {
+  position: static;
+}
+.ra-controls {
+  grid-area: controls;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ra-play {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 6px 16px -8px var(--accent);
+  transition: transform var(--dur) var(--ease);
+}
+.ra-play:active {
+  transform: scale(0.96);
+}
+.ra-play svg {
+  width: 20px;
+  height: 20px;
+}
+.ra-scrub {
+  grid-area: scrub;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.ra-scrub input {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+.ra-time {
+  font: 500 12px/1 var(--font-mono);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 4ch;
+}
+.ra-options {
+  grid-area: options;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ra-options .icon-btn[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--ra-hl);
+}
+.ra-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ra-speed select {
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 5px 6px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.ra-help {
+  grid-area: help;
+  margin: 0;
+  font-size: 12px;
+}
+.ra-help kbd {
+  font: 500 10.5px/1 var(--font-mono);
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2);
+}
+.ra-return {
+  position: sticky;
+  bottom: 136px;
+  z-index: 21;
+  display: flex;
+  margin: 0 auto 10px;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+@media (max-width: 900px) {
+  .ra-bar {
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas: "scrub scrub" "controls options";
+    padding: 10px 12px;
+  }
+  .ra-help {
+    display: none;
+  }
+  .ra-options {
+    justify-self: end;
+  }
+  .ra-return {
+    bottom: calc(190px + env(safe-area-inset-bottom));
+  }
+  .ra-listen {
+    grid-template-columns: 120px 1fr;
+    gap: 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ra-s,
+  .ra-play {
+    transition: none;
+  }
+  .skeleton-line {
+    animation: none;
+  }
+}
