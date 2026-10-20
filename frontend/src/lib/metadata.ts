@@ -22,6 +22,10 @@ export function normalizeIsbn(raw: string): string | null {
 
 export type FieldErrors = Partial<Record<keyof Metadata, string>>;
 
+/** XML 1.0-illegal control characters (tab, newline, and carriage return are fine). */
+// eslint-disable-next-line no-control-regex
+export const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
 export function validate(m: Metadata): FieldErrors {
   const e: FieldErrors = {};
   if (!m.title.trim()) e.title = "A title is required.";
@@ -30,6 +34,11 @@ export function validate(m: Metadata): FieldErrors {
   if (m.isbn && !normalizeIsbn(m.isbn)) e.isbn = "Not a valid ISBN-10 or ISBN-13 (check the digits).";
   if (m.published && !DATE_RE.test(m.published.trim())) e.published = "Use YYYY, YYYY-MM, or YYYY-MM-DD.";
   if (m.series_index != null && (Number.isNaN(m.series_index) || m.series_index < 0)) e.series_index = "Use a number such as 1 or 2.5.";
+  // The server refuses characters XML cannot carry (type ``control_characters``); say so here.
+  for (const [k, v] of Object.entries(m) as [keyof Metadata, unknown][]) {
+    const texts = Array.isArray(v) ? v.map((x) => (typeof x === "string" ? x : `${x?.name ?? ""}${x?.sort ?? ""}`)) : [v];
+    if (!e[k] && texts.some((t) => typeof t === "string" && CONTROL_RE.test(t))) e[k] = "Remove invisible control characters (often pasted from a PDF).";
+  }
   return e;
 }
 

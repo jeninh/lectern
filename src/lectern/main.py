@@ -227,11 +227,13 @@ def create_app(
             return JSONResponse(
                 {"message": "Invalid request"}, status_code=status.HTTP_400_BAD_REQUEST
             )
-        # Field and message only (never the submitted input), so forms can say what to fix.
+        # Field, message, and error type only (never the submitted input), so forms can say what
+        # to fix and clients can branch on the type (e.g. ``control_characters``).
         errors = [
             {
                 "loc": [str(p) for p in e.get("loc", ())][1:],
                 "msg": str(e.get("msg", ""))[:200],
+                "type": str(e.get("type", ""))[:64],
             }
             for e in exc.errors()[:20]
         ]

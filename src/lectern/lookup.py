@@ -47,7 +47,7 @@ from pydantic import (
 from lectern import __version__
 from lectern.ingest.epub import normalize_isbn
 from lectern.security.ratelimit import SlidingWindowLimiter
-from lectern.workmeta import Metadata
+from lectern.workmeta import Metadata, strip_controls
 
 log = logging.getLogger("lectern.lookup")
 
@@ -305,6 +305,7 @@ _IMPLS = {"openlibrary": openlibrary, "googlebooks": googlebooks}
 def _validated(fields: dict) -> dict:
     """Keep only fields the edit schema accepts, as the editor would apply them."""
     out = {}
+    fields = strip_controls(fields)  # upstream text: drop what XML cannot carry
     for k, v in fields.items():
         if v in (None, "", []):
             continue

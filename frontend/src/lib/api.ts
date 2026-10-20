@@ -60,7 +60,17 @@ const MESSAGES: Record<string, string> = {
   job_running: "Alignment is running right now. Cancel it from the jobs list first.",
   no_inputs: "This book needs both an EPUB and an audiobook to align.",
   work_gone: "That book was trashed or deleted.",
+  io_error: "a file could not be moved on the server",
+  internal_error: "an unexpected server error",
+  not_found: "it no longer exists",
+  work_busy: "a read-aloud build is using it",
+  staging_failed: "The server could not store that file. Try again later.",
 };
+
+/** Plain-language text for an API error code (the code itself when there is none). */
+export function errorText(code: string): string {
+  return MESSAGES[code] ?? code;
+}
 
 export class ApiError extends Error {
   status: number;

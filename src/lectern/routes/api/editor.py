@@ -8,7 +8,9 @@ accept an ``Idempotency-Key`` header. The logic lives in ``lectern.editing``,
 
 from __future__ import annotations
 
+import logging
 import secrets
+from contextlib import contextmanager
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -44,9 +46,10 @@ from lectern.security.deps import (
     require_role_read,
 )
 from lectern.security.sessions import client_ip
-from lectern.workmeta import AuthorIn, metadata_of
+from lectern.workmeta import AuthorIn, NoControls, metadata_of
 
 router = APIRouter()
+log = logging.getLogger("lectern.editor")
 
 Editor = Annotated[AuthContext, Depends(require_role(Role.OWNER, Role.MEMBER))]
 EditorRead = Annotated[AuthContext, Depends(require_role_read(Role.OWNER, Role.MEMBER))]
@@ -55,6 +58,18 @@ IdemKey = Annotated[str | None, Header(alias="idempotency-key", pattern=idempote
 
 def _edit_error(exc: EditError) -> HTTPException:
     return HTTPException(exc.status, {"detail": exc.code, **exc.extra})
+
+
+@contextmanager
+def _rollback_on_error(db, journal: Journal):
+    """One transaction with file steps: if anything (the commit included) fails, the database
+    rolls back and the journal puts the files back where the database says they are."""
+    try:
+        yield
+    except BaseException:
+        db.rollback()
+        journal.rollback()
+        raise
 
 
 def _busy(request: Request):
@@ -175,8 +190,11 @@ def get_editor(
     return editor_json(db, settings, request, auth.user, _work(db, auth.user, work_id))
 
 
-def _save(request, auth, db, settings, work: Work, patch: WorkPatch, *, kind="edit", batch_id=None):
-    journal = Journal()
+def _save(
+    request, auth, db, settings, work: Work, patch: WorkPatch, *, kind="edit", batch_id=None,
+    journal: Journal | None = None,
+):  # fmt: skip
+    journal = journal or Journal()
     try:
         result = editing.save(
             db,
@@ -330,11 +348,11 @@ class TrashIn(BaseModel):
 
 
 def _trash_one(
-    request, auth, db, settings, work: Work, batch_id: str | None = None
+    request, auth, db, settings, work: Work, journal: Journal, batch_id: str | None = None
 ) -> WorkRevision:
     version = work.version
     try:
-        trash.trash_work(db, settings, work, auth.user.id, busy=_busy(request))
+        trash.trash_work(db, settings, work, auth.user.id, busy=_busy(request), journal=journal)
     except trash.Busy:
         raise HTTPException(status.HTTP_409_CONFLICT, "work_busy") from None
     rev = WorkRevision(
@@ -373,8 +391,10 @@ def trash_work(
         work = _work(db, auth.user, work_id)
         if body and body.version is not None and body.version != work.version:
             raise HTTPException(status.HTTP_409_CONFLICT, "version_conflict")
-        rev = _trash_one(request, auth, db, settings, work)
-        db.commit()
+        journal = Journal()
+        with _rollback_on_error(db, journal):
+            rev = _trash_one(request, auth, db, settings, work, journal)
+            db.commit()
     return {"work_id": work.id, "revision_id": rev.id, "trashed_at": iso(work.trashed_at)}
 
 
@@ -439,18 +459,22 @@ def restore_work(
         work = db.get(Work, work_id)
         if work is None or work.trashed_at is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-        trash.restore_work(db, settings, work)
-        for rev in db.scalars(
-            select(WorkRevision).where(
-                WorkRevision.work_id == work.id,
-                WorkRevision.kind == "trash",
-                WorkRevision.undone_at.is_(None),
+        journal = Journal()
+        with _rollback_on_error(db, journal):
+            trash.restore_work(db, settings, work, journal=journal)
+            for rev in db.scalars(
+                select(WorkRevision).where(
+                    WorkRevision.work_id == work.id,
+                    WorkRevision.kind == "trash",
+                    WorkRevision.undone_at.is_(None),
+                )
+            ):
+                rev.undone_at = utcnow()
+            align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
+            _audit(
+                db, request, auth, "work.restore", work.title, f"work:{work.id} -> {work.dir_path}"
             )
-        ):
-            rev.undone_at = utcnow()
-        align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
-        _audit(db, request, auth, "work.restore", work.title, f"work:{work.id} -> {work.dir_path}")
-        db.commit()
+            db.commit()
     return {"work_id": work.id, "dir_path": work.dir_path}
 
 
@@ -481,20 +505,24 @@ def restore_file(
         work = db.get(Work, tf.work_id) if tf else None
         if tf is None or tf.restored_at is not None or work is None or work.trashed_at is not None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-        try:
-            obj = trash.restore_file(db, settings, tf)
-        except FileExistsError:
-            raise HTTPException(status.HTTP_409_CONFLICT, "duplicate") from None
-        if tf.kind.value == "audio":
-            relayout(db, work.id)
-            audio_changed(db, work.id)
-        work.version += 1
-        align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
-        from lectern.workmeta import write_book_json
+        journal = Journal()
+        with _rollback_on_error(db, journal):
+            try:
+                obj = trash.restore_file(db, settings, tf, journal=journal)
+            except FileExistsError:
+                raise HTTPException(status.HTTP_409_CONFLICT, "duplicate") from None
+            except LookupError:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found") from None
+            if tf.kind.value == "audio":
+                relayout(db, work.id)
+                audio_changed(db, work.id)
+            work.version += 1
+            align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
+            from lectern.workmeta import write_book_json
 
-        write_book_json(db, settings.library_dir, work)
-        _audit(db, request, auth, "file.restore", work.title, f"work:{work.id} {obj.rel_path}")
-        db.commit()
+            write_book_json(db, settings.library_dir, work)
+            _audit(db, request, auth, "file.restore", work.title, f"work:{work.id} {obj.rel_path}")
+            db.commit()
     return {"work_id": work.id, "rel_path": obj.rel_path}
 
 
@@ -530,9 +558,9 @@ class BulkIn(BaseModel):
         "trash",
     ]
     authors: list[AuthorIn] | None = Field(default=None, max_length=20)
-    series: str | None = Field(default=None, max_length=256)
+    series: Annotated[str, NoControls] | None = Field(default=None, max_length=256)
     series_index: float | None = Field(default=None, ge=0, le=100000)
-    tags: list[Annotated[str, Field(min_length=1, max_length=128)]] | None = Field(
+    tags: list[Annotated[str, Field(min_length=1, max_length=128), NoControls]] | None = Field(
         default=None, max_length=50
     )
     shelf_ids: list[int] | None = Field(default=None, max_length=100)
@@ -601,56 +629,76 @@ def bulk_edit(
     results = []
     for wid in dict.fromkeys(body.work_ids):
         with LIBRARY_LOCK:
+            journal = Journal()
             try:
-                work = _work(db, auth.user, wid)
-                if body.action == "trash":
-                    _trash_one(request, auth, db, settings, work, batch_id)
-                    changed = ["trashed"]
-                else:
-                    result, journal = _save(
-                        request,
-                        auth,
-                        db,
-                        settings,
-                        work,
-                        _bulk_patch(db, auth.user, work, body),
-                        kind="bulk",
-                        batch_id=batch_id,
-                    )
-                    changed = result.changed
-                db.commit()
+                with _rollback_on_error(db, journal):
+                    work = _work(db, auth.user, wid)
+                    if body.action == "trash":
+                        _trash_one(request, auth, db, settings, work, journal, batch_id)
+                        changed = ["trashed"]
+                    else:
+                        result, _ = _save(
+                            request,
+                            auth,
+                            db,
+                            settings,
+                            work,
+                            _bulk_patch(db, auth.user, work, body),
+                            kind="bulk",
+                            batch_id=batch_id,
+                            journal=journal,
+                        )
+                        changed = result.changed
+                    db.commit()
                 results.append({"work_id": wid, "ok": True, "changed": changed})
-            except HTTPException as exc:
-                db.rollback()
-                code = exc.detail if isinstance(exc.detail, str) else exc.detail.get("detail")
-                results.append(
-                    {
-                        "work_id": wid,
-                        "ok": False,
-                        "error": "not_found" if exc.status_code == 404 else code,
-                    }
-                )
-            except EditError as exc:
-                db.rollback()
-                results.append({"work_id": wid, "ok": False, "error": exc.code})
+            except Exception as exc:  # noqa: BLE001 - one work failing must not stop the rest
+                results.append({"work_id": wid, "ok": False, "error": _item_error(exc)})
     out = {"batch_id": batch_id, "action": body.action, "results": results}
+    _audit_batch(db, request, auth, "work.bulk", body.action, batch_id, results)
+    idempotency.store(db, auth.user.id, scope, key, payload, out)
+    db.commit()
+    return out
+
+
+def _item_error(exc: Exception) -> str:
+    """Machine-readable reason one item of a bulk request failed (already rolled back)."""
+    if isinstance(exc, EditError):
+        return exc.code
+    if isinstance(exc, HTTPException):
+        if exc.status_code == 404:
+            return "not_found"
+        return exc.detail if isinstance(exc.detail, str) else exc.detail.get("detail")
+    if isinstance(exc, OSError):  # MoveError included: a file could not be moved
+        log.warning("bulk item failed: %s", exc)
+        return "io_error"
+    log.exception("bulk item failed", exc_info=exc)
+    return "internal_error"
+
+
+def _audit_batch(db, request, auth, action: str, target: str, batch_id: str, results) -> None:
+    failed = [r for r in results if not r["ok"]]
     _audit(
         db,
         request,
         auth,
-        "work.bulk",
-        body.action,
-        f"batch:{batch_id} {sum(r['ok'] for r in results)}/{len(results)} works",
+        action,
+        target,
+        f"batch:{batch_id} {len(results) - len(failed)}/{len(results)} works"
+        + (
+            "; failed " + ", ".join(f"{r['work_id']}:{r['error']}" for r in failed)
+            if failed
+            else ""
+        ),
     )
-    idempotency.store(db, auth.user.id, scope, key, payload, out)
-    db.commit()
-    return out
 
 
 @router.post("/works/bulk/{batch_id}/undo")
 def bulk_undo(
     request: Request, auth: Editor, db: DbDep, settings: SettingsDep, batch_id: str
 ) -> dict:
+    """Undo every revision of a batch, newest first. Each work is its own transaction: one
+    that cannot be undone (changed since, or its removed file is back in the library) is
+    reported and the rest still go back. Every undone work gets its own ``work.undo`` audit."""
     if len(batch_id) != 16 or any(c not in "0123456789abcdef" for c in batch_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     revs = db.scalars(
@@ -661,30 +709,32 @@ def bulk_undo(
     if not revs:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     results = []
-    for rev in revs:
+    for rev_id, wid in [(r.id, r.work_id) for r in revs]:
         with LIBRARY_LOCK:
             journal = Journal()
-            work = db.get(Work, rev.work_id)
             try:
-                if work is None:
-                    raise EditError(404, "not_found")
-                editing.undo(db, settings, auth.user, work, rev, journal, busy=_busy(request))
-                if rev.kind == "trash":
-                    align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
-                db.commit()
-                results.append({"work_id": rev.work_id, "ok": True})
-            except EditError as exc:
-                db.rollback()
-                journal.rollback()
-                results.append({"work_id": rev.work_id, "ok": False, "error": exc.code})
-    _audit(
-        db,
-        request,
-        auth,
-        "work.bulk_undo",
-        batch_id,
-        f"{sum(r['ok'] for r in results)}/{len(results)} works",
-    )
+                with _rollback_on_error(db, journal):
+                    rev, work = db.get(WorkRevision, rev_id), db.get(Work, wid)
+                    if rev is None or work is None:
+                        raise EditError(404, "not_found")
+                    if rev.kind != "trash" and not can_see_work(db, auth.user, wid):
+                        raise EditError(404, "not_found")
+                    editing.undo(db, settings, auth.user, work, rev, journal, busy=_busy(request))
+                    if rev.kind == "trash":
+                        align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
+                    _audit(
+                        db,
+                        request,
+                        auth,
+                        "work.undo",
+                        work.title,
+                        f"work:{work.id} revision:{rev.id} batch:{batch_id}",
+                    )
+                    db.commit()
+                results.append({"work_id": wid, "ok": True})
+            except Exception as exc:  # noqa: BLE001 - one work failing must not stop the rest
+                results.append({"work_id": wid, "ok": False, "error": _item_error(exc)})
+    _audit_batch(db, request, auth, "work.bulk_undo", batch_id, batch_id, results)
     db.commit()
     return {"batch_id": batch_id, "results": results}
 
@@ -747,7 +797,10 @@ def update_library_settings(
 def revisions(
     auth: EditorRead, db: DbDep, work_id: int, limit: int = Query(default=20, ge=1, le=100)
 ) -> dict:
-    _work(db, auth.user, work_id)
+    """History as opaque entries: what changed, by whom, and whether it can be undone.
+    The stored before/after snapshots stay server-side (they name cover backups under the
+    data directory); undo takes the revision ``id``."""
+    current = _work(db, auth.user, work_id).version
     users = {u.id: u.username for u in db.scalars(select(User))}
     rows = db.scalars(
         select(WorkRevision)
@@ -766,8 +819,8 @@ def revisions(
                 "version_after": r.version_after,
                 "changed": sorted(r.after),
                 "undone_at": iso(r.undone_at),
-                "before": r.before,
-                "after": r.after,
+                "batch_id": r.batch_id,
+                "undoable": r.undone_at is None and r.kind != "undo" and r.version_after == current,
             }
             for r in rows
         ]

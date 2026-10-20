@@ -14,7 +14,15 @@ import re
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
+from pydantic_core import PydanticCustomError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -30,6 +38,34 @@ BOOK_JSON = "book.json"
 BOOK_JSON_VERSION = 1
 PLAYBACK = ("read", "listen", "readalong")
 
+# Characters XML 1.0 cannot carry (tab, newline, and carriage return are fine). They would
+# break book.json readers, OPDS feeds, and EPUB tooling, so text a person sends with them is
+# refused (``422``, error type ``control_characters``); text read from files or from a
+# metadata provider has them stripped instead (:func:`strip_controls`).
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def strip_controls(value):
+    """``value`` with XML-illegal control characters removed, recursing into lists/dicts."""
+    if isinstance(value, str):
+        return CONTROL_CHARS.sub("", value)
+    if isinstance(value, list):
+        return [strip_controls(v) for v in value]
+    if isinstance(value, dict):
+        return {k: strip_controls(v) for k, v in value.items()}
+    return value
+
+
+def reject_controls(value):
+    """Validator: refuse strings (or lists of strings) carrying XML-illegal controls."""
+    items = value if isinstance(value, list) else [value]
+    if any(isinstance(v, str) and CONTROL_CHARS.search(v) for v in items):
+        raise PydanticCustomError("control_characters", "must not contain control characters")
+    return value
+
+
+NoControls = BeforeValidator(reject_controls)  # before stripping: a trailing \x0c counts too
+
 Line = Annotated[str, StringConstraints(strip_whitespace=True, max_length=512)]
 Short = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 _LANG = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$")
@@ -41,6 +77,11 @@ class AuthorIn(BaseModel):
 
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     sort: Annotated[str, StringConstraints(strip_whitespace=True, max_length=256)] | None = None
+
+    @field_validator("name", "sort", mode="before")
+    @classmethod
+    def _controls(cls, v):
+        return reject_controls(v)
 
 
 class Metadata(BaseModel):
@@ -63,6 +104,23 @@ class Metadata(BaseModel):
     published: Annotated[str, StringConstraints(strip_whitespace=True, max_length=32)] | None = None
     tags: list[Short] = Field(default_factory=list, max_length=50)
     narrators: list[Short] = Field(default_factory=list, max_length=20)
+
+    @field_validator(
+        "title",
+        "sort_title",
+        "series",
+        "description",
+        "language",
+        "isbn",
+        "publisher",
+        "published",
+        "tags",
+        "narrators",
+        mode="before",
+    )
+    @classmethod
+    def _controls(cls, v):
+        return reject_controls(v)
 
     @field_validator("language")
     @classmethod

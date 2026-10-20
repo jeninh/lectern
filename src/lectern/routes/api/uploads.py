@@ -35,6 +35,7 @@ from lectern.security import audit
 from lectern.security.deps import AuthContext, DbDep, SettingsDep, require_role
 from lectern.security.sessions import client_ip
 from lectern.uploads import MEDIA_TYPES, inbox_name_for, move_into_inbox, new_public_id, part_path
+from lectern.workmeta import strip_controls
 
 router = APIRouter(prefix="/uploads")
 
@@ -151,7 +152,7 @@ def create(
     row = UploadSession(
         public_id=public_id,
         user_id=auth.user.id,
-        filename=Path(body.filename).name[:600] or "upload",
+        filename=strip_controls(Path(body.filename).name)[:600].strip() or "upload",
         media_type=body.media_type,
         size=body.size,
         chunk_size=min(UPLOAD_CHUNK_MAX_BYTES, body.size),
@@ -403,11 +404,15 @@ def _finalize_into_import(db, request, auth, settings, row, part, expected, titl
         with LIBRARY_LOCK:
             staged = imports.stage_upload(db, settings, imp, row, part)
     except imports.ImportError_ as exc:
+        # Every staging refusal is final for this upload (unreadable, import closed or full):
+        # fail the session and drop its bytes rather than leave it active with a stuck part.
         db.rollback()
         row = db.get(UploadSession, row.id)
-        if exc.code in ("not_epub", "not_audio"):
-            raise _fail(db, request, auth, settings, row, 422, exc.code) from None
-        raise _err(exc.status, exc.code, **exc.extra) from None
+        raise _fail(db, request, auth, settings, row, exc.status, exc.code) from None
+    except OSError:
+        db.rollback()
+        row = db.get(UploadSession, row.id)
+        raise _fail(db, request, auth, settings, row, 500, "staging_failed") from None
     name = f"import:{imp.public_id}/{staged.rel_path}"
     row.status = UploadStatus.COMPLETED
     row.inbox_name = name[:256]

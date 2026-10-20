@@ -1,6 +1,7 @@
 // The work editor's draft: a plain copy of the editable state, compared with what the server
 // last sent to decide what is unsaved and to build one minimal PATCH (docs/contracts.md "Editing").
 
+import { errorText } from "./api";
 import { changedFields, clean } from "./metadata";
 import type { EditorState, Metadata, PlaybackDefault } from "./types";
 
@@ -129,4 +130,14 @@ export function rebase(oldBase: EditorState, fresh: EditorState, d: Draft): Draf
     remove_track_ids: d.remove_track_ids.filter((id) => freshIds.has(id)),
     cover: d.cover,
   };
+}
+
+/** One toast line for a bulk edit or bulk undo, which answer per book: how many went
+ * through, and why the others did not (each reason once, in plain language). */
+export function bulkSummary(verb: string, results: { ok: boolean; error?: string }[]): { text: string; ok: number; failed: number } {
+  const ok = results.filter((x) => x.ok).length;
+  const failed = results.length - ok;
+  const books = (n: number) => `${n} ${n === 1 ? "book" : "books"}`;
+  const why = [...new Set(results.filter((x) => !x.ok).map((x) => errorText(x.error ?? "unknown")))].join("; ");
+  return { text: `${verb} ${books(ok)}${failed ? `; ${books(failed)} could not be changed (${why})` : ""}.`, ok, failed };
 }

@@ -140,3 +140,28 @@ describe("editor draft", () => {
     expect(buildPatch(theirs, merged)).toEqual({ version: 4, metadata: clean({ ...theirs.metadata, series_index: 2 }) });
   });
 });
+
+describe("review hardening", () => {
+  it("flags XML-illegal control characters per field but allows tabs and newlines", () => {
+    expect(validate(meta({ title: "Bad\u0001Title" })).title).toMatch(/control characters/);
+    expect(validate(meta({ authors: [{ name: "A\u0000", sort: null }] })).authors).toMatch(/control characters/);
+    expect(validate(meta({ tags: ["ok", "bell\u0007"] })).tags).toMatch(/control characters/);
+    expect(validate(meta({ description: "line\nnext\r\n\tindent" }))).toEqual({});
+  });
+
+  it("summarises per-book bulk results in plain language", async () => {
+    const { bulkSummary } = await import("../editor");
+    const s = bulkSummary("Undid", [
+      { ok: true },
+      { ok: false, error: "undo_conflict" },
+      { ok: false, error: "io_error" },
+      { ok: false, error: "io_error" },
+    ]);
+    expect(s.ok).toBe(1);
+    expect(s.failed).toBe(3);
+    expect(s.text).toBe(
+      "Undid 1 book; 3 books could not be changed (This book changed after that save, so it can no longer be undone.; a file could not be moved on the server).",
+    );
+    expect(bulkSummary("Changed", [{ ok: true }, { ok: true }]).text).toBe("Changed 2 books.");
+  });
+});

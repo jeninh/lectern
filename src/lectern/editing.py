@@ -55,6 +55,7 @@ from lectern.models import (
 from lectern.trash import restore_file, trash_file
 from lectern.workmeta import (
     Metadata,
+    NoControls,
     PlaybackDefault,
     apply_metadata,
     desired_dir_parts,
@@ -110,9 +111,11 @@ class Journal:
 
 # --- schema ----------------------------------------------------------------------------------
 
-Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+Title = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256), NoControls
+]
 ChapterTitle = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200), NoControls
 ]
 
 
@@ -294,26 +297,16 @@ def staged_covers_dir(settings: Settings) -> Path:
 def stage_cover(settings: Settings, user_id: int, data: bytes) -> str:
     """Validate an uploaded image and keep it as JPEG until a save uses it (or a day passes).
     Returns a token bound to the uploader."""
-    from io import BytesIO
-
-    from PIL import Image
+    from lectern.ingest.cover import UPLOAD_FORMATS, CoverRejected, save_cover_jpeg
 
     if len(data) > COVER_MAX_BYTES:
         raise EditError(413, "cover_too_large")
-    try:
-        with Image.open(BytesIO(data)) as img:
-            img.verify()
-        with Image.open(BytesIO(data)) as img:
-            if img.width * img.height > 40_000_000:
-                raise EditError(422, "cover_too_large")
-            rgb = img.convert("RGB")
-            rgb.thumbnail((1200, 1600))
-    except EditError:
-        raise
-    except Exception:  # noqa: BLE001 - anything Pillow cannot decode is not a cover
-        raise EditError(422, "not_an_image") from None
     token = f"{user_id}.{secrets.token_hex(12)}"
-    rgb.save(staged_covers_dir(settings) / f"{token}.jpg", "JPEG", quality=88)
+    try:
+        # JPEG, PNG, and WebP decoders only: no exotic formats reach Pillow from an upload.
+        save_cover_jpeg(data, staged_covers_dir(settings) / f"{token}.jpg", formats=UPLOAD_FORMATS)
+    except CoverRejected as exc:
+        raise EditError(422, exc.code) from None
     return token
 
 
@@ -639,7 +632,10 @@ def undo(
     text = audio = False
 
     if rev.kind == "trash":
-        trash.restore_work(db, settings, work)
+        try:
+            trash.restore_work(db, settings, work, journal=journal)
+        except FileExistsError:  # a folder appeared where it was going back to
+            raise EditError(409, "undo_conflict") from None
         rev.undone_at = utcnow()
         db.flush()
         return {"restored": True}
@@ -658,8 +654,11 @@ def undo(
         temp = None
         if tf.kind == FileKind.AUDIO:
             temp = f"audio/.lectern-restore-{secrets.token_hex(6)}{Path(tf.rel_path).suffix}"
-        obj = restore_file(db, settings, tf, rel_path=temp)
-        journal.add(_retrash(db, settings, work, obj, user.id))
+        try:
+            obj = restore_file(db, settings, tf, rel_path=temp, journal=journal)
+        except (FileExistsError, LookupError):
+            # The same file was added again (or the removal was restored by hand) since.
+            raise EditError(409, "undo_conflict") from None
         id_map[old_id] = obj.id
         if tf.kind == FileKind.AUDIO:
             audio = True
@@ -705,19 +704,6 @@ def undo(
     db.flush()
     write_book_json(db, library, work)
     return {"restored": True}
-
-
-def _retrash(db, settings, work, obj, user_id) -> Callable[[], None]:
-    """Journal step for a restore that must be taken back: the file returns to the trash."""
-    library = settings.library_dir
-    src = library / work.dir_path / obj.rel_path
-
-    def back() -> None:
-        dest = library / "_trash" / "files" / f"rollback-{secrets.token_hex(4)}" / src.name
-        if src.is_file():
-            move_file(src, dest)
-
-    return back
 
 
 # --- sweep -----------------------------------------------------------------------------------------

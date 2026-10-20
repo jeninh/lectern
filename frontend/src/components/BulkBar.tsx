@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { post } from "../lib/api";
+import { bulkSummary } from "../lib/editor";
 import { useStore } from "../lib/store";
 import type { BulkResult, Shelf } from "../lib/types";
 import { Close, Trash } from "./Icons";
@@ -21,18 +22,18 @@ export function BulkBar({ ids, visible, shelves, onSelectAll, onDone, onClose }:
     setBusy(true);
     try {
       const r = await post<BulkResult>("/api/works/bulk", { work_ids: ids, ...body }, { "idempotency-key": uuid() });
-      const ok = r.results.filter((x) => x.ok).length;
-      const failed = r.results.length - ok;
+      const { text, ok, failed } = bulkSummary(verb, r.results);
       toast(
-        `${verb} ${ok} ${ok === 1 ? "book" : "books"}${failed ? `; ${failed} could not be changed (${[...new Set(r.results.filter((x) => !x.ok).map((x) => x.error))].join(", ")})` : ""}.`,
+        text,
         failed && !ok ? "error" : "info",
         ok
           ? {
               label: "Undo",
               run: async () => {
                 try {
-                  await post(`/api/works/bulk/${r.batch_id}/undo`);
-                  toast("Undone.");
+                  const u = await post<{ results: BulkResult["results"] }>(`/api/works/bulk/${r.batch_id}/undo`);
+                  const s = bulkSummary("Undid", u.results);
+                  toast(s.failed ? s.text : "Undone.", s.failed && !s.ok ? "error" : "info");
                   await onDone();
                 } catch (e) {
                   toast((e as Error).message, "error");

@@ -730,7 +730,7 @@ def test_revision_history_is_listed(client, owner, settings):
         {"version": ed["version"], "metadata": {**ed["metadata"], "publisher": "Penguin"}},
     )
     revs = client.get(f"/api/works/{wid}/revisions").json()["revisions"]
-    assert revs[0]["before"]["metadata"]["publisher"] == "Test Press"
-    assert revs[0]["after"]["metadata"]["publisher"] == "Penguin" and revs[0]["actor"] == "owner"
+    assert revs[0]["changed"] == ["metadata"] and revs[0]["actor"] == "owner"
+    assert revs[0]["undoable"] is True and revs[0]["kind"] == "edit"
     with session_factory()() as db:
         assert db.query(WorkRevision).count() == 1

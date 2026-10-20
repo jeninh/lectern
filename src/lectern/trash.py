@@ -8,6 +8,8 @@ track) moves to ``<library>/_trash/files/<random>/<name>`` and its row is kept a
 ``TRASH_RETENTION`` except by the owner's explicit "Delete forever".
 
 All functions expect the caller to hold :data:`lectern.fsops.LIBRARY_LOCK` and to commit.
+Functions that move files take a ``journal`` (:class:`lectern.editing.Journal`) so the caller
+can put the files back when the commit fails.
 """
 
 from __future__ import annotations
@@ -18,12 +20,21 @@ import shutil
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lectern.config import Settings
-from lectern.fsops import TRASH_DIR, checked, free_dir, move_dir, move_file, prune_empty_parents
+from lectern.fsops import (
+    TRASH_DIR,
+    checked,
+    free_dir,
+    inside,
+    move_dir,
+    move_file,
+    prune_empty_parents,
+)
 from lectern.models import (
     JOB_ACTIVE_STATUSES,
     AudioTrack,
@@ -37,6 +48,9 @@ from lectern.models import (
     utcnow,
 )
 from lectern.workmeta import desired_dir_parts, write_book_json
+
+if TYPE_CHECKING:
+    from lectern.editing import Journal
 
 log = logging.getLogger("lectern.trash")
 
@@ -78,6 +92,7 @@ def trash_work(
     actor_id: int | None,
     *,
     busy: Callable[[int], bool] = lambda _id: False,
+    journal: Journal | None = None,
 ) -> None:
     if work.trashed_at is not None:
         return
@@ -86,11 +101,8 @@ def trash_work(
     library = settings.library_dir
     src = library / work.dir_path
     rel = f"{TRASH_DIR}/works/{work.id}-{secrets.token_hex(4)}"
-    if src.is_dir():
-        move_dir(src, library / rel, digests=_digests(db, work.id))
-        prune_empty_parents(src.parent, library)
-    else:
-        (library / rel).mkdir(parents=True, exist_ok=True)
+    _move_folder(db, library, work.id, src, library / rel, journal)
+    prune_empty_parents(src.parent, library)
     _cancel_jobs(db, work.id)
     work.trash_from, work.dir_path = work.dir_path, rel
     work.trashed_at, work.trashed_by = utcnow(), actor_id
@@ -98,7 +110,22 @@ def trash_work(
     db.flush()
 
 
-def restore_work(db: Session, settings: Settings, work: Work) -> None:
+def _move_folder(
+    db: Session, library: Path, work_id: int, src: Path, dst: Path, journal: Journal | None
+) -> None:
+    if src.is_dir():
+        move_dir(src, dst, digests=_digests(db, work_id))
+        if journal is not None:
+            journal.moved_dir(src, dst)
+    else:
+        dst.mkdir(parents=True, exist_ok=True)
+        if journal is not None:
+            journal.add(lambda: shutil.rmtree(dst) if inside(library, dst) else None)
+
+
+def restore_work(
+    db: Session, settings: Settings, work: Work, *, journal: Journal | None = None
+) -> None:
     if work.trashed_at is None:
         return
     library = settings.library_dir
@@ -108,11 +135,7 @@ def restore_work(db: Session, settings: Settings, work: Work) -> None:
         rel = prior.as_posix()
     else:
         rel = free_dir(library, author, title)
-    src = library / work.dir_path
-    if src.is_dir():
-        move_dir(src, library / rel, digests=_digests(db, work.id))
-    else:
-        (library / rel).mkdir(parents=True, exist_ok=True)
+    _move_folder(db, library, work.id, library / work.dir_path, library / rel, journal)
     work.dir_path, work.trash_from = rel, None
     work.trashed_at = work.trashed_by = None
     work.version = (work.version or 1) + 1
@@ -128,7 +151,8 @@ def purge_work(db: Session, settings: Settings, work: Work) -> None:
         _remove_trashed_file(library, tf)
     db.delete(work)
     db.flush()
-    if folder.is_dir() and (library / TRASH_DIR) in folder.resolve().parents:
+    # ``inside`` resolves both sides: a relative or symlinked library must purge too.
+    if folder.is_dir() and inside(library / TRASH_DIR, folder):
         shutil.rmtree(folder, ignore_errors=True)
     from lectern.sentence_map import map_path
 
@@ -176,9 +200,16 @@ def trash_file(
 
 
 def restore_file(
-    db: Session, settings: Settings, tf: TrashedFile, *, rel_path: str | None = None
+    db: Session,
+    settings: Settings,
+    tf: TrashedFile,
+    *,
+    rel_path: str | None = None,
+    journal: Journal | None = None,
 ) -> BookFile | AudioTrack:
-    """Put a removed format back in its work, under its old name when that is free."""
+    """Put a removed format back in its work, under its old name when that is free.
+    Raises ``LookupError`` (gone, or restored already) and ``FileExistsError`` (an identical
+    file is back in the library; restoring would make two rows for one SHA-256)."""
     from datetime import datetime
 
     from lectern.fsops import unique_name
@@ -199,6 +230,8 @@ def restore_file(
     rel = unique_name(work_dir, rel_path or tf.rel_path, taken)
     checked(work_dir, rel)
     move_file(library / tf.trash_path, work_dir / rel, sha256=tf.sha256)
+    if journal is not None:
+        journal.moved_file(library / tf.trash_path, work_dir / rel)
     prune_empty_parents((library / tf.trash_path).parent, library / TRASH_DIR)
     row = dict(tf.row)
     row["rel_path"], row["work_id"] = rel, work.id
@@ -219,7 +252,7 @@ def restore_file(
 
 def _remove_trashed_file(library: Path, tf: TrashedFile) -> None:
     p = library / tf.trash_path
-    if (library / TRASH_DIR) in p.resolve().parents:
+    if inside(library / TRASH_DIR, p):
         p.unlink(missing_ok=True)
         prune_empty_parents(p.parent, library / TRASH_DIR)
 

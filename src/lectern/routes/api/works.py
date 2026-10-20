@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from lectern.access import can_see_work, visible_works
 from lectern.align import jobs as align_jobs
+from lectern.editing import Journal
 from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest.merge import merge_work
 from lectern.jobs import active_job, enqueue_transcode, find_variant
@@ -457,6 +458,26 @@ def _open_suggestion(db, suggestion_id: int) -> MatchSuggestion:
     return s
 
 
+def _merge_commit(request, auth, db, settings, source: Work, target: Work, label: str) -> None:
+    """Merge under the caller's library lock: file moves are journalled and put back if the
+    commit fails; the emptied source folder and its history go only after it succeeds."""
+    journal = Journal()
+    try:
+        finish = merge_work(db, settings, source, target, journal)
+        target.version = (target.version or 1) + 1
+        write_book_json(db, settings.library_dir, target)
+        audit.record(
+            db, "work.merge", actor_user_id=auth.user.id, target=target.title[:256],
+            ip=client_ip(request), detail=label[:500],
+        )  # fmt: skip
+        db.commit()
+    except Exception:
+        db.rollback()
+        journal.rollback()
+        raise
+    finish()
+
+
 @router.post("/suggestions/{suggestion_id}/merge")
 def merge_suggestion(
     request: Request, auth: Manager, db: DbDep, settings: SettingsDep, suggestion_id: int
@@ -470,14 +491,7 @@ def _merge(request, auth, db, settings, suggestion_id: int) -> dict:
     s = _open_suggestion(db, suggestion_id)
     source, target = db.get(Work, s.work_id), db.get(Work, s.candidate_work_id)
     label = f"{source.title} -> {target.title}"
-    merge_work(db, settings.library_dir, source, target)
-    target.version = (target.version or 1) + 1
-    write_book_json(db, settings.library_dir, target)
-    audit.record(
-        db, "work.merge", actor_user_id=auth.user.id, target=target.title[:256],
-        ip=client_ip(request), detail=label[:500],
-    )  # fmt: skip
-    db.commit()
+    _merge_commit(request, auth, db, settings, source, target, label)
     return {"work_id": target.id}
 
 
@@ -509,12 +523,5 @@ def _merge_into(request, auth, db, settings, work_id: int, body: MergeIn) -> dic
     if source.id == target.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "same_work")
     label = f"{source.title} -> {target.title}"
-    merge_work(db, settings.library_dir, source, target)
-    target.version = (target.version or 1) + 1
-    write_book_json(db, settings.library_dir, target)
-    audit.record(
-        db, "work.merge", actor_user_id=auth.user.id, target=target.title[:256],
-        ip=client_ip(request), detail=label[:500],
-    )  # fmt: skip
-    db.commit()
+    _merge_commit(request, auth, db, settings, source, target, label)
     return {"work_id": target.id}

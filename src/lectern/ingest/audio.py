@@ -12,7 +12,6 @@ timeline however its files arrive (one folder, loose files, or one browser uploa
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import re
@@ -457,13 +456,13 @@ def ingest_audio(
 
 
 def _save_cover(data: bytes, dest: Path) -> bool:
-    from PIL import Image
+    """Attached artwork as the work's cover; a broken or oversized picture means no cover."""
+    from lectern.ingest.cover import EMBEDDED_FORMATS, CoverRejected, save_cover_jpeg
 
     try:
-        with Image.open(io.BytesIO(data)) as img:
-            img.convert("RGB").save(dest, "JPEG", quality=88)
+        save_cover_jpeg(data, dest, formats=EMBEDDED_FORMATS)
         return True
-    except Exception:  # noqa: BLE001 - a broken picture just means no cover
+    except (CoverRejected, OSError):
         return False
 
 

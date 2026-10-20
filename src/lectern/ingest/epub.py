@@ -18,7 +18,7 @@ NS = {
 
 _PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
 MAX_XML_BYTES = 4 * 1024 * 1024
-MAX_COVER_BYTES = 10 * 1024 * 1024
+MAX_COVER_BYTES = 10 * 1024 * 1024  # = lectern.ingest.cover.COVER_MAX_BYTES
 
 
 class EpubError(ValueError):
@@ -274,19 +274,26 @@ def _find_cover(opf, meta, opf_dir: str, zf: zipfile.ZipFile) -> tuple[str | Non
 
 
 def extract_cover(path: Path, href: str, dest: Path) -> bool:
-    """Write the cover image as JPEG to dest. Returns False if it cannot be decoded."""
-    from io import BytesIO
-
-    from PIL import Image
+    """Write the cover image as JPEG to dest. Returns False if it cannot be decoded, or if
+    the entry or the image it decodes to is too large (checked before decompressing)."""
+    from lectern.ingest.cover import EMBEDDED_FORMATS, CoverRejected, save_cover_jpeg
 
     with zipfile.ZipFile(path) as zf:
-        data = zf.read(href)
+        try:
+            info = zf.getinfo(href)
+        except KeyError:
+            return False
+        if info.file_size > MAX_COVER_BYTES:
+            return False
+        try:  # the header's size may lie: read at most one byte more than the cap
+            with zf.open(info) as fh:
+                data = fh.read(MAX_COVER_BYTES + 1)
+        except Exception:  # noqa: BLE001 - a corrupt entry (bad CRC, bad deflate) is no cover
+            return False
+    if len(data) > MAX_COVER_BYTES:
+        return False
     try:
-        img = Image.open(BytesIO(data))
-        img = img.convert("RGB")
-        img.thumbnail((1200, 1600))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        img.save(dest, "JPEG", quality=85)
+        save_cover_jpeg(data, dest, formats=EMBEDDED_FORMATS, quality=85)
         return True
-    except Exception:  # noqa: BLE001 - corrupt image is not fatal to ingest
+    except (CoverRejected, OSError):  # a corrupt image is not fatal to ingest
         return False

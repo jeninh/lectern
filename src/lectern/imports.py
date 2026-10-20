@@ -53,13 +53,15 @@ from lectern.models import (
     Import,
     ImportFile,
     ImportStatus,
+    TrashedFile,
     UploadSession,
     UploadStatus,
     User,
     Work,
     utcnow,
 )
-from lectern.workmeta import Metadata, apply_metadata, write_book_json
+from lectern.uploads import media_suffix
+from lectern.workmeta import Metadata, apply_metadata, strip_controls, write_book_json
 
 log = logging.getLogger("lectern.imports")
 
@@ -209,9 +211,21 @@ def _probe_audio(path: Path, ffprobe: str) -> tuple[dict, bytes | None]:
 
 
 def _duplicate_of(db: Session, sha256: str) -> int | None:
+    """The work already holding this exact file: as a format, a track, or a removed format
+    still in the trash (filing it anew would make that removal impossible to undo)."""
     hit = db.scalar(select(BookFile.work_id).where(BookFile.sha256 == sha256))
     if hit is None:
         hit = db.scalar(select(AudioTrack.work_id).where(AudioTrack.sha256 == sha256).limit(1))
+    if hit is None:
+        hit = db.scalar(
+            select(TrashedFile.work_id)
+            .where(
+                TrashedFile.sha256 == sha256,
+                TrashedFile.restored_at.is_(None),
+                TrashedFile.work_id.is_not(None),
+            )
+            .limit(1)
+        )
     return hit
 
 
@@ -234,7 +248,7 @@ def stage_upload(
     folder = staging_dir(settings, imp)
     folder.mkdir(parents=True, exist_ok=True)
     stem = safe_component(Path(upload.filename).stem, "file")[:80]
-    suffix = Path(upload.filename).suffix.lower() or (".epub" if kind == FileKind.EBOOK else ".mp3")
+    suffix = media_suffix(upload.filename, upload.media_type)
     rel = unique_name(folder, f"{len(imp.files) + 1:04d} {stem}{suffix}")
     dest = checked(folder, rel)
     move_file(part, dest)
@@ -345,7 +359,7 @@ def _valid_metadata(raw: dict) -> dict:
     ISBN) instead of refusing the whole upload."""
     from pydantic import ValidationError
 
-    data = dict(raw)
+    data = strip_controls(dict(raw))  # read from files: drop what XML cannot carry
     for _ in range(len(data) + 1):
         try:
             return Metadata.model_validate(data).model_dump()

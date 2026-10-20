@@ -1,9 +1,58 @@
-"""Dominant cover colour, used by the UI to tint Continue cards."""
+"""Cover images: the one guarded way to decode one, and the dominant colour the UI uses to
+tint Continue cards.
+
+Every cover (uploaded in the editor, embedded in an EPUB, attached to an audio file) is
+untrusted bytes. :func:`save_cover_jpeg` refuses oversized input, opens it with an allowlist of
+Pillow decoders, and checks the dimensions from the header *before* decoding pixels, so a small
+file claiming a gigapixel canvas (a decompression bomb) is refused without allocating it.
+"""
 
 from __future__ import annotations
 
 import colorsys
+from io import BytesIO
 from pathlib import Path
+
+COVER_MAX_BYTES = 10 * 1024 * 1024
+COVER_MAX_PIXELS = 40_000_000
+COVER_MAX_SIDE = 16_000
+UPLOAD_FORMATS = ("JPEG", "PNG", "WEBP")
+EMBEDDED_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
+
+
+class CoverRejected(ValueError):
+    """``code`` is ``cover_too_large`` or ``not_an_image``."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def save_cover_jpeg(
+    data: bytes, dest: Path, *, formats: tuple[str, ...] = UPLOAD_FORMATS, quality: int = 88
+) -> None:
+    """Decode ``data`` (bounded), scale it to at most 1200×1600, and write it as JPEG."""
+    from PIL import Image
+
+    if len(data) > COVER_MAX_BYTES:
+        raise CoverRejected("cover_too_large")
+    try:
+        img = Image.open(BytesIO(data), formats=list(formats))
+    except Image.DecompressionBombError:
+        raise CoverRejected("cover_too_large") from None
+    except Exception:  # noqa: BLE001 - anything Pillow will not open is not a cover
+        raise CoverRejected("not_an_image") from None
+    with img:
+        w, h = img.size
+        if w < 1 or h < 1 or w > COVER_MAX_SIDE or h > COVER_MAX_SIDE or w * h > COVER_MAX_PIXELS:
+            raise CoverRejected("cover_too_large")
+        try:
+            rgb = img.convert("RGB")
+            rgb.thumbnail((1200, 1600))
+        except Exception:  # noqa: BLE001 - truncated or corrupt pixel data
+            raise CoverRejected("not_an_image") from None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    rgb.save(dest, "JPEG", quality=quality)
 
 
 def dominant_tint(path: Path) -> str | None:

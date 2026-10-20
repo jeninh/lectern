@@ -527,7 +527,7 @@ the input).
 | Call | Purpose |
 | --- | --- |
 | `POST /api/imports {label}` (+`Idempotency-Key`) | Create an import (`uploading`). Same key returns the same import. |
-| `POST /api/uploads {..., import_id}` | Resumable upload into the import: finalize stages the verified file in `<library>/_staging/<id>/` instead of the inbox and reports `file.status` `ok`/`duplicate`. |
+| `POST /api/uploads {..., import_id}` | Resumable upload into the import: finalize stages the verified file in `<library>/_staging/<id>/` instead of the inbox and reports `file.status` `ok`/`duplicate` (a removed format still in the trash counts as a duplicate of its work). The stored name is a sanitized stem plus an extension from the declared media type's allowlist, never the client's raw suffix. A refused staging (unreadable, import closed or full, `staging_failed`) fails the upload session and deletes its bytes. |
 | `POST /api/imports/{id}/complete` | All files are in: detect metadata and propose a target. With `auto_file_imports`, a certain match is filed in the same call. |
 | `GET /api/imports[?status=open\|all\|ready\|filed]`, `GET /api/imports/{id}` | `ImportInfo`: files, `detected`, draft `metadata`, `proposal {action, work_id, confidence high\|medium\|low, score, reason, candidates[≤5], siblings}`, `target`, `use_cover`, `version`. |
 | `PATCH /api/imports/{id} {version, metadata?, target?, use_cover?}` | Edit the draft (optimistic `version`). |
@@ -552,7 +552,17 @@ Each save runs under the library lock with a journal of file steps (folder move,
 formats to trash, cover backups) that is rolled back if any step or the commit fails. It writes
 a `WorkRevision` (before/after of every changed aspect) and the per-work `book.json`.
 `POST …/undo {revision_id}` reverts it while the work is still at that revision's
-`version_after` (`409 undo_conflict` otherwise). Cover uploads are staged first:
+`version_after` (`409 undo_conflict` otherwise, and also when a removed format it would bring
+back is in the library again). `GET /api/works/{id}/revisions` lists opaque entries
+`{id, kind, actor, created_at, version_before, version_after, changed[], undone_at, batch_id,
+undoable}`; the stored before/after snapshots (which name server-side cover backups) are never
+returned.
+
+Text fields of `Metadata`, authors, track titles, chapter titles, and bulk series/tags refuse
+XML 1.0-illegal control characters (`U+0000–U+0008`, `U+000B`, `U+000C`, `U+000E–U+001F`,
+`U+007F`): `422` with `errors[].type == "control_characters"`. Every `422` error entry now
+carries `type`. Text read from files or metadata providers has those characters stripped, and
+OPDS strips them from old rows. Cover uploads are staged first:
 `POST /api/works/{id}/cover` (raw JPEG/PNG/WebP ≤ 10 MiB) → `{token, preview_url}`.
 
 Folder moves never overwrite: same filesystem uses rename; across filesystems (`EXDEV`) the file
@@ -563,8 +573,11 @@ sentences and cancels or stales the alignment, which is re-queued with the same 
 
 Bulk: `POST /api/works/bulk {work_ids[≤500], action: set_authors|set_series|add_tags|
 remove_tags|add_to_shelves|remove_from_shelves|trash, ...}` (+`Idempotency-Key`) → `{batch_id,
-results: [{work_id, ok, error?}]}`; each work is its own transaction and revision.
-`POST /api/works/bulk/{batch_id}/undo` reverts the batch.
+results: [{work_id, ok, error?}]}`; each work is its own transaction and revision. A failing
+work (including a filesystem error, `io_error`) is rolled back alone and reported; the others
+stand. `POST /api/works/bulk/{batch_id}/undo` reverts the batch the same way, per work
+(`{batch_id, results: [{work_id, ok, error?}]}`), auditing each undone work as `work.undo` and
+the batch as `work.bulk_undo` with the failures named.
 
 ### Trash — `/api/trash`
 
@@ -572,7 +585,12 @@ results: [{work_id, ok, error?}]}`; each work is its own transaction and revisio
 everywhere (library, OPDS, KOReader, search, matching). Removed formats go to `_trash/files/`
 with their DB rows kept as JSON. `GET /api/trash`; `POST /api/trash/works|files/{id}/restore`
 (owner/member; restores to the original folder or a free one); `DELETE …` purges now (owner
-only). Housekeeping purges after 30 days.
+only). Housekeeping purges after 30 days. Trash, restore, and file-restore moves are journalled
+and put back if the commit fails; purge resolves the library path (relative or symlinked
+`LECTERN_LIBRARY_DIR`) and never deletes outside `_trash/`. Merging a work carries its removed
+formats (still restorable) to the target and drops the source's revisions and backups after the
+commit. Covers (uploaded: JPEG/PNG/WebP only; embedded: also GIF) are refused above 10 MiB,
+16 000 px per side, or 40 MP, checked from the header before decoding.
 
 ### Metadata suggestions — `POST /api/metadata/lookup`
 
