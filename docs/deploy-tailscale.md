@@ -11,7 +11,9 @@ How it works: Tailscale gives each of your devices a private address (`100.x.y.z
 encrypted connection between them, through any router or firewall, without configuration.
 `tailscale serve` is Tailscale's built-in HTTPS front door: it takes `https://lectern.<your-
 tailnet>.ts.net`, terminates TLS with a certificate Tailscale provisions, and hands the request
-to Lectern over loopback. E-readers running KOReader talk to Lectern's port directly over the
+to Lectern over loopback. Everything ships in the repository as
+[`deploy/tailscale/`](../deploy/tailscale/compose.yaml); you only write a small `.env`, so
+`git pull` keeps working. E-readers running KOReader talk to Lectern's port directly over the
 tailnet (see [Kindle and Kobo](#kindle-and-kobo-with-koreader) for why).
 
 ```diagram
@@ -37,12 +39,12 @@ stays mandatory. The tailnet decides *which devices* can reach the server; Lecte
 
 ## You need
 
-- A machine at home that runs Docker (Docker Desktop, or Docker Engine on Linux with the
-  Compose plugin). Check with `docker compose version`. A Raspberry Pi 4/5 or any old laptop
-  is enough.
+- A machine at home that runs Docker Engine with the Compose and Buildx plugins (or Docker
+  Desktop). Check with `docker compose version`. A Raspberry Pi 4 or 5 is enough; see
+  [Raspberry Pi 4](#raspberry-pi-4) for what to expect there. Any old laptop works too.
 - A free Tailscale account (<https://login.tailscale.com/start>). Sign in with Google, Apple,
   Microsoft, GitHub, or an e-mail passkey; the Personal plan allows 100 devices and 3 users.
-- About 30 minutes.
+- About 30 minutes, plus the first build (20–40 minutes on a Pi 4).
 
 ## Sidecar or host install?
 
@@ -50,10 +52,10 @@ There are two places the Tailscale software can run. **This guide uses the sidec
 
 | | **Sidecar** (Tailscale in a container next to Lectern) | **Host install** (Tailscale on the machine itself) |
 | --- | --- | --- |
-| Setup | Everything is in one `compose.yaml`; nothing to install on the host | Install Tailscale on the host, keep Lectern's stock `compose.yaml`, run two `tailscale serve` commands |
+| Setup | The repository ships it ready to use: `deploy/tailscale/compose.yaml` plus your `.env`; nothing to install on the host but Docker | Install Tailscale on the host, keep Lectern's stock `compose.yaml`, run two `tailscale serve` commands |
 | Machine name | Lectern is its own tailnet machine (`lectern.<tailnet>.ts.net`), separate from the host | The host's name is the URL (`https://nas.<tailnet>.ts.net`); the host may already be on your tailnet for other reasons |
 | Who Lectern sees | Exact: `127.0.0.1` for `tailscale serve`, the device's own tailnet address for e-readers | Docker's loopback publishing hides addresses behind the Docker gateway; e-readers through a TCP forwarder all look alike (details [below](#alternative-host-install)) |
-| Needs | `/dev/net/tun` on the host (standard on Linux and in Docker Desktop's VM) | Root on the host |
+| Needs | `/dev/net/tun` on the host (standard on Linux, including Raspberry Pi OS, and in Docker Desktop's VM) | Root on the host |
 
 The sidecar is more self-contained and gives Lectern the accurate client addresses its rate
 limits and audit log are built around. Pick the host install if the machine already runs
@@ -73,136 +75,119 @@ In the admin console, <https://login.tailscale.com/admin>:
    you have device approval turned on, tick *Pre-approved*. Copy the key (`tskey-auth-…`).
    It is used once, at the first start, and then stored state takes over.
 
-## 2. Put Lectern and Tailscale in one Compose file
+## 2. Get the code and fill in `.env`
 
-Get the code (there is no published image yet; Compose builds it for you):
+There is no published image yet; Compose builds it on your machine. Get the code (if the
+repository is private, clone it with a [read-only deploy key](#cloning-a-private-repository-with-a-deploy-key)
+instead):
 
 ```sh
 git clone https://github.com/jeninh/lectern.git ~/lectern
 cd ~/lectern
-mkdir -p library/_inbox tailscale
+mkdir -p library/_inbox data/lectern data/tailscale
 ```
 
-Create `.env` (never commit this; it holds the auth key). Replace the tailnet name with yours:
+The `mkdir` matters: Lectern runs as your user ID (1000 by default) and must own
+`library/` and `data/lectern/`. Compose refuses to start rather than letting Docker create
+them owned by root. All three folders are git-ignored, so `git pull` never touches them.
+
+Copy the example settings and fill them in:
 
 ```sh
-LECTERN_BASE_URL=https://lectern.tail1234.ts.net
+cp .env.example .env
+chmod 600 .env        # it holds the auth key
+nano .env
+```
+
+Set the two required values (the file explains the optional ones):
+
+```sh
+LECTERN_BASE_URL=https://lectern.tail1234.ts.net   # your tailnet name from step 1
 TS_AUTHKEY=tskey-auth-paste-it-here
 ```
 
 `LECTERN_BASE_URL` must be **exactly** the address you will type in the browser, HTTPS and
 all. Passkeys are bound to it, and Lectern's CSRF check compares the browser's `Origin`
-against it.
+against it. The first part, `lectern`, is the Tailscale machine name (`TS_HOSTNAME`); change
+both together if you want another name. If `id -u` does not print `1000` (it does for the
+first user on Raspberry Pi OS), set `LECTERN_UID` and `LECTERN_GID` to your `id -u` and
+`id -g`.
 
-Create `tailscale/serve.json`. This is `tailscale serve` as a file: HTTPS on 443, proxied to
-Lectern on loopback. `${TS_CERT_DOMAIN}` is filled in by the container with your machine's
-full name.
+**Edit only `.env`.** The two deployment files are tracked templates that you never edit,
+so `git pull` never conflicts:
 
-```json
-{
-  "TCP": { "443": { "HTTPS": true } },
-  "Web": {
-    "${TS_CERT_DOMAIN}:443": {
-      "Handlers": { "/": { "Proxy": "http://127.0.0.1:8080" } }
-    }
-  }
-}
-```
+- [`deploy/tailscale/compose.yaml`](../deploy/tailscale/compose.yaml): the Tailscale
+  sidecar and Lectern. Relative paths in it resolve against its own folder, so it finds the
+  repository (build context), `library/`, `data/`, and `serve.json` wherever you cloned.
+- [`deploy/tailscale/serve.json`](../deploy/tailscale/serve.json): `tailscale serve` as a
+  file, HTTPS on 443 proxied to Lectern on loopback. `${TS_CERT_DOMAIN}` is filled in by the
+  container with the machine's full name. There is no Funnel entry.
 
-Then **replace** the repository's `compose.yaml` with this one:
-
-```yaml
-services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    container_name: lectern-tailscale
-    restart: unless-stopped
-    environment:
-      TS_AUTHKEY: ${TS_AUTHKEY}
-      TS_HOSTNAME: lectern              # -> lectern.<your-tailnet>.ts.net
-      TS_STATE_DIR: /var/lib/tailscale  # node identity; keep it across restarts
-      TS_AUTH_ONCE: "true"              # reuse the stored login instead of the key
-      TS_USERSPACE: "false"             # kernel TUN: real peer addresses (see text)
-      TS_SERVE_CONFIG: /config/serve.json
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-      - ./tailscale/serve.json:/config/serve.json:ro
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-    # No `ports:` on purpose, here or below. The only way in is the tailnet.
-
-  lectern:
-    build: .
-    image: lectern:local
-    container_name: lectern
-    restart: unless-stopped
-    network_mode: service:tailscale     # Lectern lives inside the Tailscale container's network
-    environment:
-      LECTERN_BASE_URL: ${LECTERN_BASE_URL}
-      # tailscale serve connects from loopback and sets X-Forwarded-For to the caller's
-      # tailnet address. Nothing else is trusted.
-      LECTERN_TRUSTED_PROXIES: 127.0.0.1
-      LECTERN_LOG_LEVEL: INFO
-    volumes:
-      - lectern-data:/data
-      - ./library:/library
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
-volumes:
-  lectern-data:
-  tailscale-state:
-```
-
-What the two unusual lines do:
+What the unusual parts of the Compose file do:
 
 - `network_mode: service:tailscale` makes the Lectern container share the Tailscale
   container's network stack. Lectern's port 8080 is therefore *the tailnet machine's* port
-  8080, and `tailscale serve`'s `http://127.0.0.1:8080` is Lectern. Nothing is published to
-  the host or the LAN.
+  8080, and `tailscale serve`'s `http://127.0.0.1:8080` is Lectern. Nothing has `ports:`, so
+  nothing is published to the host or the LAN.
 - `TS_USERSPACE: "false"` runs Tailscale with a real network device (`/dev/net/tun`, hence
   `cap_add: NET_ADMIN`). Lectern then sees each device's actual tailnet address when it
   connects directly (e-readers), and sees `127.0.0.1` only for `tailscale serve`, which is why
-  `LECTERN_TRUSTED_PROXIES=127.0.0.1` is exact. If the container fails to start with a
-  `/dev/net/tun` error, change it to `"true"` and remove the `devices:` and `cap_add:` blocks;
-  everything still works, with one difference described under
-  [Security caveats](#security-caveats-in-plain-words).
+  `LECTERN_TRUSTED_PROXIES=127.0.0.1` is exact (and fixed in the file, not in `.env`).
+- Lectern waits until the sidecar's health check reports a tailnet address, and is
+  restarted with it. The health endpoint listens on loopback only.
+- The Tailscale image is pinned to a release and digest; upgrades arrive with `git pull`.
+
+**Every command runs from the repository root with the same prefix:**
+
+```sh
+docker compose --env-file .env -f deploy/tailscale/compose.yaml <command>
+```
+
+Why both flags: with `-f deploy/tailscale/compose.yaml`, Compose treats `deploy/tailscale/`
+as the project folder and would look for `.env` *there*; `--env-file .env` points it at the
+root `.env` explicitly. The alternative, `COMPOSE_FILE=deploy/tailscale/compose.yaml` inside
+`.env`, mixes Compose's own settings into the file that holds your secrets, and which `.env`
+gets read then depends on your working directory and Compose version. The explicit command
+behaves the same everywhere. If typing it gets old, add an alias to `~/.bashrc`; with
+absolute paths it works from any folder:
+
+```sh
+alias lectern-compose='docker compose --env-file ~/lectern/.env -f ~/lectern/deploy/tailscale/compose.yaml'
+```
+
+(The rest of this guide spells the command out.)
 
 ## 3. Start it and create the owner account
 
 ```sh
 cd ~/lectern
-docker compose up -d --build
-docker compose logs -f tailscale
+docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build
+docker compose --env-file .env -f deploy/tailscale/compose.yaml logs -f tailscale
 ```
 
-The first build takes a few minutes (it compiles the web app and installs Python packages).
-In the Tailscale log, wait for a line saying the serve config was applied (if it instead says
-it *cannot issue TLS certs*, HTTPS is not enabled for your tailnet; go back to step 1). The
-machine `lectern` now appears on your **Machines** page with its `100.x.y.z` address.
-
-Then:
+The first build takes a few minutes on a laptop and roughly 20–40 minutes on a Raspberry
+Pi 4 (it builds the web app and installs Python packages). In the Tailscale log, wait for a
+line saying the serve config was applied (if it instead says it *cannot issue TLS certs*,
+HTTPS is not enabled for your tailnet; go back to step 1). The machine `lectern` now appears
+on your **Machines** page with its `100.x.y.z` address. Lectern starts once the sidecar is
+healthy; `ps` shows both as `healthy` after a minute:
 
 ```sh
-docker compose logs lectern | grep -A3 "FIRST-RUN SETUP"
+docker compose --env-file .env -f deploy/tailscale/compose.yaml ps
+docker compose --env-file .env -f deploy/tailscale/compose.yaml logs lectern | grep -A3 "FIRST-RUN SETUP"
 ```
 
 The log shows a link like `https://lectern.tail1234.ts.net/setup?token=…`. Open it, within 30
 minutes, from a device that is on your tailnet (the computer you are typing on is fine if it
 runs Tailscale; otherwise your phone, see next step) and create the owner account.
-Registration closes permanently after that. Passkeys work immediately because the address is
-HTTPS and `LECTERN_BASE_URL` matches it exactly.
+Registration closes permanently after that. If the token expired, restart Lectern
+(`… restart lectern`) for a fresh one; that only works while setup is incomplete. Passkeys
+work immediately because the address is HTTPS and `LECTERN_BASE_URL` matches it exactly.
 
 **Do this now:** on the Machines page, open the `⋯` menu of `lectern` and choose
 **Disable key expiry**. Otherwise the node's key expires after 180 days (the default) and the
-server silently drops off your tailnet until you re-authenticate it.
+server silently drops off your tailnet until you re-authenticate it. The auth key in `.env`
+is no longer needed; you may delete its value.
 
 ## 4. Phones and laptops
 
@@ -344,31 +329,243 @@ KOReader plugin above is the route; tailscale_kual is Kindle-only.
   **Data saver** in the player: Lectern makes a ~64 kb/s copy once (under
   `derived/audio/`, originals untouched) and streams that instead.
 
-## Backups
+## Raspberry Pi 4
 
-Three things hold state:
+What we recommend, and what we have and have not measured:
+
+- **OS:** Raspberry Pi OS Lite (64-bit), the Debian 13 "trixie" release, written with
+  Raspberry Pi Imager (set a user, enable SSH with your public key). 64-bit matters: the
+  image is built for `linux/arm64`, and CI builds and starts that image (emulated) on every
+  pull request. The 32-bit OS is not supported.
+- **Docker:** install Docker Engine with the Compose and Buildx plugins from Docker's own
+  apt repository by following Docker's [Debian instructions](https://docs.docker.com/engine/install/debian/)
+  (they apply to 64-bit Raspberry Pi OS), then `sudo usermod -aG docker $USER` and log in
+  again. `ls -l /dev/net/tun` should show the device; it is part of the stock kernel.
+- **Memory:** an 8 GB Pi 4 has plenty of room for this. Without transcription, Lectern and
+  Tailscale should need a few hundred megabytes; the first build briefly needs more (the
+  web app build and package installs). We have not measured either on a Pi, and we have
+  not tried Pis with less memory.
+- **First build:** roughly 20–40 minutes; later rebuilds reuse Docker's cache and take a
+  few minutes unless dependencies changed. These are estimates; we have not timed a Pi.
+- **Storage:** put the library on a USB 3 SSD rather than the SD card if you can (an SSD is
+  faster and does not wear out from SQLite writes; a Pi 4 can also boot from it). Plan for
+  about 5 GB of Docker images and build cache (`docker builder prune` reclaims cache), plus
+  your library: EPUBs are a few MB each, audiobooks hundreds of MB to over 1 GB each, plus
+  a ~64 kb/s data-saver copy per audiobook you listen to that way. To keep the checkout on
+  the SD card and the library on the SSD, set `LECTERN_LIBRARY_PATH` (and optionally
+  `LECTERN_DATA_PATH`) in `.env` to absolute paths on the SSD, created and owned by your
+  user.
+- **Image:** keep the default image (`LECTERN_EXTRAS` empty). Do **not** build the `align`
+  image on a Pi.
+
+### Aligning audiobooks from a Mac or another computer
+
+A Pi is too small to transcribe audiobooks well, so the default image does not try: new
+alignment jobs wait in a queue until an external worker takes them. Run the worker on a Mac
+(Apple Silicon or Intel) or any Linux/Windows computer with Python 3.12+ that is on your
+tailnet. It connects out to Lectern's HTTPS address with an owner-issued worker key, so it
+needs nothing opened anywhere:
+
+1. As the owner, create a worker credential (see
+   [External workers](alignment.md#external-workers); the `lw_…` secret is shown once).
+2. On the Mac, install the worker from your clone of the repository and point it at the Pi:
+
+   ```sh
+   python3 -m venv ~/.lectern-worker
+   ~/.lectern-worker/bin/pip install "$HOME/src/lectern[align]"   # path to your clone
+   printf '%s\n' 'lw_paste-it-here' > ~/.lectern-worker/key && chmod 600 ~/.lectern-worker/key
+   ~/.lectern-worker/bin/lectern worker --server https://lectern.tail1234.ts.net \
+     --key-file ~/.lectern-worker/key --name mac
+   ```
+
+The worker downloads only the inputs of the job it holds, transcribes locally, uploads the
+result, and loops; `Ctrl-C` hands the current job back. Models download on first use. Leave
+it running while there is a backlog; nothing breaks while it is off, jobs just wait.
+
+## Cloning a private repository with a deploy key
+
+If the repository is private, give the Pi a **read-only deploy key**: an SSH key that can
+read this one repository and nothing else, cannot push, and is not tied to your GitHub
+account. Never put a token or password in the clone URL or in `.git/config`.
+
+On the Pi:
+
+```sh
+install -d -m 700 ~/.ssh
+ssh-keygen -t ed25519 -f ~/.ssh/lectern_deploy -C "lectern deploy key ($(hostname))"
+chmod 600 ~/.ssh/lectern_deploy
+chmod 644 ~/.ssh/lectern_deploy.pub
+cat ~/.ssh/lectern_deploy.pub
+```
+
+A passphrase is optional: without one, `git pull` works unattended, and the key can only
+read this repository; with one, you type it on each pull.
+
+On GitHub (repository admin): the repository's **Settings → Deploy keys → Add deploy key**.
+Paste the `.pub` line, name it after the Pi, and leave **Allow write access unticked**.
+
+Back on the Pi, add a host alias so this key is used only for this repository. Append to
+`~/.ssh/config` (create it with `chmod 600` if it does not exist):
+
+```text
+Host github-lectern
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/lectern_deploy
+    IdentitiesOnly yes
+```
+
+Verify GitHub's host key before trusting it. Fetch it, then compare the fingerprint with the
+one GitHub publishes at
+<https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints>
+(for Ed25519, `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU` when this was written):
+
+```sh
+ssh-keyscan -t ed25519 github.com > /tmp/github.key
+ssh-keygen -lf /tmp/github.key          # must print the published fingerprint
+cat /tmp/github.key >> ~/.ssh/known_hosts && rm /tmp/github.key
+ssh -T github-lectern                   # "Hi jeninh/lectern! You've successfully authenticated…"
+```
+
+Only append the key if the fingerprints match. Then clone through the alias and continue
+with step 2 (`mkdir`, `.env`):
+
+```sh
+git clone git@github-lectern:jeninh/lectern.git ~/lectern
+```
+
+`git pull` in `~/lectern` then uses the deploy key automatically. To revoke the Pi's access,
+delete the key under **Deploy keys**.
+
+## Upgrading
+
+```sh
+cd ~/lectern
+git pull --ff-only
+docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build
+docker image prune -f        # optional: drop the previous image
+```
+
+`git pull` only changes tracked files; your `.env`, `data/`, and `library/` stay as they are,
+so there is nothing to merge. Upgrades to the Tailscale image arrive the same way (it is
+pinned in `deploy/tailscale/compose.yaml`). Lectern updates its database schema on start, so
+[back up](#backups-and-restore) first. If `git pull --ff-only` refuses because a tracked file
+was changed locally, `git status` shows which; move your change into `.env` and
+`git restore <file>`.
+
+## Logs and status
+
+```sh
+docker compose --env-file .env -f deploy/tailscale/compose.yaml ps
+docker compose --env-file .env -f deploy/tailscale/compose.yaml logs -f lectern
+docker compose --env-file .env -f deploy/tailscale/compose.yaml logs --since 1h tailscale
+docker compose --env-file .env -f deploy/tailscale/compose.yaml exec tailscale tailscale status
+docker compose --env-file .env -f deploy/tailscale/compose.yaml exec tailscale tailscale serve status
+```
+
+Lectern's own record of sign-ins and admin actions is the **Activity** page in the web app.
+
+## Backups and restore
+
+Four things hold state:
 
 | What | Where | Why it matters |
 | --- | --- | --- |
-| Library | `~/lectern/library` | your books and covers |
-| Lectern database and signing key | Docker volume `lectern-data` (`/data` in the container) | users, passkeys, devices, reading progress, audit log |
-| Tailscale node state | Docker volume `tailscale-state` | the machine identity; losing it only means signing the node in again with a new auth key |
+| Library | `~/lectern/library` (or `LECTERN_LIBRARY_PATH`) | your books, audiobooks, and covers |
+| Lectern database and signing key | `~/lectern/data/lectern` (or `LECTERN_DATA_PATH`) | users, passkeys, devices, reading progress, audit log |
+| Settings | `~/lectern/.env` | the base URL and options; keep a copy in your password manager |
+| Tailscale node state | `~/lectern/data/tailscale` (or `TS_STATE_PATH`), owned by root | the machine identity; losing it means signing the node in again |
 
-Back up the first two; the third is optional. A simple nightly job:
+Back up the first three; the fourth is optional but makes a restore seamless. A simple
+nightly job:
 
 ```sh
 cd ~/lectern
 mkdir -p backups
-docker compose stop lectern
-docker run --rm --volumes-from lectern -v "$PWD/backups":/backup alpine \
-  tar czf "/backup/lectern-data-$(date +%F).tgz" -C /data .
-docker compose start lectern
+docker compose --env-file .env -f deploy/tailscale/compose.yaml stop lectern
+tar czf "backups/lectern-data-$(date +%F).tgz" -C data/lectern .
+docker compose --env-file .env -f deploy/tailscale/compose.yaml start lectern
 rsync -a --delete library/ backups/library/
+# optional; it contains the node's private key, so protect the archive:
+sudo tar czf "backups/tailscale-state-$(date +%F).tgz" -C data/tailscale .
 ```
 
 Stopping Lectern for the few seconds the copy takes guarantees a consistent SQLite file.
-Keep `backups/` somewhere other than the same disk (an external drive, another machine on
-the tailnet, cloud storage); the whole point of a personal library is not losing it.
+`backups/` is git-ignored, but it is on the same disk: copy it somewhere else (an external
+drive, another machine on the tailnet, cloud storage); the whole point of a personal library
+is not losing it.
+
+**Restore** onto a fresh clone (or a new Pi), with `.env` copied back:
+
+```sh
+cd ~/lectern
+docker compose --env-file .env -f deploy/tailscale/compose.yaml down
+mkdir -p data/lectern library/_inbox
+tar xzf /path/to/lectern-data-2026-10-20.tgz -C data/lectern
+rsync -a /path/to/backups/library/ library/
+# with the Tailscale backup:
+sudo install -d -m 700 data/tailscale
+sudo tar xzf /path/to/tailscale-state-2026-10-20.tgz -C data/tailscale
+docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build
+```
+
+`data/lectern` and `library` must belong to `LECTERN_UID:LECTERN_GID`
+(`sudo chown -R 1000:1000 data/lectern library` if you restored as another user). Without
+the Tailscale backup, first **remove the old `lectern` machine** on the Machines page, then
+put a fresh auth key in `.env`: otherwise the new node is named `lectern-1`, the address
+changes, and passkeys (bound to the old name) stop working.
+
+## Troubleshooting
+
+- **`required variable LECTERN_BASE_URL is missing a value`**: you ran Compose without
+  `--env-file .env`, from another folder, or `.env` lacks the line. Run from `~/lectern`
+  with the full command.
+- **`bind source path does not exist`**: create the folders as your user,
+  `mkdir -p library/_inbox data/lectern` (or the paths set in `.env`).
+- **Lectern restarts with `Permission denied` or `unable to open database file`**:
+  `data/lectern` or `library` is not owned by `LECTERN_UID:LECTERN_GID`;
+  `sudo chown -R "$(id -u):$(id -g)" data/lectern library` and match `.env`.
+- **Lectern stays `Created`; `dependency failed to start: container … is unhealthy`**: the
+  sidecar never got onto the tailnet. Read `logs tailscale`: an invalid or already-used
+  auth key (make a new one, and delete `data/tailscale/*` only if the node never joined),
+  device approval pending in the admin console, or no Internet.
+- **`error gathering device information while adding custom device "/dev/net/tun"`**: the
+  host has no TUN device. On Linux, `sudo modprobe tun` and add `tun` to
+  `/etc/modules-load.d/tun.conf`. Raspberry Pi OS and Docker Desktop have it. If your host
+  cannot provide it, use the [host install](#alternative-host-install) instead.
+- **Serve log says it cannot issue TLS certificates**: enable HTTPS for the tailnet (step 1),
+  then `… restart tailscale`.
+- **The site loads but passkey creation or sign-in fails, or forms say the origin is not
+  allowed**: `LECTERN_BASE_URL` does not match the address in the browser exactly (name,
+  tailnet, `https://`, no trailing path). Fix `.env`, then `… up -d`.
+- **`https://lectern…ts.net` does not resolve**: the device is not on the tailnet, MagicDNS
+  is off, or the machine got another name (`lectern-1`; see restore above).
+- **First build fails on a Pi with `no space left on device` or the Pi becomes unresponsive**:
+  free disk (`docker system df`, `docker builder prune`) or add swap, then rerun `up -d --build`.
+- **Setup link expired**: `… restart lectern` and read the new link from the log; this only
+  works while no owner exists.
+
+## Moving from the old instructions
+
+Earlier versions of this guide had you **replace** the root `compose.yaml` and store state in
+the Docker volumes `lectern_lectern-data` and `lectern_tailscale-state`. To switch without
+losing anything:
+
+```sh
+cd ~/lectern
+docker compose down                      # the old stack, using your edited compose.yaml
+mkdir -p data/lectern data/tailscale library/_inbox
+docker run --rm -v lectern_lectern-data:/from -v "$PWD/data/lectern":/to alpine cp -a /from/. /to/
+docker run --rm -v lectern_tailscale-state:/from -v "$PWD/data/tailscale":/to alpine cp -a /from/. /to/
+sudo chown -R "$(id -u):$(id -g)" data/lectern
+git restore compose.yaml && rm -f tailscale/serve.json && rmdir tailscale
+git pull --ff-only
+docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build
+```
+
+Check the volume names with `docker volume ls` first (they start with your checkout folder's
+name). The node keeps its name and address because its state moved with it. Once everything
+works, `docker volume rm lectern_lectern-data lectern_tailscale-state`.
 
 ## Security caveats, in plain words
 
@@ -383,24 +580,26 @@ the tailnet, cloud storage); the whole point of a personal library is not losing
 - **Your tailnet's access rules apply.** Tailscale's default policy lets every device on a
   tailnet reach every other one, which is right for a household. You can tighten it in
   **Access controls**, for example so e-readers reach only `lectern` on port 8080.
-- **The auth key is a secret** until used; it is in `.env` only. The `tailscale-state` volume
-  holds the node's private key; treat the Docker host as you would any server.
+- **The auth key is a secret** until used; it is in `.env` only (git-ignored, `chmod 600`).
+  `data/tailscale` holds the node's private key; treat the Docker host as you would any
+  server, and its backups too.
 - **`LECTERN_TRUSTED_PROXIES` must stay `127.0.0.1`.** Anything listed there can tell Lectern
   "this request came from address X", which affects rate limiting and the audit log (never
-  authentication). In the default kernel-TUN setup only `tailscale serve` connects from
-  loopback. If you had to fall back to `TS_USERSPACE: "true"`, Tailscale's userspace network
-  stack delivers *every* tailnet connection, including e-readers, from `127.0.0.1`; a device
-  on your tailnet could then send its own `X-Forwarded-For` to pick a rate-limit bucket or
-  audit address, and devices without the header all share one. Harmless for a household;
-  know that it is there.
+  authentication). The Compose file fixes the value and runs Tailscale with kernel TUN, so
+  only `tailscale serve` connects from loopback. In Tailscale's userspace mode (which this
+  setup does not use), its network stack delivers *every* tailnet connection, including
+  e-readers, from `127.0.0.1`; a device on your tailnet could then send its own
+  `X-Forwarded-For` to pick a rate-limit bucket or audit address, and devices without the
+  header all share one. That is why the template needs `/dev/net/tun` rather than falling
+  back silently.
 - **E-reader traffic is `http://` inside the tailnet.** It is encrypted by WireGuard between
   the device and your Tailscale container, but there is no TLS and the device checks no
   certificate. Use the per-device sync key and app password, never your password, and revoke
   a lost device from **Devices**.
 - **Passkeys are bound to the hostname.** Renaming the machine (or your tailnet) later means
   registering passkeys again. Password + TOTP keep working.
-- **Keep things updated**: `cd ~/lectern && git pull && docker compose pull tailscale &&
-  docker compose up -d --build`.
+- **Keep things updated**: see [Upgrading](#upgrading). The Tailscale image is pinned, so
+  it changes only when the repository updates the pin.
 - If you need a public hostname rather than a private network, Cloudflare Tunnel also works
   (set `LECTERN_TRUSTED_PROXIES` to the `cloudflared` container's address *only* and
   explicitly set `LECTERN_TRUST_CF_CONNECTING_IP=1` so Lectern reads `CF-Connecting-IP` from
