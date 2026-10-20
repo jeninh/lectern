@@ -92,8 +92,8 @@ class Settings(BaseSettings):
     align_threads: int = 0  # 0 = CTranslate2 default
     # Audio is decoded as a stream and transcribed in windows of this many seconds that
     # overlap by align_overlap_seconds, so memory does not grow with the length of a track.
-    align_window_seconds: float = Field(default=900.0, ge=10.0, le=4 * 3600)
-    align_overlap_seconds: float = Field(default=30.0, ge=0.0, le=600.0)
+    align_window_seconds: float = Field(default=300.0, ge=10.0, le=4 * 3600)
+    align_overlap_seconds: float = Field(default=15.0, ge=0.0, le=600.0)
     align_local_worker: bool = True
     # The local worker aligns in a child process so that running out of memory or crashing
     # cannot take the server down. The child's resident memory is capped at this many MiB

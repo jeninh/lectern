@@ -52,10 +52,12 @@ MODELS = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo", "dist
 MODEL_ORDER = {m: i for i, m in enumerate(MODELS)}
 
 SAMPLING_RATE = 16_000  # what Whisper models take
-# 15 min of 16 kHz float32 is 58 MB; with the STFT of the window that is ~250 MB on top of
-# the model, whatever the length of the book.
-DEFAULT_WINDOW_S = 900.0
-DEFAULT_OVERLAP_S = 30.0
+# faster-whisper needs ~70 bytes of transient memory per 16 kHz sample of what it is given
+# (float32 audio, VAD, and the STFT and mel features of all of it): ~1.1 MB per second.
+# Five-minute windows add ~350 MB to the model, whatever the length of the book
+# (docs/alignment.md, "Long recordings"); the overlap costs 5 % more transcription.
+DEFAULT_WINDOW_S = 300.0
+DEFAULT_OVERLAP_S = 15.0
 MIN_WINDOW_S = 10.0
 # Two words this close (start times) with the same normalised text are one word heard twice.
 DUPLICATE_WORD_S = 1.0
