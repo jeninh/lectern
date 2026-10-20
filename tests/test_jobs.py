@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import shutil
+import sys
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -889,3 +890,167 @@ def test_a_result_moves_stored_positions_onto_the_aligned_sentences(
         n = got["position"]["sentence_n"]
         s = db.scalar(select(Sentence).where(Sentence.work_id == work_id, Sentence.n == n))
         assert s.char_start <= char < s.char_end and s.spine_index == 2
+
+
+# --- the isolated local worker (lectern.align.isolate) ------------------------------------------
+
+
+def _transcript_file(tmp_path: Path) -> Path:
+    path = tmp_path / "words.json"
+    path.write_text(json.dumps(TRANSCRIPT))
+    return path
+
+
+def isolated_worker(settings, tmp_path, **kw) -> LocalWorker:
+    kw.setdefault("transcript", _transcript_file(tmp_path))
+    return LocalWorker(
+        session_factory(),
+        data_dir=settings.data_dir,
+        library=settings.library_dir,
+        model_label="recorded-small",
+        isolated=True,
+        poll_s=0.05,
+        **kw,
+    )
+
+
+def child(code: str) -> list[str]:
+    """A stand-in alignment process: reads the job spec like the real one, then runs ``code``."""
+    return [
+        sys.executable,
+        "-c",
+        "import json, os, signal, sys, time\nspec = json.load(sys.stdin)\n" + code,
+    ]
+
+
+def test_isolated_worker_aligns_in_a_child_process(client, owner, work_id, settings, tmp_path):
+    worker = isolated_worker(settings, tmp_path, memory_limit_mb=0)
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "succeeded", job
+    assert job["result"]["sentence_count"] == 293
+    assert job["result"]["coverage"] == pytest.approx(15 / 293, abs=1e-4)
+    # the child measured its own memory, and its log is kept
+    assert job["result"]["stats"]["peak_rss_mb"] > 0
+    assert (settings.data_dir / "logs" / "align" / f"job-{job_id}-attempt-1.log").is_file()
+    assert not list((settings.data_dir / "tmp").glob("align-result-*"))
+
+
+@pytest.mark.parametrize(
+    ("code", "kind", "status", "error"),
+    [
+        # a native crash: retried with backoff like any failure
+        ("os.kill(os.getpid(), signal.SIGSEGV)", "crash", JobStatus.QUEUED, "killed by SIGSEGV"),
+        ("sys.exit(7)", "crash", JobStatus.QUEUED, "exited with status 7"),
+        # what the kernel's out-of-memory killer does: fails for good, no retry loop
+        ("os.kill(os.getpid(), signal.SIGKILL)", "oom", JobStatus.FAILED, "out-of-memory killer"),
+        # the child's exit status for a Python MemoryError
+        ("sys.exit(3)", "oom", JobStatus.FAILED, "MemoryError"),
+    ],
+)
+def test_a_crashing_alignment_fails_the_job_not_the_server(
+    client, owner, work_id, settings, tmp_path, code, kind, status, error
+):
+    code = "sys.stderr.write('decoding track 1\\n'); sys.stderr.flush()\n" + code
+    worker = isolated_worker(settings, tmp_path, child_command=child(code))
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = db_job(job_id)
+    assert job.status == status and error in job.error, job.error
+    assert "decoding track 1" in job.error  # the child's last log lines are kept
+    assert job.lease_token_hash is None or status == JobStatus.FAILED
+    if status == JobStatus.QUEUED:
+        assert job.run_after > utcnow() and job.attempts == 1
+    else:
+        al = client.get(f"/api/works/{work_id}/tracks").json()["alignment"]
+        assert al["status"] == "failed" and "out of memory" in al["error"]
+    assert client.get("/healthz").status_code == 200
+
+
+def test_memory_cap_kills_the_child(client, owner, work_id, settings, tmp_path):
+    hog = "x = bytearray(400 * 2**20)\nfor i in range(0, len(x), 4096): x[i] = 1\ntime.sleep(30)"
+    worker = isolated_worker(settings, tmp_path, child_command=child(hog), memory_limit_mb=150)
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = db_job(job_id)
+    assert job.status == JobStatus.FAILED
+    assert "used more than 150 MiB" in job.error and "LECTERN_ALIGN_WINDOW_SECONDS" in job.error
+
+
+def test_crashes_end_after_max_attempts(client, owner, work_id, settings, tmp_path):
+    worker = isolated_worker(settings, tmp_path, child_command=child("os.abort()"))
+    job_id = request_align(client, owner, work_id).json()["id"]
+    for attempt in range(1, 4):
+        set_job(job_id, run_after=utcnow())
+        assert worker.run_once()
+        assert db_job(job_id).attempts == attempt
+    job = db_job(job_id)
+    assert job.status == JobStatus.FAILED and "SIGABRT" in job.error
+    set_job(job_id, run_after=utcnow())
+    assert not worker.run_once()  # nothing left to claim
+
+
+def _wait_for(predicate, timeout=10.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _alive(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # a zombie is gone for our purposes
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+SLOW_CHILD = (
+    "open(os.environ['PIDFILE'], 'w').write(str(os.getpid()))\n"
+    "print(json.dumps({'type': 'progress', 'progress': 0.4, 'message': 'transcribing'}), flush=True)\n"
+    "time.sleep(60)"
+)
+
+
+def test_shutdown_stops_the_child_and_hands_the_job_back(
+    client, owner, work_id, settings, tmp_path, monkeypatch
+):
+    pidfile = tmp_path / "child.pid"
+    monkeypatch.setenv("PIDFILE", str(pidfile))
+    worker = isolated_worker(settings, tmp_path, child_command=child(SLOW_CHILD))
+    job_id = request_align(client, owner, work_id).json()["id"]
+    worker.start()
+    assert _wait_for(pidfile.exists)
+    assert _wait_for(lambda: pidfile.read_text() != "")
+    pid = int(pidfile.read_text())
+    worker.stop()  # what the app lifespan does on shutdown
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.attempts == 0 and job.lease_token_hash is None
+    assert not _alive(pid)
+
+
+def test_a_lost_lease_kills_the_child(client, owner, work_id, settings, tmp_path, monkeypatch):
+    monkeypatch.setattr("lectern.align.worker.MAX_HEARTBEAT_S", 1.0)
+    pidfile = tmp_path / "child.pid"
+    monkeypatch.setenv("PIDFILE", str(pidfile))
+    worker = isolated_worker(settings, tmp_path, child_command=child(SLOW_CHILD), lease_s=60)
+    job_id = request_align(client, owner, work_id).json()["id"]
+    done = threading.Event()
+    threading.Thread(target=lambda: (worker.run_once(), done.set())).start()
+    assert _wait_for(lambda: pidfile.exists() and pidfile.read_text() != "")
+    pid = int(pidfile.read_text())
+    api_post(client, f"/api/jobs/{job_id}/cancel", owner["csrf"])
+    assert done.wait(30)  # the next heartbeat (every second here) finds the lease gone
+    assert db_job(job_id).status == JobStatus.CANCELLED
+    assert not _alive(pid)

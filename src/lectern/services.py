@@ -103,11 +103,20 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
                         compute_type=settings.align_compute_type,
                         threads=settings.align_threads,
                         download_root=settings.data_dir / "models",
+                        window_s=settings.align_window_seconds,
+                        overlap_s=settings.align_overlap_seconds,
                     ),
                     poll_s=settings.worker_poll_seconds,
+                    isolated=True,
+                    memory_limit_mb=settings.align_memory_limit_mb,
                 )
             )
-            log.info("local alignment worker enabled (model %s)", settings.align_model)
+            log.info(
+                "local alignment worker enabled (model %s, %g s windows, memory cap %s)",
+                settings.align_model,
+                settings.align_window_seconds,
+                f"{started[-1].memory_limit_mb} MiB" if started[-1].memory_limit_mb else "none",
+            )
         else:
             log.info(
                 "faster-whisper is not installed: alignment jobs wait for an external worker "
