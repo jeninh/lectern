@@ -50,12 +50,18 @@ def new_public_id() -> str:
     return secrets.token_urlsafe(16)  # 22 URL-safe characters
 
 
-def inbox_name_for(filename: str, media_type: str) -> str:
+def media_suffix(filename: str, media_type: str) -> str:
+    """The extension a stored copy gets: the client's own only when it is one the declared
+    media type allows (``.m4a`` for ``audio/mp4``), else the type's default. A client name never
+    supplies an extension the allowlist does not know (a 300-character suffix, ``.exe``)."""
     allowed, default = MEDIA_TYPES[media_type]
-    p = Path(filename)
-    ext = p.suffix.lower() if p.suffix.lower() in allowed else default
-    stem = safe_component(p.stem, "upload")[:80]
-    return f"{stem}-{secrets.token_hex(3)}{ext}"
+    ext = Path(filename).suffix.lower()
+    return ext if ext in allowed else default
+
+
+def inbox_name_for(filename: str, media_type: str) -> str:
+    stem = safe_component(Path(filename).stem, "upload")[:80]
+    return f"{stem}-{secrets.token_hex(3)}{media_suffix(filename, media_type)}"
 
 
 def move_into_inbox(settings: Settings, src: Path, name: str) -> Path:

@@ -106,31 +106,36 @@ class MatchResult:
     reason: str = ""
 
 
-def match_work(
+def rank_candidates(
     db: Session,
     title: str,
     authors: list[str],
     isbn: str | None,
     *,
     prefer_audio: bool = False,
-) -> MatchResult:
-    """Find the work an incoming file belongs to, with how sure we are.
+    limit: int = 5,
+) -> list[MatchResult]:
+    """Existing works an incoming file may belong to, best first: certain matches (by title
+    score), then uncertain ones (by 0.7 title + 0.3 author). Trashed works never match.
 
     Certain: same ISBN, or title >= 92 and author >= 85 (fuzzy). For audio, also a near-exact
     title on a work that already has audio tracks. Uncertain (a person confirms in the UI):
     title >= 75, or a title match whose author differs (audiobook tags often name the narrator).
     """
+    out: list[MatchResult] = []
     if isbn:
-        hit = db.scalar(select(Work).where(Work.isbn == isbn))
+        hit = db.scalar(select(Work).where(Work.isbn == isbn, Work.trashed_at.is_(None)))
         if hit is not None:
-            return MatchResult(hit, True, 100.0, "same ISBN")
+            out.append(MatchResult(hit, True, 100.0, "same ISBN"))
     norm_title = sort_title(clean_title(title))
     if not norm_title:
-        return MatchResult()
+        return out[:limit]
     primary = author_key(authors[0]) if authors else ""
     # Cheap prefilter on the first word so we do not fuzz the whole table.
     first = norm_title.split()[0]
-    candidates = db.scalars(select(Work).where(Work.sort_title.contains(first))).all()
+    candidates = db.scalars(
+        select(Work).where(Work.sort_title.contains(first), Work.trashed_at.is_(None))
+    ).all()
     with_audio: set[int] = set()
     if prefer_audio and candidates:
         from lectern.models import AudioTrack
@@ -140,9 +145,12 @@ def match_work(
                 select(AudioTrack.work_id).where(AudioTrack.work_id.in_([w.id for w in candidates]))
             )
         )
-    best_certain: tuple[float, Work, str] | None = None
-    best_maybe: tuple[float, Work, str] | None = None
+    certain_hits: list[tuple[float, MatchResult]] = []
+    maybe_hits: list[tuple[float, MatchResult]] = []
+    seen = {r.work.id for r in out if r.work is not None}
     for work in candidates:
+        if work.id in seen:
+            continue
         t_score = fuzz.token_sort_ratio(norm_title, work.sort_title)
         if t_score < SUGGEST_THRESHOLD:
             continue
@@ -158,14 +166,26 @@ def match_work(
         if not certain and work.id in with_audio and t_score >= AUDIO_CONTINUATION_THRESHOLD:
             certain, reason = True, f"{reason}, continues its audiobook"
         if certain:
-            if best_certain is None or t_score > best_certain[0]:
-                best_certain = (t_score, work, reason)
+            certain_hits.append((t_score, MatchResult(work, True, t_score, reason)))
         else:
             combined = 0.7 * t_score + 0.3 * (a_score if a_score is not None else 50)
-            if best_maybe is None or combined > best_maybe[0]:
-                best_maybe = (combined, work, reason)
-    if best_certain:
-        return MatchResult(best_certain[1], True, best_certain[0], best_certain[2])
-    if best_maybe:
-        return MatchResult(best_maybe[1], False, round(best_maybe[0], 1), best_maybe[2])
-    return MatchResult()
+            maybe_hits.append((combined, MatchResult(work, False, round(combined, 1), reason)))
+    # Stable sorts: equal scores keep table order, as the single-best search did.
+    certain_hits.sort(key=lambda x: -x[0])
+    maybe_hits.sort(key=lambda x: -x[0])
+    out += [r for _, r in certain_hits] + [r for _, r in maybe_hits]
+    return out[:limit]
+
+
+def match_work(
+    db: Session,
+    title: str,
+    authors: list[str],
+    isbn: str | None,
+    *,
+    prefer_audio: bool = False,
+) -> MatchResult:
+    """Find the work an incoming file belongs to, with how sure we are (see
+    :func:`rank_candidates`)."""
+    ranked = rank_candidates(db, title, authors, isbn, prefer_audio=prefer_audio, limit=1)
+    return ranked[0] if ranked else MatchResult()

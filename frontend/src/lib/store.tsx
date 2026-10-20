@@ -1,15 +1,21 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { get, post, setCsrfToken } from "./api";
 import { useLocalStorage, useVisiblePolling } from "./hooks";
-import type { AppNotification, Me, Preferences, Work } from "./types";
-import { ACCEPT, httpTransport, localStore, UploadManager, workerHasher, type UploadItem } from "./uploads";
+import type { AppNotification, ImportInfo, Me, Preferences, Work } from "./types";
+import { ACCEPT, filesFromDataTransfer, groupFiles, httpTransport, localStore, UploadManager, workerHasher, type PathedFile, type UploadItem } from "./uploads";
 
 type Theme = "light" | "dark" | "system";
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
 
 interface Toast {
   id: number;
   text: string;
   kind?: "info" | "error";
+  action?: ToastAction;
 }
 
 interface Store {
@@ -22,7 +28,8 @@ interface Store {
   setTheme: (t: Theme) => void;
   resolvedTheme: "light" | "dark";
   toasts: Toast[];
-  toast: (text: string, kind?: Toast["kind"]) => void;
+  toast: (text: string, kind?: Toast["kind"], action?: ToastAction) => void;
+  dismissToast: (id: number) => void;
   paletteOpen: boolean;
   setPaletteOpen: (v: boolean) => void;
   helpOpen: boolean;
@@ -30,9 +37,23 @@ interface Store {
   /** Wall clock that ticks every 20 s so relative times re-render on their own. */
   now: number;
   canUpload: boolean;
+  /** Owners and members add, edit, and trash books. */
+  canEdit: boolean;
   /** Opens the file picker; chosen EPUBs and audiobooks go through resumable uploads. */
   pickBooks: () => void;
-  addFiles: (files: File[]) => void;
+  /** Opens a folder picker: one folder of tracks is one audiobook. */
+  pickFolder: () => void;
+  addFiles: (files: PathedFile[]) => void;
+  /** Uploaded books waiting for review before they are filed. */
+  imports: ImportInfo[];
+  refreshImports: () => Promise<void>;
+  reviewOpen: boolean;
+  setReviewOpen: (v: boolean) => void;
+  /** A file is being dragged over the window. */
+  dragging: boolean;
+  /** The work open in the editor sheet (rendered by the shell, above every page). */
+  editWorkId: number | null;
+  openEditor: (id: number | null) => void;
   uploads: UploadItem[];
   uploadManager: UploadManager | null;
   /** Saved per user on the server. */
@@ -73,6 +94,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [unread, setUnread] = useState(0);
   const [deviceName, setDeviceName] = useLocalStorage<string>("lectern.deviceName", browserLabel());
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const folderInput = useRef<HTMLInputElement | null>(null);
+  const [imports, setImports] = useState<ImportInfo[]>([]);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [editWorkId, openEditor] = useState<number | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 20000);
@@ -122,10 +148,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.theme = resolvedTheme;
   }, [resolvedTheme]);
 
-  const toast = useCallback((text: string, kind: Toast["kind"] = "info") => {
+  const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
+  const toast = useCallback((text: string, kind: Toast["kind"] = "info", action?: ToastAction) => {
     const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, text, kind }]);
-    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3800);
+    setToasts((t) => [...t, { id, text, kind, action }]);
+    // Toasts with an action (Undo, Review) stay long enough to reach with a keyboard.
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), action ? 10000 : 3800);
   }, []);
 
   const setPreference = useCallback(async <K extends keyof Preferences>(key: K, value: Preferences[K]) => {
@@ -140,41 +168,89 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [refreshMe, toast]);
 
   const canUpload = me?.user.role === "owner" || me?.user.role === "member";
+  const canEdit = canUpload && me?.can_edit !== false;
   const uploadManager = useMemo(() => (canUpload ? new UploadManager(httpTransport(), workerHasher(), localStore()) : null), [canUpload]);
+
+  const refreshImports = useCallback(async () => {
+    const d = await get<{ imports: ImportInfo[] }>("/api/imports");
+    setImports(d.imports);
+  }, []);
+  useEffect(() => {
+    if (canUpload) refreshImports().catch(() => {});
+  }, [canUpload, refreshImports]);
+
   useEffect(() => {
     if (!uploadManager) return;
-    uploadManager.onDone = (item) => {
-      toast(`${item.title || item.name} uploaded. Filing it now…`);
-      // The inbox watcher picks files up within a few seconds; refresh until they land.
-      for (const delay of [3000, 6000, 10000, 16000, 25000]) window.setTimeout(() => refreshLibrary().catch(() => {}), delay);
+    if (me?.upload.max_bytes) uploadManager.maxBytes = me.upload.max_bytes;
+    uploadManager.onImportReady = (info, group) => {
+      refreshImports().catch(() => {});
+      window.setTimeout(() => uploadManager.clearDone(group), 2500);
+      if (info.status === "failed") {
+        const dup = info.files.find((f) => f.duplicate_of)?.duplicate_of;
+        toast(
+          info.error === "all_duplicates"
+            ? `Already in your library${dup ? ` as “${dup.title}”${dup.in_trash ? " (in the trash)" : ""}` : ""}. Nothing new to add.`
+            : `${info.label}: Lectern could not read these files.`,
+          "error",
+          { label: "Details", run: () => setReviewOpen(true) },
+        );
+      } else if (info.status === "filed") {
+        toast(`Filed “${info.work?.title ?? info.label}” automatically (a certain match).`);
+        refreshLibrary().catch(() => {});
+      } else {
+        toast(`“${info.detected?.title || info.label}” is ready to review.`, "info", { label: "Review", run: () => setReviewOpen(true) });
+      }
     };
+    uploadManager.onImportError = (label, err) => toast(`${label}: ${err.message}`, "error");
     return uploadManager.subscribe(setUploads);
-  }, [uploadManager, toast, refreshLibrary]);
+  }, [uploadManager, toast, refreshLibrary, refreshImports, me?.upload.max_bytes]);
 
   const addFiles = useCallback(
-    (files: File[]) => {
+    (files: PathedFile[]) => {
       if (!uploadManager || !files.length) return;
-      const rejected = uploadManager.add(files);
-      if (rejected.length) toast(`Not a book or audiobook: ${rejected.join(", ")}`, "error");
+      const rejected: string[] = [];
+      for (const book of groupFiles(files)) rejected.push(...uploadManager.add(book.files, { label: book.label }));
+      // Folders carry cover images and cue sheets; only a lone wrong file deserves a warning.
+      const shown = files.some((f) => f.relPath || f.webkitRelativePath) ? rejected.filter((n) => !/\.(jpe?g|png|webp|gif|txt|nfo|cue|m3u8?|sfv|db|ini|ds_store|pdf|json|xml|opf)$/i.test(n) && !n.startsWith(".")) : rejected;
+      if (shown.length) toast(`Wrong format, skipped: ${shown.slice(0, 4).join(", ")}${shown.length > 4 ? ` and ${shown.length - 4} more` : ""}. Lectern takes EPUB, M4B, MP3, OGG/Opus, and FLAC.`, "error");
     },
     [uploadManager, toast],
   );
   const pickBooks = useCallback(() => fileInput.current?.click(), []);
+  const pickFolder = useCallback(() => folderInput.current?.click(), []);
 
-  // Drop files anywhere in the app to upload them.
+  // Drop files or whole folders anywhere in the app to add them.
   useEffect(() => {
     if (!canUpload) return;
+    let depth = 0;
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files");
+    const enter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth++;
+      setDragging(true);
+    };
+    const leave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth) setDragging(false);
+    };
     const over = (e: DragEvent) => {
-      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+      if (hasFiles(e)) e.preventDefault();
     };
     const drop = (e: DragEvent) => {
-      if (!e.dataTransfer?.files.length) return;
+      depth = 0;
+      setDragging(false);
+      if (!e.dataTransfer?.files.length && !e.dataTransfer?.items.length) return;
       e.preventDefault();
-      addFiles(Array.from(e.dataTransfer.files));
+      filesFromDataTransfer(e.dataTransfer).then(addFiles, () => addFiles(Array.from(e.dataTransfer?.files ?? [])));
     };
+    window.addEventListener("dragenter", enter);
+    window.addEventListener("dragleave", leave);
     window.addEventListener("dragover", over);
     window.addEventListener("drop", drop);
     return () => {
+      window.removeEventListener("dragenter", enter);
+      window.removeEventListener("dragleave", leave);
       window.removeEventListener("dragover", over);
       window.removeEventListener("drop", drop);
     };
@@ -192,14 +268,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       resolvedTheme,
       toasts,
       toast,
+      dismissToast,
       paletteOpen,
       setPaletteOpen,
       helpOpen,
       setHelpOpen,
       now,
       canUpload,
+      canEdit,
       pickBooks,
+      pickFolder,
       addFiles,
+      imports,
+      refreshImports,
+      reviewOpen,
+      setReviewOpen,
+      dragging,
+      editWorkId,
+      openEditor,
       uploads,
       uploadManager,
       setPreference,
@@ -210,7 +296,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       deviceName,
       setDeviceName,
     }),
-    [me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, paletteOpen, helpOpen, now, canUpload, pickBooks, addFiles, uploads, uploadManager, setPreference, notifications, unread, refreshNotifications, markAllRead, deviceName, setDeviceName],
+    [me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, dismissToast, paletteOpen, helpOpen, now, canUpload, canEdit, pickBooks, pickFolder, addFiles, imports, refreshImports, reviewOpen, dragging, editWorkId, uploads, uploadManager, setPreference, notifications, unread, refreshNotifications, markAllRead, deviceName, setDeviceName],
   );
   return (
     <Ctx.Provider value={value}>
@@ -227,6 +313,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           onChange={(e) => {
             const list = Array.from(e.target.files ?? []);
             if (fileInput.current) fileInput.current.value = "";
+            addFiles(list);
+          }}
+        />
+      )}
+      {canUpload && (
+        <input
+          ref={folderInput}
+          type="file"
+          multiple
+          hidden
+          aria-hidden="true"
+          tabIndex={-1}
+          {...{ webkitdirectory: "", directory: "" }}
+          onChange={(e) => {
+            const list = Array.from(e.target.files ?? []);
+            if (folderInput.current) folderInput.current.value = "";
             addFiles(list);
           }}
         />

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api";
-import { planChunks, UploadManager, type Hasher, type Store, type Transport } from "../uploads";
+import { groupFiles, planChunks, UploadManager, type Hasher, type Store, type Transport } from "../uploads";
 import type { UploadSessionInfo } from "../types";
 
 const hex = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
@@ -137,9 +137,70 @@ describe("UploadManager", () => {
     expect(mgr.add([file("x", "notes.pdf")])).toEqual(["notes.pdf"]);
     mgr.add([file("x".repeat(10))]);
     await settle(mgr);
-    expect(mgr.items[0]).toMatchObject({ state: "failed", error: "That file is larger than this server accepts." });
+    expect(mgr.items[0]).toMatchObject({ state: "failed", error: "Too large for this server. Ask the owner to raise the upload limit." });
   });
 
+  it("fails a file over the server's limit at once, without contacting the server", async () => {
+    const server = new FakeServer(4);
+    const mgr = new UploadManager(server, nodeHasher(), memStore(), async () => {});
+    mgr.maxBytes = 1024;
+    mgr.add([file("x".repeat(2048), "huge.m4b")]);
+    await settle(mgr);
+    expect(mgr.items[0].state).toBe("failed");
+    expect(mgr.items[0].error).toMatch(/^Too large: 2\.0 KB\. This server accepts files up to 1\.0 KB\.$/);
+    expect(server.sessions.size).toBe(0);
+    mgr.retry(mgr.items[0].key); // still too large: retry is refused
+    expect(mgr.items[0].state).toBe("failed");
+  });
+
+  it("pauses mid-file and resumes from the server's offset without resending", async () => {
+    const server = new FakeServer(2);
+    let gate: (() => void) | null = null;
+    const hasher = nodeHasher();
+    let calls = 0;
+    const slow: Hasher = {
+      ...hasher,
+      chunk: async (...a) => {
+        if (++calls === 2) await new Promise<void>((r) => (gate = r));
+        return hasher.chunk(...a);
+      },
+    };
+    const mgr = new UploadManager(server, slow, memStore(), async () => {});
+    mgr.add([file("abcdefgh")]);
+    for (let i = 0; i < 50 && !gate; i++) await new Promise((r) => setTimeout(r, 1));
+    const key = mgr.items[0].key;
+    mgr.pause(key);
+    expect(mgr.items[0].state).toBe("paused");
+    gate!();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(mgr.items[0].state).toBe("paused");
+    const sentBefore = [...server.sessions.values()][0].info.received_bytes;
+    expect(sentBefore).toBe(2);
+    mgr.resume(key);
+    await settle(mgr);
+    expect(mgr.items[0].state).toBe("done");
+    expect(new TextDecoder().decode([...server.sessions.values()][0].data)).toBe("abcdefgh");
+    expect(server.sessions.size).toBe(1);
+    expect(server.chunkCalls).toBe(4); // every chunk exactly once
+  });
+
+  it("retries a failed file in place", async () => {
+    const server = new FakeServer(4);
+    let refuse = true;
+    const create = server.create.bind(server);
+    server.create = async (...a) => {
+      if (refuse) throw new ApiError(422, "x", "not_epub");
+      return create(...a);
+    };
+    const mgr = new UploadManager(server, nodeHasher(), memStore(), async () => {});
+    mgr.add([file("abcdef")]);
+    await settle(mgr);
+    expect(mgr.items[0]).toMatchObject({ state: "failed", error: expect.stringMatching(/^Wrong format/) });
+    refuse = false;
+    mgr.retry(mgr.items[0].key);
+    await settle(mgr);
+    expect(mgr.items[0].state).toBe("done");
+  });
   it("cancels on the server", async () => {
     const server = new FakeServer(2);
     let release!: () => void;
@@ -156,3 +217,140 @@ describe("UploadManager", () => {
     expect([...server.sessions.values()][0].info.status).toBe("cancelled");
   });
 });
+
+/** Adds the review-before-filing calls to the fake server. */
+class ImportServer extends FakeServer {
+  imports = new Map<string, { idem: string; files: string[]; completed: number; discarded: boolean }>();
+  dupNames = new Set<string>();
+  sessionImport = new Map<string, string | undefined>();
+  async create(f: { name: string; size: number; type: string }, idem: string, importId?: string) {
+    const s = await super.create(f, idem);
+    this.sessionImport.set(s.id, importId);
+    return s;
+  }
+  async finalize(id: string, sha256: string) {
+    const r = await super.finalize(id, sha256);
+    const s = this.sessions.get(id)!;
+    const imp = this.sessionImport.get(id);
+    if (imp) this.imports.get(imp)!.files.push(s.info.filename);
+    const dup = this.dupNames.has(s.info.filename);
+    return { ...r, file: { id: 1, status: dup ? ("duplicate" as const) : ("ok" as const), duplicate_work_id: dup ? 7 : null } };
+  }
+  async createImport(_label: string, idem: string) {
+    for (const [id, v] of this.imports) if (v.idem === idem) return { id } as never;
+    const id = `i${this.imports.size + 1}`;
+    this.imports.set(id, { idem, files: [], completed: 0, discarded: false });
+    return { id } as never;
+  }
+  async completeImport(id: string) {
+    this.imports.get(id)!.completed++;
+    return { id, status: "ready", label: "", files: [] } as never;
+  }
+  async discardImport(id: string) {
+    this.imports.get(id)!.discarded = true;
+  }
+}
+
+describe("UploadManager with imports", () => {
+  it("uploads a book's files into one import and hands it to review once, after the last file", async () => {
+    const server = new ImportServer(4);
+    server.dupNames.add("02.mp3");
+    const mgr = new UploadManager(server, nodeHasher(), memStore(), async () => {});
+    const ready: string[] = [];
+    mgr.onImportReady = (info) => ready.push(info.id);
+    mgr.add([file("track one", "01.mp3"), file("track two", "02.mp3"), file("track three", "03.mp3")], { label: "Book" });
+    await settle(mgr);
+    await new Promise((r) => setTimeout(r, 2));
+    expect(server.imports.size).toBe(1);
+    expect(server.imports.get("i1")).toMatchObject({ files: ["01.mp3", "02.mp3", "03.mp3"], completed: 1 });
+    expect(ready).toEqual(["i1"]);
+    expect(mgr.items.find((i) => i.name === "02.mp3")?.duplicateOf).toEqual({ work_id: 7 });
+    expect(mgr.items.find((i) => i.name === "01.mp3")?.duplicateOf).toBeNull();
+  });
+
+  it("uploads same-named tracks from different disc folders as separate files", async () => {
+    const server = new ImportServer(4);
+    const mgr = new UploadManager(server, nodeHasher(), memStore(), async () => {});
+    const disc = (n: number) => Object.assign(new Blob([`disc ${n} track`]), { name: "01.mp3", lastModified: 1, relPath: `Dune/CD ${n}/01.mp3` });
+    mgr.add([disc(1), disc(2)], { label: "Dune" });
+    await settle(mgr);
+    expect(mgr.items.map((i) => i.state)).toEqual(["done", "done"]);
+    expect([...server.sessions.values()].map((s) => new TextDecoder().decode(s.data))).toEqual(["disc 1 track", "disc 2 track"]);
+  });
+
+  it("discards the import when every file of the book is cancelled", async () => {
+    const server = new ImportServer(2);
+    let gate!: () => void;
+    const g = new Promise<void>((r) => (gate = r));
+    const hasher = nodeHasher();
+    const slow: Hasher = { ...hasher, chunk: async (...a) => (await g, hasher.chunk(...a)) };
+    const mgr = new UploadManager(server, slow, memStore(), async () => {});
+    const ready: string[] = [];
+    mgr.onImportReady = (i) => ready.push(i.id);
+    mgr.add([file("abcdef", "a.mp3"), file("ghijkl", "b.mp3")], { label: "Book" });
+    await new Promise((r) => setTimeout(r, 5));
+    for (const it of [...mgr.items]) await mgr.cancel(it.key);
+    gate();
+    await settle(mgr);
+    await new Promise((r) => setTimeout(r, 2));
+    expect(ready).toEqual([]);
+    expect(server.imports.get("i1")?.discarded).toBe(true);
+  });
+
+  it("files the rest of a book when one of its files fails, and a later retry starts a new import", async () => {
+    const server = new ImportServer(4);
+    const create = server.create.bind(server);
+    let refuse = true;
+    server.create = async (f, idem, imp) => {
+      if (f.name === "bad.epub" && refuse) throw new ApiError(413, "x", "too_large");
+      return create(f, idem, imp);
+    };
+    const mgr = new UploadManager(server, nodeHasher(), memStore(), async () => {});
+    const ready: string[] = [];
+    mgr.onImportReady = (i) => ready.push(i.id);
+    mgr.add([file("good one", "good.mp3"), file("bad", "bad.epub")], { label: "Book" });
+    await settle(mgr);
+    await new Promise((r) => setTimeout(r, 2));
+    expect(ready).toEqual(["i1"]);
+    refuse = false;
+    mgr.retry(mgr.items.find((i) => i.name === "bad.epub")!.key);
+    await settle(mgr);
+    await new Promise((r) => setTimeout(r, 2));
+    expect(ready).toEqual(["i1", "i2"]);
+    expect(server.imports.get("i2")?.files).toEqual(["bad.epub"]);
+  });
+});
+
+describe("groupFiles", () => {
+  const f = (name: string, relPath?: string) => Object.assign(new Blob(["x"]), { name, lastModified: 1, relPath });
+  const shape = (files: ReturnType<typeof f>[]) => groupFiles(files).map((g) => [g.label, g.files.map((x) => x.name)]);
+
+  it("makes each loose EPUB and M4B its own book, and loose tracks dropped together one audiobook", () => {
+    expect(shape([f("A.epub"), f("B.m4b"), f("02.mp3"), f("10.mp3"), f("01.mp3")])).toEqual([
+      ["3 audio files", ["01.mp3", "02.mp3", "10.mp3"]],
+      ["A", ["A.epub"]],
+      ["B", ["B.m4b"]],
+    ]);
+  });
+
+  it("makes one audiobook per folder, merges CD subfolders, and keeps a folder's single EPUB with it", () => {
+    expect(
+      shape([
+        f("01.mp3", "Dune/CD 2/01.mp3"),
+        f("01.mp3", "Dune/CD 1/01.mp3"),
+        f("Dune.epub", "Dune/Dune.epub"),
+        f("1.mp3", "Emma/1.mp3"),
+        f("x.epub", "Shelf/x.epub"),
+        f("y.epub", "Shelf/y.epub"),
+      ]),
+    ).toEqual([
+      ["Dune", ["Dune.epub", "01.mp3", "01.mp3"]],
+      ["Emma", ["1.mp3"]],
+      ["x", ["x.epub"]],
+      ["y", ["y.epub"]],
+    ]);
+    const dune = groupFiles([f("01.mp3", "Dune/CD 2/01.mp3"), f("01.mp3", "Dune/CD 1/01.mp3")])[0];
+    expect(dune.files.map((x) => x.relPath)).toEqual(["Dune/CD 1/01.mp3", "Dune/CD 2/01.mp3"]);
+  });
+});
+

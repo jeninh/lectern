@@ -16,17 +16,19 @@ from sqlalchemy import select
 
 from lectern.access import can_see_work
 from lectern.ingest.epub import EpubError, read_spine
+from lectern.ingest.sentences import primary_epub
 from lectern.models import (
     Alignment,
     AlignmentStatus,
     BookFile,
     FileKind,
+    Role,
     User,
     Work,
 )
 from lectern.readaloud.cache import ReadAloudBuilder, Unavailable, gather_inputs
 from lectern.readaloud.text import SpineText
-from lectern.security import downloads
+from lectern.security import audit, downloads
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 from lectern.security.sessions import client_ip
 
@@ -96,7 +98,7 @@ def spine_text(
     book = None
     if alignment is not None:
         book = db.scalar(stmt.where(BookFile.sha256 == alignment.epub_sha256))
-    book = book or db.scalar(stmt.order_by(BookFile.id))
+    book = book or primary_epub(db, work_id)
     if book is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No EPUB")
     root = settings.library_dir.resolve()
@@ -136,7 +138,10 @@ def read_aloud_status(db, settings, work: Work, build: ReadAloudBuilder) -> dict
         "status": "unavailable",
         "reason": None,
         "message": None,
-        "readalong": bool(alignment and alignment.status == AlignmentStatus.SUCCEEDED),
+        "readalong": bool(
+            alignment and alignment.status == AlignmentStatus.SUCCEEDED and work.readalong_enabled
+        ),
+        "readalong_enabled": work.readalong_enabled,
         "alignment": alignment_json(alignment),
         "download_url": None,
         "size": None,
@@ -172,13 +177,31 @@ def read_aloud(
 
 @router.post("/works/{work_id}/read-aloud", status_code=status.HTTP_202_ACCEPTED)
 def build_read_aloud(
-    request: Request, auth: AuthCsrf, db: DbDep, settings: SettingsDep, work_id: int
+    request: Request,
+    auth: AuthCsrf,
+    db: DbDep,
+    settings: SettingsDep,
+    work_id: int,
+    force: bool = False,
 ) -> dict:
-    """Start building the read-aloud EPUB in the background; poll ``GET`` for the state."""
+    """Start building the read-aloud EPUB in the background; poll ``GET`` for the state.
+    ``force=true`` (owners and members, from the editor) throws the cached file away first."""
     work = visible_work(db, auth.user, work_id)
+    if force and auth.user.role not in (Role.OWNER, Role.MEMBER):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
     try:
         inputs = gather_inputs(db, settings, work)
     except Unavailable as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, exc.code) from exc
+    if force:
+        builder(request).invalidate(inputs)
+        audit.record(
+            db,
+            "readaloud.regenerate",
+            actor_user_id=auth.user.id,
+            target=f"work:{work.id}",
+            ip=client_ip(request),
+        )
+        db.commit()
     builder(request).start(inputs)
     return read_aloud_status(db, settings, work, builder(request))

@@ -5,7 +5,7 @@ export function tintStyle(work: Pick<Work, "cover_tint">): CSSProperties {
   return work.cover_tint ? ({ "--tint": work.cover_tint } as CSSProperties) : {};
 }
 
-export function Cover({ work, className = "" }: { work: Work; className?: string }) {
+export function Cover({ work, className = "" }: { work: Pick<Work, "title" | "author" | "cover_url" | "cover_tint">; className?: string }) {
   return (
     <div className={`cover ${className}`} style={tintStyle(work)}>
       {work.cover_url ? (

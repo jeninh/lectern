@@ -256,7 +256,7 @@ def test_upload_streams_into_inbox_and_ingests(client, owner, settings, tmp_path
 
 def test_technical_details_preference(client, owner):
     me = client.get("/api/me").json()
-    assert me["preferences"] == {"show_technical_details": False}
+    assert me["preferences"] == {"show_technical_details": False, "auto_file_imports": False}
     # Writes need the CSRF token.
     r = client.post(
         "/api/me/preferences", json={"show_technical_details": True}, headers={"origin": ORIGIN}

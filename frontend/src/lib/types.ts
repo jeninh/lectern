@@ -23,10 +23,20 @@ export interface Me {
   counts: { works: number; users: number; unread_notifications: number };
   preferences: Preferences;
   upload: { max_bytes: number; chunk_bytes: number; max_active: number };
+  library_settings: LibrarySettings;
+  /** Owners and members add, edit, and trash books; readers never do. */
+  can_edit: boolean;
 }
 
 export interface Preferences {
   show_technical_details: boolean;
+  /** File uploads whose proposed match is certain without asking. */
+  auto_file_imports: boolean;
+}
+
+export interface LibrarySettings {
+  /** Outbound metadata suggestions (Open Library, Google Books); off by default. */
+  metadata_lookup_enabled: boolean;
 }
 
 export interface Progress {
@@ -54,10 +64,24 @@ export interface BookFile {
   progress?: Progress | null;
 }
 
+export interface AuthorName {
+  name: string;
+  sort?: string | null;
+}
+
 export interface Work {
   id: number;
   title: string;
   author: string;
+  authors?: AuthorName[];
+  series?: string | null;
+  series_index?: number | null;
+  tags?: string[];
+  narrators?: string[];
+  playback_default?: PlaybackDefault;
+  readalong_enabled?: boolean;
+  primary_file_id?: number | null;
+  version?: number;
   sort_title: string;
   sort_author: string;
   language: string | null;
@@ -352,6 +376,7 @@ export interface UploadSessionInfo {
   expires_at: string | null;
   inbox_name: string | null;
   user?: string;
+  import_id?: string | null;
 }
 
 export interface MatchSuggestion {
@@ -369,4 +394,182 @@ export interface KnownDevice {
   first_seen_at: string | null;
   last_seen_at: string | null;
   last_ip: string | null;
+}
+
+// --- Add & edit books ------------------------------------------------------------------------
+
+export type PlaybackDefault = "read" | "listen" | "readalong" | null;
+
+/** Every editable descriptive field; the server validates the same schema. */
+export interface Metadata {
+  title: string;
+  sort_title: string | null;
+  authors: AuthorName[];
+  series: string | null;
+  series_index: number | null;
+  description: string | null;
+  language: string | null;
+  isbn: string | null;
+  publisher: string | null;
+  published: string | null;
+  tags: string[];
+  narrators: string[];
+}
+
+export interface WorkSummary {
+  id: number;
+  title: string;
+  author: string;
+  series: string | null;
+  series_index: number | null;
+  isbn: string | null;
+  cover_url: string | null;
+  cover_tint: string | null;
+  has_ebook: boolean;
+  has_audio: boolean;
+}
+
+export interface Candidate {
+  work: WorkSummary;
+  score: number;
+  certain: boolean;
+  reason: string;
+}
+
+export interface Proposal {
+  action: "join" | "new";
+  work_id: number | null;
+  confidence: "high" | "medium" | "low";
+  score: number | null;
+  reason: string;
+  candidates: Candidate[];
+  siblings: { id: string; label: string; title: string | null }[];
+}
+
+export interface ImportFileInfo {
+  id: number;
+  filename: string;
+  kind: "ebook" | "audio";
+  media_type: string;
+  size: number;
+  sha256: string;
+  status: "ok" | "duplicate";
+  duplicate_of: { work_id: number; title: string; in_trash: boolean } | null;
+  duration_s: number | null;
+  track_no: number | null;
+  disc_no: number | null;
+  chapters: number;
+}
+
+export interface ImportInfo {
+  id: string;
+  label: string;
+  status: "uploading" | "ready" | "filed" | "discarded" | "failed";
+  error: string | null;
+  version: number;
+  created_at: string | null;
+  updated_at: string | null;
+  expires_at: string | null;
+  filed_at: string | null;
+  auto_filed: boolean;
+  files: ImportFileInfo[];
+  uploads_active: number;
+  detected: Metadata | null;
+  metadata: Metadata | null;
+  proposal: Proposal | null;
+  target: { action: "join" | "new"; work_id?: number | null } | null;
+  use_cover: boolean | null;
+  cover_url: string | null;
+  work: { id: number; title: string; author: string } | null;
+}
+
+export interface EditorTrack {
+  id: number;
+  position: number;
+  title: string;
+  rel_path: string;
+  duration_s: number;
+  size: number;
+  codec: string;
+  sha256: string;
+  chapters: { title: string; start_s: number }[];
+}
+
+export interface EditorFile {
+  id: number;
+  kind: "ebook";
+  rel_path: string;
+  size: number;
+  sha256: string;
+  partial_md5: string | null;
+  added_at: string | null;
+  primary: boolean;
+}
+
+export interface EditorState {
+  work: Work;
+  version: number;
+  metadata: Metadata;
+  playback_default: PlaybackDefault;
+  readalong_enabled: boolean;
+  primary_file_id: number | null;
+  cover: { has_cover: boolean; url: string | null; source: string | null; embedded_available: boolean };
+  files: EditorFile[];
+  tracks: EditorTrack[];
+  shelves: { id: number; name: string; member: boolean }[];
+  alignment: AlignmentInfo | null;
+  align_models: string[];
+  align_default_model: string;
+  read_aloud: ReadAloudInfo;
+  folder: { dir_path: string; pending: boolean };
+  last_revision: { id: number; created_at: string | null; actor: string | null; changed: string[]; undoable: boolean } | null;
+  lookup_enabled: boolean;
+}
+
+export interface AlignmentInfo {
+  status: string;
+  model?: string | null;
+  coverage?: number | null;
+  [k: string]: unknown;
+}
+
+export interface ReadAloudInfo {
+  work_id: number;
+  status: string;
+  reason: string | null;
+  message: string | null;
+  readalong: boolean;
+  readalong_enabled?: boolean;
+  download_url: string | null;
+  size: number | null;
+  generated_at: string | null;
+  duration_s: number | null;
+}
+
+export interface LookupSuggestion {
+  provider: "openlibrary" | "googlebooks";
+  provider_name: string;
+  source_url: string;
+  fetched_at: string;
+  fields: Partial<Metadata>;
+}
+
+export interface LookupResult {
+  sent: { isbn?: string; title?: string; author?: string };
+  suggestions: LookupSuggestion[];
+  errors: { provider: string; error: string }[];
+  cached: boolean;
+}
+
+export interface TrashList {
+  retention_days: number;
+  can_purge: boolean;
+  works: { work: { id: number; title: string; author: string; has_cover: boolean }; trashed_at: string | null; trashed_by: string | null; purge_at: string | null; days_left: number; from: string | null }[];
+  files: { id: number; kind: "ebook" | "audio"; name: string; size: number; work: { id: number; title: string; in_trash: boolean } | null; trashed_at: string | null; trashed_by: string | null; purge_at: string | null }[];
+}
+
+export interface BulkResult {
+  batch_id: string;
+  action: string;
+  results: { work_id: number; ok: boolean; changed?: string[]; error?: string }[];
 }

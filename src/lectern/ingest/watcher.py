@@ -16,11 +16,13 @@ from pathlib import Path
 
 from sqlalchemy.orm import sessionmaker
 
+from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest.audio import AudioError, ingest_audio, is_audio, probe
 from lectern.ingest.epub import EpubError, read_epub_metadata
 from lectern.ingest.hashing import partial_md5, sha256_file
 from lectern.ingest.library import ingest_epub
 from lectern.ingest.sentences import ensure_text_sentences
+from lectern.workmeta import write_book_json
 
 log = logging.getLogger("lectern.ingest")
 
@@ -177,11 +179,12 @@ class InboxWatcher:
             return False
         sha = sha256_file(path)
         pmd5 = partial_md5(path)
-        with self.session_factory() as db:
+        with LIBRARY_LOCK, self.session_factory() as db:
             try:
                 work, book, created = ingest_epub(db, self.library, path, meta, sha, pmd5)
                 db.flush()
                 ensure_text_sentences(db, self.library, work.id)
+                write_book_json(db, self.library, work)
                 db.commit()
             except FileExistsError:
                 log.warning("rejecting %s: duplicate of an existing file", path.name)
@@ -210,9 +213,10 @@ class InboxWatcher:
             self._reject(path)
             return False
         sha = sha256_file(path)
-        with self.session_factory() as db:
+        with LIBRARY_LOCK, self.session_factory() as db:
             try:
                 result = ingest_audio(db, self.library, path, info, sha)
+                write_book_json(db, self.library, result.work)
                 db.commit()
             except FileExistsError as exc:
                 log.warning("rejecting %s: %s", path.name, exc)
