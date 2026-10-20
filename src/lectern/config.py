@@ -50,7 +50,33 @@ class Settings(BaseSettings):
     # Ingest
     inbox_poll_seconds: float = 5.0
     ingest_enabled: bool = True
-    upload_max_bytes: int = 200 * 1024 * 1024
+    # Largest file a resumable upload session may declare (audiobooks: one M4B can be GBs).
+    upload_max_bytes: int = 4 * 1024**3
+    # Largest EPUB accepted by the one-request POST /api/books/upload.
+    upload_direct_max_bytes: int = 200 * 1024 * 1024
+    # Sum of declared sizes of one user's ACTIVE upload sessions.
+    upload_quota_bytes: int = 16 * 1024**3
+    upload_max_active: int = 5
+    upload_session_ttl_seconds: int = 24 * 60 * 60
+
+    # Download caps and alerts. Caps count whole-file transfers (EPUB, original audio, the web
+    # reader's copy) in the last hour; 0 disables a cap. Per-user and per-device overrides live
+    # on users / app_passwords.
+    download_cap_per_hour: int = 120
+    download_device_cap_per_hour: int = 60
+    # Alert the user and the owner when this many downloads happen within the window.
+    download_burst_count: int = 20
+    download_burst_window_seconds: int = 600
+
+    # Audio
+    ffmpeg_path: str = "ffmpeg"
+    ffprobe_path: str = "ffprobe"
+    # Low-bitrate "data saver" renditions under <work>/derived/audio/. Codec "aac" (M4A, plays
+    # everywhere including iOS) or "opus" (smaller, not on older Safari).
+    audio_low_codec: str = Field(default="aac", pattern="^(aac|opus)$")
+    audio_low_bitrate_kbps: int = Field(default=64, ge=16, le=192)
+    # Queue a data-saver rendition automatically after every audiobook import.
+    audio_low_auto: bool = False
 
     log_level: str = "INFO"
 

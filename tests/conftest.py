@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -199,3 +201,112 @@ def ko_headers(username: str, secret: str) -> dict[str, str]:
         "x-auth-user": username,
         "x-auth-key": hashlib.md5(secret.encode(), usedforsecurity=False).hexdigest(),
     }
+
+
+# --- audio fixtures ------------------------------------------------------------------------
+
+FFMPEG = shutil.which("ffmpeg")
+needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not installed")
+MAGI = Path(__file__).parent / "fixtures" / "magi"
+
+
+def make_mp3(
+    path: Path,
+    seconds: float = 2.0,
+    *,
+    title: str | None = None,
+    album: str | None = None,
+    artist: str | None = None,
+    track: int | None = None,
+    freq: int = 440,
+) -> Path:
+    """A short tagged MP3 (sine tone, so every file has a distinct hash)."""
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
+         f"sine=frequency={freq}:duration={seconds}", "-ac", "1", "-b:a", "32k", str(path)],
+        check=True,
+    )  # fmt: skip
+    from mutagen.easyid3 import EasyID3
+
+    tags = EasyID3()
+    for k, v in {"title": title, "album": album, "artist": artist}.items():
+        if v:
+            tags[k] = v
+    if track:
+        tags["tracknumber"] = str(track)
+    tags.save(path)
+    return path
+
+
+def make_m4b(
+    path: Path,
+    chapters: list[tuple[str, float]],
+    seconds: float,
+    *,
+    title: str,
+    artist: str,
+    comment: str | None = None,
+) -> Path:
+    """An AAC audiobook with QuickTime chapters, the way M4B files usually arrive."""
+    meta = path.with_suffix(".ffmeta")
+    lines = [";FFMETADATA1", f"title={title}", f"album={title}", f"artist={artist}"]
+    if comment:
+        lines.append(f"comment={comment}")
+    for i, (name, start) in enumerate(chapters):
+        end = chapters[i + 1][1] if i + 1 < len(chapters) else seconds
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={int(start * 1000)}",
+                  f"END={int(end * 1000)}", f"title={name}"]  # fmt: skip
+    meta.write_text("\n".join(lines) + "\n")
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=frequency=330:duration={seconds}",
+         "-i", str(meta), "-map_metadata", "1", "-map_chapters", "1", "-c:a", "aac",
+         "-b:a", "32k", "-f", "mp4", str(path)],
+        check=True,
+    )  # fmt: skip
+    meta.unlink()
+    return path
+
+
+def drain_inbox(settings, *, settings_aware: bool = True) -> list[Path]:
+    """Run the inbox watcher until nothing is left to ingest."""
+    from lectern.db import session_factory
+    from lectern.ingest.watcher import InboxWatcher
+
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    w = InboxWatcher(
+        settings.inbox_path,
+        settings.library_dir,
+        session_factory(),
+        0.01,
+        settings if settings_aware else None,
+    )
+    done: list[Path] = []
+    for _ in range(4):
+        done += w.scan_once()
+    return done
+
+
+def put_json(client: TestClient, url: str, csrf: str, json: dict, **kw):
+    return client.put(url, json=json, headers={"origin": ORIGIN, "x-csrf-token": csrf}, **kw)
+
+
+def api_delete(client: TestClient, url: str, csrf: str, **kw):
+    return client.delete(url, headers={"origin": ORIGIN, "x-csrf-token": csrf}, **kw)
+
+
+def make_user(client: TestClient, owner_csrf: str, username: str, role: str) -> dict:
+    """Create a user as the owner; returns the creation payload plus the password."""
+    password = f"{username}-correct horse"
+    r = api_post(
+        client,
+        "/api/admin/users",
+        owner_csrf,
+        {
+            "username": username,
+            "display_name": username.title(),
+            "role": role,
+            "password": password,
+        },
+    )
+    assert r.status_code == 201, r.text
+    return {**r.json()["user"], "password": password}

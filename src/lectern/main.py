@@ -15,14 +15,16 @@ from lectern import __version__
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
+from lectern.jobs import JobRunner
 from lectern.migrate import upgrade_to_head
 from lectern.readaloud.cache import ReadAloudBuilder
-from lectern.routes import api, auth, health, kosync, library, media, opds, setup, spa
+from lectern.routes import api, auth, health, invites, kosync, library, opds, setup, spa
 from lectern.security.deps import LoginRequired
 from lectern.security.ratelimit import SlidingWindowLimiter
 from lectern.security.webauthn import ChallengeStore
 from lectern.setup_state import ensure_setup_token, print_setup_banner
 from lectern.templating import TEMPLATES_DIR
+from lectern.uploads import sweep as upload_sweep
 
 log = logging.getLogger("lectern")
 
@@ -42,11 +44,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         else:
             h.setdefault("Cache-Control", "no-store")
         if not request.url.path.startswith(("/opds", "/syncs", "/users")):
-            # style-src allows inline *attributes* only (cover tints are per-card CSS variables);
-            # scripts stay strictly same-origin.
+            # style-src allows inline styles (cover tints are per-card CSS variables; EPUB
+            # stylesheets); scripts stay strictly same-origin, which is also what keeps
+            # scripts inside EPUBs from running in the web reader. The reader renders book
+            # sections in blob: iframes, so frames, images, fonts, and media may be blob:.
             h.setdefault(
                 "Content-Security-Policy",
-                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                "default-src 'self'; img-src 'self' data: blob:; "
+                "style-src 'self' 'unsafe-inline' blob:; font-src 'self' data: blob:; "
+                "media-src 'self' blob:; frame-src 'self' blob:; worker-src 'self'; "
                 "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
                 "form-action 'self'; base-uri 'none'",
             )
@@ -81,7 +87,9 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
                 "LECTERN_BASE_URL is not https; cookies are marked Secure and passkeys will not work. "
                 "Set LECTERN_INSECURE_HTTP=1 for local development only."
             )
-        watcher = None
+        with session_factory()() as db:
+            upload_sweep(db, settings)
+        watcher = runner = None
         run_watcher = settings.ingest_enabled if start_watcher is None else start_watcher
         if run_watcher:
             settings.library_dir.mkdir(parents=True, exist_ok=True)
@@ -90,16 +98,22 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
                 settings.library_dir,
                 session_factory(),
                 settings.inbox_poll_seconds,
+                settings,
             )
             watcher.start()
             log.info("watching inbox %s", settings.inbox_path)
+            runner = JobRunner(session_factory(), settings)
+            runner.start()
         app.state.watcher = watcher
+        app.state.jobs = runner
         log.info("Lectern %s ready on %s", __version__, settings.base_url)
         try:
             yield
         finally:
             if watcher:
                 watcher.stop()
+            if runner:
+                runner.stop()
             app.state.readaloud.shutdown()
             engine.dispose()
 
@@ -118,6 +132,10 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
         "basic": SlidingWindowLimiter(limit=settings.rate_limit_per_minute, window_seconds=60),
         "kosync": SlidingWindowLimiter(limit=settings.rate_limit_per_minute * 2, window_seconds=60),
         "webauthn": SlidingWindowLimiter(limit=20, window_seconds=60),
+        # Resumable upload chunks (<= 50 MiB each): generous enough for a LAN, still bounded.
+        "uploads": SlidingWindowLimiter(
+            limit=settings.rate_limit_per_minute * 4, window_seconds=60
+        ),
     }
     app.state.challenges = ChallengeStore()
     app.state.readaloud = ReadAloudBuilder()
@@ -132,9 +150,10 @@ def create_app(settings: Settings | None = None, *, start_watcher: bool | None =
     app.include_router(setup.router)
     app.include_router(auth.router)
     app.include_router(api.router)
+    app.include_router(invites.api)
+    app.include_router(invites.pages)
     app.include_router(spa.router)
     app.include_router(library.router)
-    app.include_router(media.router)  # interim milestone 2 routes; see lectern.routes.media
     app.include_router(opds.router)
     app.include_router(kosync.router)
 

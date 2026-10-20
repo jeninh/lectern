@@ -16,6 +16,7 @@ from lectern.config import Settings
 from lectern.db import get_db
 from lectern.models import AppPassword, Role, Session, SyncKey, User, utcnow
 from lectern.security.csrf import verify_csrf
+from lectern.security.downloads import Device
 from lectern.security.sessions import client_ip, load_session
 from lectern.security.tokens import sha256_hex
 
@@ -124,12 +125,40 @@ def opds_user(request: Request, db: DbDep) -> User:
     user = db.get(User, row.user_id)
     if user is None or not user.is_active or user.username != username:
         raise _basic_unauthorized()
+    if row.last_used_at is None:
+        from lectern.security.alerts import on_credential_first_use
+
+        on_credential_first_use(db, request, user, "app_password", row.label)
     row.last_used_at = utcnow()
     db.commit()
+    request.state.app_password = row
     return user
 
 
 OpdsUser = Annotated[User, Depends(opds_user)]
+
+
+@dataclass
+class LibraryAuth:
+    """A /library/* caller: a browser session or an OPDS app password, and its device."""
+
+    user: User
+    device: Device
+
+
+def library_auth(request: Request, db: DbDep) -> LibraryAuth:
+    """Session cookie if present, else HTTP Basic with an app password (no browser prompt)."""
+    found = load_session(db, request)
+    if found is not None:
+        session, user = found
+        return LibraryAuth(user, Device.session(session.id))
+    if request.headers.get("authorization", "").lower().startswith("basic "):
+        user = opds_user(request, db)
+        return LibraryAuth(user, Device.app_password(request.state.app_password))
+    raise LoginRequired()
+
+
+LibraryUser = Annotated[LibraryAuth, Depends(library_auth)]
 
 
 # --- KOReader sync: x-auth-user / x-auth-key ----------------------------------------------
@@ -159,6 +188,10 @@ def kosync_auth(request: Request, db: DbDep) -> SyncAuth:
     user = db.get(User, row.user_id)
     if user is None or not user.is_active or user.username != username:
         raise _sync_unauthorized()
+    if row.last_used_at is None:
+        from lectern.security.alerts import on_credential_first_use
+
+        on_credential_first_use(db, request, user, "sync_key", row.label)
     row.last_used_at = utcnow()
     db.commit()
     return SyncAuth(user=user, key=row)

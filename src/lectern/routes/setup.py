@@ -9,7 +9,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 
 from lectern.models import Role, User
-from lectern.security import audit
+from lectern.security import alerts, audit
 from lectern.security.deps import DbDep, SettingsDep
 from lectern.security.passwords import hash_password, validate_password_strength
 from lectern.security.sessions import client_ip, create_session, set_session_cookie
@@ -80,7 +80,9 @@ def setup_submit(
         db, "setup.owner_created", actor_user_id=user.id, target=username, ip=client_ip(request)
     )
     session_token = create_session(db, user, request, settings)
+    device_token = alerts.remember_device_quietly(db, request, user)
     db.commit()
     response = RedirectResponse("/app?welcome=1", status_code=status.HTTP_303_SEE_OTHER)
     set_session_cookie(response, session_token, settings)
+    alerts.set_device_cookie(response, device_token, settings)
     return response

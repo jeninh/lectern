@@ -633,3 +633,26 @@ def test_fixture_sentences_are_exact_epub_text_slices(fixture_map):
         assert s.matched and 0 <= s.audio_start_s < s.audio_end_s <= m.total_duration_s
     assert m.sentences[0].text == "One dollar and eighty-seven cents."
     assert m.sentences[14].text.endswith("\u201cMr. James Dillingham Young.\u201d")
+
+
+def test_models_match_migrations_and_0006_round_trips(tmp_path):
+    """The ORM models and the migration chain describe the same schema; 0006 downgrades."""
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from lectern.models import Base
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'm6.db'}")
+    upgrade_to_head(engine)
+    with engine.connect() as conn:
+        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+    m2 = {"notifications", "known_devices", "download_events", "match_suggestions"}
+    assert m2 <= set(sa.inspect(engine).get_table_names())
+    cfg = alembic_config(str(engine.url))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.downgrade(cfg, "0005")
+    insp = sa.inspect(engine)
+    assert not (m2 & set(insp.get_table_names())) and NEW_TABLES <= set(insp.get_table_names())
+    assert "idempotency_key" not in {c["name"] for c in insp.get_columns("upload_sessions")}
+    upgrade_to_head(engine)

@@ -209,7 +209,9 @@ def test_device_issues_paired_credentials_and_revokes_together(client, owner):
     assert client.get("/users/auth", headers=ko).status_code == 401
     assert client.get("/opds", headers=opds).status_code == 401
     actions = [e["action"] for e in client.get("/api/activity").json()["events"]]
-    assert actions[:2] == ["device.revoke", "device.create"]
+    # Each credential's first use is its own audit event (and a "connected" alert).
+    assert [a for a in actions if a != "device.first_use"][:2] == ["device.revoke", "device.create"]
+    assert actions.count("device.first_use") == 2
 
     assert api_post(client, "/api/devices/x1/revoke", owner["csrf"]).status_code == 404
     assert api_post(client, "/api/devices/k999/revoke", owner["csrf"]).status_code == 404

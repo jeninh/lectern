@@ -230,3 +230,29 @@ def revoke_app_password(request: Request, auth: AuthCsrf, db: DbDep, key_id: int
         )
         db.commit()
     return {"app_password": app_password_json(row)}
+
+
+class DeviceCapIn(BaseModel):
+    # None = server default (LECTERN_DOWNLOAD_DEVICE_CAP_PER_HOUR); 0 = no cap for this device.
+    cap: int | None = Field(default=None, ge=0, le=100000)
+
+
+@router.post("/app-passwords/{pw_id}/download-cap")
+def set_device_download_cap(
+    request: Request, auth: AuthCsrf, db: DbDep, pw_id: int, body: DeviceCapIn
+) -> dict:
+    """Hourly download cap for one OPDS device (its app password)."""
+    row = db.get(AppPassword, pw_id)
+    if row is None or row.user_id != auth.user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    row.download_cap_per_hour = body.cap
+    audit.record(
+        db,
+        "device.download_cap",
+        actor_user_id=auth.user.id,
+        target=row.label,
+        ip=client_ip(request),
+        detail="default" if body.cap is None else str(body.cap),
+    )
+    db.commit()
+    return {"app_password": app_password_json(row)}

@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from lectern.ingest.cover import dominant_tint
 from lectern.ingest.epub import EpubMetadata, extract_cover
-from lectern.ingest.matching import find_matching_work, sort_author, sort_title
-from lectern.models import BookFile, FileKind, Work
+from lectern.ingest.matching import match_work, sort_author, sort_title
+from lectern.models import BookFile, FileKind, MatchSuggestion, Work
 
 log = logging.getLogger("lectern.ingest")
 
@@ -41,6 +41,42 @@ def _unique_dir(library: Path, author: str, title: str) -> str:
     return rel.as_posix()
 
 
+def new_work(
+    db: Session,
+    library: Path,
+    *,
+    title: str,
+    author: str,
+    language: str | None = None,
+    isbn: str | None = None,
+    description: str | None = None,
+    publisher: str | None = None,
+    published: str | None = None,
+) -> Work:
+    """Create a work and reserve its ``<Author>/<Title>`` directory name."""
+    rel_dir = _unique_dir(
+        library,
+        safe_component(author, "Unknown Author"),
+        safe_component(title, "Untitled"),
+    )
+    (library / rel_dir).mkdir(parents=True, exist_ok=True)
+    work = Work(
+        title=title[:512],
+        sort_title=sort_title(title)[:512],
+        author=author[:512],
+        sort_author=sort_author(author)[:512],
+        language=language,
+        isbn=isbn,
+        description=description,
+        publisher=publisher,
+        published=published[:32] if published else None,
+        dir_path=rel_dir,
+    )
+    db.add(work)
+    db.flush()
+    return work
+
+
 def ingest_epub(
     db: Session,
     library: Path,
@@ -49,36 +85,43 @@ def ingest_epub(
     sha256: str,
     pmd5: str,
 ) -> tuple[Work, BookFile, bool]:
-    """Move source into the library. Returns (work, file, created_new_work)."""
+    """Move source into the library. Returns (work, file, created_new_work).
+
+    An uncertain match creates a new work and a ``match_suggestions`` row for a person to
+    confirm or dismiss in the web app.
+    """
     if db.scalar(select(BookFile).where(BookFile.sha256 == sha256)) is not None:
         raise FileExistsError("identical file already in library")
 
     author = meta.authors[0] if meta.authors else "Unknown Author"
-    work = find_matching_work(db, meta.title, meta.authors, meta.isbn)
+    match = match_work(db, meta.title, meta.authors, meta.isbn)
     created = False
-    if work is None:
-        rel_dir = _unique_dir(
+    if match.certain:
+        work = match.work
+        if work.isbn is None and meta.isbn:
+            work.isbn = meta.isbn
+    else:
+        work = new_work(
+            db,
             library,
-            safe_component(author, "Unknown Author"),
-            safe_component(meta.title, "Untitled"),
-        )
-        work = Work(
-            title=meta.title[:512],
-            sort_title=sort_title(meta.title)[:512],
-            author=author[:512],
-            sort_author=sort_author(author)[:512],
+            title=meta.title,
+            author=author,
             language=meta.language,
             isbn=meta.isbn,
             description=meta.description,
             publisher=meta.publisher,
             published=meta.published,
-            dir_path=rel_dir,
         )
-        db.add(work)
-        db.flush()
         created = True
-    elif work.isbn is None and meta.isbn:
-        work.isbn = meta.isbn
+        if match.work is not None:
+            db.add(
+                MatchSuggestion(
+                    work_id=work.id,
+                    candidate_work_id=match.work.id,
+                    score=match.score,
+                    reason=match.reason,
+                )
+            )
 
     work_dir = library / work.dir_path
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -90,7 +133,6 @@ def ingest_epub(
     if not work.has_cover and meta.cover_href:
         if extract_cover(dest, meta.cover_href, work_dir / "cover.jpg"):
             work.has_cover = True
-            work.cover_tint = dominant_tint(work_dir / "cover.jpg")
             work.cover_tint = dominant_tint(work_dir / "cover.jpg")
 
     book = BookFile(
