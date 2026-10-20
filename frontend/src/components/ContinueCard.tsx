@@ -4,6 +4,7 @@ import { absoluteTime, bytes, percent, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { Work } from "../lib/types";
 import { Cover, tintStyle } from "./Cover";
+import { ReadAloudFormats } from "./ReadAloudFormats";
 import { Book, Chevron, Download, Headphones, Reader, Sync } from "./Icons";
 
 /** KOReader positions look like "/body/DocFragment[12]/body/p[3]/text().0"; show the chapter. */
@@ -67,11 +68,7 @@ export function ContinueCard({ work }: { work: Work }) {
                 <span><strong>Audiobook</strong> <span className="hint">Not linked yet</span></span>
                 <span className="soon">Soon</span>
               </li>
-              <li className="slot" aria-disabled="true">
-                <Sync />
-                <span><strong>Read-along</strong> <span className="hint">Text + audio in step</span></span>
-                <span className="soon">Soon</span>
-              </li>
+              <ReadAloudFormats work={work} active={open} />
             </ul>
           </section>
           <section>

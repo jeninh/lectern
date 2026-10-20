@@ -53,6 +53,21 @@ export async function post<T>(path: string, body?: unknown): Promise<T> {
   return (await parse(res)) as T;
 }
 
+export async function put<T>(path: string, body: unknown, init?: { keepalive?: boolean }): Promise<T> {
+  const res = await fetch(path, {
+    method: "PUT",
+    credentials: "same-origin",
+    keepalive: init?.keepalive,
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "x-csrf-token": csrfToken,
+    },
+    body: JSON.stringify(body),
+  });
+  return (await parse(res)) as T;
+}
+
 /** Streams one EPUB to the inbox. The body is the raw file; its name rides in a header. */
 export async function uploadBook(file: File): Promise<{ queued: string; size: number }> {
   const res = await fetch("/api/books/upload", {

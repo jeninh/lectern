@@ -155,3 +155,90 @@ export interface CreatedDevice {
   sync_secret: string;
   opds_secret: string;
 }
+
+// --- Read-along (docs/contracts.md: tracks, sentences, progress, read-aloud EPUB) ---------
+
+export interface AlignmentSummary {
+  status: "pending" | "running" | "succeeded" | "failed" | "stale";
+  model: string;
+  coverage: number | null;
+}
+
+export interface Track {
+  id: number;
+  position: number;
+  media_type: string;
+  codec: string;
+  duration_s: number;
+  offset_s: number;
+  size: number;
+  sha256: string;
+  chapters: { title: string; start_s: number }[];
+  stream_url: string;
+}
+
+export interface TracksResponse {
+  work_id: number;
+  audio_fingerprint: string | null;
+  total_duration_s: number;
+  alignment: AlignmentSummary | null;
+  tracks: Track[];
+}
+
+export interface SentenceInfo {
+  n: number;
+  spine_index: number;
+  char_start: number;
+  char_end: number;
+  audio_start_s: number | null;
+  audio_end_s: number | null;
+  matched: boolean;
+}
+
+export interface SentencesResponse {
+  work_id: number;
+  count: number;
+  alignment: AlignmentSummary | null;
+  sentences: SentenceInfo[];
+}
+
+export interface TextBlock {
+  kind: "p" | "li" | "quote" | "pre" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+  /** Offset (code points) of the block's first character in the spine item's normalised text. */
+  start: number;
+  text: string;
+}
+
+export interface SpineTextResponse {
+  work_id: number;
+  spine_index: number;
+  length: number;
+  blocks: TextBlock[];
+}
+
+export interface WorkProgressResponse {
+  work_id: number;
+  position: { sentence_n: number; offset: number } | null;
+  source: "koreader" | "web" | "audio" | null;
+  raw: string | null;
+  device: string | null;
+  received_at: string | null;
+  text: { spine_index: number; char: number } | null;
+  audio_s: number | null;
+  percent: number | null;
+}
+
+export type ReadAloudState = "unavailable" | "not_generated" | "generating" | "ready" | "failed";
+
+export interface ReadAloudStatus {
+  work_id: number;
+  status: ReadAloudState;
+  reason: "no_alignment" | "alignment_stale" | "no_audio" | "no_ebook" | "missing_file" | null;
+  message: string | null;
+  readalong: boolean;
+  alignment: AlignmentSummary | null;
+  download_url: string | null;
+  size: number | null;
+  generated_at: string | null;
+  duration_s: number | null;
+}

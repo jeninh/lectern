@@ -17,12 +17,25 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Fetch epubcheck (pinned)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/epubcheck.zip" \
+            https://github.com/w3c/epubcheck/releases/download/v5.4.0/epubcheck-5.4.0.zip
+          echo "33350c61038e71dfb3d45a76aed04bf5481e6d5500cb780f6e98db8bbd15a28c  $RUNNER_TEMP/epubcheck.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/epubcheck.zip" -d "$RUNNER_TEMP"
+          echo "EPUBCHECK_JAR=$RUNNER_TEMP/epubcheck-5.4.0/epubcheck.jar" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
       - run: uv sync --frozen --extra dev
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run pytest
+        env:
+          EPUBCHECK_REQUIRED: "1"
   docker:
     runs-on: ubuntu-latest
     steps:

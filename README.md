@@ -1,7 +1,8 @@
 # Lectern
 
 Self-hosted reading server for one household: a library of works, an authenticated
-OPDS catalogue, and KOReader progress sync between devices. Milestone 1.
+OPDS catalogue, KOReader progress sync between devices, and read-along for books with an
+aligned audiobook.
 
 ## Run
 
@@ -46,6 +47,24 @@ values to enter, then waits and confirms the device's first sync live.
 - Catalogue: OPDS catalog → add `https://lectern.example/opds` with your username and
   the app password.
 
+## Read-along
+
+When a work has an EPUB, its audiobook, and a finished text–audio alignment, its **Formats**
+list (the expanded card on Home, or the book sheet in the Library) offers:
+
+- **Read-along** in the browser: the sentence being spoken is highlighted; click a sentence to
+  play from it; the page follows the narration until you scroll away. Separate speeds for
+  reading along and for listening only; keyboard (`Space`, `←`/`→`, `<`/`>`, `F`) and
+  screen-reader support; your position is saved.
+- **Narrated EPUB**: the book with EPUB 3 Media Overlays and the audio inside, built on request
+  and cached at `<Author>/<Title>/derived/read-aloud.epub`. Download requires sign-in like any
+  other download. The plain `book.epub` is never changed, so KOReader sync is unaffected.
+
+Few apps play Media Overlays: Thorium Reader does; BookFusion and Colibrio are reported to;
+**KOReader, Kobo/Kindle e-readers, and Apple Books (reflowable books) do not** and show the
+narrated EPUB as an ordinary book. Details, the state machine, the EPUB 2 → 3 upgrade, and
+validation with epubcheck are in [`docs/read-aloud.md`](docs/read-aloud.md).
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -77,7 +96,7 @@ values to enter, then waits and confirms the device's first sync live.
   per-session CSRF token and a same-origin `Origin`/`Sec-Fetch-Site`.
 - Roles: owner (user admin, audit log), member, reader.
 - Per-IP rate limits, per-account lockout, and an audit log of logins, credential
-  changes, and downloads. The client IP is the socket peer unless that peer is listed in
+  changes, and downloads (narrated EPUBs included). The client IP is the socket peer unless that peer is listed in
   `LECTERN_TRUSTED_PROXIES`; only then is `X-Forwarded-For` honoured, read right to left so a
   client-supplied entry is never believed. `CF-Connecting-IP` is ignored unless
   `LECTERN_TRUST_CF_CONNECTING_IP` is on (details in `docs/contracts.md`).
@@ -96,13 +115,14 @@ values to enter, then waits and confirms the device's first sync live.
   from Project Gutenberg and LibriVox; see `tests/fixtures/magi/PROVENANCE.md`.)
 
 The data model and API contracts for audiobooks, text–audio alignment, shelves, invites, and
-external alignment workers are in [`docs/contracts.md`](docs/contracts.md).
+external alignment workers are in [`docs/contracts.md`](docs/contracts.md). Read-along never
+fetches anything either: it works only from audio and alignments already in your library.
 
 ## Development
 
 ```sh
 uv sync --extra dev
-uv run pytest
+uv run pytest                     # set EPUBCHECK_JAR to also run epubcheck (docs/read-aloud.md)
 LECTERN_DATA_DIR=./data LECTERN_LIBRARY_DIR=./library LECTERN_INSECURE_HTTP=1 uv run lectern
 ```
 
