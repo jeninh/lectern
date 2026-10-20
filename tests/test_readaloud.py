@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from lxml import etree
 from sqlalchemy import select
-from tests.conftest import ORIGIN, api_post, login
+from tests.conftest import ORIGIN, api_post, login, make_user
 
 from lectern.db import session_factory
 from lectern.ingest.epub import read_epub_metadata
@@ -604,3 +604,25 @@ def test_progress_put_and_get(client, owner, settings, tmp_path):
             db.delete(s)
         db.commit()
     assert put({"source": "web", "sentence_n": 0}).status_code == 409
+
+
+def test_read_aloud_download_follows_visibility_and_caps(client, owner, settings, tmp_path):
+    """The narrated EPUB is a whole-file download like any other: hidden from readers without
+    a shelf grant, and counted against the hourly cap."""
+    work_id = seed_magi(settings, tmp_path)
+    url = f"/library/works/{work_id}/read-aloud.epub"
+    csrf = owner["csrf"]
+    rita = make_user(client, csrf, "rita", "reader")
+    mia = make_user(client, csrf, "mia", "member")
+    assert (
+        api_post(client, f"/api/admin/users/{mia['id']}/download-cap", csrf, {"cap": 1}).status_code
+        == 200
+    )
+
+    login(client, "rita", rita["password"])
+    assert client.get(url).status_code == 404
+
+    login(client, "mia", mia["password"])
+    assert client.get(url).status_code == 200
+    r = client.get(url)
+    assert r.status_code == 429 and r.json()["detail"] == "download_cap"
