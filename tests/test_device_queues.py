@@ -627,20 +627,47 @@ def test_queue_feed_obeys_the_basic_auth_rate_limit(home, app):
     assert codes == [200, 200, 200, 429, 429]
 
 
-def test_0007_downgrades_and_upgrades(tmp_path):
+def test_0008_downgrades_to_0007_and_upgrades(tmp_path):
     import sqlalchemy as sa
     from alembic import command
 
     from lectern.db import make_engine
     from lectern.migrate import alembic_config, upgrade_to_head
 
-    engine = make_engine(f"sqlite:///{tmp_path / 'm7.db'}")
+    engine = make_engine(f"sqlite:///{tmp_path / 'm8.db'}")
     upgrade_to_head(engine)
     assert "device_queue_items" in sa.inspect(engine).get_table_names()
     cfg = alembic_config(str(engine.url))
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.downgrade(cfg, "0006")
-    assert "device_queue_items" not in sa.inspect(engine).get_table_names()
+        command.downgrade(cfg, "0007")
+    tables = sa.inspect(engine).get_table_names()
+    assert "device_queue_items" not in tables
+    assert "instance_settings" in tables  # 0007 (add & edit books) is left alone
     upgrade_to_head(engine)
     assert "device_queue_items" in sa.inspect(engine).get_table_names()
+
+
+def test_queue_and_root_feeds_parse_with_legacy_control_characters(home, monkeypatch):
+    """Rows written before PR #6 validated metadata (and device labels, which were never
+    validated) may hold XML 1.0-illegal controls; the root, queue, and a paged search must
+    still be well-formed XML. Regression for the raw ``&q=`` in next/previous links too."""
+    owner, ids = home["owner"], home["ids"]
+    kobo = owner.devices["Kobo"]
+    from lectern.models import AppPassword
+
+    with session_factory()() as db:
+        db.get(AppPassword, kobo["id"]).label = "Ko\x01bo <&>"
+        w = db.get(Work, ids["Alpha"])
+        w.title, w.author, w.description = "Al\x0bpha & co", "A\x1futhor", "bell\x07 <b>"
+        db.commit()
+    owner.queue(kobo["id"], ids["Alpha"])
+    root = feed(owner.http, "/opds", kobo["headers"])
+    queue = [e for e in root.iter(f"{ATOM}entry") if e.findtext(f"{ATOM}id") == "urn:lectern:queue"]
+    assert queue[0].findtext(f"{ATOM}content") == "1 book sent to Kobo <&>"
+    assert titles(feed(owner.http, "/opds/queue", kobo["headers"])) == ["Alpha & co"]
+    monkeypatch.setattr("lectern.routes.opds.PAGE_SIZE", 1)
+    got = feed(owner.http, "/opds/search?q=author", kobo["headers"])
+    assert int(got.findtext(f"{OS}totalResults")) >= 2
+    links = {e.get("rel"): e.get("href") for e in got.iter(f"{ATOM}link")}
+    assert links["next"] == "/opds/search?page=2&q=author"

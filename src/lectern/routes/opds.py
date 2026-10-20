@@ -165,11 +165,11 @@ def _acquisition(
     base = self_href.split("?")[0]
     if page < pages:
         links.append(
-            f'<link rel="next" href="{escape(base)}?page={page + 1}{extra_q}" type="{ACQ}"/>'
+            f'<link rel="next" href="{escape(base)}?page={page + 1}{escape(extra_q)}" type="{ACQ}"/>'
         )
     if page > 1:
         links.append(
-            f'<link rel="previous" href="{escape(base)}?page={page - 1}{extra_q}" type="{ACQ}"/>'
+            f'<link rel="previous" href="{escape(base)}?page={page - 1}{escape(extra_q)}" type="{ACQ}"/>'
         )
     body = (
         '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" '

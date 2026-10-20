@@ -122,7 +122,7 @@ OPDS (HTTP Basic with the device's app password; the per-IP Basic rate limit app
 
 ## Storage
 
-`device_queue_items` (migration `0007`): `app_password_id`, `user_id` (the device's owner),
+`device_queue_items` (migration `0008`): `app_password_id`, `user_id` (the device's owner),
 `work_id`, `status` (`pending`/`delivered`/`removed`), `position`, `queued_by`, `queued_at`,
 `delivered_at`, `delivered_file_id`, `removed_at`, `removed_by`, `updated_at`. Deleting a
 device's app password, a user, or a work deletes their items.

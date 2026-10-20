@@ -843,7 +843,7 @@ Tables `notifications`, `known_devices`, `download_events` and the cap columns
 
 ## Per-device queues (milestone 5)
 
-Table `device_queue_items` (migration `0007`), API `/api/device-queues/*`, and the OPDS feeds
+Table `device_queue_items` (migration `0008`), API `/api/device-queues/*`, and the OPDS feeds
 `/opds/continue`, `/opds/up-next`, `/opds/queue` are specified in
 [`device-queues.md`](device-queues.md), including who may queue to which device and exactly
 which download marks an item delivered.
