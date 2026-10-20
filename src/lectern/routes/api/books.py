@@ -31,14 +31,16 @@ async def upload_book(
     content_type: Annotated[str, Header()] = "",
     x_filename: Annotated[str, Header(max_length=600)] = "book.epub",
 ) -> dict:
-    """Body is the raw EPUB (``Content-Type: application/epub+zip``); the name rides in a header.
+    """Small EPUBs in one request; larger files and audio use resumable ``/api/uploads``.
+
+    Body is the raw EPUB (``Content-Type: application/epub+zip``); the name rides in a header.
 
     Auth and CSRF run before any of the body is read, and the size cap is enforced while
     streaming, so unauthenticated or oversized requests never touch the disk.
     """
     if content_type.split(";")[0].strip().lower() != "application/epub+zip":
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Upload an EPUB file")
-    limit = settings.upload_max_bytes
+    limit = min(settings.upload_direct_max_bytes, settings.upload_max_bytes)
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > limit:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "File is too large")

@@ -99,6 +99,9 @@ export const Reader = (p: P) => (
 export const Person = (p: P) => (
   <svg {...base} {...p}><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
 );
+export const Bell = (p: P) => (
+  <svg {...base} {...p}><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z" /><path d="M10 20.5a2 2 0 0 0 4 0" /></svg>
+);
 export const Play = (p: P) => (
   <svg {...base} {...p}><path d="M7 4.5v15l12.5-7.5z" fill="currentColor" /></svg>
 );
@@ -113,4 +116,37 @@ export const NextSentence = (p: P) => (
 );
 export const Follow = (p: P) => (
   <svg {...base} {...p}><path d="M4 6h10M4 10h16M4 14h8M4 18h12" /><circle cx="18.5" cy="16" r="2.5" /></svg>
+);
+export const Back = (p: P) => (
+  <svg {...base} {...p}><path d="M4 12a8 8 0 1 0 2.4-5.7" /><path d="M4 4v4.5h4.5" /><text x="12" y="15.2" fontSize="7.5" textAnchor="middle" fill="currentColor" stroke="none" fontFamily="system-ui" fontWeight="600">15</text></svg>
+);
+export const Forward = (p: P) => (
+  <svg {...base} {...p}><path d="M20 12a8 8 0 1 1-2.4-5.7" /><path d="M20 4v4.5h-4.5" /><text x="12" y="15.2" fontSize="7.5" textAnchor="middle" fill="currentColor" stroke="none" fontFamily="system-ui" fontWeight="600">30</text></svg>
+);
+export const PrevChapter = (p: P) => (
+  <svg {...base} {...p}><path d="M6 5v14" /><path d="M18 5v14L8 12z" fill="currentColor" /></svg>
+);
+export const NextChapter = (p: P) => (
+  <svg {...base} {...p}><path d="M18 5v14" /><path d="M6 5v14l10-7z" fill="currentColor" /></svg>
+);
+export const Timer = (p: P) => (
+  <svg {...base} {...p}><circle cx="12" cy="13" r="8" /><path d="M12 9v4l2.5 2.5M9.5 2.5h5" /></svg>
+);
+export const TextSize = (p: P) => (
+  <svg {...base} {...p}><path d="M3 19 8 6l5 13M4.8 14.5h6.4" /><path d="M14 19l3.5-9 3.5 9M15.2 16h4.6" /></svg>
+);
+export const Toc = (p: P) => (
+  <svg {...base} {...p}><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" /></svg>
+);
+export const ArrowLeft = (p: P) => (
+  <svg {...base} {...p}><path d="M19 12H5M11 6l-6 6 6 6" /></svg>
+);
+export const Expand = (p: P) => (
+  <svg {...base} {...p}><path d="m6 15 6-6 6 6" /></svg>
+);
+export const Shelf = (p: P) => (
+  <svg {...base} {...p}><path d="M3 20h18M5 20V8h3v12M10 20V4h3v16M15.5 20l-1-11 3-.3 1 11.3" /></svg>
+);
+export const Link2 = (p: P) => (
+  <svg {...base} {...p}><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" /><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" /></svg>
 );

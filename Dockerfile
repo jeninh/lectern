@@ -16,8 +16,10 @@ COPY --from=ui /src/lectern/static/app ./src/lectern/static/app
 RUN uv sync --frozen --no-dev
 
 FROM python:3.12-slim-bookworm
-# ffmpeg and faster-whisper arrive with the audiobook milestone; keep the image small for now.
-RUN groupadd -g 1000 lectern && useradd -u 1000 -g lectern -m -s /usr/sbin/nologin lectern \
+# ffmpeg/ffprobe: audiobook metadata and chapters, data-saver renditions, sleep-timer rewind.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -g 1000 lectern && useradd -u 1000 -g lectern -m -s /usr/sbin/nologin lectern \
  && mkdir -p /data /library && chown lectern:lectern /data /library
 WORKDIR /app
 COPY --from=build --chown=lectern:lectern /app /app

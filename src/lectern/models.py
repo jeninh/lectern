@@ -75,6 +75,8 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     # UI preference: reveal KOReader xpointers, partial-MD5 ids, and storage paths.
     show_technical_details: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Owner-set override of LECTERN_DOWNLOAD_CAP_PER_HOUR for this user; NULL = default, 0 = off.
+    download_cap_per_hour: Mapped[int | None] = mapped_column(Integer, default=None)
 
     passkeys: Mapped[list[Passkey]] = relationship(back_populates="user", cascade="all, delete")
     sync_keys: Mapped[list[SyncKey]] = relationship(back_populates="user", cascade="all, delete")
@@ -152,6 +154,8 @@ class AppPassword(Base):
     sync_key_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_keys.id", ondelete="SET NULL"), default=None, index=True
     )
+    # Override of LECTERN_DOWNLOAD_DEVICE_CAP_PER_HOUR for this device; NULL = default, 0 = off.
+    download_cap_per_hour: Mapped[int | None] = mapped_column(Integer, default=None)
 
     user: Mapped[User] = relationship(back_populates="app_passwords")
 
@@ -624,6 +628,7 @@ class UploadSession(Base):
         ),
         Index("ix_upload_sessions_user_status", "user_id", "status"),
         Index("ix_upload_sessions_sweep", "status", "expires_at"),
+        Index("ix_upload_sessions_idempotency", "user_id", "idempotency_key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -644,3 +649,94 @@ class UploadSession(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # Migration 0006: client-chosen key that makes POST /api/uploads idempotent per user, and
+    # the digest of the last accepted chunk so a retried chunk can be answered without writing.
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    last_chunk_sha256: Mapped[str | None] = mapped_column(String(64), default=None)
+
+
+# --- Milestone 2: security alerts, download caps, ingest match review (migration 0006) -------
+
+
+class Notification(Base):
+    """An in-app alert for one user (new sign-in, new device, download burst or cap, ...).
+
+    In-app is the only delivery today; lectern.notify is where e-mail or webhook sinks plug in.
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (Index("ix_notifications_user_unread", "user_id", "read_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))  # "login.new", "device.new", "download.cap", ...
+    severity: Mapped[str] = mapped_column(String(16), default="info")  # "info" | "warning"
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text, default="")
+    data: Mapped[dict | None] = mapped_column(JSON, default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    read_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+class KnownDevice(Base):
+    """A browser that has signed in before, recognised by a long-lived random cookie.
+
+    token_hash = SHA-256 of the cookie value. A sign-in without a recognised cookie is a new
+    device and raises an alert.
+    """
+
+    __tablename__ = "known_devices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    label: Mapped[str] = mapped_column(String(128), default="")
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_ip: Mapped[str | None] = mapped_column(String(64), default=None)
+
+
+class DownloadEvent(Base):
+    """One whole-file transfer (EPUB, original audio track, web-reader copy), for hourly caps.
+
+    ``credential`` names the device: ``session:<id>`` for a browser, ``app_password:<id>`` for an
+    OPDS client. Blocked attempts are kept too so the UI can show them.
+    """
+
+    __tablename__ = "download_events"
+    __table_args__ = (
+        Index("ix_download_events_user_at", "user_id", "at"),
+        Index("ix_download_events_credential_at", "credential", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    credential: Mapped[str] = mapped_column(String(48))
+    target: Mapped[str] = mapped_column(String(64))  # "file:3", "track:7"
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    ip: Mapped[str | None] = mapped_column(String(64), default=None)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class MatchSuggestion(Base):
+    """Ingest was unsure whether a new work is the same as an existing one; a person decides.
+
+    ``work_id`` is the work the incoming file created; ``candidate_work_id`` the likely match.
+    Merging moves the new work's files into the candidate and deletes the new work.
+    """
+
+    __tablename__ = "match_suggestions"
+    __table_args__ = (
+        UniqueConstraint("work_id", "candidate_work_id", name="uq_match_suggestion_pair"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    candidate_work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), index=True
+    )
+    score: Mapped[float] = mapped_column(Float)
+    reason: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    resolution: Mapped[str | None] = mapped_column(String(16), default=None)  # merged|dismissed

@@ -5,10 +5,13 @@ uploads), 3 (alignment workers) and 4 (positions and read-aloud) build on. Step 
 database tables (migration `0005`), the sentence-map schema (`lectern.sentence_map`), the
 position interface (`lectern.positions`), the visibility predicates (`lectern.access`), the
 trusted-proxy client-address rule (`lectern.security.proxy`, **implemented**), and this
-document. Milestone 4 implements the sentences, progress (web and audio sources), spine text,
-and read-aloud routes below (see [`read-aloud.md`](read-aloud.md)), plus an interim copy of the
-milestone 2 track list and stream in `lectern.routes.media`. **The other HTTP routes are not
-implemented yet**; they are the contract the milestones implement.
+document. Milestone 2 implements tracks, range streaming and the low-bitrate variant,
+sentences, progress with cross-device hand-off, shelves, invites, resumable uploads, and the
+notification and download-cap routes (`lectern.routes.api.works`, `…shelves`, `…uploads`,
+`…notifications`, `lectern.routes.invites`, `lectern.routes.library`, migration `0006`).
+Milestone 4 implements spine text and the read-aloud routes (see [`read-aloud.md`](read-aloud.md));
+its interim `lectern.routes.media` was replaced by milestone 2's routes. **The alignment-worker
+routes (milestone 3) are not implemented yet.**
 
 Conventions used throughout:
 
@@ -166,11 +169,22 @@ players seek with `Range`.
   `416` with `Content-Range: bytes */size`.
 - `ETag: "<sha256>"`, `Last-Modified`, and `If-Range` are honoured; `If-None-Match` yields
   `304`. `Cache-Control: private, max-age=3600`. `Content-Type` is the track's `media_type`.
+- Byte positions longer than 19 digits are not a valid range: the header is ignored (`200`).
 - Visibility is checked through the track's work (`404` otherwise). Streaming is **not**
   written to the audit log per request (a player issues many); starting playback of a work is
   recorded once per session in milestone 2's player.
+- **Metering.** Metering is per **work**: an audiobook counts as one download per credential
+  (session or app password) per hour, whichever tracks and ranges were played. The bytes
+  actually sent (counted as the response body is written, not the declared `Content-Length`,
+  so an open-ended `bytes=N-` the player abandons costs only what it received) are summed over
+  all tracks of the work. Once they reach `stream_meter_bytes` (default 8 MiB) the work is
+  admitted exactly once: caps, a `download` audit row (`target stream:work:<work_id>`,
+  `detail stream`), and burst alerts apply. Later requests that hour are free. If admission
+  is refused mid-response the body ends early; later requests for that work answer
+  `429 download_cap` without writing more events, audit rows, or notifications while the
+  credential stays over the cap.
 
-#### Optional low-bitrate variant (milestone 2 may implement)
+#### Optional low-bitrate variant (implemented in milestone 2)
 
 Away from home, every byte still crosses the home uplink (over Tailscale or any other route), so
 a 320 kb/s MP3 audiobook is slow to seek on a phone. Milestone 2 *may* add a
@@ -182,9 +196,14 @@ rendition. The contract leaves room for it without requiring it:
   work.
 - The derivative lives in the work directory at
   `derived/audio/<original sha256>.<opus|m4a>`, keyed by the original's hash so a replaced
-  track invalidates it. It is produced by a `transcode` job (same queue, `kind = "transcode"`,
-  payload `{"track_id", "sha256", "codec", "bitrate_kbps"}`), on the server with `ffmpeg`
-  when available or by an external worker. No schema is needed: existence of the file *is*
+  track invalidates it. It is produced by a `transcode` job (same queue, `kind = "transcode"`),
+  on the server with `ffmpeg` when available or by an external worker. **As implemented**, one
+  job covers the whole work, because the active-job index allows one active job per work and
+  kind: payload `{"tracks": [{"track_id", "sha256"}], "codec", "bitrate_kbps"}`, `result.done`
+  counts finished tracks. A `<file>.sha256` sidecar holds the rendition's own hash for its
+  `ETag`. Default codec is AAC in `.m4a` (plays on iOS), `LECTERN_AUDIO_LOW_CODEC=opus` for Opus.
+  `POST /api/works/{id}/transcode` (owner, member) queues it; `GET …/tracks` reports
+  `transcode: {status, progress, total} | null`. No schema is needed: existence of the file *is*
   the state; the track object in `GET /api/works/{id}/tracks` gains
   `"variants": {"low": {"codec": "opus", "bitrate_kbps": 64, "size": …, "stream_url": "…?variant=low"} | null}`.
 - Requesting `variant=low` before it exists answers `404 variant_unavailable`; clients fall
@@ -285,10 +304,24 @@ Response is the same shape as `GET`. Rules:
 - `404` if the work is not visible; `source: "koreader"` is rejected (`422`), that source is only
   written by the sync projection.
 
-Status: `GET` and `PUT` are implemented (milestone 4) and used by the web read-along
-(`source: web` while reading along, `audio` in listen-only mode). A `sentence_n` past the last
-sentence is `422`; `offset` is clamped to the sentence. The KOReader projection (xpointer ↔
-sentence, `lectern.positions.xpointer_to_text`) is not implemented yet.
+Status: implemented (milestone 2's `lectern.progress`, used by the web reader, the audio player,
+and milestone 4's read-along). A `sentence_n` past the last sentence is `422`; `offset` is
+clamped to the sentence. Additions beyond the shape above:
+
+- Every EPUB gets a **text-only sentence list at ingest** (all `matched = false`), so progress
+  works before alignment. Until a work is aligned, audio ↔ text conversion is proportional
+  over the total duration and the response says `"estimated": true`.
+- `PUT` with `source: "web"` may carry `raw` (≤ 1024 chars), the reader's own precise locator
+  (an EPUB CFI), returned as `raw` so the same browser restores the exact page.
+- `count` (sentences) and `total_duration_s` are included; `percent` is a fraction `0..1`.
+- `koreader`: KOReader's latest `reading_progress` for the work's EPUB, as a read-only hand-off
+  candidate `{source: "koreader", device, received_at, percent, raw, text, audio_s, estimated}`
+  (text from the xpointer's `DocFragment` plus the percentage, so `estimated: true`). KOReader
+  progress itself is unchanged and still keyed by document hash.
+- **Hand-off rule (client):** a device offers "<device>, <time>: continue here?" only when a
+  position newer than the last one it wrote or accepted exists, comes from another device, and
+  is at least 0.5 % of the book (reading) or 20 s (listening) away. Clients save only positions
+  the reader moved to, so opening a book never overwrites a newer position.
 
 ### Read-aloud EPUB — `GET /library/works/{work_id}/read-aloud.epub`
 
@@ -356,7 +389,7 @@ Visibility rule, implemented by `lectern.access`:
 > Owners and members see the whole library. Readers see only works on shelves they hold a
 > grant for.
 
-`visible_works(user)` is a SQL predicate that milestone 2 adds to `/api/library`,
+`visible_works(user)` is a SQL predicate that milestone 2 applies to `/api/library`,
 `/api/works/{id}`, `/api/continue`, covers, downloads, OPDS, and all routes in this document.
 A role change takes effect on the next request.
 
@@ -366,10 +399,10 @@ A role change takes effect on the next request.
 | `POST /api/shelves {name}` | owner, member | `201`; `409` on a duplicate name for that owner |
 | `PATCH /api/shelves/{id} {name}` / `DELETE` | shelf owner or the owner role | `DELETE` cascades items and grants, never works |
 | `GET /api/shelves/{id}` | anyone who can see it | shelf plus its works in `position` order (readers never see a shelf they are not granted) |
-| `PUT /api/shelves/{id}/items {work_ids: [...]}` | manager or `edit` grant | Replaces the whole ordered list; members may add any work, a reader with `edit` only works they can already see |
+| `PUT /api/shelves/{id}/items {work_ids: [...]}` | manager or `edit` grant | Replaces the whole ordered list; members may add any work, a reader with `edit` only works they can already see, and never to a shelf another reader is granted (`403 shelf_shared_with_readers`) |
 | `POST /api/shelves/{id}/items {work_id}` / `DELETE …/items/{work_id}` | manager or `edit` grant | Append / remove one |
 | `GET /api/shelves/{id}/grants` | manager | `[{user, permission, granted_by, created_at}]` |
-| `PUT /api/shelves/{id}/grants/{user_id} {permission}` / `DELETE` | manager | Upsert / revoke. Granting to an owner or member is allowed but has no effect on visibility (it still lists the shelf for them) |
+| `PUT /api/shelves/{id}/grants/{user_id} {permission}` / `DELETE` | manager | Upsert / revoke. Only the owner role may grant to a reader (`403 only_owner_grants_readers`). Granting to an owner or member is allowed but has no effect on visibility (it still lists the shelf for them) |
 
 Smart shelves: `rule` is reserved (JSON, `NULL` today). When implemented, a non-null rule is
 evaluated instead of `shelf_items`, and grants on a smart shelf expose whatever the rule
@@ -387,7 +420,10 @@ Owner-only management; the sign-up page is the only unauthenticated route added.
 - `GET /invite/{token}` renders the sign-up form; `POST /invite/{token} {username, password,
   password_confirm}` creates the user with the invite's role, marks the invite used, signs the
   user in, and redirects to `/app`. Used, expired, revoked, or unknown tokens all answer `404`
-  (not distinguished). The route shares the per-IP login rate limit. Passkeys/TOTP are set up
+  (not distinguished). The invite is claimed with one conditional `UPDATE` (unused, unrevoked,
+  unexpired) in the same transaction as the new account, so concurrent submissions create at
+  most one user; a username taken in the meantime is a `400` form error and leaves the link
+  usable. The route shares the per-IP login rate limit. Passkeys/TOTP are set up
   afterwards from the normal security settings.
 
 ### Resumable uploads — `/api/uploads`
@@ -396,7 +432,8 @@ Owner-only management; the sign-up page is the only unauthenticated route added.
 long transfers, and some proxies cap request bodies (Cloudflare: 100 MB; Tailscale has no such
 cap, but the 50 MiB chunk limit keeps one contract for every deployment), so milestone 2 adds a
 resumable session upload for EPUBs and audiobooks. The schema
-(`upload_sessions`, migration `0005`) is in place; the routes are M2's. **The inbox folder
+(`upload_sessions`, migration `0005`, plus `idempotency_key` and `last_chunk_sha256` in `0006`)
+backs the routes below, implemented in milestone 2. **The inbox folder
 remains the path for very large local imports** (a 2 GB audiobook on the same LAN is a file
 copy, not an upload).
 
@@ -422,7 +459,7 @@ gets `403`; a session that belongs to another user is `404`, so ids cannot be pr
 | Route | Behaviour |
 | --- | --- |
 | `POST /api/uploads` `{filename, size, media_type, sha256?}` | `201 {id, chunk_size, received_bytes: 0, expires_at}`. `size` ≤ `LECTERN_UPLOAD_MAX_BYTES` (`413` otherwise); `media_type` ∈ `application/epub+zip`, `audio/mpeg`, `audio/mp4`, `audio/ogg`, `audio/flac` (`415`). `chunk_size` is chosen by the server: `min(50 MiB, size)`. `sha256`, if given, is checked at finalize; if omitted it must be sent to finalize. `id` is `public_id`, 22 URL-safe chars. `expires_at = now + 24 h`, extended by each accepted chunk. |
-| `PUT /api/uploads/{id}/chunk` | Headers `Upload-Offset: <int>`, `X-Chunk-SHA256: <hex>`, raw body ≤ `chunk_size` bytes (a larger body is `413` before anything is written). Every chunk except the last must be exactly `chunk_size` long (`400 short_chunk`). `Upload-Offset` must equal `received_bytes` (`409 offset_mismatch` with the current `Upload-Offset` header; the client reads it and resumes). A replay with `Upload-Offset + len == received_bytes` and the same `X-Chunk-SHA256` as the recorded last chunk answers `204` without writing (idempotent retry after a lost response); any other overlap is `409`. The body is hashed while streaming to the `.part` file; a mismatch truncates the file back to the previous offset and answers `422 chunk_checksum`. Success: `204` with `Upload-Offset: <new received_bytes>`. |
+| `PUT /api/uploads/{id}/chunk` | Headers `Upload-Offset: <int>`, `X-Chunk-SHA256: <hex>`, raw body ≤ `chunk_size` bytes (a larger body is `413` before anything is written). Every chunk except the last must be exactly `chunk_size` long (`400 short_chunk`). `Upload-Offset` must equal `received_bytes` (`409 offset_mismatch` with the current `Upload-Offset` header; the client reads it and resumes). A replay with `Upload-Offset + len == received_bytes` and the same `X-Chunk-SHA256` as the recorded last chunk answers `204` without writing (idempotent retry after a lost response); any other overlap is `409`. The body is read (bounded by `chunk_size`), then hashed and written to the `.part` file in the threadpool, never on the event loop; a mismatch leaves the file at the previous offset and answers `422 chunk_checksum`. Success: `204` with `Upload-Offset: <new received_bytes>`. |
 | `GET /api/uploads/{id}` | `{id, filename, size, chunk_size, received_bytes, status, error, expires_at, inbox_name}`. The resume point is `received_bytes`. |
 | `GET /api/uploads` | The caller's sessions (owner: everyone's, with `user`), newest first, so the UI can offer to resume or discard. |
 | `POST /api/uploads/{id}/finalize` `{sha256?}` | Requires `received_bytes == size` (`409 incomplete` with `received_bytes`) and a declared or supplied `sha256` (`400 sha256_required`). The server hashes the whole `.part` and compares (`422 checksum_mismatch` → status `FAILED`, file deleted). For EPUBs the zip magic is checked as `/api/books/upload` does. Then the file is renamed into `<inbox>/<stem>-<hex>.<ext>` and the row becomes `COMPLETED` with `inbox_name`; the ordinary watcher ingests it. Response `200` with the status shape plus `queued` (the inbox name) and `title` when readable. Finalize is idempotent: on a `COMPLETED` session it returns the same `200`. |
@@ -436,9 +473,11 @@ Rules:
 - **Idempotency.** `POST /api/uploads` accepts an optional `Idempotency-Key` header
   (≤ 64 chars); a repeat with the same key and user within 24 h returns the existing session
   (`200`) instead of creating another. Chunk replay and finalize replay are defined above.
-- **Expiry and cleanup.** A sweeper (on startup and hourly) marks `ACTIVE` sessions past
-  `expires_at` as `EXPIRED` and deletes their `.part` files, deletes `.part` files with no
-  `ACTIVE` row, and deletes rows in a terminal state after 7 days. A chunk for an `EXPIRED`,
+- **Expiry and cleanup.** A sweeper (on startup and hourly, whether or not inbox ingest is
+  enabled) marks `ACTIVE` sessions past `expires_at` as `EXPIRED` and deletes their `.part`
+  files, deletes `.part` files with no `ACTIVE` row that are older than 10 minutes, and deletes
+  rows in a terminal state after 7 days. The session row is committed before its `.part` file
+  is created. A chunk for an `EXPIRED`,
   `CANCELLED`, `FAILED`, or `COMPLETED` session answers `410 gone`.
 - **Limits.** `size` and the running total are checked against `LECTERN_UPLOAD_MAX_BYTES`
   (which M2 raises to a value suitable for audiobooks, e.g. 4 GiB; the old 200 MiB default is
@@ -637,6 +676,39 @@ Rules:
 Tests: `tests/test_proxy.py` (spoofed leftmost entries, all-trusted chains, malformed hops,
 IPv4/IPv6 and port forms, trusted and untrusted peers, `CF-Connecting-IP` ignored by default
 and honoured only with the flag on, and the rate-limit buckets and audit rows through the app).
+
+## Notifications, alerts, and download caps (milestone 2)
+
+Tables `notifications`, `known_devices`, `download_events` and the cap columns
+`users.download_cap_per_hour` and `app_passwords.download_cap_per_hour` are in migration `0006`.
+
+- **Alerts.** A sign-in from a browser without a recognised `lectern_device` cookie notifies
+  the user and every owner (`device.new`, audit `device.new`); a known browser gets an info
+  note. The first use of a sync key or app password notifies the user (`device.connected`,
+  audit `device.first_use`). `download_burst_count` downloads within
+  `download_burst_window_seconds` notify the user and owners once per hour (`download.burst`).
+- **Caps.** Whole-file transfers (`/library/files/{id}/download`, OPDS downloads,
+  `/library/works/{id}/book.epub`, `/library/tracks/{id}/download`,
+  `/library/works/{id}/read-aloud.epub`) are counted per user and, for OPDS app passwords,
+  per device over a rolling hour. Over a cap: `429 {"detail": "download_cap", "message",
+  "scope": "user"|"device", "limit", "retry_after"}` with `Retry-After`, an audit
+  `download.blocked`, and a `download.cap` notification. Streams count once per credential and
+  work per hour after `stream_meter_bytes` were sent (see Streaming); read-along chapter text
+  (`GET /api/works/{id}/text/{n}`) counts once per session and work per hour on the first
+  chapter (`target text:<work_id>`). Counting and recording are atomic, so concurrent requests
+  cannot overshoot a cap. Overrides: `POST /api/admin/users/{id}/download-cap {cap}` (owner) and
+  `POST /api/devices/app-passwords/{id}/download-cap {cap}` (that user); `null` means the
+  server default, `0` no cap. Members and readers may only lower their own device's effective
+  cap (`403 only_owner_can_raise_cap` otherwise); the owner role may set any value. `GET /api/security` reports `downloads` usage and
+  `known_devices`; `POST /api/security/known-devices/{id}/forget` forgets one.
+- **Reading them.** `GET /api/notifications?limit=` → `{items: [{id, kind, severity, title,
+  body, data, created_at, read_at}], unread}`; `POST /api/notifications/read {ids?, all?}`.
+  `/api/me` includes `counts.unread_notifications`.
+- **Extension point for e-mail or webhooks.** Lectern ships in-app delivery only, because
+  external channels need configuration a household server does not have by default. Implement
+  `lectern.notify.Sink` (`deliver(db, note, user)`, must return quickly and not commit) and call
+  `notify.register_sink(...)` at startup, gated by your own setting; every notification reaches
+  it after the row is written. Failures are logged, never raised.
 
 ## `lectern.positions` interface
 

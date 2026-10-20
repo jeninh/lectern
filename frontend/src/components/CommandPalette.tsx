@@ -8,7 +8,8 @@ import { fuzzyScore } from "../lib/fuzzy";
 import { useStore } from "../lib/store";
 import type { Device, Work } from "../lib/types";
 import { Cover } from "./Cover";
-import { Devices, Gear, Help, Home, Key, Library, Moon, Person, Plus, Pulse, Reader, Search, Shield, Sun, Upload } from "./Icons";
+import { usePlayer } from "../lib/player";
+import { Devices, Gear, Headphones, Help, Home, Key, Library, Link2, Moon, Person, Plus, Pulse, Reader, Search, Shield, Sun, Upload } from "./Icons";
 
 type Group = "Actions" | "Pages" | "Books" | "Authors" | "Devices" | "Settings";
 const ORDER: Group[] = ["Actions", "Books", "Authors", "Devices", "Pages", "Settings"];
@@ -29,6 +30,7 @@ interface Item {
 export function CommandPalette() {
   const { paletteOpen, setPaletteOpen, works, me, resolvedTheme, setTheme, setHelpOpen, canUpload, pickBooks } = useStore();
   const nav = useNavigate();
+  const player = usePlayer();
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -68,7 +70,7 @@ export function CommandPalette() {
     const all: Item[] = [
       { id: "a-add", group: "Actions", label: "Add device", keywords: "new koreader kobo kindle opds connect", hint: "N", icon: <Plus />, run: () => go("/app/devices/new") },
       ...(canUpload
-        ? [{ id: "a-upload", group: "Actions" as Group, label: "Upload book", keywords: "epub import add file", icon: <Upload />, run: () => { close(); pickBooks(); } }]
+        ? [{ id: "a-upload", group: "Actions" as Group, label: "Upload books or audiobooks", keywords: "epub m4b mp3 audio import add file", icon: <Upload />, run: () => { close(); pickBooks(); } }]
         : []),
       {
         id: "a-theme",
@@ -84,8 +86,11 @@ export function CommandPalette() {
       },
       { id: "a-help", group: "Actions", label: "Keyboard shortcuts", keywords: "help keys hotkeys", hint: "?", icon: <Help />, run: () => { close(); setHelpOpen(true); } },
 
+      ...(player.work ? [{ id: "a-play", group: "Actions" as Group, label: player.playing ? `Pause ${player.work.title}` : `Play ${player.work.title}`, keywords: "audio listen resume", hint: "Space", icon: <Headphones />, run: () => { close(); player.toggle(); } }] : []),
+      ...(isOwner ? [{ id: "a-invite", group: "Actions" as Group, label: "Invite someone to the household", keywords: "invite member reader family link", icon: <Link2 />, run: () => go("/app/admin#invites") }] : []),
       { id: "p-home", group: "Pages", label: "Home", keywords: "continue reading", hint: "G H", icon: <Home />, run: () => go("/app") },
-      { id: "p-lib", group: "Pages", label: "Library", keywords: "books", hint: "G L", icon: <Library />, run: () => go("/app/library") },
+      { id: "p-lib", group: "Pages", label: "Library", keywords: "books shelves", hint: "G L", icon: <Library />, run: () => go("/app/library") },
+      { id: "p-listen", group: "Pages", label: "Listening", keywords: "audiobooks player audio", hint: "G P", icon: <Headphones />, run: () => go("/app/listening") },
       { id: "p-dev", group: "Pages", label: "Devices", hint: "G D", icon: <Devices />, run: () => go("/app/devices") },
       { id: "p-sec", group: "Pages", label: "Security", hint: "G S", icon: <Shield />, run: () => go("/app/security") },
       { id: "p-act", group: "Pages", label: "Activity", keywords: "audit log", hint: "G A", icon: <Pulse />, run: () => go("/app/activity") },
@@ -99,6 +104,8 @@ export function CommandPalette() {
       ...(isOwner ? [{ id: "s-users", group: "Settings" as Group, label: "Add a user", keywords: "member reader invite", icon: <Person />, run: () => go("/app/admin?new=1") }] : []),
 
       ...works.map<Item>((w) => ({ id: `w${w.id}`, group: "Books", label: w.title, detail: w.author, keywords: w.isbn ?? "", work: w, run: () => go(`/app/library/${w.id}`) })),
+      ...works.filter((w) => w.files.some((f) => f.kind === "ebook")).map<Item>((w) => ({ id: `r${w.id}`, group: "Actions", label: `Read ${w.title}`, keywords: `open ${w.author}`, icon: <Reader />, run: () => go(`/app/reader/${w.id}`) })),
+      ...works.filter((w) => w.audio).map<Item>((w) => ({ id: `l${w.id}`, group: "Actions", label: `Listen to ${w.title}`, keywords: `play audiobook ${w.author}`, icon: <Headphones />, run: () => { close(); player.open(w, { autoplay: true }); } })),
       ...[...new Set(works.map((w) => w.author))].map<Item>((a) => {
         const n = works.filter((w) => w.author === a).length;
         return { id: `au-${a}`, group: "Authors", label: a, detail: `${n} ${n === 1 ? "book" : "books"}`, icon: <Person />, run: () => go(`/app/library?q=${encodeURIComponent(a)}`) };
@@ -119,7 +126,7 @@ export function CommandPalette() {
       // Without a query: actions, a few recent books, and pages.
       const recent = [...works].sort((a, b) => (b.progress?.updated_at ?? b.created_at ?? "").localeCompare(a.progress?.updated_at ?? a.created_at ?? "")).slice(0, 4);
       const ids = new Set(recent.map((w) => `w${w.id}`));
-      picked = all.filter((i) => i.group === "Actions" || i.group === "Pages" || ids.has(i.id)).map((item) => ({ item, score: 0 }));
+      picked = all.filter((i) => (i.group === "Actions" && !/^[rl]\d/.test(i.id)) || i.group === "Pages" || ids.has(i.id)).map((item) => ({ item, score: 0 }));
     } else {
       picked = all
         .map((item) => {
@@ -134,14 +141,14 @@ export function CommandPalette() {
     const byGroup = new Map<Group, { items: Item[]; best: number }>();
     for (const { item, score } of picked) {
       const g = byGroup.get(item.group) ?? { items: [], best: score };
-      if (g.items.length < (item.group === "Books" ? 6 : 5)) g.items.push(item);
+      if (g.items.length < (item.group === "Books" || item.group === "Actions" ? 7 : 5)) g.items.push(item);
       byGroup.set(item.group, g);
     }
     return [...byGroup.entries()]
       .sort((a, b) => (needle ? b[1].best - a[1].best : 0) || ORDER.indexOf(a[0]) - ORDER.indexOf(b[0]))
       .map(([group, g]) => ({ group, items: g.items }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, works, me, resolvedTheme, devices, canUpload]);
+  }, [q, works, me, resolvedTheme, devices, canUpload, player.work, player.playing]);
 
   const flat = groups.flatMap((g) => g.items);
 

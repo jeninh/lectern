@@ -5,17 +5,19 @@ export interface MenuAction {
   label: string;
   icon?: ReactNode;
   danger?: boolean;
+  /** Renders as a radio item (speed, sleep timer). */
+  checked?: boolean;
   onSelect: () => void;
 }
 
 /** Overflow menu button: ARIA menu pattern with arrow keys, Home/End, Esc, and outside click. */
-export function OverflowMenu({ label, actions }: { label: string; actions: MenuAction[] }) {
+export function OverflowMenu({ label, actions, trigger, className = "icon-btn ghost sm", up }: { label: string; actions: MenuAction[]; trigger?: ReactNode; className?: string; up?: boolean }) {
   const [open, setOpen] = useState(false);
   const btn = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
 
-  const items = () => Array.from(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+  const items = () => Array.from(menu.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? []);
   const close = (refocus = true) => {
     setOpen(false);
     if (refocus) btn.current?.focus();
@@ -51,7 +53,7 @@ export function OverflowMenu({ label, actions }: { label: string; actions: MenuA
     <div className="menu-wrap">
       <button
         ref={btn}
-        className="icon-btn ghost sm"
+        className={className}
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -64,14 +66,15 @@ export function OverflowMenu({ label, actions }: { label: string; actions: MenuA
           }
         }}
       >
-        <More />
+        {trigger ?? <More />}
       </button>
       {open && (
-        <div className="menu" role="menu" id={id} ref={menu} aria-label={label} onKeyDown={onKey}>
+        <div className={`menu${up ? " up" : ""}`} role="menu" id={id} ref={menu} aria-label={label} onKeyDown={onKey}>
           {actions.map((a) => (
             <button
               key={a.label}
-              role="menuitem"
+              role={a.checked === undefined ? "menuitem" : "menuitemradio"}
+              aria-checked={a.checked}
               tabIndex={-1}
               className={a.danger ? "danger" : undefined}
               onClick={() => {

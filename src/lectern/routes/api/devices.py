@@ -11,10 +11,10 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from lectern.models import AppPassword, BookFile, ReadingProgress, SyncKey, Work, utcnow
+from lectern.models import AppPassword, BookFile, ReadingProgress, Role, SyncKey, Work, utcnow
 from lectern.routes.api.serializers import app_password_json, iso, sync_key_json
 from lectern.security import audit
-from lectern.security.deps import Auth, AuthCsrf, DbDep
+from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 from lectern.security.sessions import client_ip
 from lectern.security.tokens import new_secret, sha256_hex, sync_key_hash
 
@@ -229,4 +229,47 @@ def revoke_app_password(request: Request, auth: AuthCsrf, db: DbDep, key_id: int
             ip=client_ip(request),
         )
         db.commit()
+    return {"app_password": app_password_json(row)}
+
+
+class DeviceCapIn(BaseModel):
+    # None = server default (LECTERN_DOWNLOAD_DEVICE_CAP_PER_HOUR); 0 = no cap for this device.
+    cap: int | None = Field(default=None, ge=0, le=100000)
+
+
+@router.post("/app-passwords/{pw_id}/download-cap")
+def set_device_download_cap(
+    request: Request,
+    auth: AuthCsrf,
+    db: DbDep,
+    settings: SettingsDep,
+    pw_id: int,
+    body: DeviceCapIn,
+) -> dict:
+    """Hourly download cap for one OPDS device (its app password).
+
+    Owners may set anything. Members and readers may only tighten their own device's cap:
+    the new effective limit must not be higher than the current one (0 counts as unlimited).
+    """
+    row = db.get(AppPassword, pw_id)
+    if row is None or row.user_id != auth.user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if auth.user.role != Role.OWNER:
+
+        def limit(cap: int | None) -> float:
+            eff = settings.download_device_cap_per_hour if cap is None else cap
+            return eff or float("inf")
+
+        if limit(body.cap) > limit(row.download_cap_per_hour):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "only_owner_can_raise_cap")
+    row.download_cap_per_hour = body.cap
+    audit.record(
+        db,
+        "device.download_cap",
+        actor_user_id=auth.user.id,
+        target=row.label,
+        ip=client_ip(request),
+        detail="default" if body.cap is None else str(body.cap),
+    )
+    db.commit()
     return {"app_password": app_password_json(row)}

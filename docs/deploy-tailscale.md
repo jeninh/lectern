@@ -225,10 +225,13 @@ Each person needs two things: a way onto the tailnet, and a Lectern account.
    your own tailnet). Shared machines are one-way: they can reach Lectern, Lectern cannot
    reach their devices, and they see nothing else of yours. Share invites expire after 30 days
    if not accepted.
-2. **Lectern account.** As owner, create their user in **Admin → Users** with the role
-   *member* (can add books) or *reader* (can read what is shared with them). Milestone 2 adds
-   invite links for this step. They sign in once, set up a passkey or TOTP, and add their
-   e-reader under **Devices**.
+2. **Lectern account.** As owner, open **Admin → Household invites → New invite**, choose
+   *member* (whole library, can add books) or *reader* (only shelves you share), and send them
+   the one-use link privately; it expires (3 days by default). They pick their own username and
+   password at `https://lectern.tail1234.ts.net/invite/…`, which only works on the tailnet like
+   everything else. For a reader, share shelves from **Library → Shelves**. They then set up a
+   passkey or TOTP and add their e-reader under **Devices**. Lectern's sign-in is required on
+   the tailnet too, and you get a notification when someone signs in from a new browser.
 
 ## Kindle and Kobo with KOReader
 
@@ -330,13 +333,16 @@ KOReader plugin above is the route; tailscale_kual is Kindle-only.
 ## Adding books, especially big ones
 
 - Small EPUBs: use **Upload** in the web app as usual, from any device on the tailnet.
-- Tailscale puts no size cap on requests, but a long upload over a home uplink can still drop
-  and start over. Milestone 2 adds resumable uploads (see `contracts.md`). Until then, and
-  for anything really large (audiobooks), **copy the files into the inbox folder on the host
-  instead**: `~/lectern/library/_inbox/`. Lectern notices new files within a few seconds. On
+- Audiobooks upload from the web app too. Uploads are resumable: files go up in ≤ 50 MiB
+  chunks, so a dropped connection on a home uplink resumes where it stopped instead of
+  starting over. For anything really large, on the LAN, **copying into the inbox folder on the
+  host is still fastest**: `~/lectern/library/_inbox/`. Lectern notices new files within a few seconds. On
   your LAN this is a plain file copy (Finder, Explorer, `scp`, Syncthing, a Samba share) and
   faster than any upload.
 - Finished books are stored under `~/lectern/library/<Author>/<Title>/`.
+- Listening away from home goes over your home upload bandwidth through Tailscale. Turn on
+  **Data saver** in the player: Lectern makes a ~64 kb/s copy once (under
+  `derived/audio/`, originals untouched) and streams that instead.
 
 ## Backups
 

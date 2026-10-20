@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { EmptyState } from "../components/EmptyState";
-import { Book, Close, Plus, Reader, Sync } from "../components/Icons";
+import { Book, Close, Download, Plus, Reader, Sync } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -22,12 +22,13 @@ export function deviceStatus(d: Device, now = Date.now()): { tone: "live" | "ok"
 }
 
 export function DevicesPage() {
-  const { toast, now } = useStore();
+  const { me, toast, now } = useStore();
   const nav = useNavigate();
   const loc = useLocation();
   const adding = loc.pathname.endsWith("/new");
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [confirm, setConfirm] = useState<Device | null>(null);
+  const [capFor, setCapFor] = useState<Device | null>(null);
   const [showRevoked, setShowRevoked] = useState(false);
 
   const load = useCallback(async () => {
@@ -87,7 +88,7 @@ export function DevicesPage() {
           ) : (
             <ul className="device-grid" aria-label="Active devices">
               {active.map((d) => (
-                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} onRevoke={() => setConfirm(d)} />
+                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} />
               ))}
             </ul>
           )}
@@ -121,11 +122,59 @@ export function DevicesPage() {
           <button className="btn danger" onClick={revoke} data-autofocus>Revoke</button>
         </div>
       </Sheet>
+      <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for ${capFor.label}` : ""} variant="dialog" labelledBy="cap-title">
+        {capFor?.app_password && (
+          <CapForm
+            initial={capFor.app_password.download_cap_per_hour ?? null}
+            what="this device"
+            lowerOnly={me?.user.role !== "owner"}
+            onSave={async (cap) => {
+              await post(`/api/devices/app-passwords/${capFor.app_password!.id}/download-cap`, { cap });
+              toast(`Limit for ${capFor.label} saved`);
+              setCapFor(null);
+              await load();
+            }}
+          />
+        )}
+      </Sheet>
     </>
   );
 }
 
-function DeviceCard({ d, now, highlight, onRevoke }: { d: Device; now: number; highlight?: boolean; onRevoke?: () => void }) {
+/** Hourly download cap: server default, a number, or no limit. Shared with Admin. */
+export function CapForm({ initial, what, onSave, lowerOnly = false }: { initial: number | null; what: string; onSave: (cap: number | null) => Promise<void>; lowerOnly?: boolean }) {
+  const [mode, setMode] = useState<"default" | "custom" | "none">(initial === null ? "default" : initial === 0 ? "none" : "custom");
+  const [n, setN] = useState(initial && initial > 0 ? initial : 30);
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        try {
+          await onSave(mode === "default" ? null : mode === "none" ? 0 : n);
+        } catch (ex) {
+          setErr((ex as Error).message);
+        }
+      }}
+    >
+      {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
+      <fieldset className="radio-list">
+        <legend className="sr-only">Hourly download limit for {what}</legend>
+        <label><input type="radio" name="cap" checked={mode === "default"} onChange={() => setMode("default")} /> Server default</label>
+        <label>
+          <input type="radio" name="cap" checked={mode === "custom"} onChange={() => setMode("custom")} /> At most
+          <input className="input sm" type="number" min={1} max={100000} value={n} onChange={(e) => { setN(Number(e.target.value)); setMode("custom"); }} aria-label="Downloads per hour" style={{ width: 90 }} />
+          per hour
+        </label>
+        {!lowerOnly && <label><input type="radio" name="cap" checked={mode === "none"} onChange={() => setMode("none")} /> No limit</label>}
+      </fieldset>
+      <p className="hint">Downloads over the limit are refused with a clear message and recorded in Activity.{lowerOnly && " You can lower this device's limit; only the owner can raise it."}</p>
+      <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn primary">Save</button></div>
+    </form>
+  );
+}
+
+function DeviceCard({ d, now, highlight, onRevoke, onCap }: { d: Device; now: number; highlight?: boolean; onRevoke?: () => void; onCap?: () => void }) {
   const s = deviceStatus(d, now);
   return (
     <li className="device-card" id={`device-${d.id}`} data-tone={s.tone} data-highlight={highlight || undefined}>
@@ -138,7 +187,15 @@ function DeviceCard({ d, now, highlight, onRevoke }: { d: Device; now: number; h
             {s.text}
           </span>
         </div>
-        {onRevoke && <OverflowMenu label={`Actions for ${d.label}`} actions={[{ label: "Revoke device", icon: <Close />, danger: true, onSelect: onRevoke }]} />}
+        {onRevoke && (
+          <OverflowMenu
+            label={`Actions for ${d.label}`}
+            actions={[
+              ...(d.app_password && onCap ? [{ label: "Download limit…", icon: <Download />, onSelect: onCap }] : []),
+              { label: "Revoke device", icon: <Close />, danger: true, onSelect: onRevoke },
+            ]}
+          />
+        )}
       </div>
       <dl className="device-meta">
         <div>
@@ -157,6 +214,7 @@ function DeviceCard({ d, now, highlight, onRevoke }: { d: Device; now: number; h
       <div className="caps" aria-label="Capabilities">
         {d.sync_key && <span className="cap"><Sync /> Progress sync</span>}
         {d.app_password && <span className="cap"><Book /> Catalogue</span>}
+        {d.app_password?.download_cap_per_hour != null && <span className="cap"><Download /> {d.app_password.download_cap_per_hour ? `${d.app_password.download_cap_per_hour}/h` : "no limit"}</span>}
       </div>
     </li>
   );
