@@ -112,5 +112,5 @@ jobs:
           docker logs smoke 2>&1 | tail -n 40
           docker exec smoke python -c "import urllib.request as u; assert u.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200"
           docker logs smoke 2>&1 | grep -A3 "FIRST-RUN SETUP" | grep -q "https://lectern.tail1234.ts.net/setup?token="
-          sudo test -s "$RUNNER_TEMP/smoke/data/lectern.db"   
+          sudo test -s "$RUNNER_TEMP/smoke/data/lectern.db"   # written as UID 1001 via the bind mount
           docker rm -f smoke
