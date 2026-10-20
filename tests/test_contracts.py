@@ -665,3 +665,39 @@ def test_models_match_migrations_and_0006_round_trips(tmp_path):
     assert not (m2 & set(insp.get_table_names())) and NEW_TABLES <= set(insp.get_table_names())
     assert "idempotency_key" not in {c["name"] for c in insp.get_columns("upload_sessions")}
     upgrade_to_head(engine)
+
+
+def test_migration_0007_backfills_authors_and_round_trips(tmp_path):
+    """Existing works get ``authors`` from their author columns; 0007 downgrades cleanly."""
+    from lectern.models import Base
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'm7.db'}")
+    cfg = alembic_config(str(engine.url))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "0006")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO works (title, sort_title, author, sort_author, dir_path, has_cover,"
+                " created_at, updated_at) VALUES ('Kim', 'kim', 'Rudyard Kipling',"
+                " 'kipling, rudyard', 'Rudyard Kipling/Kim', 0, '2026-01-01', '2026-01-01')"
+            )
+        )
+    upgrade_to_head(engine)
+    with engine.connect() as conn:
+        row = conn.execute(sa.text("SELECT authors, version, readalong_enabled FROM works")).one()
+        assert json.loads(row[0]) == [{"name": "Rudyard Kipling", "sort": "kipling, rudyard"}]
+        assert (row[1], row[2]) == (1, 1)
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
+
+        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.downgrade(cfg, "0006")
+    insp = sa.inspect(engine)
+    assert "imports" not in insp.get_table_names()
+    assert "authors" not in {c["name"] for c in insp.get_columns("works")}
+    with engine.connect() as conn:
+        assert conn.execute(sa.text("SELECT title FROM works")).scalar() == "Kim"

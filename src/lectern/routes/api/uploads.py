@@ -16,10 +16,20 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
+from lectern import imports
+from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest.audio import AudioError, probe
 from lectern.ingest.epub import EpubError, read_epub_metadata
 from lectern.ingest.hashing import sha256_file
-from lectern.models import UPLOAD_CHUNK_MAX_BYTES, Role, UploadSession, UploadStatus, User, utcnow
+from lectern.models import (
+    UPLOAD_CHUNK_MAX_BYTES,
+    Import,
+    Role,
+    UploadSession,
+    UploadStatus,
+    User,
+    utcnow,
+)
 from lectern.routes.api.serializers import iso
 from lectern.security import audit
 from lectern.security.deps import AuthContext, DbDep, SettingsDep, require_role
@@ -44,6 +54,7 @@ def _err(code: int, detail: str, **extra) -> HTTPException:
 
 def session_json(s: UploadSession, users: dict[int, str] | None = None) -> dict:
     out = {
+        "import_id": s.import_id and _import_public_id(s),
         "id": s.public_id,
         "filename": s.filename,
         "media_type": s.media_type,
@@ -62,6 +73,16 @@ def session_json(s: UploadSession, users: dict[int, str] | None = None) -> dict:
     return out
 
 
+def _import_public_id(s: UploadSession) -> str | None:
+    from sqlalchemy.orm import object_session
+
+    from lectern.models import Import
+
+    db = object_session(s)
+    imp = db.get(Import, s.import_id) if db is not None and s.import_id else None
+    return imp.public_id if imp else None
+
+
 def _own(db, auth: AuthContext, public_id: str, *, owner_may: bool = False) -> UploadSession:
     row = db.scalar(select(UploadSession).where(UploadSession.public_id == public_id))
     if row is None or (
@@ -76,6 +97,8 @@ class CreateIn(BaseModel):
     size: int = Field(gt=0)
     media_type: str = Field(max_length=64)
     sha256: str | None = Field(default=None, pattern=_HEX64.pattern)
+    # Stage into this import (review before filing) instead of handing off to the inbox.
+    import_id: str | None = Field(default=None, max_length=32)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -102,6 +125,14 @@ def create(
         raise _err(status.HTTP_413_CONTENT_TOO_LARGE, "too_large", limit=settings.upload_max_bytes)
     if body.media_type not in MEDIA_TYPES:
         raise _err(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
+    imp = None
+    if body.import_id is not None:
+        try:
+            imp = imports.get_owned(db, auth.user, body.import_id)
+        except imports.ImportError_ as exc:
+            raise _err(exc.status, exc.code) from None
+        if imp.status not in imports.OPEN:
+            raise _err(status.HTTP_409_CONFLICT, "import_closed", status=imp.status.value)
     active = db.execute(
         select(func.count(), func.coalesce(func.sum(UploadSession.size), 0)).where(
             UploadSession.user_id == auth.user.id, UploadSession.status == UploadStatus.ACTIVE
@@ -127,6 +158,7 @@ def create(
         sha256=body.sha256,
         expires_at=now + timedelta(seconds=settings.upload_session_ttl_seconds),
         idempotency_key=idempotency_key,
+        import_id=imp.id if imp is not None else None,
     )
     db.add(row)
     db.commit()  # the row exists before the file, so a concurrent sweep never sees an orphan
@@ -308,6 +340,14 @@ def finalize(
 ) -> dict:
     row = _own(db, auth, public_id)
     if row.status == UploadStatus.COMPLETED:
+        if row.import_id is not None:
+            imp = db.get(Import, row.import_id)
+            return {
+                **session_json(row),
+                "queued": None,
+                "title": None,
+                "import": imports.import_json(db, settings, imp, refresh=False) if imp else None,
+            }
         return {**session_json(row), "queued": row.inbox_name, "title": None}
     _expire_if_due(db, settings, row)
     if row.status != UploadStatus.ACTIVE:
@@ -333,6 +373,8 @@ def finalize(
             probe(part, settings.ffprobe_path)
         except AudioError:
             raise _fail(db, request, auth, settings, row, 422, "not_audio") from None
+    if row.import_id is not None:
+        return _finalize_into_import(db, request, auth, settings, row, part, expected, title)
     name = inbox_name_for(row.filename, row.media_type)
     move_into_inbox(settings, part, name)
     row.sha256 = expected
@@ -350,6 +392,47 @@ def finalize(
     db.commit()
     _locks.pop(public_id, None)
     return {**session_json(row), "queued": name, "title": title}
+
+
+def _finalize_into_import(db, request, auth, settings, row, part, expected, title) -> dict:
+    """Stage the verified file in its import (review before filing); nothing reaches the
+    inbox, so nothing is filed until a person (or a certain auto-file) decides."""
+    imp = db.get(Import, row.import_id)
+    row.sha256 = expected
+    try:
+        with LIBRARY_LOCK:
+            staged = imports.stage_upload(db, settings, imp, row, part)
+    except imports.ImportError_ as exc:
+        db.rollback()
+        row = db.get(UploadSession, row.id)
+        if exc.code in ("not_epub", "not_audio"):
+            raise _fail(db, request, auth, settings, row, 422, exc.code) from None
+        raise _err(exc.status, exc.code, **exc.extra) from None
+    name = f"import:{imp.public_id}/{staged.rel_path}"
+    row.status = UploadStatus.COMPLETED
+    row.inbox_name = name[:256]
+    row.completed_at = utcnow()
+    audit.record(
+        db,
+        "upload.complete",
+        actor_user_id=auth.user.id,
+        target=(title or row.filename)[:256],
+        ip=client_ip(request),
+        detail=name[:500],
+    )
+    db.commit()
+    _locks.pop(row.public_id, None)
+    return {
+        **session_json(row),
+        "queued": None,
+        "title": title,
+        "import": imports.import_json(db, settings, imp, refresh=False),
+        "file": {
+            "id": staged.id,
+            "status": staged.status,
+            "duplicate_work_id": staged.duplicate_work_id,
+        },
+    }
 
 
 @router.delete("/{public_id}", status_code=status.HTTP_204_NO_CONTENT)

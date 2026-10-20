@@ -92,7 +92,15 @@ def epub_sentences(path: Path) -> list[dict]:
 
 
 def primary_epub(db: Session, work_id: int) -> BookFile | None:
-    """The EPUB the reader opens and sentence lists are built from: the first one added."""
+    """The EPUB the reader opens and sentence lists are built from: the one chosen in the
+    editor (``works.primary_file_id``), else the first one added."""
+    from lectern.models import Work
+
+    chosen = db.scalar(select(Work.primary_file_id).where(Work.id == work_id))
+    if chosen is not None:
+        book = db.get(BookFile, chosen)
+        if book is not None and book.work_id == work_id and book.kind == FileKind.EBOOK:
+            return book
     return db.scalar(
         select(BookFile)
         .where(BookFile.work_id == work_id, BookFile.kind == FileKind.EBOOK)

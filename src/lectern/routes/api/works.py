@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from lectern.access import can_see_work, visible_works
 from lectern.align import jobs as align_jobs
+from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest.merge import merge_work
 from lectern.jobs import active_job, enqueue_transcode, find_variant
 from lectern.models import (
@@ -37,6 +38,7 @@ from lectern.security import audit
 from lectern.security.deps import Auth, AuthContext, AuthCsrf, DbDep, SettingsDep, require_role
 from lectern.security.sessions import client_ip
 from lectern.sentence_map import audio_fingerprint
+from lectern.workmeta import write_book_json
 
 router = APIRouter()
 Manager = Annotated[AuthContext, Depends(require_role(Role.OWNER, Role.MEMBER))]
@@ -430,9 +432,14 @@ def _suggestion_json(db, s: MatchSuggestion) -> dict:
 
 @router.get("/suggestions")
 def suggestions(auth: Manager, db: DbDep) -> dict:
+    live = select(Work.id).where(Work.trashed_at.is_(None))
     rows = db.scalars(
         select(MatchSuggestion)
-        .where(MatchSuggestion.resolved_at.is_(None))
+        .where(
+            MatchSuggestion.resolved_at.is_(None),
+            MatchSuggestion.work_id.in_(live),
+            MatchSuggestion.candidate_work_id.in_(live),
+        )
         .order_by(MatchSuggestion.created_at.desc())
         .limit(100)
     ).all()
@@ -441,7 +448,11 @@ def suggestions(auth: Manager, db: DbDep) -> dict:
 
 def _open_suggestion(db, suggestion_id: int) -> MatchSuggestion:
     s = db.get(MatchSuggestion, suggestion_id)
-    if s is None or s.resolved_at is not None:
+    if (
+        s is None
+        or s.resolved_at is not None
+        or any(db.get(Work, w).trashed_at is not None for w in (s.work_id, s.candidate_work_id))
+    ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     return s
 
@@ -451,10 +462,17 @@ def merge_suggestion(
     request: Request, auth: Manager, db: DbDep, settings: SettingsDep, suggestion_id: int
 ) -> dict:
     """Confirm: the new work is the candidate. Its files move over and it is deleted."""
+    with LIBRARY_LOCK:
+        return _merge(request, auth, db, settings, suggestion_id)
+
+
+def _merge(request, auth, db, settings, suggestion_id: int) -> dict:
     s = _open_suggestion(db, suggestion_id)
     source, target = db.get(Work, s.work_id), db.get(Work, s.candidate_work_id)
     label = f"{source.title} -> {target.title}"
     merge_work(db, settings.library_dir, source, target)
+    target.version = (target.version or 1) + 1
+    write_book_json(db, settings.library_dir, target)
     audit.record(
         db, "work.merge", actor_user_id=auth.user.id, target=target.title[:256],
         ip=client_ip(request), detail=label[:500],
@@ -481,12 +499,19 @@ def merge_into(
     request: Request, auth: Manager, db: DbDep, settings: SettingsDep, work_id: int, body: MergeIn
 ) -> dict:
     """Manually merge this work into another (e.g. an audiobook imported under another title)."""
+    with LIBRARY_LOCK:
+        return _merge_into(request, auth, db, settings, work_id, body)
+
+
+def _merge_into(request, auth, db, settings, work_id: int, body: MergeIn) -> dict:
     source = _visible_work(db, auth.user, work_id)
     target = _visible_work(db, auth.user, body.target_work_id)
     if source.id == target.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "same_work")
     label = f"{source.title} -> {target.title}"
     merge_work(db, settings.library_dir, source, target)
+    target.version = (target.version or 1) + 1
+    write_book_json(db, settings.library_dir, target)
     audit.record(
         db, "work.merge", actor_user_id=auth.user.id, target=target.title[:256],
         ip=client_ip(request), detail=label[:500],

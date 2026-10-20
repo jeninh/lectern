@@ -76,6 +76,13 @@ class AudioInfo:
     media_type: str = "application/octet-stream"
     chapters: list[dict] = field(default_factory=list)
     cover: bytes | None = None
+    # Review-before-filing hints (migration 0007); none of them is required.
+    narrator: str | None = None
+    series: str | None = None
+    series_index: float | None = None
+    language: str | None = None
+    description: str | None = None
+    composer: str | None = None
 
     @property
     def book_title(self) -> str | None:
@@ -165,10 +172,71 @@ def _mutagen_info(path: Path, info: AudioInfo) -> None:
                 v = rtags[key]
                 texts.append(str(v.text if hasattr(v, "text") else v))
     info.isbn = _find_isbn(*texts)
+    info.composer = _first(tags, "composer")
+    info.language = (_first(tags, "language") or "")[:16] or None
+    info.description = _first(tags, "description")
+    _extra_tags(rtags, info)
     info.cover = _cover_bytes(raw)
     chapters = _mutagen_chapters(raw)
     if chapters:
         info.chapters = chapters
+
+
+_NARRATOR_KEYS = (
+    "narrator",
+    "©nrt",
+    "----:com.apple.itunes:narrator",
+    "txxx:narrator",
+    "txxx:narratedby",
+)
+_SERIES_KEYS = (
+    "series",
+    "©mvn",
+    "mvnm",
+    "----:com.apple.itunes:series",
+    "txxx:series",
+    "txxx:mvnm",
+)
+_PART_KEYS = ("series-part", "series_part", "©mvi", "mvin", "----:com.apple.itunes:series-part",
+              "txxx:series-part", "txxx:mvin")  # fmt: skip
+
+
+def _tag_text(v) -> str:
+    v = getattr(v, "text", v)
+    if isinstance(v, list):
+        v = v[0] if v else ""
+    if isinstance(v, bytes):
+        v = v.decode("utf-8", "replace")
+    if isinstance(v, tuple):  # MP4 movement index is (n, total)
+        v = v[0]
+    return str(v).strip()
+
+
+def _extra_tags(rtags, info: AudioInfo) -> None:
+    """Narrator and series from the tag spellings audiobook tools use (ID3 TXXX, iTunes
+    freeform atoms, Audible's ``©nrt`` and movement atoms)."""
+    if rtags is None:
+        return
+    found: dict[str, str] = {}
+    try:
+        items = list(rtags.items())
+    except Exception:  # noqa: BLE001 - some tag containers do not iterate cleanly
+        return
+    for key, value in items:
+        k = str(key).lower()
+        text = _tag_text(value)
+        if text and k not in found:
+            found[k] = text
+    narrator = next((found[k] for k in _NARRATOR_KEYS if k in found), None)
+    info.narrator = narrator[:128] if narrator else None
+    series = next((found[k] for k in _SERIES_KEYS if k in found), None)
+    info.series = series[:256] if series else None
+    part = next((found[k] for k in _PART_KEYS if k in found), None)
+    if part:
+        try:
+            info.series_index = float(part.split("/")[0])
+        except ValueError:
+            info.series_index = None
 
 
 def _cover_bytes(raw) -> bytes | None:
@@ -259,6 +327,17 @@ def probe(path: Path, ffprobe: str = "ffprobe") -> AudioInfo:
         ]
         if chapters:
             info.chapters = chapters
+        ftags = {
+            str(k).lower(): str(v) for k, v in (data.get("format", {}).get("tags") or {}).items()
+        }
+        info.narrator = info.narrator or (ftags.get("narrator") or "")[:128] or None
+        info.series = info.series or (ftags.get("series") or ftags.get("mvnm") or "")[:256] or None
+        if info.series_index is None:
+            part = ftags.get("series-part") or ftags.get("mvin")
+            try:
+                info.series_index = float(part.split("/")[0]) if part else None
+            except ValueError:
+                info.series_index = None
     if info.duration_s <= 0:
         raise AudioError("could not determine duration")
     info.chapters = [
@@ -310,6 +389,7 @@ def ingest_audio(
     if match.certain:
         work = match.work
         assert work is not None
+        work.version = (work.version or 1) + 1  # an open editor must not overwrite this
         if work.isbn is None and info.isbn:
             work.isbn = info.isbn
     else:

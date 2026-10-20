@@ -98,6 +98,7 @@ def ingest_epub(
     created = False
     if match.certain:
         work = match.work
+        work.version = (work.version or 1) + 1  # an open editor must not overwrite this
         if work.isbn is None and meta.isbn:
             work.isbn = meta.isbn
     else:

@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from lectern.align import jobs
 from lectern.align.worker import LocalWorker
 from lectern.config import Settings
+from lectern.fsops import LIBRARY_LOCK
 from lectern.models import Work
 
 log = logging.getLogger("lectern.services")
@@ -29,9 +30,9 @@ def rescan_works(session_factory: sessionmaker, library: Path) -> int:
     with session_factory() as db:
         ids = list(db.scalars(select(Work.id).order_by(Work.id)))
     for work_id in ids:
-        with session_factory() as db:
+        with LIBRARY_LOCK, session_factory() as db:
             work = db.get(Work, work_id)
-            if work is None:
+            if work is None or work.trashed_at is not None:
                 continue
             try:
                 if jobs.refresh_work(db, library, work) is not None:

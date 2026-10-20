@@ -12,6 +12,7 @@ from lectern.models import (
     User,
     Work,
 )
+from lectern.workmeta import authors_of
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -66,8 +67,18 @@ def work_json(
         "publisher": w.publisher,
         "published": w.published,
         "dir_path": w.dir_path,
+        "authors": authors_of(w),
+        "series": w.series,
+        "series_index": w.series_index,
+        "tags": list(w.tags or []),
+        "narrators": list(w.narrators or []),
+        "playback_default": w.playback_default,
+        "readalong_enabled": w.readalong_enabled,
+        "primary_file_id": w.primary_file_id,
+        "version": w.version,
         "has_cover": w.has_cover,
-        "cover_url": f"/library/works/{w.id}/cover.jpg" if w.has_cover else None,
+        # ?v= changes with every edit, so a replaced cover is not served from the cache.
+        "cover_url": f"/library/works/{w.id}/cover.jpg?v={w.version}" if w.has_cover else None,
         "cover_tint": w.cover_tint,
         "created_at": iso(w.created_at),
         "updated_at": iso(w.updated_at),
