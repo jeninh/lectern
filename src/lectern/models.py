@@ -77,6 +77,8 @@ class User(Base):
     show_technical_details: Mapped[bool] = mapped_column(Boolean, default=False)
     # Owner-set override of LECTERN_DOWNLOAD_CAP_PER_HOUR for this user; NULL = default, 0 = off.
     download_cap_per_hour: Mapped[int | None] = mapped_column(Integer, default=None)
+    # Migration 0007: file uploads whose proposed match is certain without asking.
+    auto_file_imports: Mapped[bool] = mapped_column(Boolean, default=False)
 
     passkeys: Mapped[list[Passkey]] = relationship(back_populates="user", cascade="all, delete")
     sync_keys: Mapped[list[SyncKey]] = relationship(back_populates="user", cascade="all, delete")
@@ -218,6 +220,27 @@ class Work(Base):
     cover_tint: Mapped[str | None] = mapped_column(String(7), default=None)  # "#rrggbb"
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    # Migration 0007 (add & edit books). ``author``/``sort_author`` stay the display and sort
+    # forms of ``authors`` (every author: [{"name", "sort"}], in order) for OPDS and sorting.
+    authors: Mapped[list | None] = mapped_column(JSON, default=None)
+    series: Mapped[str | None] = mapped_column(String(256), default=None, index=True)
+    series_index: Mapped[float | None] = mapped_column(Float, default=None)
+    tags: Mapped[list | None] = mapped_column(JSON, default=None)  # [str]
+    narrators: Mapped[list | None] = mapped_column(JSON, default=None)  # [str]
+    # The EPUB the reader opens and sentences are built from; NULL (or a file that is no longer
+    # this work's) = the first one added. No FK: works <-> book_files would be a cycle.
+    primary_file_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    playback_default: Mapped[str | None] = mapped_column(String(16), default=None)
+    readalong_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    cover_source: Mapped[str | None] = mapped_column(String(16), default=None)
+    # Optimistic concurrency: every edit is ``UPDATE ... WHERE version = <seen>``.
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    # Trash: hidden from everyone, files under <library>/_trash/, purged after 30 days.
+    trashed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None, index=True)
+    trashed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    trash_from: Mapped[str | None] = mapped_column(String(1024), default=None)
 
     files: Mapped[list[BookFile]] = relationship(back_populates="work", cascade="all, delete")
 
@@ -297,6 +320,8 @@ class AudioTrack(Base):
     # [{"title": str, "start_s": float}], start_s relative to this track.
     chapters: Mapped[list | None] = mapped_column(JSON, default=None)
     added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Migration 0007: the name a person gave the track (file names are ASCII-folded).
+    title: Mapped[str | None] = mapped_column(String(256), default=None)
 
     work: Mapped[Work] = relationship()
 
@@ -653,6 +678,10 @@ class UploadSession(Base):
     # the digest of the last accepted chunk so a retried chunk can be answered without writing.
     idempotency_key: Mapped[str | None] = mapped_column(String(64), default=None)
     last_chunk_sha256: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Migration 0007: finalize stages the file into this import instead of the inbox.
+    import_id: Mapped[int | None] = mapped_column(
+        ForeignKey("imports.id", ondelete="SET NULL"), default=None, index=True
+    )
 
 
 # --- Milestone 2: security alerts, download caps, ingest match review (migration 0006) -------
@@ -740,3 +769,166 @@ class MatchSuggestion(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     resolution: Mapped[str | None] = mapped_column(String(16), default=None)  # merged|dismissed
+
+
+# --- Add & edit books (migration 0007) -----------------------------------------------------
+
+
+class ImportStatus(enum.StrEnum):
+    UPLOADING = "uploading"  # files are still arriving
+    READY = "ready"  # analysed; waiting for a person (or auto-file) to decide
+    FILED = "filed"  # files moved into ``work_id``
+    DISCARDED = "discarded"  # by the uploader, or expired; staged files deleted
+    FAILED = "failed"  # nothing fileable (every file a duplicate or unreadable)
+
+
+class Import(Base):
+    """A proposed addition to the library: one or more uploaded files that become (or join)
+    one work after review. Files wait in ``<library>/_staging/<public_id>/`` so filing is a
+    rename on the library's filesystem. ``detected`` is what the files say; ``metadata`` is
+    the reviewed version (starts as a copy); ``proposal`` is the matcher's suggestion.
+    """
+
+    __tablename__ = "imports"
+    __table_args__ = (
+        Index("ix_imports_user_status", "user_id", "status"),
+        Index("ix_imports_idempotency", "user_id", "idempotency_key"),
+        CheckConstraint("status <> 'FILED' OR work_id IS NOT NULL", name="ck_import_filed"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    label: Mapped[str] = mapped_column(String(256), default="")  # folder or file name
+    status: Mapped[ImportStatus] = mapped_column(
+        Enum(ImportStatus, native_enum=False, length=16), default=ImportStatus.UPLOADING
+    )
+    detected: Mapped[dict | None] = mapped_column(JSON, default=None)
+    metadata_: Mapped[dict | None] = mapped_column("metadata", JSON, default=None)
+    proposal: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # {"action": "new"} or {"action": "join", "work_id": n}; NULL = follow the proposal.
+    target: Mapped[dict | None] = mapped_column(JSON, default=None)
+    use_cover: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    error: Mapped[str | None] = mapped_column(String(64), default=None)
+    work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("works.id", ondelete="SET NULL"), default=None
+    )
+    auto_filed: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    filed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+    files: Mapped[list[ImportFile]] = relationship(
+        back_populates="import_", cascade="all, delete-orphan", order_by="ImportFile.id"
+    )
+
+
+class ImportFile(Base):
+    """One staged file of an import. ``status``: ok, duplicate (already in the library, see
+    ``duplicate_work_id``), or invalid. ``probe`` keeps what ingest needs (tags, chapters)."""
+
+    __tablename__ = "import_files"
+    __table_args__ = (UniqueConstraint("import_id", "sha256", name="uq_import_file_sha"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    import_id: Mapped[int] = mapped_column(ForeignKey("imports.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[FileKind] = mapped_column(Enum(FileKind, native_enum=False, length=16))
+    filename: Mapped[str] = mapped_column(String(600))  # as uploaded (sanitised)
+    rel_path: Mapped[str] = mapped_column(String(256))  # inside the staging directory
+    media_type: Mapped[str] = mapped_column(String(64))
+    size: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    partial_md5: Mapped[str | None] = mapped_column(String(32), default=None)
+    status: Mapped[str] = mapped_column(String(16), default="ok")
+    duplicate_work_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    probe: Mapped[dict | None] = mapped_column(JSON, default=None)
+    added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    import_: Mapped[Import] = relationship(back_populates="files")
+
+
+class WorkRevision(Base):
+    """One saved edit of a work: the state before and after, so the save can be undone.
+
+    ``before``/``after`` hold only the aspects the save changed (metadata fields, shelves,
+    tracks, cover, removed files, folder). Undo applies ``before`` while the work is still at
+    ``version_after``; any later change makes it a conflict instead of a silent overwrite.
+    """
+
+    __tablename__ = "work_revisions"
+    __table_args__ = (Index("ix_work_revisions_batch", "batch_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    kind: Mapped[str] = mapped_column(String(16), default="edit")  # edit | bulk | undo
+    batch_id: Mapped[str | None] = mapped_column(String(32), default=None)
+    version_before: Mapped[int] = mapped_column(Integer)
+    version_after: Mapped[int] = mapped_column(Integer)
+    before: Mapped[dict] = mapped_column(JSON)
+    after: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    undone_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+class TrashedFile(Base):
+    """A format removed from a work (an EPUB or an audio track), kept for 30 days under
+    ``<library>/_trash/files/``. ``row`` is the original database row, for restore."""
+
+    __tablename__ = "trashed_files"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), default=None, index=True
+    )
+    kind: Mapped[FileKind] = mapped_column(Enum(FileKind, native_enum=False, length=16))
+    rel_path: Mapped[str] = mapped_column(String(1024))  # where it was, relative to the work
+    trash_path: Mapped[str] = mapped_column(String(1024))  # relative to the library
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    size: Mapped[int] = mapped_column(BigInteger)
+    row: Mapped[dict] = mapped_column(JSON)
+    trashed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    trashed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    restored_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+class IdempotencyRecord(Base):
+    """The stored answer to a write sent with an ``Idempotency-Key`` header, for 24 hours.
+
+    Scoped to the user and the route; the request digest makes reusing a key for a different
+    body an error instead of a silent replay of the wrong answer.
+    """
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("user_id", "scope", "key", name="uq_idempotency_user_scope_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    scope: Mapped[str] = mapped_column(String(128))
+    key: Mapped[str] = mapped_column(String(64))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    status_code: Mapped[int] = mapped_column(Integer)
+    response: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+
+
+class InstanceSetting(Base):
+    """Owner-controlled, server-wide switches (``metadata_lookup_enabled``)."""
+
+    __tablename__ = "instance_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict | list | str | int | bool | None] = mapped_column(JSON, default=None)
+    updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)

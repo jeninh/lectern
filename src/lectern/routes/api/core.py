@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
-from lectern.access import visible_works
+from lectern import instance
+from lectern.access import can_edit_library, visible_works
 from lectern.models import (
     UPLOAD_CHUNK_MAX_BYTES,
     AudioTrack,
@@ -60,22 +61,32 @@ def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
             "chunk_bytes": UPLOAD_CHUNK_MAX_BYTES,
             "max_active": settings.upload_max_active,
         },
+        "library_settings": instance.all_settings(db),
+        "can_edit": can_edit_library(auth.user),
     }
 
 
 def _preferences(user: User) -> dict:
-    return {"show_technical_details": user.show_technical_details}
+    return {
+        "show_technical_details": user.show_technical_details,
+        "auto_file_imports": user.auto_file_imports,
+    }
 
 
 class PreferencesIn(BaseModel):
     show_technical_details: bool | None = None
+    auto_file_imports: bool | None = None
 
 
 @router.post("/me/preferences")
 def update_preferences(auth: AuthCsrf, db: DbDep, body: PreferencesIn) -> dict:
-    """Per-user display preferences. Only fields present in the body change."""
+    """Per-user preferences. Only fields present in the body change."""
     if body.show_technical_details is not None:
         auth.user.show_technical_details = body.show_technical_details
+    if body.auto_file_imports is not None:
+        if auth.user.role == Role.READER:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
+        auth.user.auto_file_imports = body.auto_file_imports
     db.commit()
     return {"preferences": _preferences(auth.user)}
 
@@ -309,6 +320,23 @@ _ACTIVITY_ACTIONS = {
     "device.forget",
     "device.download_cap",
     "user.download_cap",
+    "import.file",
+    "import.auto_file",
+    "import.discard",
+    "import.combine",
+    "work.edit",
+    "work.bulk_edit",
+    "work.bulk",
+    "work.bulk_undo",
+    "work.undo",
+    "work.trash",
+    "work.restore",
+    "work.purge",
+    "file.restore",
+    "file.purge",
+    "metadata.lookup",
+    "settings.change",
+    "readaloud.regenerate",
 }
 
 
@@ -350,7 +378,14 @@ def activity(
         }
         for r in db.scalars(audit_stmt.order_by(AuditLog.id.desc()).limit(limit)).all()
     ]
-    linkable = ("book.upload", "upload.complete")
+    linkable = (
+        "book.upload",
+        "upload.complete",
+        "import.file",
+        "import.auto_file",
+        "work.edit",
+        "work.restore",
+    )
     uploaded = {e["target"] for e in events if e["action"] in linkable and e["target"]}
     if uploaded:
         ids = dict(db.execute(select(Work.title, Work.id).where(Work.title.in_(uploaded))).all())

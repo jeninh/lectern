@@ -182,10 +182,16 @@ def run_transcode(db: Session, settings: Settings, job: Job) -> None:
             if find_variant(settings.library_dir, work, track.sha256):
                 continue
             src = settings.library_dir / work.dir_path / track.rel_path
-            transcode_track(
-                settings, src, variant_path(settings.library_dir, work, track.sha256, codec),
-                codec, kbps,
-            )  # fmt: skip
+            # Render outside the library and publish under the library lock, re-reading the
+            # work's folder: an edit may rename (or trash) it while ffmpeg runs.
+            scratch = settings.data_dir / "tmp" / f"{job.id}-{track.sha256}.{EXT[codec]}"
+            scratch.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                transcode_track(settings, src, scratch, codec, kbps)
+                _publish_variant(db, settings, job, work, track.sha256, codec, scratch)
+            finally:
+                scratch.unlink(missing_ok=True)
+                scratch.with_name(scratch.name + ".sha256").unlink(missing_ok=True)
             done += 1
             job.heartbeat_at = utcnow()
             job.result = {"done": done, "total": len(payload.get("tracks", []))}
@@ -204,6 +210,24 @@ def run_transcode(db: Session, settings: Settings, job: Job) -> None:
     job.finished_at = utcnow()
     db.commit()
     log.info("transcode job %s: %d renditions for work %s", job.id, done, job.work_id)
+
+
+def _publish_variant(db, settings, job, work, sha256: str, codec: str, scratch: Path) -> None:
+    from lectern.fsops import LIBRARY_LOCK, move_file
+
+    with LIBRARY_LOCK:
+        db.refresh(work)
+        db.refresh(job)
+        if work.trashed_at is not None or job.status != JobStatus.LEASED:
+            return
+        dest = variant_path(settings.library_dir, work, sha256, codec)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        side = scratch.with_name(scratch.name + ".sha256")
+        dest.unlink(missing_ok=True)
+        move_file(scratch, dest)
+        if side.exists():
+            dest.with_name(dest.name + ".sha256").unlink(missing_ok=True)
+            move_file(side, dest.with_name(dest.name + ".sha256"))
 
 
 def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
@@ -229,13 +253,41 @@ def recover_local_leases(db: Session) -> int:
     return res.rowcount or 0
 
 
-class JobRunner:
-    """Background thread: runs transcode jobs and the hourly upload sweep."""
+def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda _id: False) -> None:
+    """The hourly sweep: abandoned uploads and imports, the 30-day trash, old undo history,
+    replay records, and staged covers. Each part is independent; one failing does not stop
+    the rest."""
+    from lectern import editing, idempotency, imports, trash
+    from lectern.fsops import LIBRARY_LOCK
+    from lectern.uploads import sweep
 
-    def __init__(self, session_factory: sessionmaker, settings: Settings, poll: float = 5.0):
+    steps = [
+        ("uploads", lambda db: sweep(db, settings)),
+        ("imports", lambda db: (imports.sweep(db, settings), db.commit())),
+        ("trash", lambda db: (trash.purge_expired(db, settings), db.commit())),
+        ("idempotency", idempotency.sweep),
+        ("editing", lambda db: editing.sweep(db, settings, busy)),
+    ]
+    for name, step in steps:
+        with LIBRARY_LOCK, session_factory() as db:
+            try:
+                step(db)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                log.exception("%s sweep failed", name)
+
+
+class JobRunner:
+    """Background thread: runs transcode jobs, the hourly housekeeping, and folder renames
+    that had to wait for a build."""
+
+    def __init__(
+        self, session_factory: sessionmaker, settings: Settings, poll: float = 5.0, busy=None
+    ):
         self.session_factory = session_factory
         self.settings = settings
         self.poll = poll
+        self.busy = busy or (lambda _id: False)
         self.wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -251,7 +303,8 @@ class JobRunner:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        from lectern.uploads import sweep
+        from lectern import editing
+        from lectern.fsops import LIBRARY_LOCK
 
         last_sweep = utcnow()
         with self.session_factory() as db:
@@ -260,9 +313,11 @@ class JobRunner:
             try:
                 run_pending(self.session_factory, self.settings)
                 if utcnow() - last_sweep > timedelta(hours=1):
-                    with self.session_factory() as db:
-                        sweep(db, self.settings)
+                    housekeeping(self.session_factory, self.settings, self.busy)
                     last_sweep = utcnow()
+                elif editing.PENDING_FOLDERS:
+                    with LIBRARY_LOCK, self.session_factory() as db:
+                        editing.sweep(db, self.settings, self.busy)
             except Exception:  # noqa: BLE001
                 log.exception("job runner iteration failed")
             self.wake.wait(self.poll)

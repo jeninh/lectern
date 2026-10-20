@@ -30,28 +30,69 @@ IPs instead of the proxy's. Lectern's own sign-in is always required, private ne
 
 ## Adding books
 
-Upload EPUBs and audiobooks (M4B, or a set of MP3s) from the web app: **Upload** in the
-Library, "Upload books or audiobooks" in the Cmd/Ctrl+K palette, or drop files anywhere on the
-page. Or copy them into `library/_inbox/`. Within a few seconds each file is read, hashed, and
-filed:
+Owners and members add books from the web app: **Add books** in the Library (its menu also has
+**Choose a folder** for one multi-track audiobook), **B** or "Add books or audiobooks" in the
+Cmd/Ctrl+K palette, or drop files or whole folders anywhere on the page. Or copy them into
+`library/_inbox/`, which files them directly as before.
 
-- **EPUBs**: OPF metadata via lxml, SHA-256 and KOReader's partial MD5, a text-only sentence
-  list, then `library/<Author>/<Title>/book.epub` with `cover.jpg`.
-- **Audiobooks**: tags, chapters, codec, and duration via mutagen and ffprobe. Tracks are
-  stored as `audio/D01-T001 <name>.<ext>` and placed end to end on one timeline for the work
-  (disc and track numbers, then natural filename order).
-- **Matching** to an existing work: by ISBN, else fuzzy title + author (suffixes such as
-  "(Unabridged)" are ignored). Uncertain matches are filed as a separate book and listed under
-  **Library → Review**, where you confirm "same book — merge" or keep them apart. Any book
-  sheet also has **Merge…** for manual fixes.
+![Add books](docs/screenshots/books-library-add.png)
 
-Rejected files land in `library/_inbox/_rejected/`. Browser uploads (owners and members) are
-**resumable**: files go up in ≤ 50 MiB chunks, each with its own SHA-256, plus a whole-file
-SHA-256 at the end. A dropped connection resumes from the server's offset; picking the same
-file again after a reload resumes too. Sessions expire after a day and their partial files are
-swept. Limits: `LECTERN_UPLOAD_MAX_BYTES` per file, `LECTERN_UPLOAD_QUOTA_BYTES` in flight per
-user. For very large audiobooks on the home network, copying into the inbox is still the
-fastest path.
+- **Upload.** EPUB, M4B/M4A, MP3, OGG/Opus, and FLAC go up through the resumable upload API in
+  ≤ 50 MiB chunks, each with its own SHA-256. The tray shows live progress per file with pause,
+  resume, cancel, and retry, grouped by book. Wrong formats, files over the server limit, and
+  exact duplicates are reported in plain words before anything is filed.
+- **Grouping.** Each EPUB and M4B is its own book. Audio tracks in one folder are one
+  audiobook (with that folder's EPUB, if it has exactly one); `CD 1`/`Disc 2` subfolders are
+  merged. Loose MP3s dropped together are one audiobook. You can combine or split during review.
+- **Review before filing.** Uploads wait in **Review before filing** with what Lectern detected:
+  title, authors, series and number, cover, language, ISBN, narrators, and a proposed match to
+  a book you already have, with its confidence and reason. Accept it, edit any field, pick
+  another book, or file it as a new one. Joining an existing book only fills its empty fields;
+  adding audio to a book that already has an audiobook needs an explicit "add as more tracks".
+- **Auto-file (optional, per person, off by default).** Security → *File certain matches
+  automatically* files only certain matches (same ISBN, or exact title and author); anything
+  else still waits for review.
+- **Filing** reads metadata the same way for uploads and the inbox (OPF incl. Calibre/EPUB 3
+  series and `nrt` narrators; audio tags incl. narrator and series), stores
+  `library/<Author>/<Title>/book.epub`, `cover.jpg`, `audio/D01-T001 <name>.<ext>`, and a
+  `book.json` sidecar with the work's metadata.
+
+![Review before filing](docs/screenshots/books-review-join.png)
+
+Rejected inbox files land in `library/_inbox/_rejected/`. Upload sessions expire after a day;
+unfiled reviews after 7 days. Limits: `LECTERN_UPLOAD_MAX_BYTES` per file,
+`LECTERN_UPLOAD_QUOTA_BYTES` in flight per user.
+
+## Editing books
+
+**Edit** on a book (or "Edit …" in Cmd/Ctrl+K) opens the full editor: title and sort title;
+several authors with sort names; series and number; description; language; ISBN; publisher and
+date; tags and genres; narrators; cover (upload, the EPUB's own, or none); shelves; files and
+tracks (primary EPUB, remove a format, reorder and rename tracks, chapter titles); and playback
+(default mode, read-along on or off, re-run alignment with a chosen model, regenerate the
+read-aloud EPUB).
+
+- **One save, one undo.** Save sends one versioned change. The toast and the save bar offer
+  **Undo** for that save while nobody has saved since. Closing with unsaved edits asks first.
+- **Concurrent edits.** If someone else saved meanwhile, nothing is overwritten: you choose
+  "use their version" or "keep my edits on top".
+- **Files stay untouched.** The original EPUB is never rewritten. Changing author or title moves
+  the folder atomically to `<Author>/<Title>` (with a ` (2)` suffix on collisions, and a
+  verified copy when it crosses filesystems); renaming tracks renames files. Bytes, SHA-256,
+  and KOReader document ids are unchanged, so device sync keeps working. Text or audio changes
+  re-queue alignment with the same model.
+- **Bulk edit.** **Select** in the Library sets author or series, adds or removes tags and
+  shelves, or trashes many books at once, with one Undo for the batch.
+- **Trash.** Trashed books and removed files are hidden at once and stay restorable from
+  **Trash** for 30 days; a background job then deletes them. Only the owner can delete early.
+- **Metadata suggestions (optional, off by default).** The owner can enable them in Admin.
+  The editor then asks Open Library and Google Books (no key) for the ISBN, or the title and
+  first author, and shows suggestions side by side with their source. You apply them field by
+  field; nothing is written until you save.
+
+Readers never see add, edit, or trash controls, and the API refuses them (`403`).
+
+![Work editor with suggestions](docs/screenshots/books-editor-suggestions.png)
 
 ## Reading and listening in the browser
 
@@ -210,7 +251,9 @@ benchmark numbers are in [`docs/alignment.md`](docs/alignment.md).
 - **No book searching or downloading integrations.** There is no catalogue search, no
   connection to any download site, store, or torrent/IRC/Usenet source, and no fetching of
   books or audiobooks from the Internet. Content enters the library only through your own
-  uploads and the inbox folder. (The test suite contains one documented public-domain fixture
+  uploads and the inbox folder. Optional metadata suggestions only fetch descriptive
+  fields (title, authors, description, ISBN, …) from Open Library and Google Books when the
+  owner enables them; they never search for, link to, or download book files. (The test suite contains one documented public-domain fixture
   from Project Gutenberg and LibriVox; see `tests/fixtures/magi/PROVENANCE.md`.)
 
 The data model and API contracts for audiobooks, text–audio alignment, shelves, invites, and

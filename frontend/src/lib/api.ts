@@ -29,7 +29,48 @@ const MESSAGES: Record<string, string> = {
   only_owner_can_raise_cap: "You can only lower this device's limit. Ask the owner to raise it.",
   only_owner_grants_readers: "Only the owner can share shelves with readers.",
   shelf_shared_with_readers: "Other readers can see this shelf, so only the owner can add books to it.",
+  version_conflict: "Someone else saved this book while you were editing.",
+  undo_conflict: "This book changed after that save, so it can no longer be undone.",
+  undo_unavailable: "That change can no longer be undone.",
+  authors_required: "Enter at least one author.",
+  tags_required: "Enter at least one tag.",
+  shelves_required: "Choose at least one shelf.",
+  cover_not_found: "That cover upload expired. Choose the image again.",
+  primary_not_an_epub_of_this_book: "Choose one of this book’s EPUBs.",
+  track_not_found: "One of those tracks no longer exists. Reload and try again.",
+  file_not_found: "That file no longer exists.",
+  idempotency_key_reused: "That request was already sent with different content. Try again.",
+  too_many_imports: "You have many books waiting for review. File or discard some first.",
+  too_many_files: "That is too many files for one book.",
+  uploads_in_progress: "Some files of this book are still uploading.",
+  import_closed: "This upload was already filed or discarded.",
+  not_ready: "This upload is not ready to file yet.",
+  target_gone: "The book you chose to join is no longer in the library.",
+  target_has_audio: "That book already has an audiobook. Choose “Add as more tracks” to append, or file it as a new book.",
+  nothing_to_file: "Nothing left to file: every file was removed or is a duplicate.",
+  cannot_combine: "These uploads cannot be combined.",
+  cover_too_large: "That image is too large for a cover (10 MB at most).",
+  not_an_image: "That is not a JPEG, PNG, or WebP image.",
+  no_embedded_cover: "The EPUB has no cover of its own.",
+  tracks_mismatch: "The track list changed on the server. Reload and try again.",
+  chapters_mismatch: "The chapter list changed on the server. Reload and try again.",
+  shelf_not_editable: "You cannot change one of those shelves.",
+  lookup_disabled: "Metadata suggestions are turned off. The owner can enable them in Admin.",
+  rate_limited: "Too many requests. Wait a minute and try again.",
+  job_running: "Alignment is running right now. Cancel it from the jobs list first.",
+  no_inputs: "This book needs both an EPUB and an audiobook to align.",
+  work_gone: "That book was trashed or deleted.",
+  io_error: "a file could not be moved on the server",
+  internal_error: "an unexpected server error",
+  not_found: "it no longer exists",
+  work_busy: "a read-aloud build is using it",
+  staging_failed: "The server could not store that file. Try again later.",
 };
+
+/** Plain-language text for an API error code (the code itself when there is none). */
+export function errorText(code: string): string {
+  return MESSAGES[code] ?? code;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -58,9 +99,11 @@ async function parse(res: Response) {
     if (res.status === 401) {
       window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname)}`);
     }
-    const d = data as { detail?: unknown; message?: string } | null;
+    const d = data as { detail?: unknown; message?: string; errors?: { loc: string[]; msg: string }[] } | null;
     const code = typeof d?.detail === "string" ? d.detail : null;
-    const message = d?.message || (code && MESSAGES[code]) || code || `Request failed (${res.status})`;
+    const field = d?.errors?.[0];
+    const invalid = field ? `${field.loc.filter((x) => !/^\d+$/.test(x)).join(" ") || "Request"}: ${field.msg.replace(/^Value error, /, "")}` : null;
+    const message = d?.message || invalid || (code && MESSAGES[code]) || code || `Request failed (${res.status})`;
     throw new ApiError(res.status, message, code, (data as Record<string, unknown>) ?? null, res.headers);
   }
   return data;
@@ -89,7 +132,18 @@ async function send<T>(method: string, path: string, body?: unknown, extra?: Hea
 
 export const post = <T>(path: string, body?: unknown, headers?: HeadersInit) => send<T>("POST", path, body, headers);
 export const put = <T>(path: string, body?: unknown, keepalive = false) => send<T>("PUT", path, body, undefined, keepalive);
-export const patch = <T>(path: string, body?: unknown) => send<T>("PATCH", path, body);
+export const patch = <T>(path: string, body?: unknown, headers?: HeadersInit) => send<T>("PATCH", path, body, headers);
+
+/** Raw binary POST (cover images); same CSRF and error handling as JSON writes. */
+export async function postBlob<T>(path: string, body: Blob): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { accept: "application/json", "content-type": body.type || "application/octet-stream", "x-csrf-token": csrfToken },
+    body,
+  });
+  return (await parse(res)) as T;
+}
 export const del = <T>(path: string) => send<T>("DELETE", path);
 
 /** Raw chunk PUT for resumable uploads; returns the server's new offset. */

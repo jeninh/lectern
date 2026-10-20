@@ -20,6 +20,7 @@ from lectern.routes.library import (
 from lectern.security.deps import DbDep, OpdsUser, SettingsDep
 from lectern.security.downloads import Device
 from lectern.security.sessions import client_ip
+from lectern.workmeta import strip_controls
 
 router = APIRouter(prefix="/opds")
 
@@ -37,6 +38,12 @@ def _xml(body: str, media_type: str) -> Response:
     return Response('<?xml version="1.0" encoding="UTF-8"?>\n' + body, media_type=media_type)
 
 
+def _text(value: str) -> str:
+    """Escaped, and without control characters XML 1.0 forbids: rows written before edits
+    were validated (or by a scanner reading odd tags) must not make the whole feed unparsable."""
+    return escape(strip_controls(value))
+
+
 def _entry(work: Work) -> str:
     links = []
     for f in work.files:
@@ -52,19 +59,19 @@ def _entry(work: Work) -> str:
             f'<link rel="http://opds-spec.org/image/thumbnail" href="/opds/works/{work.id}/cover.jpg" type="image/jpeg"/>'
         )
     summary = (
-        f'<summary type="text">{escape(work.description[:1000])}</summary>'
+        f'<summary type="text">{_text(work.description[:1000])}</summary>'
         if work.description
         else ""
     )
-    lang = f"<dc:language>{escape(work.language)}</dc:language>" if work.language else ""
-    isbn = f"<dc:identifier>urn:isbn:{work.isbn}</dc:identifier>" if work.isbn else ""
-    pub = f"<dc:publisher>{escape(work.publisher)}</dc:publisher>" if work.publisher else ""
+    lang = f"<dc:language>{_text(work.language)}</dc:language>" if work.language else ""
+    isbn = f"<dc:identifier>urn:isbn:{_text(work.isbn)}</dc:identifier>" if work.isbn else ""
+    pub = f"<dc:publisher>{_text(work.publisher)}</dc:publisher>" if work.publisher else ""
     return (
         "<entry>"
-        f"<title>{escape(work.title)}</title>"
+        f"<title>{_text(work.title)}</title>"
         f"<id>urn:lectern:work:{work.id}</id>"
         f"<updated>{_iso(work.updated_at)}</updated>"
-        f"<author><name>{escape(work.author)}</name></author>"
+        f"<author><name>{_text(work.author)}</name></author>"
         f"{lang}{isbn}{pub}{summary}" + "".join(links) + "</entry>"
     )
 
@@ -97,7 +104,7 @@ def _acquisition(
 ) -> Response:
     pages = max(1, -(-total // PAGE_SIZE))
     links = [
-        f'<link rel="self" href="{escape(self_href)}" type="{ACQ}"/>',
+        f'<link rel="self" href="{_text(self_href)}" type="{ACQ}"/>',
         f'<link rel="start" href="/opds" type="{NAV}"/>',
         f'<link rel="up" href="/opds" type="{NAV}"/>',
         f'<link rel="search" href="/opds/search.xml" type="{OPENSEARCH}"/>',
@@ -114,7 +121,7 @@ def _acquisition(
     body = (
         '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" '
         'xmlns:opds="http://opds-spec.org/2010/catalog" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
-        f"<id>urn:lectern:{escape(base)}</id><title>{escape(title)}</title>"
+        f"<id>urn:lectern:{escape(base)}</id><title>{_text(title)}</title>"
         f"<updated>{_iso(None)}</updated><author><name>Lectern</name></author>"
         f"<opensearch:totalResults>{total}</opensearch:totalResults>"
         f"<opensearch:itemsPerPage>{PAGE_SIZE}</opensearch:itemsPerPage>"

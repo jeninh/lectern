@@ -77,7 +77,7 @@ def test_ingest_places_file_and_registers_work(client, owner, settings):
     assert [w["title"] for w in lib["works"]] == ["The Left Hand of Darkness"]
     detail = client.get("/api/works/1").json()
     assert detail["files"][0]["partial_md5"] == expected_pmd5
-    assert detail["cover_url"] == "/library/works/1/cover.jpg"
+    assert detail["cover_url"] == f"/library/works/1/cover.jpg?v={detail['version']}"
     assert detail["cover_tint"] and detail["cover_tint"].startswith("#")
     r = client.get("/library/files/1/download")
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/epub+zip")

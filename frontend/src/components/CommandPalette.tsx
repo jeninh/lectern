@@ -9,7 +9,7 @@ import { useStore } from "../lib/store";
 import type { Device, Work } from "../lib/types";
 import { Cover } from "./Cover";
 import { usePlayer } from "../lib/player";
-import { Devices, Gear, Headphones, Help, Home, Key, Library, Link2, Moon, Person, Plus, Pulse, Reader, Search, Shield, Sun, Upload } from "./Icons";
+import { Devices, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
 type Group = "Actions" | "Pages" | "Books" | "Authors" | "Devices" | "Settings";
 const ORDER: Group[] = ["Actions", "Books", "Authors", "Devices", "Pages", "Settings"];
@@ -28,7 +28,7 @@ interface Item {
 }
 
 export function CommandPalette() {
-  const { paletteOpen, setPaletteOpen, works, me, resolvedTheme, setTheme, setHelpOpen, canUpload, pickBooks } = useStore();
+  const { paletteOpen, setPaletteOpen, works, me, resolvedTheme, setTheme, setHelpOpen, canUpload, canEdit, pickBooks, pickFolder, imports, setReviewOpen, openEditor } = useStore();
   const nav = useNavigate();
   const player = usePlayer();
   const [q, setQ] = useState("");
@@ -70,8 +70,15 @@ export function CommandPalette() {
     const all: Item[] = [
       { id: "a-add", group: "Actions", label: "Add device", keywords: "new koreader kobo kindle opds connect", hint: "N", icon: <Plus />, run: () => go("/app/devices/new") },
       ...(canUpload
-        ? [{ id: "a-upload", group: "Actions" as Group, label: "Upload books or audiobooks", keywords: "epub m4b mp3 audio import add file", icon: <Upload />, run: () => { close(); pickBooks(); } }]
+        ? [
+            { id: "a-upload", group: "Actions" as Group, label: "Add books or audiobooks", keywords: "upload epub m4b mp3 audio import add file", hint: "B", icon: <Upload />, run: () => { close(); pickBooks(); } },
+            { id: "a-folder", group: "Actions" as Group, label: "Add an audiobook folder", keywords: "upload directory mp3 tracks multi-track import", icon: <Folder />, run: () => { close(); pickFolder(); } },
+            ...(imports.some((i) => i.status === "ready")
+              ? [{ id: "a-review", group: "Actions" as Group, label: `Review ${imports.filter((i) => i.status === "ready").length} uploaded before filing`, keywords: "imports pending match", icon: <Upload />, run: () => { close(); setReviewOpen(true); } }]
+              : []),
+          ]
         : []),
+      ...(canEdit ? [{ id: "p-trash", group: "Pages" as Group, label: "Trash", keywords: "deleted restore recover removed", icon: <Trash />, run: () => go("/app/trash") }] : []),
       {
         id: "a-theme",
         group: "Actions",
@@ -105,6 +112,7 @@ export function CommandPalette() {
 
       ...works.map<Item>((w) => ({ id: `w${w.id}`, group: "Books", label: w.title, detail: w.author, keywords: w.isbn ?? "", work: w, run: () => go(`/app/library/${w.id}`) })),
       ...works.filter((w) => w.files.some((f) => f.kind === "ebook")).map<Item>((w) => ({ id: `r${w.id}`, group: "Actions", label: `Read ${w.title}`, keywords: `open ${w.author}`, icon: <Reader />, run: () => go(`/app/reader/${w.id}`) })),
+      ...(canEdit ? works.map<Item>((w) => ({ id: `e${w.id}`, group: "Actions", label: `Edit ${w.title}`, keywords: `metadata cover tracks ${w.author}`, icon: <Pencil />, run: () => { close(); openEditor(w.id); } })) : []),
       ...works.filter((w) => w.audio).map<Item>((w) => ({ id: `l${w.id}`, group: "Actions", label: `Listen to ${w.title}`, keywords: `play audiobook ${w.author}`, icon: <Headphones />, run: () => { close(); player.open(w, { autoplay: true }); } })),
       ...[...new Set(works.map((w) => w.author))].map<Item>((a) => {
         const n = works.filter((w) => w.author === a).length;
@@ -126,7 +134,7 @@ export function CommandPalette() {
       // Without a query: actions, a few recent books, and pages.
       const recent = [...works].sort((a, b) => (b.progress?.updated_at ?? b.created_at ?? "").localeCompare(a.progress?.updated_at ?? a.created_at ?? "")).slice(0, 4);
       const ids = new Set(recent.map((w) => `w${w.id}`));
-      picked = all.filter((i) => (i.group === "Actions" && !/^[rl]\d/.test(i.id)) || i.group === "Pages" || ids.has(i.id)).map((item) => ({ item, score: 0 }));
+      picked = all.filter((i) => (i.group === "Actions" && !/^[rle]\d/.test(i.id)) || i.group === "Pages" || ids.has(i.id)).map((item) => ({ item, score: 0 }));
     } else {
       picked = all
         .map((item) => {
@@ -148,7 +156,7 @@ export function CommandPalette() {
       .sort((a, b) => (needle ? b[1].best - a[1].best : 0) || ORDER.indexOf(a[0]) - ORDER.indexOf(b[0]))
       .map(([group, g]) => ({ group, items: g.items }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, works, me, resolvedTheme, devices, canUpload, player.work, player.playing]);
+  }, [q, works, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing]);
 
   const flat = groups.flatMap((g) => g.items);
 

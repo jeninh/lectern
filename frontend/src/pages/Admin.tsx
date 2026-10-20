@@ -4,11 +4,45 @@ import { Copy, Link2, Plus, Users as UsersIcon } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
-import { del, get, post } from "../lib/api";
+import { del, get, post, put } from "../lib/api";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { Invite, User } from "../lib/types";
 import { CapForm } from "./Devices";
+
+/** Instance-wide switches. Metadata lookup is off by default because it sends data outside. */
+function LibrarySettingsCard() {
+  const { toast, refreshMe, me } = useStore();
+  const on = !!me?.library_settings?.metadata_lookup_enabled;
+  const [busy, setBusy] = useState(false);
+  const flip = async () => {
+    setBusy(true);
+    try {
+      await put("/api/library-settings", { metadata_lookup_enabled: !on });
+      await refreshMe();
+      toast(on ? "Metadata suggestions turned off." : "Metadata suggestions turned on.");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="card" id="library" aria-labelledby="libset-h" style={{ marginTop: 18 }}>
+      <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+        <div>
+          <h2 id="libset-h">Metadata suggestions</h2>
+          <p className="sub" id="libset-sub">
+            Lets owners and members ask Open Library and Google Books for a book’s details while editing. When used, the ISBN (or the title and first author) is sent to them; no account or key is involved. Suggestions are only applied field by field, never automatically. Off by default.
+          </p>
+        </div>
+        <button type="button" role="switch" className="switch" aria-checked={on} aria-labelledby="libset-h" aria-describedby="libset-sub" onClick={flip} disabled={busy}>
+          <span aria-hidden="true" />
+        </button>
+      </div>
+    </section>
+  );
+}
 
 export function AdminPage() {
   const { toast, me } = useStore();
@@ -83,6 +117,7 @@ export function AdminPage() {
         )}
       </section>
       <InvitesCard />
+      <LibrarySettingsCard />
       <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for @${capFor.username}` : ""} variant="dialog" labelledBy="ucap-title">
         {capFor && (
           <CapForm

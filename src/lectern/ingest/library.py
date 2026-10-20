@@ -98,6 +98,7 @@ def ingest_epub(
     created = False
     if match.certain:
         work = match.work
+        work.version = (work.version or 1) + 1  # an open editor must not overwrite this
         if work.isbn is None and meta.isbn:
             work.isbn = meta.isbn
     else:
@@ -112,6 +113,10 @@ def ingest_epub(
             publisher=meta.publisher,
             published=meta.published,
         )
+        work.series = meta.series
+        work.series_index = meta.series_index if meta.series else None
+        work.tags = list(meta.tags)
+        work.narrators = list(meta.narrators)
         created = True
         if match.work is not None:
             db.add(

@@ -9,8 +9,10 @@ import { usePlayer } from "../lib/player";
 import { CommandPalette } from "./CommandPalette";
 import { NotificationBell, UploadTray } from "./Notifications";
 import { MiniPlayer } from "./Player";
-import { Devices, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun } from "./Icons";
+import { Devices, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
 import { Sheet } from "./Sheet";
+import { ReviewSheet } from "./ReviewSheet";
+import { WorkEditor } from "./WorkEditor";
 
 interface NavEntry {
   to: string;
@@ -33,6 +35,7 @@ const MANAGE: NavEntry[] = [
   { to: "/app/activity", label: "Activity", icon: <Pulse />, keys: "g a" },
 ];
 const ADMIN: NavEntry = { to: "/app/admin", label: "Admin", icon: <Gear />, keys: "g u" };
+const TRASH: NavEntry = { to: "/app/trash", label: "Trash", icon: <Trash /> };
 
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 export const MOD = isMac ? "⌘" : "Ctrl";
@@ -50,7 +53,7 @@ function NavItem({ n, collapsed }: { n: NavEntry; collapsed: boolean }) {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { me, resolvedTheme, setTheme, toasts, setPaletteOpen, helpOpen, setHelpOpen } = useStore();
+  const { me, resolvedTheme, setTheme, toasts, dismissToast, setPaletteOpen, helpOpen, setHelpOpen, canEdit, canUpload, pickBooks, dragging } = useStore();
   const [collapsed, setCollapsed] = useLocalStorage("lectern.sidebarCollapsed", false);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const nav = useNavigate();
@@ -110,6 +113,7 @@ export function Shell({ children }: { children: ReactNode }) {
     { keys: "t", handler: toggleTheme },
     { keys: "[", handler: () => setCollapsed(!collapsed) },
     { keys: "n", handler: () => nav("/app/devices/new") },
+    { keys: "b", handler: () => canUpload && pickBooks() },
     { keys: "g h", handler: () => nav("/app") },
     { keys: "g l", handler: () => nav("/app/library") },
     { keys: "g p", handler: () => nav("/app/listening") },
@@ -119,7 +123,7 @@ export function Shell({ children }: { children: ReactNode }) {
     { keys: "g u", handler: () => isOwner && nav("/app/admin") },
   ]);
 
-  const manage = isOwner ? [...MANAGE, ADMIN] : MANAGE;
+  const manage = [...MANAGE, ...(canEdit ? [TRASH] : []), ...(isOwner ? [ADMIN] : [])];
   const name = me?.user.display_name || me?.user.username || "";
 
   return (
@@ -193,6 +197,17 @@ export function Shell({ children }: { children: ReactNode }) {
 
       {!immersive && !fullPlayer && !readAlong && <MiniPlayer />}
       {!immersive && <UploadTray />}
+      {canUpload && <ReviewSheet />}
+      {canEdit && <WorkEditor />}
+      {dragging && canUpload && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div>
+            <Upload />
+            <strong>Drop to add books</strong>
+            <span>EPUB, M4B, MP3 — or a whole audiobook folder. You review before anything is filed.</span>
+          </div>
+        </div>
+      )}
 
       <nav className="bottom-nav" aria-label="Primary">
         {[READ[0], READ[1], READ[2], MANAGE[0], MANAGE[1]].map((n) => (
@@ -209,6 +224,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <dt><kbd>{MOD}</kbd><kbd>K</kbd></dt><dd>Search books, authors, devices, settings, and actions</dd>
           <dt><kbd>/</kbd></dt><dd>Filter the library (search elsewhere)</dd>
           <dt><kbd>N</kbd></dt><dd>Add a device</dd>
+          {canUpload && <><dt><kbd>B</kbd></dt><dd>Add books (or drop files anywhere)</dd></>}
           <dt><kbd>G</kbd> then <kbd>H</kbd></dt><dd>Home</dd>
           <dt><kbd>G</kbd> then <kbd>L</kbd></dt><dd>Library</dd>
           <dt><kbd>G</kbd> then <kbd>P</kbd></dt><dd>Listening (player)</dd>
@@ -227,7 +243,12 @@ export function Shell({ children }: { children: ReactNode }) {
         // Outside #root so announcements still reach screen readers while a sheet makes #root inert.
         <div className="toasts" role="status" aria-live="polite">
           {toasts.map((t) => (
-            <div key={t.id} className={`toast ${t.kind ?? ""}`}>{t.text}</div>
+            <div key={t.id} className={`toast ${t.kind ?? ""}`}>
+              <span>{t.text}</span>
+              {t.action && (
+                <button className="toast-action" onClick={() => { dismissToast(t.id); t.action!.run(); }}>{t.action.label}</button>
+              )}
+            </div>
           ))}
         </div>,
         document.body,

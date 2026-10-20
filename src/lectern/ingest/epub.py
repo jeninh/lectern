@@ -18,7 +18,7 @@ NS = {
 
 _PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
 MAX_XML_BYTES = 4 * 1024 * 1024
-MAX_COVER_BYTES = 10 * 1024 * 1024
+MAX_COVER_BYTES = 10 * 1024 * 1024  # = lectern.ingest.cover.COVER_MAX_BYTES
 
 
 class EpubError(ValueError):
@@ -37,6 +37,10 @@ class EpubMetadata:
     published: str | None = None
     cover_href: str | None = None  # path inside the zip
     cover_media_type: str | None = None
+    series: str | None = None
+    series_index: float | None = None
+    narrators: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
 
 
 def _read_xml(zf: zipfile.ZipFile, name: str) -> etree._Element:
@@ -140,10 +144,19 @@ def read_epub_metadata(path: Path) -> EpubMetadata:
         opf_dir = posixpath.dirname(opf_path)
 
         title = _text(meta.find("dc:title", NS)) or path.stem
+        refined = {
+            (m.get("refines") or "")[1:]: _text(m)
+            for m in meta.findall("opf:meta", NS)
+            if m.get("property") == "role"
+        }
         authors = [
             _text(c)
             for c in meta.findall("dc:creator", NS)
-            if _text(c) and (c.get(f"{{{NS['opf']}}}role") in (None, "aut"))
+            if _text(c)
+            and (
+                c.get(f"{{{NS['opf']}}}role") or (refined.get(c.get("id")) if c.get("id") else None)
+            )
+            in (None, "aut")
         ]
         language = _text(meta.find("dc:language", NS)) or None
         identifiers = [_text(i) for i in meta.findall("dc:identifier", NS) if _text(i)]
@@ -158,6 +171,9 @@ def read_epub_metadata(path: Path) -> EpubMetadata:
         published = _text(meta.find("dc:date", NS)) or None
 
         cover_href, cover_type = _find_cover(opf, meta, opf_dir, zf)
+        series, series_index = _series(meta)
+        narrators = _narrators(meta)
+        tags = [_text(t)[:128] for t in meta.findall("dc:subject", NS) if _text(t)][:50]
 
     return EpubMetadata(
         title=title,
@@ -170,7 +186,55 @@ def read_epub_metadata(path: Path) -> EpubMetadata:
         published=published[:32] if published else None,
         cover_href=cover_href,
         cover_media_type=cover_type,
+        series=series,
+        series_index=series_index,
+        narrators=narrators,
+        tags=tags,
     )
+
+
+def _number(v: str | None) -> float | None:
+    try:
+        n = float((v or "").strip())
+    except ValueError:
+        return None
+    return n if 0 <= n <= 100000 else None
+
+
+def _series(meta) -> tuple[str | None, float | None]:
+    """Calibre's ``calibre:series`` metas, else EPUB 3 ``belongs-to-collection``."""
+    calibre = {m.get("name"): m.get("content") for m in meta.findall("opf:meta", NS)}
+    if calibre.get("calibre:series"):
+        return calibre["calibre:series"].strip()[:256], _number(calibre.get("calibre:series_index"))
+    metas = meta.findall("opf:meta", NS)
+    for m in metas:
+        if m.get("property") != "belongs-to-collection" or not _text(m):
+            continue
+        ref = f"#{m.get('id')}" if m.get("id") else None
+        kind = position = None
+        for r in metas:
+            if ref and r.get("refines") == ref:
+                if r.get("property") == "collection-type":
+                    kind = _text(r)
+                elif r.get("property") == "group-position":
+                    position = _number(_text(r))
+        if kind in (None, "series"):
+            return _text(m)[:256], position
+    return None, None
+
+
+def _narrators(meta) -> list[str]:
+    """``dc:contributor`` (or ``dc:creator``) whose role is MARC ``nrt``, in EPUB 2 or 3 form."""
+    roles: dict[str, str] = {}
+    for m in meta.findall("opf:meta", NS):
+        if m.get("property") == "role" and (m.get("refines") or "").startswith("#"):
+            roles[m.get("refines")[1:]] = _text(m)
+    out: list[str] = []
+    for el in meta.findall("dc:contributor", NS) + meta.findall("dc:creator", NS):
+        role = el.get(f"{{{NS['opf']}}}role") or roles.get(el.get("id") or "")
+        if role == "nrt" and _text(el) and _text(el) not in out:
+            out.append(_text(el)[:128])
+    return out[:20]
 
 
 def _find_cover(opf, meta, opf_dir: str, zf: zipfile.ZipFile) -> tuple[str | None, str | None]:
@@ -210,19 +274,26 @@ def _find_cover(opf, meta, opf_dir: str, zf: zipfile.ZipFile) -> tuple[str | Non
 
 
 def extract_cover(path: Path, href: str, dest: Path) -> bool:
-    """Write the cover image as JPEG to dest. Returns False if it cannot be decoded."""
-    from io import BytesIO
-
-    from PIL import Image
+    """Write the cover image as JPEG to dest. Returns False if it cannot be decoded, or if
+    the entry or the image it decodes to is too large (checked before decompressing)."""
+    from lectern.ingest.cover import EMBEDDED_FORMATS, CoverRejected, save_cover_jpeg
 
     with zipfile.ZipFile(path) as zf:
-        data = zf.read(href)
+        try:
+            info = zf.getinfo(href)
+        except KeyError:
+            return False
+        if info.file_size > MAX_COVER_BYTES:
+            return False
+        try:  # the header's size may lie: read at most one byte more than the cap
+            with zf.open(info) as fh:
+                data = fh.read(MAX_COVER_BYTES + 1)
+        except Exception:  # noqa: BLE001 - a corrupt entry (bad CRC, bad deflate) is no cover
+            return False
+    if len(data) > MAX_COVER_BYTES:
+        return False
     try:
-        img = Image.open(BytesIO(data))
-        img = img.convert("RGB")
-        img.thumbnail((1200, 1600))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        img.save(dest, "JPEG", quality=85)
+        save_cover_jpeg(data, dest, formats=EMBEDDED_FORMATS, quality=85)
         return True
-    except Exception:  # noqa: BLE001 - corrupt image is not fatal to ingest
+    except (CoverRejected, OSError):  # a corrupt image is not fatal to ingest
         return False

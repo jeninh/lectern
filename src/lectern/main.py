@@ -15,7 +15,8 @@ from lectern import __version__
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
-from lectern.jobs import JobRunner
+from lectern.jobs import JobRunner, housekeeping
+from lectern.lookup import http_get as lookup_http_get
 from lectern.migrate import upgrade_to_head
 from lectern.readaloud.cache import ReadAloudBuilder
 from lectern.routes import api, auth, health, invites, kosync, library, opds, setup, spa
@@ -97,6 +98,8 @@ def create_app(
             )
         with session_factory()() as db:
             upload_sweep(db, settings)
+        if start_watcher is None or start_watcher:
+            housekeeping(session_factory(), settings)
         watcher = runner = None
         run_watcher = settings.ingest_enabled if start_watcher is None else start_watcher
         if run_watcher:
@@ -113,7 +116,7 @@ def create_app(
         # Transcodes and the hourly upload sweep run even with ingest off. Tests that pass
         # start_watcher=False opt out of every background thread.
         if run_watcher or start_watcher is None:
-            runner = JobRunner(session_factory(), settings)
+            runner = JobRunner(session_factory(), settings, busy=app.state.readaloud.is_generating)
             runner.start()
         app.state.watcher = watcher
         app.state.jobs = runner
@@ -167,7 +170,11 @@ def create_app(
         "worker": SlidingWindowLimiter(
             limit=settings.worker_requests_per_minute, window_seconds=60
         ),
+        # Optional metadata suggestions (outbound to Open Library / Google Books), per user.
+        "lookup": SlidingWindowLimiter(limit=10, window_seconds=60),
     }
+    # The only outbound HTTP Lectern makes; tests swap in a fake upstream.
+    app.state.lookup_fetch = lookup_http_get
     app.state.challenges = ChallengeStore()
     app.state.readaloud = ReadAloudBuilder()
 
@@ -220,8 +227,19 @@ def create_app(
             return JSONResponse(
                 {"message": "Invalid request"}, status_code=status.HTTP_400_BAD_REQUEST
             )
+        # Field, message, and error type only (never the submitted input), so forms can say what
+        # to fix and clients can branch on the type (e.g. ``control_characters``).
+        errors = [
+            {
+                "loc": [str(p) for p in e.get("loc", ())][1:],
+                "msg": str(e.get("msg", ""))[:200],
+                "type": str(e.get("type", ""))[:64],
+            }
+            for e in exc.errors()[:20]
+        ]
         return JSONResponse(
-            {"detail": "Invalid request"}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+            {"detail": "Invalid request", "errors": errors},
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
 
     return app

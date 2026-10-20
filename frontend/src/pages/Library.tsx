@@ -3,8 +3,9 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
-import { Book, Close, Download, Headphones, Plus, Reader, Search as SearchIcon, Shelf as ShelfIcon, Upload } from "../components/Icons";
+import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
+import { BulkBar } from "../components/BulkBar";
 import { del, get, patch, post, put } from "../lib/api";
 import { clock, usePlayer } from "../lib/player";
 import type { MatchSuggestion, Shelf, ShelfGrant, User } from "../lib/types";
@@ -59,7 +60,20 @@ const STATUS_LABEL: Record<Status, string> = { all: "All", reading: "Reading", u
 const SORT_LABEL: Record<Sort, string> = { title: "Title", author: "Author", added: "Newest" };
 
 export function LibraryPage() {
-  const { works, worksLoaded, me, refreshLibrary, canUpload, pickBooks, toast } = useStore();
+  const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen } = useStore();
+  const [selecting, setSelecting] = useState(false);
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const togglePick = (w: Work) => setPicked((p) => {
+    const n = new Set(p);
+    if (n.has(w.id)) n.delete(w.id);
+    else n.add(w.id);
+    return n;
+  });
+  const endSelect = () => {
+    setSelecting(false);
+    setPicked(new Set());
+  };
+  const readyImports = imports.filter((i) => i.status === "ready").length;
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
   const sort = (params.get("sort") as Sort) || "title";
@@ -127,7 +141,7 @@ export function LibraryPage() {
     else next.delete(k);
     setParams(next, { replace: true });
   };
-  const open = (w: Work) => nav(`/app/library/${w.id}${loc.search}`);
+  const open = (w: Work) => (selecting ? togglePick(w) : nav(`/app/library/${w.id}${loc.search}`));
   const filtering = !!q || status !== "all" || !!shelfId;
   const reader = me?.user.role === "reader";
 
@@ -138,12 +152,37 @@ export function LibraryPage() {
         aside={
           <>
             {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
-            {canUpload && <button className="btn ghost" onClick={pickBooks}><Upload /> Upload</button>}
+            {canEdit && works.length > 0 && (
+              <button className="btn ghost" aria-pressed={selecting} onClick={() => (selecting ? endSelect() : setSelecting(true))}>
+                <Select /> {selecting ? "Done" : "Select"}
+              </button>
+            )}
+            {canUpload && (
+              <span className="split-btn">
+                <button className="btn primary" onClick={pickBooks}><Plus /> Add books</button>
+                <OverflowMenu
+                  label="More ways to add books"
+                  className="btn primary split-more"
+                  trigger={<Down />}
+                  actions={[
+                    { label: "Choose files (EPUB, M4B, MP3)…", onSelect: pickBooks },
+                    { label: "Choose a folder (one audiobook)…", onSelect: pickFolder },
+                    ...(readyImports ? [{ label: `Review ${readyImports} waiting`, onSelect: () => setReviewOpen(true) }] : []),
+                  ]}
+                />
+              </span>
+            )}
           </>
         }
       >
         Library
       </PageTitle>
+      {readyImports > 0 && (
+        <div className="alert review-banner" role="status">
+          <span><strong>{readyImports === 1 ? "One book" : `${readyImports} books`}</strong> uploaded and waiting for you to check the details before filing.</span>
+          <button className="btn sm primary" onClick={() => setReviewOpen(true)}>Review</button>
+        </div>
+      )}
       {suggestions.length > 0 && (
         <div className="alert review-banner" role="status">
           <span><strong>{suggestions.length === 1 ? "One upload" : `${suggestions.length} uploads`}</strong> might belong to a book you already have.</span>
@@ -221,8 +260,12 @@ export function LibraryPage() {
             Your household shares books with you shelf by shelf. Ask the owner to add you to one.
           </EmptyState>
         ) : (
-          <EmptyState icon={<Book />} title="No books yet" action={canUpload ? <button className="btn primary" onClick={pickBooks}><Upload /> Upload books</button> : undefined}>
-            Upload EPUBs and audiobooks (M4B or MP3) or drop them into <code>{me?.inbox_path ?? "the inbox"}</code>. Lectern reads their metadata, files them under author and title, and lists them here.
+          <EmptyState
+            icon={<Book />}
+            title="No books yet"
+            action={canUpload ? <div className="row"><button className="btn primary" onClick={pickBooks}><Upload /> Add books</button><button className="btn" onClick={pickFolder}><Folder /> Add an audiobook folder</button></div> : undefined}
+          >
+            Drop EPUBs and audiobooks (M4B, or a folder of MP3s) anywhere on this page, or put them in <code>{me?.inbox_path ?? "the inbox"}</code>. You check the details before anything is filed.
           </EmptyState>
         )
       ) : filtered.length === 0 ? (
@@ -237,7 +280,8 @@ export function LibraryPage() {
         <ul className="book-grid" aria-label="Books">
           {filtered.map((w) => (
             <li key={w.id}>
-              <button className="book" style={tintStyle(w)} onClick={() => open(w)} aria-label={`${w.title} by ${w.author}${w.progress ? `, ${percent(w.progress.percentage)} read` : ""}`}>
+              <button className="book" style={tintStyle(w)} onClick={() => open(w)} aria-pressed={selecting ? picked.has(w.id) : undefined} data-selecting={selecting || undefined} aria-label={`${w.title} by ${w.author}${w.progress ? `, ${percent(w.progress.percentage)} read` : ""}`}>
+                {selecting && <span className="pick" aria-hidden="true">{picked.has(w.id) ? "✓" : ""}</span>}
                 <span className="cover-wrap">
                   <Cover work={w} />
                   {w.progress && <ProgressRing value={w.progress.percentage} />}
@@ -252,7 +296,8 @@ export function LibraryPage() {
         <ul className="book-list" aria-label="Books">
           {filtered.map((w) => (
             <li key={w.id}>
-              <button className="book" style={tintStyle(w)} onClick={() => open(w)}>
+              <button className="book" style={tintStyle(w)} onClick={() => open(w)} aria-pressed={selecting ? picked.has(w.id) : undefined} data-selecting={selecting || undefined}>
+                {selecting && <span className="pick" aria-hidden="true">{picked.has(w.id) ? "✓" : ""}</span>}
                 <Cover work={w} />
                 <span className="titles">
                   <strong><Highlight text={w.title} q={q} /></strong>
@@ -266,6 +311,18 @@ export function LibraryPage() {
         </ul>
       )}
 
+      {selecting && (
+        <BulkBar
+          ids={[...picked]}
+          visible={filtered.map((w) => w.id)}
+          shelves={shelves.filter((sh) => sh.permission !== "view" && !sh.smart)}
+          onSelectAll={(all) => setPicked(new Set(all))}
+          onDone={async () => {
+            await Promise.all([refreshLibrary(), loadShelves()]).catch(() => {});
+          }}
+          onClose={endSelect}
+        />
+      )}
       <Sheet open={!!selected} onClose={() => nav(`/app/library${loc.search}`)} title={selected?.title ?? ""}>
         {selected && <WorkDetail work={selected} shelves={shelves} onShelvesChanged={() => loadShelves().catch(() => {})} />}
       </Sheet>
@@ -294,7 +351,8 @@ const ListIcon = () => (
 
 function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: Shelf[]; onShelvesChanged: () => void }) {
   const p = work.progress;
-  const { me, canUpload, works, toast, refreshLibrary, now } = useStore();
+  const { me, canUpload, canEdit, works, toast, refreshLibrary, now, openEditor } = useStore();
+  const loc = useLocation();
   const player = usePlayer();
   const nav = useNavigate();
   const showTech = !!me?.preferences.show_technical_details;
@@ -342,11 +400,24 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
             {work.publisher && <span className="badge">{work.publisher}</span>}
             {work.audio && <span className="badge"><Headphones width={13} height={13} /> {clock(work.audio.duration_s)}</span>}
           </div>
+          {(work.series || (work.narrators?.length ?? 0) > 0 || (work.tags?.length ?? 0) > 0) && (
+            <div className="hint">
+              {work.series && <>{work.series}{work.series_index != null ? ` #${work.series_index}` : ""}</>}
+              {work.series && (work.narrators?.length ?? 0) > 0 && " · "}
+              {(work.narrators?.length ?? 0) > 0 && <>Read by {work.narrators!.join(", ")}</>}
+              {(work.tags?.length ?? 0) > 0 && <div className="chips" style={{ marginTop: 6 }}>{work.tags!.map((t) => <span key={t} className="badge">{t}</span>)}</div>}
+            </div>
+          )}
           <div className="row">
             {ebook && <button className="btn primary" onClick={() => nav(`/app/reader/${work.id}`)}><Reader /> {pos?.source === "web" || p ? "Continue reading" : "Read"}</button>}
             {work.audio && (
               <button className={`btn ${ebook ? "" : "primary"}`} onClick={() => { player.open(work, { autoplay: true }); }}>
                 <Headphones /> {pos?.audio_s ? `Listen from ${clock(pos.audio_s)}` : "Listen"}
+              </button>
+            )}
+            {canEdit && (
+              <button className="btn ghost" onClick={() => { nav(`/app/library${loc.search}`); openEditor(work.id); }}>
+                <Pencil /> Edit
               </button>
             )}
           </div>

@@ -300,6 +300,22 @@ class ReadAloudBuilder:
             return "failed", None, _message(exc)
         return "not_generated", None, None  # finished, but the file is gone again
 
+    def is_generating(self, work_id: int) -> bool:
+        """A build is writing into this work's ``derived/`` folder right now (folder moves
+        wait for it: ``lectern.editing.reconcile_folder``)."""
+        with self._lock:
+            build = self._builds.get(work_id)
+        return build is not None and not build.future.done()
+
+    def invalidate(self, inputs: Inputs) -> None:
+        """Forget the cached file so the next ``start`` rebuilds it (explicit regeneration)."""
+        with self._work_lock(inputs.work_id):
+            inputs.sidecar.unlink(missing_ok=True)
+        with self._lock:
+            build = self._builds.get(inputs.work_id)
+            if build is not None and build.future.done():
+                self._builds.pop(inputs.work_id, None)
+
     def start(self, inputs: Inputs) -> None:
         """Queue a build unless one for these inputs is running or the file is current."""
         if read_cached(inputs) is not None:
