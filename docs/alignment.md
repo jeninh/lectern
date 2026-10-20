@@ -120,7 +120,9 @@ the fixture test checks it against the 15 hand-checked sentences.
 are transcribed in order and each word is placed on the work timeline by adding the track's
 `offset_s` (sum of the earlier tracks' durations); word times are clamped to be
 non-decreasing. Audio is decoded by PyAV's bundled FFmpeg; no system `ffmpeg` is needed.
-PyAV is pinned below 19 because PyAV 19 breaks faster-whisper 1.2.
+PyAV is pinned below 19 because PyAV 19 breaks faster-whisper 1.2. Each track is decoded as a
+stream and transcribed in overlapping windows, so memory stays flat however long the track is
+(see [Long recordings](#long-recordings)).
 
 | Setting | Default | Notes |
 | --- | --- | --- |
@@ -128,6 +130,9 @@ PyAV is pinned below 19 because PyAV 19 breaks faster-whisper 1.2.
 | `LECTERN_ALIGN_DEVICE` | `cpu` | `cuda` on a GPU worker |
 | `LECTERN_ALIGN_COMPUTE_TYPE` | `int8` | `float16` on GPU |
 | `LECTERN_ALIGN_THREADS` | `0` | CTranslate2 threads; 0 = its default |
+| `LECTERN_ALIGN_WINDOW_SECONDS` | `300` | Audio transcribed at a time (≥ 10). Memory grows with this, not with the book. Workers: `--window` |
+| `LECTERN_ALIGN_OVERLAP_SECONDS` | `15` | Audio shared by neighbouring windows (at most a third of the window). Workers: `--overlap` |
+| `LECTERN_ALIGN_MEMORY_LIMIT_MB` | 75 % of RAM / cgroup limit | Resident-memory cap of the local worker's alignment process; `0` = none of our own |
 | `LECTERN_ALIGN_LOCAL_WORKER` | `1` | Run jobs in the server when faster-whisper is installed |
 | `LECTERN_BACKGROUND_JOBS` | `1` | Rescans, lease sweeps, and the local worker |
 | `LECTERN_WORKER_POLL_SECONDS` | `10` | Local worker's idle poll |
@@ -320,8 +325,8 @@ Notes:
   (`test_recorded_transcript_aligns_close_to_the_hand_checked_map`).
 - Speed is wall-clock and includes decoding and VAD; "model load" is from the local cache
   (the first run also downloads ~460 MB).
-- Peak RSS is the whole process. It is dominated by the model and does not grow with book
-  length; matching a full novel adds tens of MB.
+- Peak RSS is the whole process. The table above predates windowing, when it grew with the
+  length of the track (see "Long recordings" below); matching a full novel adds tens of MB.
 - Whisper output varies between runs and builds: the checked-in transcript has 207 words for
   the excerpt, this run 198 (different splits of hyphenated and numeric words); matching is
   insensitive to that. Timing varies by a few percent run to run on a shared vCPU.
@@ -329,3 +334,116 @@ Notes:
 
 Reproduce the recorded transcript with
 `lectern align-transcribe tests/fixtures/magi/excerpt.mp3 -o transcript_small.json`.
+
+## Long recordings
+
+A single-file audiobook can be 10–40 hours. Before this section existed, faster-whisper was
+handed the whole decoded track: about 70 bytes of transient memory per 16 kHz sample (the
+float32 audio, VAD, and the STFT and mel features of all of it), roughly 1.1 MB per second of
+audio on top of the model, so a 10-hour track would have needed ~40 GB.
+
+**Windows.** Each track is now decoded as a stream (PyAV, 16 kHz mono int16, the same
+resampling as `faster_whisper.decode_audio`) and transcribed in windows of
+`LECTERN_ALIGN_WINDOW_SECONDS` (default 300 s) that overlap by `LECTERN_ALIGN_OVERLAP_SECONDS`
+(default 15 s; at most a third of the window). Only the current window's samples are held. Each
+window is transcribed with the same options as before (VAD, beam 5, no conditioning on previous
+text), and its word times are shifted by the window's start and the track's `offset_s`, so the
+work keeps one absolute timeline across windows and tracks.
+
+**Seams.** Two neighbouring windows both hear the overlap. The words are joined at one cut
+inside it: the middle of the longest pause between words of the earlier window in the central
+half of the overlap (the edges of a window are where Whisper is least reliable), else the
+overlap's midpoint. Earlier-window words before the cut and later-window words from the cut
+on are kept; if the first kept later word repeats the last kept earlier word (same normalised
+text, starts within 1 s) it is dropped. The cut depends only on the earlier window's words, so
+the merge is deterministic. Language is detected once, on the first window that contains speech,
+and then fixed for the rest of the work. Word start times stay non-decreasing.
+
+**The rest is small.** The EPUB is read one spine item at a time and only its sentences and
+tokens are kept; a long novel's text is a few MB, and matching adds tens of MB. Only the merged
+word list (a few hundred bytes per word, ~20 MB for a 10-hour book) grows with the length of the audio. The child process writes
+the sentence map to a file instead of piping it.
+
+### Failure isolation
+
+The in-server worker (`LECTERN_ALIGN_LOCAL_WORKER`) never transcribes in the web server's
+process. For each job it starts `python -m lectern.align.child`, sends the job on stdin, and reads
+progress lines from the child's stdout. The server keeps the lease and the heartbeats.
+
+- The child sets its Linux `oom_score_adj` to 1000, so if the machine runs out of memory the
+  kernel kills the alignment, not the server. It also runs at `nice` +10, never dumps core, and
+  exits if its parent dies.
+- The server watches the child's resident memory (`/proc/<pid>/status`) and kills it above
+  `LECTERN_ALIGN_MEMORY_LIMIT_MB`. The default is 75 % of the memory available to the server
+  (physical RAM or the container's cgroup limit, whichever is lower). `0` turns this cap off and
+  leaves only the kernel's.
+- The child's stderr is kept in `<LECTERN_DATA_DIR>/logs/align/job-<id>-attempt-<n>.log` (the 50
+  most recent are kept), and its tail is quoted in the job's error.
+
+| What happened | Job |
+| --- | --- |
+| Child finished | Result checked and stored exactly as a worker upload would be |
+| Pipeline raised (bad file, no speech) | Failed or retried, as the error decides (unchanged) |
+| Over the memory cap, `MemoryError` (exit 3), or a `SIGKILL` the server did not send (the OOM killer) | **Failed, not retried**: the same input, model, and limit would fail again. The error says to raise the limit, use a smaller model or window, or run an external worker |
+| Any other signal (e.g. `SIGSEGV`) or exit code | Retried under the usual attempts and backoff (3 attempts) |
+| Server shutting down | Child terminated, job **released** without spending an attempt |
+| Lease lost (reclaimed, cancelled, credential revoked) | Child killed, result discarded |
+| Server itself killed | Child exits; the lease expires and the sweep reclaims the job |
+
+External workers (`lectern worker --server …`) transcribe in their own process as before. They
+are already isolated from the server and use the same windows (`--window`, `--overlap`).
+
+### Measurements
+
+Measured 2026-10-20 in an Amp orb: 2 vCPUs (Intel Xeon @ 2.60 GHz), 3.8 GB RAM, Linux x86-64,
+Python 3.14, faster-whisper 1.2.1, CPU `int8`, `OMP_NUM_THREADS=2`, one run each. "Before" is
+the code at commit `70acd67`; "after" uses the default 300 s / 15 s windows. Peak RSS is the
+`align-bench` process's own `ru_maxrss` (the whole process: Python, model, audio). Runs were
+killed at 2.8 GB to keep the orb alive.
+
+The long files are the excerpt repeated with 2 s gaps
+(`tests/fixtures/magi/make_long_audio.py --minutes N`). This is a memory and speed test only:
+repeated text cannot be matched to one story, so coverage on those files means nothing. It is
+not committed.
+
+| Audio (model `tiny`) | Before: peak RSS | Before: time | After: peak RSS | After: time |
+| --- | --- | --- | --- | --- |
+| 15 min | 1,266 MB | 51 s | 668 MB | 55 s |
+| 30 min | 1,993 MB | 100 s | 691 MB | 102 s |
+| 45 min | > 2,800 MB (killed) | — | 690 MB | 155 s |
+| 60 min | > 2,800 MB (killed) | — | 671 MB | 202 s |
+| 120 min | not run | — | 676 MB | 361 s |
+| 600 min (10 h) | not run | — | 708 MB | 1,974 s |
+
+The window sets the memory (30-minute file, `tiny`, 30 s overlap): 120 s → 468 MB at 13.0×
+realtime, 300 s → 674 MB at 16.5×, 600 s → 1,019 MB at 18.7×, 900 s → 1,361 MB at 18.7×. Short
+windows cost speed because each one pays for VAD, the first decoder passes, and its overlap;
+300 s keeps most of the speed.
+
+Quality on the real 13:22 recording (model `small`), compared with the hand-checked map
+(sentences 0–14, shifted by +24.50 s) and with whole-file transcription:
+
+| | Before (whole file) | After, 300 s windows | After, 120 s windows |
+| --- | --- | --- | --- |
+| Peak RSS | 1,345 MB | 1,076 MB | 945 MB |
+| Time / speed | 238 s / 3.37× | 245 s / 3.28× | 277 s / 2.89× |
+| Words | 2,145 | 2,145 | 2,149 |
+| Sentences matched | 155 | 154 | 155 |
+| `span_coverage` / diagnosis | 1.0 / `partial_audio` | 0.994 / `partial_audio` | 1.0 / `partial_audio` |
+| Start error vs. hand map | median 0.16 s, max 0.36 s | median 0.17 s, max 0.31 s | median 0.16 s, max 0.36 s |
+| End error vs. hand map | median 0.22 s, max 0.61 s | median 0.17 s, max 0.59 s | median 0.21 s, max 0.61 s |
+| Start vs. whole file (all matched) | — | median 0.04 s, max 0.66 s | median 0.03 s, max 0.73 s |
+
+The one sentence the 300 s run missed starts at 154 s, inside the first window and far from a
+seam: Whisper heard it slightly differently. The 120 s run crosses six seams and matches all 155.
+
+Honest limits:
+
+- `small` needs about 1.1 GB with the default window, `tiny` about 0.7 GB. Both are flat in
+  the length of the book and fit a 4 GB Raspberry Pi with the server alongside. **No Pi was
+  measured**; ARM speed will be lower than these x86 numbers.
+- The memory cap is enforced by polling every 0.2 s, so a very fast spike can overshoot it
+  before the kill. `oom_score_adj` still makes the kernel pick the child first.
+- `oom_score_adj` and `/proc` are Linux-only. On other systems the child still isolates
+  crashes, but there is no memory cap.
+- PyAV stays pinned below 19 (`av>=11,<19`) because PyAV 19 breaks faster-whisper 1.2.

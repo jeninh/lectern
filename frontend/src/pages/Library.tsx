@@ -3,7 +3,8 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
-import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Shelf as ShelfIcon, Upload } from "../components/Icons";
+import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
+import { SendToDevice } from "../components/SendToDevice";
 import { OverflowMenu } from "../components/Menu";
 import { BulkBar } from "../components/BulkBar";
 import { del, get, patch, post, put } from "../lib/api";
@@ -63,6 +64,7 @@ export function LibraryPage() {
   const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen } = useStore();
   const [selecting, setSelecting] = useState(false);
   const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [sendingMany, setSendingMany] = useState(false);
   const togglePick = (w: Work) => setPicked((p) => {
     const n = new Set(p);
     if (n.has(w.id)) n.delete(w.id);
@@ -152,7 +154,7 @@ export function LibraryPage() {
         aside={
           <>
             {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
-            {canEdit && works.length > 0 && (
+            {works.length > 0 && (
               <button className="btn ghost" aria-pressed={selecting} onClick={() => (selecting ? endSelect() : setSelecting(true))}>
                 <Select /> {selecting ? "Done" : "Select"}
               </button>
@@ -321,8 +323,17 @@ export function LibraryPage() {
             await Promise.all([refreshLibrary(), loadShelves()]).catch(() => {});
           }}
           onClose={endSelect}
+          canEdit={canEdit}
+          onSend={() => setSendingMany(true)}
         />
       )}
+      <SendToDevice
+        open={sendingMany}
+        workIds={[...picked]}
+        title={`Send ${picked.size} ${picked.size === 1 ? "book" : "books"} to a device`}
+        onClose={() => setSendingMany(false)}
+        onSent={endSelect}
+      />
       <Sheet open={!!selected} onClose={() => nav(`/app/library${loc.search}`)} title={selected?.title ?? ""}>
         {selected && <WorkDetail work={selected} shelves={shelves} onShelvesChanged={() => loadShelves().catch(() => {})} />}
       </Sheet>
@@ -360,6 +371,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
   const pos = work.position;
   const editable = shelves.filter((sh) => sh.permission !== "view" && !sh.smart);
   const [member, setMember] = useState<Set<number> | null>(null);
+  const [sending, setSending] = useState(false);
   const [merging, setMerging] = useState(false);
 
   useEffect(() => {
@@ -420,7 +432,9 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
                 <Pencil /> Edit
               </button>
             )}
+            {ebook && <button className="btn ghost" onClick={() => setSending(true)}><Send /> Send to device</button>}
           </div>
+          <SendToDevice open={sending} workIds={[work.id]} title={`Send “${work.title}” to a device`} onClose={() => setSending(false)} />
           {pos && (
             <div>
               <div className="progress-bar"><span style={{ width: `${Math.round((pos.fraction ?? 0) * 100)}%` }} /></div>

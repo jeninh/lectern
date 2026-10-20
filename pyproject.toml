@@ -30,6 +30,9 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.5",
     "hypothesis>=6.100",
+    # Streaming decode and windowing tests (no model needed). Same pin as the align extra.
+    "av>=11,<19",
+    "numpy>=1.26",
 ]
 # Transcription and the external worker (`lectern worker`). PyAV 19 breaks faster-whisper 1.2.
 align = [

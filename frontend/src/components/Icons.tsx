@@ -42,6 +42,9 @@ export const Sync = (p: P) => (
 export const Download = (p: P) => (
   <svg {...base} {...p}><path d="M12 4v11M7 10l5 5 5-5" /><path d="M4 19h16" /></svg>
 );
+export const Send = (p: P) => (
+  <svg {...base} {...p}><path d="M4 12h11" /><path d="m11 6 6 6-6 6" /><path d="M20 5v14" /></svg>
+);
 export const Plus = (p: P) => (
   <svg {...base} {...p}><path d="M12 5v14M5 12h14" /></svg>
 );

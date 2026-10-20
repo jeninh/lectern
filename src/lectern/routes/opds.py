@@ -7,9 +7,13 @@ from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
+from lectern import device_queue
 from lectern.access import visible_works
 from lectern.models import Work
+from lectern.reading_lists import continue_items, up_next_ids
 from lectern.routes.library import (
     PAGE_SIZE,
     download_response,
@@ -76,9 +80,28 @@ def _entry(work: Work) -> str:
     )
 
 
+def _nav_entry(title: str, urn: str, href: str, content: str, rel: str = "subsection") -> str:
+    return (
+        f"<entry><title>{_text(title)}</title><id>urn:lectern:{urn}</id>"
+        f'<updated>{_iso(None)}</updated><content type="text">{_text(content)}</content>'
+        f'<link rel="{rel}" href="{href}" type="{ACQ}"/></entry>'
+    )
+
+
+def _books(n: int) -> str:
+    return f"{n} book" if n == 1 else f"{n} books"
+
+
 @router.get("", include_in_schema=False)
 @router.get("/", include_in_schema=False)
-def root(user: OpdsUser) -> Response:
+def root(request: Request, user: OpdsUser, db: DbDep) -> Response:
+    """Navigation, e-ink first: the three personal lists (Continue, Up next, and this
+    device's queue) before the whole library, each with its size, so the book you want is
+    one tap away on a slow screen. The order never changes; empty lists say so."""
+    pw = request.state.app_password
+    n_continue = len(continue_items(db, user, PAGE_SIZE))
+    n_next = len(up_next_ids(db, user))
+    n_queue = device_queue.pending_count(db, pw.id, user)
     body = (
         '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">'
         "<id>urn:lectern:root</id><title>Lectern</title>"
@@ -88,19 +111,49 @@ def root(user: OpdsUser) -> Response:
         f'<link rel="start" href="/opds" type="{NAV}"/>'
         f'<link rel="search" href="/opds/search.xml" type="{OPENSEARCH}"/>'
         f'<link rel="search" href="/opds/search?q={{searchTerms}}" type="{ACQ}"/>'
-        "<entry><title>All books</title><id>urn:lectern:all</id>"
-        f'<updated>{_iso(None)}</updated><content type="text">Every work in the library</content>'
-        f'<link rel="subsection" href="/opds/all" type="{ACQ}"/></entry>'
-        "<entry><title>Recently added</title><id>urn:lectern:recent</id>"
-        f'<updated>{_iso(None)}</updated><content type="text">Newest first</content>'
-        f'<link rel="http://opds-spec.org/sort/new" href="/opds/recent" type="{ACQ}"/></entry>'
-        "</feed>"
+        + _nav_entry(
+            "Continue reading",
+            "continue",
+            "/opds/continue",
+            f"{_books(n_continue)} in progress, latest first"
+            if n_continue
+            else "Nothing in progress",
+        )
+        + _nav_entry(
+            "Up next",
+            "up-next",
+            "/opds/up-next",
+            f"{_books(n_next)} on your shelves, not started"
+            if n_next
+            else "Nothing on your shelves to start",
+        )
+        + _nav_entry(
+            "Queued for this device",
+            "queue",
+            "/opds/queue",
+            f"{_books(n_queue)} sent to {pw.label}" if n_queue else f"Nothing sent to {pw.label}",
+        )
+        + _nav_entry("All books", "all", "/opds/all", "Every work in the library")
+        + _nav_entry(
+            "Recently added",
+            "recent",
+            "/opds/recent",
+            "Newest first",
+            "http://opds-spec.org/sort/new",
+        )
+        + "</feed>"
     )
     return _xml(body, NAV)
 
 
 def _acquisition(
-    title: str, self_href: str, works: list[Work], page: int, total: int, extra_q: str = ""
+    title: str,
+    self_href: str,
+    works: list[Work],
+    page: int,
+    total: int,
+    extra_q: str = "",
+    feed_id: str | None = None,
 ) -> Response:
     pages = max(1, -(-total // PAGE_SIZE))
     links = [
@@ -112,16 +165,16 @@ def _acquisition(
     base = self_href.split("?")[0]
     if page < pages:
         links.append(
-            f'<link rel="next" href="{escape(base)}?page={page + 1}{extra_q}" type="{ACQ}"/>'
+            f'<link rel="next" href="{escape(base)}?page={page + 1}{escape(extra_q)}" type="{ACQ}"/>'
         )
     if page > 1:
         links.append(
-            f'<link rel="previous" href="{escape(base)}?page={page - 1}{extra_q}" type="{ACQ}"/>'
+            f'<link rel="previous" href="{escape(base)}?page={page - 1}{escape(extra_q)}" type="{ACQ}"/>'
         )
     body = (
         '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" '
         'xmlns:opds="http://opds-spec.org/2010/catalog" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
-        f"<id>urn:lectern:{escape(base)}</id><title>{_text(title)}</title>"
+        f"<id>{escape(feed_id or f'urn:lectern:{base}')}</id><title>{_text(title)}</title>"
         f"<updated>{_iso(None)}</updated><author><name>Lectern</name></author>"
         f"<opensearch:totalResults>{total}</opensearch:totalResults>"
         f"<opensearch:itemsPerPage>{PAGE_SIZE}</opensearch:itemsPerPage>"
@@ -133,6 +186,58 @@ def _acquisition(
     return _xml(body, ACQ)
 
 
+def _works_page(db, ids: list[int], page: int) -> list[Work]:
+    """The works of one page of ``ids``, in the order of ``ids``."""
+    chunk = ids[(page - 1) * PAGE_SIZE : page * PAGE_SIZE]
+    rows = db.scalars(
+        select(Work).options(selectinload(Work.files)).where(Work.id.in_(chunk))
+    ).all()
+    by_id = {w.id: w for w in rows}
+    return [by_id[i] for i in chunk if i in by_id]
+
+
+@router.get("/continue", include_in_schema=False)
+def continue_feed(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
+    """Works in progress, most recent activity first (lectern.reading_lists)."""
+    page = max(1, page)
+    ids = [w for w, _, _ in continue_items(db, user, PAGE_SIZE)]
+    works = _works_page(db, ids, page)
+    return _acquisition("Continue reading", f"/opds/continue?page={page}", works, page, len(ids))
+
+
+@router.get("/up-next", include_in_schema=False)
+def up_next_feed(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
+    """Unstarted works on the person's shelves, in shelf order (lectern.reading_lists)."""
+    page = max(1, page)
+    ids = up_next_ids(db, user)
+    return _acquisition(
+        "Up next", f"/opds/up-next?page={page}", _works_page(db, ids, page), page, len(ids)
+    )
+
+
+@router.get("/queue", include_in_schema=False)
+def queue_feed(request: Request, user: OpdsUser, db: DbDep, page: int = 1) -> Response:
+    """This credential's queue, oldest first. Only the device whose app password signed the
+    request sees it; an entry leaves once this device downloaded the whole EPUB."""
+    page = max(1, page)
+    pw = request.state.app_password
+    total = device_queue.pending_count(db, pw.id, user)
+    rows = db.execute(
+        device_queue.pending_query(pw.id, user)
+        .options(selectinload(Work.files))
+        .offset((page - 1) * PAGE_SIZE)
+        .limit(PAGE_SIZE)
+    ).all()
+    return _acquisition(
+        "Queued for this device",
+        f"/opds/queue?page={page}",
+        [w for _, w in rows],
+        page,
+        total,
+        feed_id=f"urn:lectern:queue:{pw.id}",
+    )
+
+
 @router.get("/all", include_in_schema=False)
 def all_books(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
     page = max(1, page)
@@ -142,9 +247,6 @@ def all_books(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
 
 @router.get("/recent", include_in_schema=False)
 def recent(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
-    from sqlalchemy import func, select
-    from sqlalchemy.orm import selectinload
-
     page = max(1, page)
     total = db.scalar(select(func.count()).select_from(Work).where(visible_works(user))) or 0
     works = db.scalars(
@@ -196,4 +298,6 @@ def cover(user: OpdsUser, db: DbDep, settings: SettingsDep, work_id: int):
 def download(request: Request, user: OpdsUser, db: DbDep, settings: SettingsDep, file_id: int):
     book, path = resolve_file(db, settings, file_id, user)
     device = Device.app_password(request.state.app_password)
-    return download_response(db, settings, book, path, user, device, client_ip(request), "opds")
+    return download_response(
+        request, db, settings, book, path, user, device, client_ip(request), "opds"
+    )

@@ -43,7 +43,7 @@ def serve() -> None:
 
 
 def _transcriber_args(p: argparse.ArgumentParser) -> None:
-    from lectern.align.transcribe import DEFAULT_MODEL
+    from lectern.align.transcribe import DEFAULT_MODEL, DEFAULT_OVERLAP_S, DEFAULT_WINDOW_S
 
     p.add_argument("--model", default=os.environ.get("LECTERN_ALIGN_MODEL", DEFAULT_MODEL))
     p.add_argument("--device", default=os.environ.get("LECTERN_ALIGN_DEVICE", "cpu"))
@@ -55,6 +55,18 @@ def _transcriber_args(p: argparse.ArgumentParser) -> None:
         help="CPU threads for CTranslate2 (0 = its default)",
     )
     p.add_argument(
+        "--window",
+        type=float,
+        default=float(os.environ.get("LECTERN_ALIGN_WINDOW_SECONDS", DEFAULT_WINDOW_S)),
+        help="seconds of audio transcribed at a time; memory grows with this, not the book",
+    )
+    p.add_argument(
+        "--overlap",
+        type=float,
+        default=float(os.environ.get("LECTERN_ALIGN_OVERLAP_SECONDS", DEFAULT_OVERLAP_S)),
+        help="seconds shared by consecutive windows (at most a third of --window)",
+    )
+    p.add_argument(
         "--models-dir",
         type=Path,
         default=None,
@@ -63,16 +75,22 @@ def _transcriber_args(p: argparse.ArgumentParser) -> None:
 
 
 def _transcriber(args: argparse.Namespace):
-    from lectern.align.transcribe import Transcriber, transcription_available
+    from lectern.align.transcribe import Transcriber, check_window, transcription_available
 
     if not transcription_available():
         sys.exit("faster-whisper is not installed: pip install 'lectern[align]'")
+    try:
+        check_window(args.window, args.overlap)
+    except ValueError as exc:
+        sys.exit(f"--window/--overlap: {exc}")
     return Transcriber(
         args.model,
         device=args.device,
         compute_type=args.compute_type,
         threads=args.threads,
         download_root=args.models_dir,
+        window_s=args.window,
+        overlap_s=args.overlap,
     )
 
 
@@ -217,6 +235,7 @@ def align_bench(args: argparse.Namespace) -> None:
         args.output.write_text(out.sentence_map.model_dump_json(indent=1) + "\n")
     report = {
         "stats": {**out.stats, "model_load_s": load_s, "peak_rss_mb": _peak_rss_mb()},
+        "config": {"window_s": args.window, "overlap_s": args.overlap, "model": args.model},
         "hardware": _hardware(),
     }
     print(json.dumps(report, indent=2))

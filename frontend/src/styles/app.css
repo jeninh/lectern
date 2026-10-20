@@ -4285,3 +4285,173 @@ table.compare tr:last-child th {
 table.compare td:first-child {
   width: 28px;
 }
+
+/* ---------- per-device queues: send dialog, queue sheet, library selection ---------- */
+.send-list {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.send-list legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font: 600 11px/1.2 var(--font-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.send-option {
+  display: grid;
+  grid-template-columns: auto 36px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color var(--dur), box-shadow var(--dur), background var(--dur);
+}
+.send-option:hover {
+  border-color: var(--line-2);
+}
+.send-option[data-checked] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--surface);
+}
+.send-option:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.send-option input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+.send-option .device-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+.send-option .device-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.send-text,
+.queue-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.send-text strong,
+.queue-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.send-text .hint,
+.queue-text .hint {
+  font-size: 12.5px;
+}
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.queue-item {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.queue-item strong {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 16px;
+}
+.queue-item[data-status="removed"] {
+  background: transparent;
+  border-style: dashed;
+}
+.queue-item[data-status="delivered"] .hint svg {
+  vertical-align: -1px;
+  color: var(--ok);
+}
+.queue-cover {
+  width: 44px;
+  border-radius: 4px;
+}
+.queue-cover .fallback strong,
+.queue-cover .fallback span {
+  display: none;
+}
+.queue-actions {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+.queue-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-2);
+  border-radius: 12px;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur), background var(--dur), color var(--dur);
+}
+.queue-summary:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+  background: var(--accent-soft);
+}
+.queue-summary svg {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+  flex: none;
+}
+.queue-summary .go {
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.queue-devices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.queue-devices li {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+/* selection itself (.pick, .bulk-bar) is styled with the Library's bulk edit above */
+.icon-btn:disabled,
+.icon-btn:disabled:hover {
+  opacity: 0.35;
+  cursor: default;
+  background: none;
+}
