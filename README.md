@@ -1,9 +1,10 @@
 # Lectern
 
 Self-hosted reading server for one household: a library of works (EPUBs and their
-audiobooks), a web reader and audiobook player, an authenticated OPDS catalogue, KOReader
-progress sync between devices, household accounts with shared shelves, text–audio
-alignment of audiobooks, and read-along for books with an aligned audiobook.
+audiobooks), a web reader and audiobook player, an authenticated OPDS catalogue with a
+per-device "send to device" queue, KOReader progress sync between devices, household
+accounts with shared shelves, text–audio alignment of audiobooks, and read-along for books
+with an aligned audiobook.
 
 ## Run
 
@@ -159,7 +160,17 @@ values to enter, then waits and confirms the device's first sync live.
 - Progress sync: Tools → Progress sync → Custom sync server → `https://lectern.example/`,
   then **Login** (not Register) with your Lectern username and the sync key.
 - Catalogue: OPDS catalog → add `https://lectern.example/opds` with your username and
-  the app password.
+  the app password. Its first page is made for e-ink: **Continue reading**, **Up next**
+  (unstarted books on your shelves), and **Queued for this device**, then the whole library.
+
+### Send to device
+
+**Send to device** on a book (or **Select** several in the Library) queues it for one
+e-reader. It shows up first in that device's catalogue and leaves the queue when that device
+has downloaded the whole EPUB; another device, a browser download, a range request, or a
+conditional `304` never counts. Everyone sends to their own devices; the owner can send to
+anyone's, but only books that person can see. Queues are on **Devices → Open queue**. Details,
+delivery rules, and the API: [`docs/device-queues.md`](docs/device-queues.md).
 
 ## Read-along
 
@@ -187,13 +198,17 @@ audio with faster-whisper and matches it to the text sentence by sentence. After
 position follows you between KOReader, the web read-along, and listening: KOReader's sync
 jumps to the sentence you were listening to, and audio resumes where KOReader stopped.
 
-Transcription is CPU-heavy (about 3× realtime and 1.4 GB of memory on two x86 cores with the
-default `small` model). The default image does not transcribe; either build with
-`--build-arg LECTERN_EXTRAS=align` on a machine with the memory for it, or keep the server
-small (e.g. a Raspberry Pi, with `LECTERN_ALIGN_LOCAL_WORKER=0`) and run
-`lectern worker --server https://lectern.example` on a laptop or GPU box with an owner-issued
-worker key. Setup, settings, how matching handles intros and missing or abridged chapters, and
-benchmark numbers are in [`docs/alignment.md`](docs/alignment.md).
+Transcription is CPU-heavy (about 3× realtime on two x86 cores with the default `small`
+model). Audio is decoded as a stream and transcribed in five-minute windows, so memory does
+not grow with the length of a file: a 10-hour single-file audiobook needs no more than a
+chapter. The server runs each alignment in a separate, lower-priority process with a memory
+cap, so running out of memory or a crash fails that job (with the log kept) and never takes
+the server down. The default image does not transcribe; either build with
+`--build-arg LECTERN_EXTRAS=align`, or keep the server small (`LECTERN_ALIGN_LOCAL_WORKER=0`)
+and run `lectern worker --server https://lectern.example` on a laptop or GPU box with an
+owner-issued worker key. Setup, settings, memory and benchmark numbers, failure handling, and
+how matching handles intros and missing or abridged chapters are in
+[`docs/alignment.md`](docs/alignment.md).
 
 ## Configuration
 
@@ -225,6 +240,8 @@ benchmark numbers are in [`docs/alignment.md`](docs/alignment.md).
 | `LECTERN_WORKER_REQUESTS_PER_MINUTE` | 1200 | Requests per minute per valid worker key (failed worker logins use the per-IP limit) |
 | `LECTERN_ALIGN_MODEL` | `small` | faster-whisper model for alignment ([more settings](docs/alignment.md#transcription)) |
 | `LECTERN_ALIGN_LOCAL_WORKER` | `1` | Align in the server when faster-whisper is installed; `0` leaves jobs to `lectern worker` |
+| `LECTERN_ALIGN_WINDOW_SECONDS` / `_OVERLAP_SECONDS` | 300 / 15 | Audio transcribed at a time, and shared by neighbouring windows; memory grows with the window, not the book |
+| `LECTERN_ALIGN_MEMORY_LIMIT_MB` | 75 % of RAM or the container limit | Resident-memory cap of the alignment process (the job fails above it); `0` = none of our own |
 | `LECTERN_BACKGROUND_JOBS` | `1` | Audio rescans, lease sweeps, and the local worker |
 | `LECTERN_TRUSTED_PROXIES` | empty | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed (`127.0.0.1` for `tailscale serve`); empty trusts nobody |
 | `LECTERN_TRUST_CF_CONNECTING_IP` | false | Also believe `CF-Connecting-IP` from a trusted proxy. Only for Cloudflare Tunnel, with `LECTERN_TRUSTED_PROXIES` limited to the `cloudflared` connector; any other proxy passes the header through from the client |

@@ -837,6 +837,16 @@ Tables `notifications`, `known_devices`, `download_events` and the cap columns
   server default, `0` no cap. Members and readers may only lower their own device's effective
   cap (`403 only_owner_can_raise_cap` otherwise); the owner role may set any value. `GET /api/security` reports `downloads` usage and
   `known_devices`; `POST /api/security/known-devices/{id}/forget` forgets one.
+  EPUB downloads (`/library/files/{id}/download`, `/opds/files/{id}/download`) carry the
+  file's SHA-256 as a strong `ETag` and honour single `Range` requests; an `If-None-Match`
+  that matches is a `304` that is not counted (milestone 5).
+
+## Per-device queues (milestone 5)
+
+Table `device_queue_items` (migration `0007`), API `/api/device-queues/*`, and the OPDS feeds
+`/opds/continue`, `/opds/up-next`, `/opds/queue` are specified in
+[`device-queues.md`](device-queues.md), including who may queue to which device and exactly
+which download marks an item delivered.
 - **Reading them.** `GET /api/notifications?limit=` → `{items: [{id, kind, severity, title,
   body, data, created_at, read_at}], unread}`; `POST /api/notifications/read {ids?, all?}`.
   `/api/me` includes `counts.unread_notifications`.
