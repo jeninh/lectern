@@ -306,6 +306,9 @@ _ACTIVITY_ACTIONS = {
     "user.role",
     "listen.start",
     "work.merge",
+    "device.forget",
+    "device.download_cap",
+    "user.download_cap",
 }
 
 
@@ -354,6 +357,21 @@ def activity(
         for e in events:
             if e["action"] in linkable and e["target"] in ids:
                 e["work_id"] = ids[e["target"]]
+    # Listening is audited against "work:<id>"; show the title instead.
+    listened = {
+        int(e["target"][5:])
+        for e in events
+        if e["action"] == "listen.start"
+        and (e["target"] or "").startswith("work:")
+        and e["target"][5:].isdigit()
+    }
+    if listened:
+        titles = dict(db.execute(select(Work.id, Work.title).where(Work.id.in_(listened))).all())
+        for e in events:
+            if e["action"] == "listen.start" and (e["target"] or "")[5:].isdigit():
+                wid = int(e["target"][5:])
+                if wid in titles:
+                    e["work_id"], e["target"] = wid, titles[wid]
 
     sync_stmt = (
         select(ReadingProgress, SyncKey, BookFile, Work)

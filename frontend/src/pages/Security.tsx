@@ -118,6 +118,42 @@ export function SecurityPage() {
           </div>
         </section>
 
+        <section className="card" id="downloads" aria-labelledby="dl-h" data-highlight={hash === "downloads" || undefined}>
+          <h2 id="dl-h">Downloads and alerts</h2>
+          <p className="sub">
+            Each account may download {sec.downloads.cap ? `${sec.downloads.cap} books an hour` : "without an hourly limit"}
+            {sec.downloads.device_cap ? `, and each catalogue device ${sec.downloads.device_cap}` : ""}. More than {sec.downloads.burst_count} in {Math.round(sec.downloads.burst_window_s / 60)} minutes alerts you and the owner. Blocked downloads are recorded in Activity.
+          </p>
+          <div className="meter" role="meter" aria-valuenow={sec.downloads.used} aria-valuemin={0} aria-valuemax={sec.downloads.cap || sec.downloads.used || 1} aria-label="Downloads in the last hour">
+            <span style={{ width: `${sec.downloads.cap ? Math.min(100, (sec.downloads.used / sec.downloads.cap) * 100) : 0}%` }} />
+          </div>
+          <div className="hint" style={{ marginTop: 6 }}>{sec.downloads.used} in the last hour{sec.downloads.cap ? ` of ${sec.downloads.cap}` : ""}. Per-device limits are on the Devices page; the owner sets yours under Admin.</div>
+        </section>
+
+        <section className="card" id="browsers" aria-labelledby="kd-h">
+          <h2 id="kd-h">Recognised browsers</h2>
+          <p className="sub">Signing in from a browser not on this list sends you and the owner an alert. Forget one to be alerted the next time it signs in.</p>
+          {sec.known_devices.length === 0 ? (
+            <div className="hint">None yet.</div>
+          ) : (
+            <table className="list">
+              <tbody>
+                {sec.known_devices.map((d) => (
+                  <tr key={d.id}>
+                    <td>
+                      <strong>{d.label || "Browser"}</strong>
+                      <div className="hint">first seen {relativeTime(d.first_seen_at)} · last {relativeTime(d.last_seen_at)}{d.last_ip ? ` · ${d.last_ip}` : ""}</div>
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <button className="btn sm ghost" onClick={() => post(`/api/security/known-devices/${d.id}/forget`).then(() => done(`Forgot ${d.label || "browser"}`)).catch((e) => toast(e.message, "error"))}>Forget</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+
         <section className="card" id="password" aria-labelledby="pw-h" data-highlight={hash === "password" || undefined}>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>

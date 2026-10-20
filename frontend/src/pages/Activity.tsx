@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { EmptyState } from "../components/EmptyState";
-import { Alert, Devices, Download, Key, Login, Logout, Pulse, Shield, Sync, Upload, Users } from "../components/Icons";
+import { Alert, Devices, Download, Headphones, Key, Login, Logout, Pulse, Shelf, Shield, Sync, Upload, Users } from "../components/Icons";
 import { PageTitle } from "../components/Shell";
 import { get } from "../lib/api";
 import { absoluteTime, percent, relativeTime } from "../lib/format";
@@ -70,6 +70,35 @@ function describe(e: ActivityEvent, self: string | undefined): { icon: JSX.Eleme
       return { icon: <Upload />, cls: "", text: <>{who} uploaded {book(e.target)}</> };
     case "setup.owner_created":
       return { icon: <Users />, cls: "ok", text: <>Owner account <strong>{e.target}</strong> created</> };
+    case "upload.complete":
+      return { icon: <Upload />, cls: "", text: <>{who} uploaded <strong>{e.target}</strong></> };
+    case "upload.fail":
+      return { icon: <Alert />, cls: "warn", text: <>{who}’s upload of <strong>{e.target}</strong> failed <span>({e.detail})</span></> };
+    case "download.blocked":
+      return { icon: <Alert />, cls: "warn", text: <>Download blocked for {who} <span>({e.detail})</span></> };
+    case "download.burst":
+      return { icon: <Alert />, cls: "warn", text: <>{who} downloaded many books quickly <span>({e.detail})</span></> };
+    case "device.new":
+      return { icon: <Alert />, cls: "warn", text: <>{who} signed in from a new device <strong>{e.target}</strong></> };
+    case "device.first_use":
+      return { icon: <Devices />, cls: "ok", text: <><strong>{e.target}</strong> connected for the first time</> };
+    case "device.forget":
+      return { icon: <Devices />, cls: "", text: <>{who} forgot browser <strong>{e.target}</strong></> };
+    case "device.download_cap":
+    case "user.download_cap":
+      return { icon: <Download />, cls: "", text: <>{who} set the hourly download limit for <strong>{e.target}</strong> to {e.detail}</> };
+    case "invite.create":
+      return { icon: <Users />, cls: "", text: <>{who} created a {e.detail} invite <strong>{e.target}</strong></> };
+    case "invite.accept":
+      return { icon: <Users />, cls: "ok", text: <><strong>{e.target}</strong> joined as a {e.detail}</> };
+    case "invite.revoke":
+      return { icon: <Users />, cls: "warn", text: <>{who} revoked invite <strong>{e.target}</strong></> };
+    case "user.role":
+      return { icon: <Users />, cls: "", text: <>{who} made <strong>{e.target}</strong> a {e.detail}</> };
+    case "listen.start":
+      return { icon: <Headphones />, cls: "", text: <>{who} started listening to {book(e.target)}</> };
+    case "work.merge":
+      return { icon: <Shelf />, cls: "", text: <>{who} merged <span>{e.detail}</span></> };
     default:
       return { icon: <Pulse />, cls: "", text: <>{e.action}</> };
   }
