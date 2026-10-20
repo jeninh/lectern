@@ -183,7 +183,7 @@ def proxied(tmp_path):
         insecure_http=True,
         trusted_proxies="127.0.0.1",
     )
-    app = create_app(settings, start_watcher=False)
+    app = create_app(settings, start_watcher=False, start_background=False)
     app.state.limiters["login"].limit = 2
     cap = _TokenCapture()
     logging.getLogger("lectern.setup").addHandler(cap)
@@ -241,7 +241,7 @@ def _app(tmp_path, **overrides):
         trusted_proxies="127.0.0.1",
         **overrides,
     )
-    app = create_app(settings, start_watcher=False)
+    app = create_app(settings, start_watcher=False, start_background=False)
     app.state.limiters["login"].limit = 2
     return app
 

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from lectern.config import Settings
 from lectern.db import get_db
-from lectern.models import AppPassword, Role, Session, SyncKey, User, utcnow
+from lectern.models import AppPassword, Role, Session, SyncKey, User, WorkerCredential, utcnow
 from lectern.security.csrf import verify_csrf
 from lectern.security.downloads import Device
 from lectern.security.sessions import client_ip, load_session
@@ -159,6 +159,52 @@ def library_auth(request: Request, db: DbDep) -> LibraryAuth:
 
 
 LibraryUser = Annotated[LibraryAuth, Depends(library_auth)]
+
+
+# --- External alignment workers: Bearer worker credential ---------------------------------
+#
+# Accepted only by /api/worker/*. A worker key is not a user: no session, no role, no CSRF
+# token. Sessions and app passwords are not accepted here either, so a browser cannot be
+# tricked into claiming jobs and a worker key cannot read anything but its jobs' inputs.
+
+_BEARER_CHALLENGE = {"WWW-Authenticate": 'Bearer realm="Lectern workers"'}
+WORKER_KEY_PREFIX = "lw_"
+
+
+def _bearer_unauthorized() -> HTTPException:
+    return HTTPException(
+        status.HTTP_401_UNAUTHORIZED, "Worker credential required", headers=_BEARER_CHALLENGE
+    )
+
+
+def worker_credential(request: Request, db: DbDep) -> WorkerCredential:
+    """Rate limits: *failed* checks are limited per client address (``worker_fail``, the
+    ordinary per-minute limit), and an address over it is refused before any lookup, so keys
+    cannot be guessed. A valid key gets its own, much larger bucket (``worker``), because one
+    alignment legitimately issues many range requests for its inputs. ``/fail`` is exempt
+    from that bucket: a worker that cannot report a failure leaves its lease to expire."""
+    limiters = request.app.state.limiters
+    ip_key = f"worker:{client_ip(request) or '?'}"
+    if limiters["worker_fail"].exhausted(ip_key):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
+    header = request.headers.get("authorization", "")
+    secret = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    row = None
+    if secret.startswith(WORKER_KEY_PREFIX) and len(secret) <= 128:
+        row = db.scalar(
+            select(WorkerCredential).where(WorkerCredential.key_hash == sha256_hex(secret))
+        )
+    if row is None or row.revoked_at is not None:
+        limiters["worker_fail"].allow(ip_key)
+        raise _bearer_unauthorized()
+    if not request.url.path.endswith("/fail") and not limiters["worker"].allow(f"cred:{row.id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
+    row.last_used_at = utcnow()
+    db.commit()
+    return row
+
+
+WorkerAuth = Annotated[WorkerCredential, Depends(worker_credential)]
 
 
 # --- KOReader sync: x-auth-user / x-auth-key ----------------------------------------------

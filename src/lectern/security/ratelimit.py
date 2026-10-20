@@ -25,6 +25,17 @@ class SlidingWindowLimiter:
             q.append(now)
             return True
 
+    def exhausted(self, key: str) -> bool:
+        """Would ``allow(key)`` refuse right now? Does not count as a hit."""
+        now = time.monotonic()
+        with self._lock:
+            q = self._hits.get(key)
+            if not q:
+                return False
+            while q and now - q[0] > self.window:
+                q.popleft()
+            return len(q) >= self.limit
+
     def reset(self, key: str) -> None:
         with self._lock:
             self._hits.pop(key, None)

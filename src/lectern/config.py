@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     login_max_failures: int = 5
     login_lockout_seconds: int = 60 * 15
     rate_limit_per_minute: int = 60
+    # Per worker credential: a job downloads its EPUB and every track, often in ranges.
+    worker_requests_per_minute: int = 1200
 
     # Ingest
     inbox_poll_seconds: float = 5.0
@@ -80,6 +82,20 @@ class Settings(BaseSettings):
     audio_low_bitrate_kbps: int = Field(default=64, ge=16, le=192)
     # Queue a data-saver rendition automatically after every audiobook import.
     audio_low_auto: bool = False
+
+    # Alignment (text <-> audio). The in-process worker runs only when faster-whisper is
+    # installed (`lectern[align]`); a weak host sets LECTERN_ALIGN_LOCAL_WORKER=0 and runs
+    # `lectern worker --server …` elsewhere instead.
+    align_model: str = "small"
+    align_device: str = "cpu"
+    align_compute_type: str = "int8"
+    align_threads: int = 0  # 0 = CTranslate2 default
+    align_local_worker: bool = True
+    # Lease sweeps, audio rescans, and the local worker. Off = the server only serves.
+    background_jobs: bool = True
+    worker_poll_seconds: float = 10.0
+    job_sweep_seconds: float = 30.0
+    track_rescan_seconds: float = 60.0
 
     log_level: str = "INFO"
 

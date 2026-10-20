@@ -103,11 +103,13 @@ def _read_opf(zf: zipfile.ZipFile) -> tuple[etree._Element, str]:
         raise EpubError(f"missing OPF {opf_path}") from exc
 
 
-def read_spine(path: Path) -> list[str]:
+def read_spine(path: Path, *, strict: bool = True) -> list[str]:
     """Zip member names of the spine items in reading order.
 
     The list index is the ``spine_index`` used by sentence maps, ``sentences`` rows, and
-    KOReader's ``DocFragment[n]`` (which is this index plus one).
+    KOReader's ``DocFragment[n]`` (which is this index plus one). An itemref missing from the
+    manifest raises ``EpubError``; with ``strict=False`` it keeps its index with the name
+    ``""`` instead (no zip member has that name), so the items after it keep theirs.
     """
     with _open_zip(path) as zf:
         opf, opf_path = _read_opf(zf)
@@ -121,7 +123,10 @@ def read_spine(path: Path) -> list[str]:
         for ref in spine.findall("opf:itemref", NS):
             href = hrefs.get(ref.get("idref"))
             if not href:
-                raise EpubError(f"spine itemref {ref.get('idref')!r} is not in the manifest")
+                if strict:
+                    raise EpubError(f"spine itemref {ref.get('idref')!r} is not in the manifest")
+                names.append("")
+                continue
             names.append(posixpath.normpath(posixpath.join(opf_dir, href)))
         return names
 

@@ -2,8 +2,8 @@
 
 Self-hosted reading server for one household: a library of works (EPUBs and their
 audiobooks), a web reader and audiobook player, an authenticated OPDS catalogue, KOReader
-progress sync between devices, household accounts with shared shelves, and read-along for
-books with an aligned audiobook.
+progress sync between devices, household accounts with shared shelves, text–audio
+alignment of audiobooks, and read-along for books with an aligned audiobook.
 
 ## Run
 
@@ -126,6 +126,22 @@ Few apps play Media Overlays: Thorium Reader does; BookFusion and Colibrio are r
 narrated EPUB as an ordinary book. Details, the state machine, the EPUB 2 → 3 upgrade, and
 validation with epubcheck are in [`docs/read-aloud.md`](docs/read-aloud.md).
 
+## Audiobooks and alignment
+
+Put an audiobook's files next to its `book.epub` (`library/<Author>/<Title>/`, subfolders
+allowed). Lectern finds them within a minute and queues an alignment, which transcribes the
+audio with faster-whisper and matches it to the text sentence by sentence. After that, one
+position follows you between KOReader, the web read-along, and listening: KOReader's sync
+jumps to the sentence you were listening to, and audio resumes where KOReader stopped.
+
+Transcription is CPU-heavy (about 3× realtime and 1.4 GB of memory on two x86 cores with the
+default `small` model). The default image does not transcribe; either build with
+`--build-arg LECTERN_EXTRAS=align` on a machine with the memory for it, or keep the server
+small (e.g. a Raspberry Pi, with `LECTERN_ALIGN_LOCAL_WORKER=0`) and run
+`lectern worker --server https://lectern.example` on a laptop or GPU box with an owner-issued
+worker key. Setup, settings, how matching handles intros and missing or abridged chapters, and
+benchmark numbers are in [`docs/alignment.md`](docs/alignment.md).
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -153,6 +169,10 @@ validation with epubcheck are in [`docs/read-aloud.md`](docs/read-aloud.md).
 | `LECTERN_AUDIO_LOW_CODEC` | `aac` | Data-saver codec: `aac` (plays everywhere, iOS included) or `opus` |
 | `LECTERN_AUDIO_LOW_BITRATE_KBPS` | 64 | Data-saver bitrate |
 | `LECTERN_AUDIO_LOW_AUTO` | false | Make a data-saver copy after every audiobook import |
+| `LECTERN_WORKER_REQUESTS_PER_MINUTE` | 1200 | Requests per minute per valid worker key (failed worker logins use the per-IP limit) |
+| `LECTERN_ALIGN_MODEL` | `small` | faster-whisper model for alignment ([more settings](docs/alignment.md#transcription)) |
+| `LECTERN_ALIGN_LOCAL_WORKER` | `1` | Align in the server when faster-whisper is installed; `0` leaves jobs to `lectern worker` |
+| `LECTERN_BACKGROUND_JOBS` | `1` | Audio rescans, lease sweeps, and the local worker |
 | `LECTERN_TRUSTED_PROXIES` | empty | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed (`127.0.0.1` for `tailscale serve`); empty trusts nobody |
 | `LECTERN_TRUST_CF_CONNECTING_IP` | false | Also believe `CF-Connecting-IP` from a trusted proxy. Only for Cloudflare Tunnel, with `LECTERN_TRUSTED_PROXIES` limited to the `cloudflared` connector; any other proxy passes the header through from the client |
 
@@ -167,10 +187,13 @@ validation with epubcheck are in [`docs/read-aloud.md`](docs/read-aloud.md).
   only their SHA-256 digests are stored.
 - Cookies are `HttpOnly; Secure; SameSite=Lax`; state-changing browser requests need a
   per-session CSRF token and a same-origin `Origin`/`Sec-Fetch-Site`.
-- Roles: owner (user admin, invites, audit log), member (whole library, uploads), reader
-  (only shelves shared with them; everything else answers 404, OPDS included).
+- Roles: owner (user admin, invites, audit log, worker keys), member (whole library,
+  uploads, can request alignments), reader (only shelves shared with them; everything else
+  answers 404, OPDS and KOReader progress projection included).
 - Alerts for new sign-ins, new devices, and download bursts; hourly download caps per account
   and per device (see above).
+- External alignment workers authenticate with an owner-issued `lw_…` key (stored hashed,
+  revocable) that opens only `/api/worker/*`, and only the inputs of jobs they hold a lease on.
 - Per-IP rate limits, per-account lockout, and an audit log of logins, credential
   changes, and downloads (narrated EPUBs included). The client IP is the socket peer unless that peer is listed in
   `LECTERN_TRUSTED_PROXIES`; only then is `X-Forwarded-For` honoured, read right to left so a

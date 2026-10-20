@@ -1,0 +1,891 @@
+"""Job queue and the external-worker protocol (docs/contracts.md, "Worker protocol").
+
+The worker side runs over HTTP against the real app with a worker credential; alignment uses
+the recorded faster-whisper transcript of the fixture, so no model is needed.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import shutil
+import threading
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from tests.conftest import ORIGIN, api_post, login, make_app_password, make_sync_key
+
+from lectern.align import jobs
+from lectern.align.pipeline import TrackInput, align_work
+from lectern.align.transcribe import Word
+from lectern.align.worker import LocalWorker, RemoteWorker
+from lectern.cli import main as cli_main
+from lectern.db import session_factory
+from lectern.ingest.epub import read_epub_metadata
+from lectern.ingest.hashing import partial_md5, sha256_file
+from lectern.ingest.library import ingest_epub
+from lectern.models import (
+    Alignment,
+    AlignmentStatus,
+    Job,
+    JobStatus,
+    Sentence,
+    Work,
+    utcnow,
+)
+from lectern.sentence_map import load_sentence_map, map_path
+
+FIXTURE = Path(__file__).parent / "fixtures" / "magi"
+EPUB = FIXTURE / "the-gift-of-the-magi.epub"
+EXCERPT = FIXTURE / "excerpt.mp3"
+TRANSCRIPT = json.loads((FIXTURE / "transcript_small.json").read_text())
+
+
+def recorded(_tracks, _language, progress):
+    progress(0.5)
+    return [Word(*w) for w in TRANSCRIPT["words"]], TRANSCRIPT["language"]
+
+
+def ingest_fixture(settings, tmp_path: Path, *, audio: bool = True) -> int:
+    """The fixture EPUB (and excerpt as the work's only track) in the library."""
+    src = tmp_path / "magi.epub"
+    shutil.copy(EPUB, src)
+    with session_factory()() as db:
+        meta = read_epub_metadata(src)
+        work, _, _ = ingest_epub(
+            db, settings.library_dir, src, meta, sha256_file(src), partial_md5(src)
+        )
+        if audio:
+            shutil.copy(EXCERPT, settings.library_dir / work.dir_path / "01 excerpt.mp3")
+        db.commit()
+        return work.id
+
+
+@pytest.fixture
+def work_id(client, owner, settings, tmp_path) -> int:
+    return ingest_fixture(settings, tmp_path)
+
+
+@pytest.fixture
+def worker_key(client, owner) -> str:
+    r = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "gpu-box"})
+    assert r.status_code == 201, r.text
+    assert r.json()["secret"].startswith("lw_")
+    return r.json()["secret"]
+
+
+@pytest.fixture
+def wc(app, worker_key) -> TestClient:
+    """A cookie-less client that carries only the worker credential."""
+    return TestClient(app, headers={"Authorization": f"Bearer {worker_key}"})
+
+
+def request_align(client, owner, work_id, **body):
+    return api_post(client, f"/api/works/{work_id}/align", owner["csrf"], body)
+
+
+def claim(wc, **body):
+    return wc.post("/api/worker/jobs/claim", json={"worker": "gpu-box", **body})
+
+
+def lease(r) -> dict:
+    assert r.status_code == 200, r.text
+    return {"X-Lease-Token": r.json()["lease"]["token"]}
+
+
+def sentence_map_body(work_id: int, **override) -> bytes:
+    out = align_work(
+        work_id=work_id,
+        epub_path=EPUB,
+        epub_sha256=sha256_file(EPUB),
+        tracks=[TrackInput(0, EXCERPT, sha256_file(EXCERPT), _excerpt_duration(), 0.0)],
+        model_label="recorded-small",
+        transcribe=recorded,
+    )
+    data = json.loads(out.sentence_map.model_dump_json())
+    data.update(override)
+    return json.dumps(data).encode(), out.stats
+
+
+def _excerpt_duration() -> float:
+    from lectern.align.tracks import probe
+
+    return probe(EXCERPT)[0]
+
+
+def put_result(wc, job_id, headers, body):
+    return wc.put(
+        f"/api/worker/jobs/{job_id}/result",
+        content=body,
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+
+def db_job(job_id: int) -> Job:
+    with session_factory()() as db:
+        return db.get(Job, job_id)
+
+
+def set_job(job_id: int, **values) -> None:
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        for k, v in values.items():
+            setattr(job, k, v)
+        db.commit()
+
+
+# --- the whole protocol -------------------------------------------------------------------
+
+
+def test_worker_protocol_end_to_end(client, owner, work_id, wc, settings):
+    r = request_align(client, owner, work_id)
+    assert r.status_code == 202, r.text
+    job = r.json()
+    assert job["status"] == "queued" and job["model"] == "small"
+    assert job["eta"] is None  # nothing measured yet: no made-up number
+    again = request_align(client, owner, work_id)
+    assert again.status_code == 200 and again.json()["id"] == job["id"]
+
+    c = claim(wc, lease_s=5)  # clamped to the 60 s minimum
+    headers = lease(c)
+    body = c.json()
+    assert body["lease"]["lease_s"] == 60 and body["job"]["attempt"] == 1
+    payload = body["job"]["payload"]
+    assert payload["epub_sha256"] == sha256_file(EPUB)
+    assert [t["sha256"] for t in payload["tracks"]] == [sha256_file(EXCERPT)]
+    assert claim(wc).status_code == 204  # nothing else runnable
+
+    # authenticated, hash-checked, range-capable inputs
+    epub = wc.get(body["inputs"]["epub"], headers=headers)
+    assert epub.status_code == 200
+    assert hashlib.sha256(epub.content).hexdigest() == payload["epub_sha256"]
+    assert epub.headers["x-content-sha256"] == payload["epub_sha256"]
+    part = wc.get(body["inputs"]["tracks"][0], headers={**headers, "Range": "bytes=0-99"})
+    assert part.status_code == 206 and len(part.content) == 100
+    assert part.content == EXCERPT.read_bytes()[:100]
+    assert wc.get(body["inputs"]["epub"]).status_code == 409  # no lease token
+
+    map_body, stats = sentence_map_body(work_id)
+    stats = {**stats, "speed": 1.8}  # what a CPU worker measures (docs/alignment.md)
+    hb = wc.post(
+        f"/api/worker/jobs/{job['id']}/heartbeat",
+        json={"progress": 0.4, "message": "transcribing", "stats": stats},
+        headers=headers,
+    )
+    assert hb.status_code == 200
+    listed = client.get(f"/api/jobs/{job['id']}").json()
+    assert listed["status"] == "leased"
+    assert listed["lease"]["worker"] == "gpu-box" and listed["lease"]["progress"] == 0.4
+
+    res = put_result(wc, job["id"], headers, map_body)
+    assert res.status_code == 200, res.text
+    assert res.json() == {
+        "job_id": job["id"],
+        "status": "succeeded",
+        "sentence_count": 293,
+        "coverage": pytest.approx(15 / 293, abs=1e-4),
+    }
+    # idempotent with the same lease token; any other token is lease_lost
+    assert put_result(wc, job["id"], headers, map_body).json() == res.json()
+    assert put_result(wc, job["id"], {"X-Lease-Token": "x" * 43}, map_body).status_code == 409
+
+    # applied: the file, the rows, the alignment and its diagnosis
+    assert load_sentence_map(map_path(settings.data_dir, work_id)).work_id == work_id
+    sentences = client.get(f"/api/works/{work_id}/sentences", params={"from": 14, "to": 16})
+    data = sentences.json()
+    assert data["count"] == 293 and [s["n"] for s in data["sentences"]] == [14, 15]
+    assert data["sentences"][0]["matched"] and data["sentences"][0]["audio_start_s"] < 1.0
+    tracks = client.get(f"/api/works/{work_id}/tracks").json()
+    al = tracks["alignment"]
+    assert al["status"] == "succeeded" and al["warnings"] == ["low_coverage"]
+    # an excerpt: the narrated span matched fully, so a bigger model is not suggested
+    assert al["diagnosis"] == "partial_audio" and al["span_coverage"] == 1.0
+    assert al["suggested_model"] is None
+    assert (
+        tracks["tracks"][0]["stream_url"] == f"/library/tracks/{tracks['tracks'][0]['id']}/stream"
+    )
+    t = client.get(f"/api/works/{work_id}/sentences", params={"t": 3.5, "around": 0}).json()
+    assert [s["n"] for s in t["sentences"]] == [15]  # "That was all."
+
+    # with one measured run, a new job gets an honest ETA from that run's speed
+    r = request_align(client, owner, work_id, force=True)
+    assert r.status_code == 202
+    eta = r.json()["eta"]
+    assert eta == {
+        "seconds": round(_excerpt_duration() / 1.8),
+        "speed": 1.8,
+        "basis": "median of 1 measured run",
+    }
+
+
+# --- credentials: scope, isolation, revocation --------------------------------------------
+
+
+def test_worker_routes_accept_only_worker_credentials(client, owner, app, worker_key):
+    anon = TestClient(app)
+    for headers in (
+        {},
+        {"Authorization": "Bearer not-a-worker-key"},
+        {"Authorization": "Bearer lw_" + "a" * 43},
+        {"Authorization": "Basic " + base64.b64encode(b"owner:x").decode()},
+    ):
+        r = anon.post("/api/worker/jobs/claim", json={}, headers=headers)
+        assert r.status_code == 401
+        assert r.headers["www-authenticate"].startswith("Bearer")
+    # a browser session (the owner's cookie) is not a worker credential
+    assert client.post("/api/worker/jobs/claim", json={}).status_code == 401
+    # an app password or sync key sent as a bearer token is not one either
+    app_pw = make_app_password(client, owner["csrf"], "kobo")
+    sync = make_sync_key(client, owner["csrf"], "kobo")
+    for secret in (app_pw, sync):
+        r = anon.post("/api/worker/jobs/claim", headers={"Authorization": f"Bearer {secret}"})
+        assert r.status_code == 401
+    # and a worker key opens nothing outside /api/worker
+    bearer = {"Authorization": f"Bearer {worker_key}"}
+    for url in ("/api/library", "/api/jobs", "/api/me", "/opds", "/api/worker-credentials"):
+        assert anon.get(url, headers=bearer).status_code == 401, url
+
+
+def test_only_the_owner_manages_credentials_and_secrets_are_hashed(client, owner, settings):
+    r = api_post(
+        client,
+        "/api/admin/users",
+        owner["csrf"],
+        {"username": "member", "role": "member", "password": "member password 123"},
+    )
+    assert r.status_code == 201
+    created = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "box"}).json()
+    from lectern.models import WorkerCredential
+
+    with session_factory()() as db:
+        row = db.get(WorkerCredential, created["id"])
+        assert row.key_hash == hashlib.sha256(created["secret"].encode()).hexdigest()
+    listed = client.get("/api/worker-credentials").json()["credentials"]
+    assert "secret" not in listed[0] and listed[0]["label"] == "box"
+    # without CSRF a write is refused
+    r = client.post("/api/worker-credentials", json={"label": "x"}, headers={"origin": ORIGIN})
+    assert r.status_code == 403
+    csrf = login(client, "member", "member password 123")
+    assert api_post(client, "/api/worker-credentials", csrf, {"label": "m"}).status_code == 403
+    assert client.get("/api/worker-credentials").status_code == 403
+
+
+def test_revoking_a_credential_reclaims_its_lease_at_once(client, owner, work_id, wc, worker_key):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    cred_id = client.get("/api/worker-credentials").json()["credentials"][0]["id"]
+    r = client.delete(
+        f"/api/worker-credentials/{cred_id}",
+        headers={"origin": ORIGIN, "x-csrf-token": owner["csrf"]},
+    )
+    assert r.status_code == 200 and r.json()["revoked_at"]
+    assert db_job(job_id).status == JobStatus.QUEUED
+    assert db_job(job_id).lease_token_hash is None
+    hb = wc.post(f"/api/worker/jobs/{job_id}/heartbeat", json={}, headers=headers)
+    assert hb.status_code == 401  # the key itself no longer authenticates
+
+
+# --- leases, expiry, retries ------------------------------------------------------------------
+
+
+def test_cancel_and_wrong_tokens_lose_the_lease(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    wrong = {"X-Lease-Token": "y" * 43}
+    for path in ("heartbeat", "fail"):
+        r = wc.post(f"/api/worker/jobs/{job_id}/{path}", json={"error": "x"}, headers=wrong)
+        assert r.status_code == 409 and r.json() == {"detail": "lease_lost"}
+    r = api_post(client, f"/api/jobs/{job_id}/cancel", owner["csrf"])
+    assert r.json()["status"] == "cancelled"
+    assert (
+        wc.post(f"/api/worker/jobs/{job_id}/heartbeat", json={}, headers=headers).status_code == 409
+    )
+    assert wc.get(f"/api/worker/jobs/{job_id}/inputs/epub", headers=headers).status_code == 409
+    body, _ = sentence_map_body(work_id)
+    assert put_result(wc, job_id, headers, body).status_code == 409
+    with session_factory()() as db:
+        assert db.scalar(select(Alignment).where(Alignment.work_id == work_id)).status == (
+            AlignmentStatus.FAILED
+        )
+
+
+def test_expired_lease_is_reclaimed_with_backoff_then_fails_terminally(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    for attempt in (1, 2, 3):
+        set_job(job_id, run_after=utcnow() - timedelta(seconds=1))
+        c = claim(wc)
+        headers = lease(c)
+        assert c.json()["job"]["attempt"] == attempt
+        set_job(job_id, lease_expires_at=utcnow() - timedelta(seconds=1))
+        # an expired lease is lost even before anyone reclaims it
+        assert (
+            wc.post(f"/api/worker/jobs/{job_id}/heartbeat", json={}, headers=headers).status_code
+            == 409
+        )
+        before = utcnow()
+        assert claim(wc).status_code == 204  # reclaims, but the job now waits out its backoff
+        job = db_job(job_id)
+        assert job.error == "lease expired"
+        if attempt < 3:
+            assert job.status == JobStatus.QUEUED and job.lease_token_hash is None
+            wait = (job.run_after - before).total_seconds()
+            base = 30 * 2 ** (attempt - 1)
+            assert base * 0.8 - 1 <= wait <= base * 1.2 + 1
+    assert job.status == JobStatus.FAILED and job.finished_at is not None
+    with session_factory()() as db:
+        al = db.scalar(select(Alignment).where(Alignment.work_id == work_id))
+        assert al.status == AlignmentStatus.FAILED and al.error == "lease expired"
+    # failed jobs are not retried on their own
+    set_job(job_id, run_after=utcnow() - timedelta(seconds=1))
+    assert claim(wc).status_code == 204
+
+
+def test_worker_failures_retry_or_end(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    r = wc.post(
+        f"/api/worker/jobs/{job_id}/fail",
+        json={"error": "CUDA out of memory", "retryable": True},
+        headers=headers,
+    )
+    assert r.status_code == 200 and r.json()["status"] == "queued" and r.json()["run_after"]
+    assert client.get(f"/api/jobs/{job_id}").json()["error"] == "CUDA out of memory"
+    assert claim(wc).status_code == 204  # backoff
+    set_job(job_id, run_after=utcnow())
+    headers = lease(claim(wc))
+    r = wc.post(
+        f"/api/worker/jobs/{job_id}/fail",
+        json={"error": "unsupported codec", "retryable": False},
+        headers=headers,
+    )
+    assert r.json() == {"status": "failed"}
+    assert db_job(job_id).status == JobStatus.FAILED
+
+
+def test_heartbeat_extends_the_lease(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc, lease_s=120))
+    set_job(job_id, lease_expires_at=utcnow() + timedelta(seconds=5))
+    hb = wc.post(f"/api/worker/jobs/{job_id}/heartbeat", json={"progress": 2}, headers=headers)
+    assert hb.status_code == 422  # progress is a fraction
+    hb = wc.post(f"/api/worker/jobs/{job_id}/heartbeat", json={"progress": 0.5}, headers=headers)
+    assert hb.status_code == 200
+    left = (db_job(job_id).lease_expires_at - utcnow()).total_seconds()
+    assert 110 <= left <= 120
+
+
+# --- result validation and staleness -------------------------------------------------------
+
+
+def test_result_validation(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    r = put_result(wc, job_id, headers, b"{not json")
+    assert r.status_code == 400 and r.json()["detail"] == "invalid_map"
+    body, _ = sentence_map_body(work_id)
+    data = json.loads(body)
+    data["sentences"][3]["n"] = 7
+    r = put_result(wc, job_id, headers, json.dumps(data).encode())
+    assert r.status_code == 400 and r.json()["errors"]
+    wrong_epub, _ = sentence_map_body(work_id, epub_sha256="0" * 64)
+    assert put_result(wc, job_id, headers, wrong_epub).json() == {"detail": "input_mismatch"}
+    wrong_work, _ = sentence_map_body(work_id + 1)
+    assert put_result(wc, job_id, headers, wrong_work).status_code == 422
+    # sentences past the end of the real spine item are rejected
+    data = json.loads(body)
+    last = data["sentences"][-1]
+    last["char_end"] = last["char_start"] + 40_000
+    last.pop("text", None)
+    r = put_result(wc, job_id, headers, json.dumps(data).encode())
+    assert r.status_code == 400 and "beyond spine item" in r.json()["errors"][0]
+    big = b" " * (jobs.RESULT_MAX_BYTES + 1)
+    assert put_result(wc, job_id, headers, big).status_code == 413
+    # none of that cost the lease
+    assert db_job(job_id).status == JobStatus.LEASED
+    assert put_result(wc, job_id, headers, body).status_code == 200
+
+
+def test_changed_audio_makes_results_stale_and_requeues(client, owner, work_id, wc, settings):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    with session_factory()() as db:
+        work = db.get(Work, work_id)
+        track = settings.library_dir / work.dir_path / "01 excerpt.mp3"
+    with track.open("ab") as fh:
+        fh.write(b"\0" * 417)  # a re-encode or replacement
+    body, _ = sentence_map_body(work_id)
+    assert put_result(wc, job_id, headers, body).json() == {"detail": "lease_lost"}
+    assert wc.get(f"/api/worker/jobs/{job_id}/inputs/tracks/0", headers=headers).status_code == 409
+    # detected at once, not at the next rescan: cancelled and requeued with the new snapshot
+    assert db_job(job_id).status == JobStatus.CANCELLED
+    with session_factory()() as db:
+        new_job = jobs.active_job(db, work_id)
+        assert new_job is not None and new_job.id != job_id
+        assert new_job.payload["audio_fingerprint"] != db_job(job_id).payload["audio_fingerprint"]
+
+
+def test_success_then_changed_epub_marks_alignment_stale(client, owner, work_id, settings):
+    worker = LocalWorker(
+        session_factory(),
+        data_dir=settings.data_dir,
+        library=settings.library_dir,
+        transcribe=recorded,
+    )
+    request_align(client, owner, work_id)
+    assert worker.run_once()
+    with session_factory()() as db:
+        work = db.get(Work, work_id)
+        book = settings.library_dir / work.dir_path / "book.epub"
+        work.files[0].sha256 = "f" * 64  # what a re-ingest of a new edition records
+        db.commit()
+        queued = jobs.refresh_work(db, settings.library_dir, work)
+        db.commit()
+        assert queued is not None and queued.status == JobStatus.QUEUED
+        al = db.scalar(select(Alignment).where(Alignment.work_id == work_id))
+        assert al.status == AlignmentStatus.STALE
+        # the old sentences stay readable until a new alignment replaces them
+        assert (
+            db.scalar(select(func.count()).select_from(Sentence).where(Sentence.work_id == work_id))
+            == 293
+        )
+    assert book.is_file()
+    assert "stale" in client.get(f"/api/works/{work_id}/tracks").json()["alignment"]["warnings"]
+
+
+def test_align_needs_inputs_and_role(client, owner, settings, tmp_path):
+    text_only = ingest_fixture(settings, tmp_path, audio=False)
+    r = request_align(client, owner, text_only)
+    assert r.status_code == 409 and r.json()["detail"] == "no_inputs"
+    assert request_align(client, owner, text_only, model="huge").json()["detail"] == "unknown_model"
+    assert request_align(client, owner, 9999).status_code == 404
+    api_post(
+        client,
+        "/api/admin/users",
+        owner["csrf"],
+        {"username": "reader", "role": "reader", "password": "reader password 123"},
+    )
+    csrf = login(client, "reader", "reader password 123")
+    r = api_post(client, f"/api/works/{text_only}/align", csrf, {})
+    assert r.status_code == 403
+    assert client.get("/api/jobs").status_code == 403
+
+
+# --- claiming is atomic ----------------------------------------------------------------------
+
+
+def test_concurrent_claims_lease_each_job_once(client):
+    with session_factory()() as db:
+        for i in range(6):
+            w = Work(
+                title=f"W{i}", sort_title=f"w{i}", author="A", sort_author="a", dir_path=f"A/W{i}"
+            )
+            db.add(w)
+            db.flush()
+            db.add(Job(kind="align", work_id=w.id, status=JobStatus.QUEUED, payload={"tracks": []}))
+        db.commit()
+    results: list = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        while True:
+            with session_factory()() as db:
+                got = jobs.claim(db, kinds=["align"], worker="t", lease_s=60, credential_id=None)
+            if got is None:
+                return
+            with lock:
+                results.append(got[0].id)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == sorted(set(results)) and len(results) == 6
+
+
+# --- in-process and remote workers ------------------------------------------------------------
+
+
+def test_local_worker_runs_a_job(client, owner, work_id, settings):
+    worker = LocalWorker(
+        session_factory(),
+        data_dir=settings.data_dir,
+        library=settings.library_dir,
+        transcribe=recorded,
+        model_label="recorded-small",
+    )
+    assert not worker.run_once()  # empty queue
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "succeeded" and job["result"]["sentence_count"] == 293
+    assert job["result"]["stats"]["diagnosis"] == "partial_audio"
+    assert job["result"]["stats"]["speed"] > 0
+    assert (
+        client.get(f"/api/works/{work_id}/tracks").json()["alignment"]["model"] == "recorded-small"
+    )
+
+
+def test_local_worker_hands_the_job_back_on_shutdown(client, owner, work_id, settings):
+    worker = LocalWorker(
+        session_factory(),
+        data_dir=settings.data_dir,
+        library=settings.library_dir,
+        transcribe=None,
+    )
+
+    def stopping(_tracks, _language, progress):
+        worker._stop.set()  # what the app lifespan does on shutdown
+        progress(0.5)
+        raise AssertionError("unreachable")
+
+    worker._transcribe = stopping
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.attempts == 0 and job.error is None
+
+
+def test_local_worker_releases_a_busy_job_when_stopped(client, owner, work_id, settings):
+    """Transcription can run for a long time between progress reports; a server restart must
+    not leave the job leased until its lease expires."""
+    started, unblock = threading.Event(), threading.Event()
+
+    def busy(tracks, language, progress):
+        started.set()
+        unblock.wait(10)  # inside one long faster-whisper segment
+        return recorded(tracks, language, progress)
+
+    worker = LocalWorker(
+        session_factory(), data_dir=settings.data_dir, library=settings.library_dir,
+        transcribe=busy, poll_s=0.05,
+    )  # fmt: skip
+    job_id = request_align(client, owner, work_id).json()["id"]
+    worker.start()
+    assert started.wait(10)
+    worker.stop()  # what the app lifespan does on shutdown
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.attempts == 0 and job.lease_token_hash is None
+    unblock.set()  # the old thread finishes late; its result must not land
+    worker._thread.join(10)
+    assert db_job(job_id).status == JobStatus.QUEUED
+    with session_factory()() as db:
+        assert db.scalar(select(func.count()).select_from(Sentence)) == 0
+
+
+def test_local_worker_reports_failures(client, owner, work_id, settings):
+    def broken(*_a):
+        raise RuntimeError("decoder exploded")
+
+    worker = LocalWorker(
+        session_factory(),
+        data_dir=settings.data_dir,
+        library=settings.library_dir,
+        transcribe=broken,
+    )
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.error == "RuntimeError: decoder exploded"
+
+
+def test_remote_worker_over_http(client, owner, work_id, app, worker_key):
+    http = TestClient(app, headers={"Authorization": f"Bearer {worker_key}"})
+    worker = RemoteWorker(
+        "http://testserver", worker_key, client=http, transcribe=recorded, name="laptop"
+    )
+    assert not worker.run_once()
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "succeeded", job
+    assert job["result"]["coverage"] == pytest.approx(15 / 293, abs=1e-4)
+
+
+def test_remote_worker_abandons_a_cancelled_job(client, owner, work_id, app, worker_key):
+    http = TestClient(app, headers={"Authorization": f"Bearer {worker_key}"})
+
+    def cancel_midway(tracks, language, progress):
+        api_post(client, f"/api/jobs/{job_id}/cancel", owner["csrf"])
+        return recorded(tracks, language, progress)
+
+    worker = RemoteWorker("http://testserver", worker_key, client=http, transcribe=cancel_midway)
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    assert db_job(job_id).status == JobStatus.CANCELLED
+    with session_factory()() as db:
+        assert db.scalar(select(func.count()).select_from(Sentence)) == 0
+
+
+def test_remote_worker_rejects_tampered_inputs(client, owner, work_id, app, worker_key, settings):
+    """The downloaded bytes are hashed against the job snapshot, not just the header."""
+    http = TestClient(app, headers={"Authorization": f"Bearer {worker_key}"})
+    worker = RemoteWorker("http://testserver", worker_key, client=http, transcribe=recorded)
+    job_id = request_align(client, owner, work_id).json()["id"]
+    original = http.stream
+
+    def corrupting(method, url, **kw):
+        ctx = original(method, url, **kw)
+
+        class Wrap:
+            def __enter__(self):
+                r = ctx.__enter__()
+                r.headers.pop("x-content-sha256", None)
+                inner = r.iter_bytes
+                r.iter_bytes = lambda n: (b[:-1] + b"!" for b in inner(n))  # type: ignore[method-assign]
+                return r
+
+            def __exit__(self, *exc):
+                return ctx.__exit__(*exc)
+
+        return Wrap()
+
+    http.stream = corrupting  # type: ignore[method-assign]
+    assert worker.run_once()
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and "does not match sha256" in job.error
+
+
+def test_worker_cli_refuses_plain_http_and_missing_keys(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit, match="plain http"):
+        cli_main(["worker", "--server", "http://lectern.lan"])
+    monkeypatch.delenv("LECTERN_WORKER_KEY", raising=False)
+    with pytest.raises(SystemExit, match="worker credential is required"):
+        cli_main(["worker", "--server", "https://lectern.example"])
+    key = tmp_path / "key"
+    key.write_text("sk_not_a_worker_key\n")
+    with pytest.raises(SystemExit, match="worker credential is required"):
+        cli_main(["worker", "--server", "https://lectern.example", "--key-file", str(key)])
+
+
+def test_track_discovery_finds_subfolders_in_order_and_skips_derived(
+    client, owner, settings, tmp_path
+):
+    work_id = ingest_fixture(settings, tmp_path, audio=False)
+    with session_factory()() as db:
+        work_dir = settings.library_dir / db.get(Work, work_id).dir_path
+    audio = EXCERPT.read_bytes()
+    files = {"CD2/01.mp3": 1, "CD1/10.mp3": 2, "CD1/2.mp3": 3, "CD2/copy.mp3": 1}
+    files |= {"derived/audio/x.opus": 4, ".hidden/a.mp3": 5}
+    for rel, tag in files.items():
+        (work_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work_dir / rel).write_bytes(audio + bytes([tag]) * 64)  # distinct content
+    with session_factory()() as db:
+        assert jobs.refresh_work(db, settings.library_dir, db.get(Work, work_id)) is not None
+        db.commit()
+    tracks = client.get(f"/api/works/{work_id}/tracks").json()["tracks"]
+    assert [t["position"] for t in tracks] == [0, 1, 2]
+    d = tracks[0]["duration_s"]
+    assert [t["offset_s"] for t in tracks] == pytest.approx([0, d, 2 * d], abs=0.01)
+    streamed = [client.get(t["stream_url"]).content[-1] for t in tracks]
+    assert streamed == [3, 2, 1]  # CD2/copy.mp3 duplicates CD2/01.mp3 and is skipped
+    with session_factory()() as db:
+        from lectern.align.tracks import work_tracks
+
+        assert [t.rel_path for t in work_tracks(db, work_id)] == [
+            "CD1/2.mp3",
+            "CD1/10.mp3",
+            "CD2/01.mp3",
+        ]
+
+
+# --- review fixes --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        {"speed": -1},
+        {"speed": 0},
+        {"speed": 1e12},
+        {"diagnosis": "all good, trust me"},
+        {"span_coverage": 1.5},
+        {"likely_abridged": "maybe"},
+        {"words": -3},
+    ],
+)
+def test_heartbeat_rejects_invalid_stats(client, owner, work_id, wc, stats):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    r = wc.post(f"/api/worker/jobs/{job_id}/heartbeat", json={"stats": stats}, headers=headers)
+    assert r.status_code == 422
+    assert "stats" not in (db_job(job_id).result or {})
+
+
+def test_heartbeat_stores_only_known_finite_stats_and_caps_bodies(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    url = f"/api/worker/jobs/{job_id}/heartbeat"
+    raw = b'{"stats": {"speed": Infinity}}'
+    r = wc.post(url, content=raw, headers={**headers, "Content-Type": "application/json"})
+    assert r.status_code == 422
+    r = wc.post(
+        url, json={"stats": {"speed": 1.5, "diagnosis": "ok", "evil": "x" * 1000}}, headers=headers
+    )
+    assert r.status_code == 200
+    assert db_job(job_id).result["stats"] == {"speed": 1.5, "diagnosis": "ok"}
+    big = {"message": "m", "pad": "x" * 70_000}
+    assert wc.post(url, json=big, headers=headers).status_code == 413
+    fail = f"/api/worker/jobs/{job_id}/fail"
+    assert (
+        wc.post(fail, json={"error": "e", "pad": "x" * 70_000}, headers=headers).status_code == 413
+    )
+    assert db_job(job_id).status == JobStatus.LEASED
+
+
+def test_measured_speed_ignores_bad_historical_values(client):
+    rows = [
+        {"stats": {"speed": "fast"}},
+        {"stats": {"speed": float("nan")}},
+        {"stats": {"speed": 0}},
+        {"stats": {"speed": -4}},
+        {"stats": {"speed": 1e12}},
+        {"stats": {"speed": [1]}},
+        {"stats": [1, 2]},
+        {"audio_s": 10, "elapsed_s": 0},
+        {"audio_s": "x", "elapsed_s": 2},
+        {"stats": {"speed": 2.0}},
+    ]
+    with session_factory()() as db:
+        for result in rows:
+            db.add(Job(kind="align", status=JobStatus.SUCCEEDED, payload={"tracks": []},
+                       result=result, finished_at=utcnow()))  # fmt: skip
+        db.commit()
+        assert jobs.measured_speed(db, None) == (2.0, 1)
+        for job in db.scalars(select(Job)).all():
+            out = jobs.job_json(db, job)  # never raises on old rows
+            assert isinstance(out["result"]["stats"], dict)
+
+
+def test_valid_workers_are_not_throttled_like_logins(client, owner, work_id, wc, app):
+    from lectern.security.ratelimit import SlidingWindowLimiter
+
+    job_id = request_align(client, owner, work_id).json()["id"]
+    c = claim(wc)
+    headers = lease(c)
+    track = c.json()["inputs"]["tracks"][0]
+    for i in range(150):  # many range requests: far beyond the 60/min login-style limit
+        r = wc.get(track, headers={**headers, "Range": f"bytes={i}-{i + 99}"})
+        assert r.status_code == 206, i
+    # a valid key has its own bucket; when it is exhausted, /fail still gets through
+    app.state.limiters["worker"] = SlidingWindowLimiter(limit=2, window_seconds=60)
+    hb = f"/api/worker/jobs/{job_id}/heartbeat"
+    assert [wc.post(hb, json={}, headers=headers).status_code for _ in range(3)] == [200, 200, 429]
+    r = wc.post(f"/api/worker/jobs/{job_id}/fail", json={"error": "bye"}, headers=headers)
+    assert r.status_code == 200 and r.json()["status"] == "queued"
+    # failed credential checks are limited per address, and then nothing is looked up
+    bad = TestClient(app, headers={"Authorization": "Bearer lw_" + "z" * 43})
+    codes = [bad.post("/api/worker/jobs/claim", json={}).status_code for _ in range(61)]
+    assert codes[:60] == [401] * 60 and codes[60] == 429
+
+
+def test_result_is_applied_off_the_event_loop(client, owner, work_id, wc, monkeypatch):
+    import asyncio
+
+    seen = {}
+    original = jobs.apply_result
+
+    def spy(*args, **kw):
+        try:
+            asyncio.get_running_loop()
+            seen["loop"] = True
+        except RuntimeError:
+            seen["loop"] = False
+        return original(*args, **kw)
+
+    monkeypatch.setattr(jobs, "apply_result", spy)
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    body, _ = sentence_map_body(work_id)
+    assert put_result(wc, job_id, headers, body).status_code == 200
+    assert seen == {"loop": False}
+
+
+def test_result_tracks_must_match_the_job_and_floats_must_be_finite(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    body, _ = sentence_map_body(work_id)
+    data = json.loads(body)
+    data["tracks"][0]["duration_s"] += 1.0  # a stretched timeline
+    r = put_result(wc, job_id, headers, json.dumps(data).encode())
+    assert r.status_code == 422 and r.json()["detail"] == "input_mismatch"
+    assert "duration" in r.json()["errors"][0]
+    data = json.loads(body)
+    data["sentences"][20]["audio_start_s"] = float("nan")
+    r = put_result(wc, job_id, headers, json.dumps(data).encode())
+    assert r.status_code == 400 and r.json()["detail"] == "invalid_map"
+    assert put_result(wc, job_id, headers, body).status_code == 200
+
+
+def test_force_is_refused_while_a_worker_holds_the_job(client, owner, work_id, wc):
+    first = request_align(client, owner, work_id).json()["id"]
+    queued = request_align(client, owner, work_id, force=True)
+    assert queued.status_code == 202 and queued.json()["id"] != first  # queued: replaced
+    assert db_job(first).status == JobStatus.CANCELLED
+    lease(claim(wc))
+    r = request_align(client, owner, work_id, force=True)
+    assert r.status_code == 409 and r.json() == {"detail": "job_running"}
+    assert db_job(queued.json()["id"]).status == JobStatus.LEASED
+
+
+def test_a_lease_is_bound_to_the_credential_that_claimed_it(client, owner, work_id, wc, app):
+    other = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "other"}).json()
+    wc2 = TestClient(app, headers={"Authorization": f"Bearer {other['secret']}"})
+    job_id = request_align(client, owner, work_id).json()["id"]
+    c = claim(wc)
+    headers = lease(c)
+    assert (
+        wc2.post(f"/api/worker/jobs/{job_id}/heartbeat", json={}, headers=headers).status_code
+        == 409
+    )
+    assert wc2.get(c.json()["inputs"]["epub"], headers=headers).status_code == 409
+    body, _ = sentence_map_body(work_id)
+    assert put_result(wc2, job_id, headers, body).status_code == 409
+    assert (
+        wc2.post(
+            f"/api/worker/jobs/{job_id}/fail", json={"error": "x"}, headers=headers
+        ).status_code
+        == 409
+    )
+    assert put_result(wc, job_id, headers, body).status_code == 200
+
+
+def test_transcode_jobs_never_leave_the_server(client, owner, work_id, wc):
+    with session_factory()() as db:
+        db.add(Job(kind="transcode", work_id=work_id, status=JobStatus.QUEUED, payload={}))
+        db.commit()
+    assert claim(wc, kinds=["transcode"]).status_code == 204
+    job_id = request_align(client, owner, work_id).json()["id"]
+    got = claim(wc, kinds=["transcode", "align"])
+    assert got.status_code == 200 and got.json()["job"]["id"] == job_id
+
+
+def test_a_result_moves_stored_positions_onto_the_aligned_sentences(
+    client, owner, work_id, wc, settings
+):
+    from tests.test_cross_sync import STORY, put_web
+
+    from lectern.ingest.sentences import ensure_text_sentences
+
+    with session_factory()() as db:
+        assert ensure_text_sentences(db, settings.library_dir, work_id) > 0
+        db.commit()
+    char = STORY.index("Della finished her cry") + 5
+    assert (
+        put_web(client, owner, work_id, source="web", spine_index=2, char=char).status_code == 200
+    )
+    job_id = request_align(client, owner, work_id).json()["id"]
+    body, _ = sentence_map_body(work_id)
+    assert put_result(wc, job_id, lease(claim(wc)), body).status_code == 200
+    got = client.get(f"/api/works/{work_id}/progress").json()
+    assert got["text"] == {"spine_index": 2, "char": char}
+    with session_factory()() as db:
+        n = got["position"]["sentence_n"]
+        s = db.scalar(select(Sentence).where(Sentence.work_id == work_id, Sentence.n == n))
+        assert s.char_start <= char < s.char_end and s.spine_index == 2

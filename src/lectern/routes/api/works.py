@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from lectern.access import can_see_work, visible_works
+from lectern.align import jobs as align_jobs
 from lectern.ingest.merge import merge_work
 from lectern.jobs import active_job, enqueue_transcode, find_variant
 from lectern.models import (
@@ -49,10 +50,9 @@ def _visible_work(db, user, work_id: int) -> Work:
 
 
 def _alignment_json(db, work_id: int) -> dict | None:
+    """Status, coverage, and the matcher's diagnosis (``lectern.align.jobs.alignment_json``)."""
     al = db.scalar(select(Alignment).where(Alignment.work_id == work_id))
-    if al is None:
-        return None
-    return {"status": al.status.value, "model": al.model, "coverage": al.coverage}
+    return align_jobs.alignment_json(db, al)
 
 
 def _tracks(db, work_id: int) -> list[AudioTrack]:

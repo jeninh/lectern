@@ -15,6 +15,8 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -30,7 +32,14 @@ from lectern.models import (
     WorkProgress,
     utcnow,
 )
-from lectern.positions import SentenceIndex, SentencePos, TextPos, xpointer_spine_index
+from lectern.positions import (
+    SentenceIndex,
+    SentencePos,
+    TextPos,
+    text_to_xpointer,
+    xpointer_spine_index,
+    xpointer_to_text,
+)
 
 
 def iso(dt) -> str | None:
@@ -307,3 +316,76 @@ def put_progress(
     row.raw = (raw or stored_raw)[:1024]
     row.device = device[:128]
     row.received_at = utcnow()
+
+
+# --- KOReader xpointers <-> sentence positions (lectern.routes.kosync) -----------------------
+
+
+def sentence_index(db: Session, work_id: int) -> SentenceIndex:
+    return SentenceCache.get(db, work_id).index
+
+
+def get_progress(db: Session, user_id: int, work_id: int) -> WorkProgress | None:
+    return db.scalar(
+        select(WorkProgress).where(WorkProgress.user_id == user_id, WorkProgress.work_id == work_id)
+    )
+
+
+def set_progress(
+    db: Session,
+    *,
+    user_id: int,
+    work_id: int,
+    pos: SentencePos,
+    source: ProgressSource,
+    raw: str,
+    device: str = "",
+    now: datetime | None = None,
+) -> WorkProgress:
+    """Upsert the canonical position from an already-resolved sentence position. Caller
+    commits."""
+    now = now or utcnow()
+    row = get_progress(db, user_id, work_id)
+    if row is None:
+        row = WorkProgress(
+            user_id=user_id, work_id=work_id, sentence_n=pos.n, raw="", source=source
+        )
+        db.add(row)
+    row.sentence_n, row.sentence_offset = pos.n, pos.offset
+    row.source = source
+    row.raw = raw[:1024]
+    row.device = device[:128]
+    row.received_at = now
+    row.updated_at = now
+    db.flush()
+    return row
+
+
+def xpointer_to_sentence(epub: Path, idx: SentenceIndex, xpointer: str) -> SentencePos | None:
+    """Project a KOReader position in ``epub`` onto the work's sentences; ``None`` when it
+    cannot be. ``epub`` must be the edition the sentences were aligned against."""
+    from lectern.align.text import read_spine_item
+
+    if not len(idx):
+        return None
+    spine_index = xpointer_spine_index(xpointer)
+    if spine_index is None:
+        return None
+    try:
+        text = xpointer_to_text(xpointer, read_spine_item(epub, spine_index))
+    except Exception:  # noqa: BLE001 - a damaged EPUB must not break sync
+        return None
+    return idx.at_text(text)
+
+
+def sentence_to_xpointer(epub: Path, idx: SentenceIndex, pos: SentencePos) -> str | None:
+    """Inverse of :func:`xpointer_to_sentence` for the same edition."""
+    from lectern.align.text import read_spine_item
+
+    if not len(idx):
+        return None
+    text: TextPos = idx.to_text(pos)
+    try:
+        return text_to_xpointer(text, read_spine_item(epub, text.spine_index))
+    except Exception:  # noqa: BLE001
+        return None
