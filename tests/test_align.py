@@ -774,3 +774,82 @@ def test_total_spine_bytes_are_capped(tmp_path, monkeypatch):
     monkeypatch.setattr(text_mod, "MAX_TOTAL_BYTES", first + 10)
     lengths = spine_lengths(epub)
     assert lengths[0] == len(_GOOD1) and lengths[3:] == [0] * 5  # later items read nothing
+
+
+def test_a_word_said_twice_across_the_seam_is_kept_twice():
+    """Regression: "no, no" with the seam between the two copies lost one of them, even when
+    both windows heard both. A word heard once but timed on opposite sides of the seam is still
+    kept once, and a word the earlier window missed is kept."""
+    from lectern.align.transcribe import merge_window_words
+
+    def filler(a: float, b: float, d: float = 0.0) -> list[Word]:
+        """A 0.3 s word every 0.35 s from ``a``, the last ending by ``b`` (shifted by ``d``)."""
+        n = round((b - a + 0.05) / 0.35)
+        return [Word(" la", a + 0.35 * i + d, a + 0.35 * i + 0.3 + d) for i in range(n)]
+
+    def count(earlier, later, text=" no"):
+        kept, rest = merge_window_words([], earlier, later, 100.0, 115.0)
+        starts = [w.start for w in kept + rest]
+        assert starts == sorted(starts)
+        return sum(w.text == text for w in kept + rest)
+
+    # Overlap [100, 115); the longest pause in its central half is between the two "no"s.
+    earlier = filler(100, 106.3) + [Word(" no", 106.3, 106.6), Word(" no", 107.0, 107.3)]
+    earlier += filler(107.35, 115)
+    later = filler(100, 106.3, 0.02) + [Word(" no", 106.32, 106.6), Word(" no", 107.02, 107.3)]
+    later += filler(107.35, 120, 0.02)
+    assert count(earlier, later) == 2
+    # Both copies before the seam in the earlier window; the later one times the second
+    # copy 0.8 s late, after the seam: still two, not three.
+    earlier = filler(100, 105.5) + [Word(" no", 105.6, 105.9), Word(" no", 105.95, 106.1)]
+    earlier += filler(107.2, 115)
+    later = filler(100, 105.5, 0.01) + [Word(" no", 105.62, 105.9), Word(" no", 106.75, 106.9)]
+    later += filler(107.2, 120, 0.01)
+    assert count(earlier, later) == 2
+    # One "door", timed before the seam by the earlier window and after it by the later one.
+    earlier = filler(100, 105.5) + [Word(" door", 105.6, 105.9)] + filler(107.5, 115)
+    later = filler(100, 105.5, 0.01) + [Word(" door", 106.6, 106.9)] + filler(107.5, 120, 0.01)
+    assert count(earlier, later, " door") == 1
+    # A word only the later window heard, just after the seam, is kept.
+    later = filler(100, 105.5, 0.01) + [Word(" door", 105.62, 105.9), Word(" bell", 106.7, 107)]
+    later += filler(107.5, 120, 0.01)
+    assert count(earlier, later, " bell") == 1
+
+
+@pytest.mark.parametrize("every", [0.75, 0.9, 1.2])
+def test_dense_speech_keeps_every_word_across_many_seams(monkeypatch, every):
+    """Bursts closer together than the duplicate window (1 s): the old merge dropped a burst
+    at about every second seam (315 of 328 at 0.9 s)."""
+    from lectern.align.transcribe import transcribe_tracks
+
+    monkeypatch.setattr(f"{__name__}.BEEP_EVERY_S", every)
+    durations = {Path("a"): 200.0, Path("b"): 95.5}
+    tr = _beep_transcriber(30.0, 9.0, durations)
+    words, _ = transcribe_tracks(
+        tr, [TrackAudio(Path("a"), 0.0, 200.0), TrackAudio(Path("b"), 200.0, 95.5)]
+    )
+    expected = _beep_times(200.0) + [200.0 + t for t in _beep_times(95.5)]
+    assert [w.start for w in words] == pytest.approx(expected, abs=0.06)
+
+
+def test_words_without_finite_times_are_dropped_and_times_stay_ordered():
+    import math
+
+    class Model:
+        def transcribe(self, audio, **kw):
+            nan = math.nan
+            words = [
+                SimpleNamespace(word=" a", start=1.0, end=1.2, probability=0.9),
+                SimpleNamespace(word=" b", start=nan, end=nan, probability=nan),
+                SimpleNamespace(word=" c", start=0.5, end=math.inf, probability=nan),
+                SimpleNamespace(word=" d", start=2.0, end=2.4, probability=0.8),
+            ]
+            return iter([SimpleNamespace(end=3.0, words=words)]), SimpleNamespace(language="en")
+
+    tr = Transcriber("small", window_s=30.0, overlap_s=0.0)
+    tr._model = Model()
+    tr.decode = lambda path: _beep_pcm(3.0)
+    words, _ = tr.transcribe(TrackAudio(Path("a"), 10.0, 3.0))
+    assert [w.text for w in words] == [" a", " c", " d"]
+    assert all(math.isfinite(v) for w in words for v in (w.start, w.end, w.probability))
+    assert [w.start for w in words] == [11.0, 11.0, 12.0]

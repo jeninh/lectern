@@ -20,7 +20,9 @@ Bounded memory
     copy. The seam is placed at the longest pause the earlier window heard inside the middle
     of the overlap (or the overlap's midpoint when it heard nothing there): earlier-window
     words that start before the seam are kept, later-window words that start at or after it.
-    A word both windows heard straddling the seam is dropped from the later window. Words
+    Words the later window heard after the seam that pair, in order, with words kept from the
+    earlier window (the same word timed on the other side of the seam) are dropped; a word
+    said twice pairs twice, so it stays twice, and a different word never pairs. Words
     near a window's edge, where audio is cut mid-phrase, are never used. The result depends
     only on the two windows' words, so it is deterministic.
 
@@ -34,6 +36,7 @@ import gc
 import importlib.util
 import itertools
 import logging
+import math
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +64,8 @@ DEFAULT_OVERLAP_S = 15.0
 MIN_WINDOW_S = 10.0
 # Two words this close (start times) with the same normalised text are one word heard twice.
 DUPLICATE_WORD_S = 1.0
+# How far before the seam the two windows' words are aligned to find repeated words.
+SEAM_CONTEXT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -222,14 +227,70 @@ def merge_window_words(
     the later window's words from the seam on, which become the next ``earlier`` window."""
     cut = seam(earlier_tail, lo, hi)
     kept.extend(w for w in earlier_tail if w.start < cut)
-    rest = [w for w in later if w.start >= cut]
-    if kept and rest:
-        last = kept[-1]
-        if abs(rest[0].start - last.start) < DUPLICATE_WORD_S and _norm(rest[0].text) == _norm(
-            last.text
+    dropped = [w for w in earlier_tail if w.start >= cut]
+    first = next((i for i, w in enumerate(later) if w.start >= cut), len(later))
+    # Where the later window has its own copy of the first word the earlier one drops, the
+    # later window's words from there on are certainly new.
+    anchor = _closest(later, dropped[0]) if dropped else None
+    if anchor is not None and anchor <= first:
+        return kept, later[anchor:]  # the later window timed that word before the cut
+    stop = len(later) if anchor is None else anchor
+    # Later-window words between the cut and the anchor may repeat words kept from the
+    # earlier window (timed on the other side of the cut). Align the two windows' words near
+    # the cut in order and drop exactly those that pair with a kept word: a word said twice
+    # ("no, no") pairs twice, so both copies stay; a different word never pairs.
+    since = max(lo, cut - SEAM_CONTEXT_S)
+    k = len(kept)
+    while k > 0 and kept[k - 1].start >= since:
+        k -= 1
+    j0 = next((i for i, w in enumerate(later) if w.start >= since - DUPLICATE_WORD_S), stop)
+    j0 = min(j0, first)
+    paired = _paired(kept[k:], later[j0:stop])
+    head = [w for i, w in enumerate(later[first:stop], first) if i - j0 not in paired]
+    return kept, head + later[stop:]
+
+
+def _same(a: Word, b: Word) -> bool:
+    return abs(a.start - b.start) < DUPLICATE_WORD_S and _norm(a.text) == _norm(b.text)
+
+
+def _paired(a: Sequence[Word], b: Sequence[Word]) -> set[int]:
+    """Indexes into ``b`` of an order-preserving pairing of ``a`` and ``b`` (same text, starts
+    within ``DUPLICATE_WORD_S``) with the most pairs, then the least total time difference."""
+    n, m = len(a), len(b)
+    best = [[(0, 0.0)] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            s = max(best[i + 1][j], best[i][j + 1])
+            if _same(a[i], b[j]):
+                hit = best[i + 1][j + 1]
+                s = max(s, (hit[0] + 1, hit[1] - abs(a[i].start - b[j].start)))
+            best[i][j] = s
+    out: set[int] = set()
+    i = j = 0
+    while i < n and j < m:
+        hit = best[i + 1][j + 1]
+        if _same(a[i], b[j]) and best[i][j] == (
+            hit[0] + 1,
+            hit[1] - abs(a[i].start - b[j].start),
         ):
-            rest = rest[1:]
-    return kept, rest
+            out.add(j)
+            i, j = i + 1, j + 1
+        elif best[i][j] == best[i + 1][j]:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
+def _closest(words: Sequence[Word], word: Word) -> int | None:
+    """Index of the word in ``words`` with ``word``'s text starting closest to it (within
+    ``DUPLICATE_WORD_S``; the first on a tie), or ``None``."""
+    best: tuple[float, int] | None = None
+    for i, w in enumerate(words):
+        if _same(w, word) and (best is None or abs(w.start - word.start) < best[0]):
+            best = (abs(w.start - word.start), i)
+    return best[1] if best is not None else None
 
 
 # --- the model --------------------------------------------------------------------------------
@@ -319,10 +380,14 @@ class Transcriber:
         last = 0.0
         for seg in segments:
             for w in seg.words or ():
-                start = max(float(w.start), last)
-                end = max(float(w.end), start)
+                start, end, p = float(w.start), float(w.end), float(w.probability)
+                if not math.isfinite(start):
+                    continue  # a word with no time cannot be placed (and would poison max())
+                start = max(start, last)
+                end = max(end, start) if math.isfinite(end) else start
                 last = start
-                words.append(Word(w.word, base_s + start, base_s + end, float(w.probability)))
+                p = p if math.isfinite(p) else 0.0
+                words.append(Word(w.word, base_s + start, base_s + end, p))
             on_segment(float(seg.end))
         return words, getattr(info, "language", None)
 
