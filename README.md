@@ -62,6 +62,7 @@ values to enter, then waits and confirms the device's first sync live.
 | `LECTERN_RATE_LIMIT_PER_MINUTE` | 60 | Per-IP limit on OPDS/sync auth attempts |
 | `LECTERN_UPLOAD_MAX_BYTES` | 200 MiB | Largest EPUB accepted by browser upload |
 | `LECTERN_TRUSTED_PROXIES` | empty | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed (`127.0.0.1` for `tailscale serve`); empty trusts nobody |
+| `LECTERN_TRUST_CF_CONNECTING_IP` | false | Also believe `CF-Connecting-IP` from a trusted proxy. Only for Cloudflare Tunnel, with `LECTERN_TRUSTED_PROXIES` limited to the `cloudflared` connector; any other proxy passes the header through from the client |
 
 ## Security model
 
@@ -78,7 +79,8 @@ values to enter, then waits and confirms the device's first sync live.
 - Per-IP rate limits, per-account lockout, and an audit log of logins, credential
   changes, and downloads. The client IP is the socket peer unless that peer is listed in
   `LECTERN_TRUSTED_PROXIES`; only then is `X-Forwarded-For` honoured, read right to left so a
-  client-supplied entry is never believed (details in `docs/contracts.md`).
+  client-supplied entry is never believed. `CF-Connecting-IP` is ignored unless
+  `LECTERN_TRUST_CF_CONNECTING_IP` is on (details in `docs/contracts.md`).
 - `POST /users/create` (KOReader's Register button) always returns 403; keys come from
   the web UI.
 - Non-goals: anonymous access, and the two below.

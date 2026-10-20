@@ -396,9 +396,11 @@ the tailnet, cloud storage); the whole point of a personal library is not losing
 - **Keep things updated**: `cd ~/lectern && git pull && docker compose pull tailscale &&
   docker compose up -d --build`.
 - If you need a public hostname rather than a private network, Cloudflare Tunnel also works
-  (set `LECTERN_TRUSTED_PROXIES` to the `cloudflared` container's address and Lectern reads
-  `CF-Connecting-IP` from it), at the price of Cloudflare terminating TLS and seeing your
-  traffic, and of KOReader's routes having to bypass any Cloudflare Access login.
+  (set `LECTERN_TRUSTED_PROXIES` to the `cloudflared` container's address *only* and
+  explicitly set `LECTERN_TRUST_CF_CONNECTING_IP=1` so Lectern reads `CF-Connecting-IP` from
+  it; the flag is off by default and must stay off with `tailscale serve`), at the price of
+  Cloudflare terminating TLS and seeing your traffic, and of KOReader's routes having to
+  bypass any Cloudflare Access login.
 
 ## Alternative: host install
 

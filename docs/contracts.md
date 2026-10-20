@@ -577,16 +577,22 @@ Rules:
    all-trusted chain or an absent header also yields the peer. `tailscale serve` *replaces*
    the header with the caller's tailnet address, so in the documented deployment the header
    has exactly one hop.
-4. `CF-Connecting-IP`, if present and valid, takes precedence over `X-Forwarded-For`, and only
-   behind a trusted peer. It exists for the one-line Cloudflare Tunnel alternative in the
-   deployment guide (cloudflared sets it to the visitor and strips any copy the visitor sent);
-   nothing else should set it.
+4. `CF-Connecting-IP` is **ignored by default, even behind a trusted peer**. Every proxy
+   other than cloudflared (`tailscale serve` included) passes it through from the client
+   untouched, so believing it would hand the client its own address back. The boolean
+   `LECTERN_TRUST_CF_CONNECTING_IP` (default `false`) enables it for the one-line Cloudflare
+   Tunnel alternative in the deployment guide: a Cloudflare deployment must set it explicitly
+   *and* limit `LECTERN_TRUSTED_PROXIES` to the `cloudflared` connector's address, nothing
+   else. With the flag on, a valid `CF-Connecting-IP` from a trusted peer takes precedence
+   over `X-Forwarded-For` (cloudflared sets it to the visitor and strips any copy the visitor
+   sent); an invalid value falls through to rule 3, and an untrusted peer's header is still
+   ignored.
 5. uvicorn's own `--proxy-headers` handling is disabled (`lectern.cli`), so the rule above is
    the only place forwarding headers are interpreted.
 
 Tests: `tests/test_proxy.py` (spoofed leftmost entries, all-trusted chains, malformed hops,
-IPv4/IPv6 and port forms, trusted and untrusted peers, and the rate-limit buckets and audit
-rows through the app).
+IPv4/IPv6 and port forms, trusted and untrusted peers, `CF-Connecting-IP` ignored by default
+and honoured only with the flag on, and the rate-limit buckets and audit rows through the app).
 
 ## `lectern.positions` interface
 

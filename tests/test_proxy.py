@@ -21,9 +21,12 @@ CHAIN = parse_networks("127.0.0.0/8, ::1, 10.0.0.0/8")  # serve behind an intern
 CLOUDFLARED = parse_networks("172.18.0.0/16")
 
 
-def _resolve(peer, trusted=LOOPBACK, **headers):
+def _resolve(peer, trusted=LOOPBACK, trust_cf=False, **headers):
     return resolve_client_ip(
-        peer, Headers({k.replace("_", "-"): v for k, v in headers.items()}), trusted
+        peer,
+        Headers({k.replace("_", "-"): v for k, v in headers.items()}),
+        trusted,
+        trust_cf_connecting_ip=trust_cf,
     )
 
 
@@ -97,21 +100,49 @@ def test_xff_accepts_port_and_bracket_forms_and_mixed_families():
     assert _resolve("::1", trusted=CHAIN, x_forwarded_for="2001:DB8::9, 10.0.0.2") == "2001:db8::9"
 
 
-def test_cf_connecting_ip_only_behind_a_trusted_peer_and_before_xff():
+def test_cf_connecting_ip_is_ignored_unless_enabled_even_behind_a_trusted_peer():
+    # Default: `tailscale serve` (or any non-Cloudflare proxy) passes a client-sent
+    # CF-Connecting-IP through untouched, so it must not beat the proxy-appended XFF hop.
     assert (
-        _resolve("172.18.0.7", trusted=CLOUDFLARED, cf_connecting_ip="2001:db8::9") == "2001:db8::9"
+        _resolve("127.0.0.1", cf_connecting_ip="198.51.100.1", x_forwarded_for="100.101.102.103")
+        == "100.101.102.103"
     )
     assert (
-        _resolve("127.0.0.1", cf_connecting_ip="198.51.100.1", x_forwarded_for="192.0.2.5")
+        _resolve(
+            "127.0.0.1",
+            cf_connecting_ip="198.51.100.1",
+            x_forwarded_for="192.0.2.5, 100.101.102.103",
+        )
+        == "100.101.102.103"
+    )
+    # With no usable XFF either, the peer: never the CF header.
+    assert _resolve("127.0.0.1", cf_connecting_ip="198.51.100.1") == "127.0.0.1"
+    assert (
+        _resolve("172.18.0.7", trusted=CLOUDFLARED, cf_connecting_ip="2001:db8::9") == "172.18.0.7"
+    )
+
+
+def test_cf_connecting_ip_enabled_only_behind_a_trusted_peer_and_before_xff():
+    assert (
+        _resolve("172.18.0.7", trusted=CLOUDFLARED, trust_cf=True, cf_connecting_ip="2001:db8::9")
+        == "2001:db8::9"
+    )
+    assert (
+        _resolve(
+            "127.0.0.1", trust_cf=True, cf_connecting_ip="198.51.100.1", x_forwarded_for="192.0.2.5"
+        )
         == "198.51.100.1"
     )
-    # Bad CF header -> XFF rule; untrusted peer -> ignored.
-    assert _resolve("127.0.0.1", cf_connecting_ip="nope", x_forwarded_for="192.0.2.5") == (
-        "192.0.2.5"
+    # Bad CF header -> XFF rule; untrusted peer -> ignored even with the flag on.
+    assert (
+        _resolve("127.0.0.1", trust_cf=True, cf_connecting_ip="nope", x_forwarded_for="192.0.2.5")
+        == "192.0.2.5"
     )
-    assert _resolve("172.19.0.7", trusted=CLOUDFLARED, cf_connecting_ip="2001:db8::9") == (
-        "172.19.0.7"
+    assert (
+        _resolve("172.19.0.7", trusted=CLOUDFLARED, trust_cf=True, cf_connecting_ip="2001:db8::9")
+        == "172.19.0.7"
     )
+    assert _resolve("203.0.113.9", trust_cf=True, cf_connecting_ip="198.51.100.1") == "203.0.113.9"
 
 
 @pytest.mark.parametrize(
@@ -136,6 +167,7 @@ def test_settings_reject_bad_networks(tmp_path):
         Settings(data_dir=tmp_path, library_dir=tmp_path, trusted_proxies="10.0.0.0/8, lan")
     s = Settings(data_dir=tmp_path, library_dir=tmp_path, trusted_proxies="")
     assert s.trusted_proxy_networks == []
+    assert s.trust_cf_connecting_ip is False  # off unless a Cloudflare deployment opts in
 
 
 # --- through the app: rate limit keys and audit rows use the resolved address -------------
@@ -199,17 +231,50 @@ def test_trusted_proxy_rate_limits_and_audits_the_forwarded_address(proxied):
     ]
 
 
-def test_untrusted_peer_cannot_pick_its_own_address(tmp_path):
+def _app(tmp_path, **overrides):
+    """App trusting loopback with a two-attempt login limiter; no owner needed for /login."""
     settings = Settings(
         data_dir=tmp_path / "data",
         library_dir=tmp_path / "library",
         base_url=ORIGIN,
         insecure_http=True,
         trusted_proxies="127.0.0.1",
+        **overrides,
     )
     app = create_app(settings, start_watcher=False)
     app.state.limiters["login"].limit = 2
-    with TestClient(app, client=("100.64.0.9", 40000)) as c:
+    return app
+
+
+def test_untrusted_peer_cannot_pick_its_own_address(tmp_path):
+    with TestClient(_app(tmp_path), client=("100.64.0.9", 40000)) as c:
         codes = [_failed_login(c, x_forwarded_for=f"198.51.100.{i}") for i in range(3)]
     assert codes == [401, 401, 429]  # all keyed on the real peer despite distinct headers
     assert _audit_ips("login.failed") == ["100.64.0.9"] * 2  # the throttled one is not logged
+
+
+def test_spoofed_cf_connecting_ip_is_ignored_by_default_behind_tailscale_serve(tmp_path):
+    # Peer is the trusted serve hop; XFF is what serve appended; CF header is client-sent junk.
+    with TestClient(_app(tmp_path), client=("127.0.0.1", 40000)) as c:
+        codes = [
+            _failed_login(c, cf_connecting_ip=f"198.51.100.{i}", x_forwarded_for="100.101.102.103")
+            for i in range(3)
+        ]
+        assert codes == [401, 401, 429]  # one bucket: the XFF hop, not three CF addresses
+        # Leftmost XFF spoof plus a CF spoof together still land in the throttled bucket.
+        assert (
+            _failed_login(
+                c, cf_connecting_ip="198.51.100.9", x_forwarded_for="192.0.2.5, 100.101.102.103"
+            )
+            == 429
+        )
+    assert _audit_ips("login.failed") == ["100.101.102.103"] * 2
+
+
+def test_cf_connecting_ip_wins_when_explicitly_enabled(tmp_path):
+    with TestClient(_app(tmp_path, trust_cf_connecting_ip=True), client=("127.0.0.1", 40000)) as c:
+        a = {"cf_connecting_ip": "198.51.100.1", "x_forwarded_for": "192.0.2.5"}
+        assert [_failed_login(c, **a) for _ in range(3)] == [401, 401, 429]
+        # A different CF address is a different bucket even with the same XFF.
+        assert _failed_login(c, cf_connecting_ip="198.51.100.2", x_forwarded_for="192.0.2.5") == 401
+    assert _audit_ips("login.failed") == ["198.51.100.1", "198.51.100.1", "198.51.100.2"]

@@ -24,7 +24,12 @@ def client_ip(request: Request) -> str | None:
     """
     peer = request.client.host if request.client else None
     settings: Settings = request.app.state.settings
-    return resolve_client_ip(peer, request.headers, settings.trusted_proxy_networks)
+    return resolve_client_ip(
+        peer,
+        request.headers,
+        settings.trusted_proxy_networks,
+        trust_cf_connecting_ip=settings.trust_cf_connecting_ip,
+    )
 
 
 def create_session(db: DbSession, user: User, request: Request, settings: Settings) -> str:

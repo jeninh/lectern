@@ -9,8 +9,12 @@ appended by the proxy that connected to us and is the only one it vouches for. H
 themselves trusted proxies are skipped, and the first untrusted address is the client. The
 leftmost entry is whatever the client chose to send and is never believed on its own. A
 malformed hop ends the walk (nothing to its left is verifiable) and the peer is used.
-``CF-Connecting-IP`` takes precedence when present, for the documented Cloudflare Tunnel
-alternative; cloudflared sets it to the visitor and strips any copy the visitor sent.
+
+``CF-Connecting-IP`` is ignored unless ``LECTERN_TRUST_CF_CONNECTING_IP`` is on, even behind
+a trusted peer: any proxy other than cloudflared passes the header through untouched, so it
+would otherwise be a client-chosen address. With the flag on (the documented Cloudflare Tunnel
+alternative, where only the cloudflared connector is trusted) it takes precedence over
+``X-Forwarded-For``; cloudflared sets it to the visitor and strips any copy the visitor sent.
 
 Every consumer of a client address (rate limits, login records, audit log, session rows) goes
 through :func:`lectern.security.sessions.client_ip`, which calls :func:`resolve_client_ip`.
@@ -64,14 +68,19 @@ def is_trusted_peer(peer: str | None, trusted: Sequence[Network]) -> bool:
 
 
 def resolve_client_ip(
-    peer: str | None, headers: Mapping[str, str], trusted: Sequence[Network]
+    peer: str | None,
+    headers: Mapping[str, str],
+    trusted: Sequence[Network],
+    *,
+    trust_cf_connecting_ip: bool = False,
 ) -> str | None:
     """The address to treat as the client: peer, or what a trusted proxy says it forwarded."""
     if not is_trusted_peer(peer, trusted):
         return peer
-    forwarded = parse_ip(headers.get(CF_HEADER, ""))
-    if forwarded:
-        return forwarded
+    if trust_cf_connecting_ip:
+        forwarded = parse_ip(headers.get(CF_HEADER, ""))
+        if forwarded:
+            return forwarded
     xff = headers.get(XFF_HEADER, "")
     for hop in reversed(xff.split(",")) if xff.strip() else ():
         addr = parse_ip(hop)

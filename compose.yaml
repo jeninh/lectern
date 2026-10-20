@@ -14,6 +14,8 @@ services:
       # Reverse proxy addresses whose X-Forwarded-For to believe (see README and
       # docs/deploy-tailscale.md). Empty trusts nobody.
       LECTERN_TRUSTED_PROXIES: ${LECTERN_TRUSTED_PROXIES:-}
+      # Only for Cloudflare Tunnel with the connector alone in LECTERN_TRUSTED_PROXIES.
+      LECTERN_TRUST_CF_CONNECTING_IP: ${LECTERN_TRUST_CF_CONNECTING_IP:-0}
     volumes:
       - lectern-data:/data
       - ./library:/library
