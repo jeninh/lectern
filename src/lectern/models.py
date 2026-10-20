@@ -6,17 +6,21 @@ import enum
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     TypeDecorator,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -253,3 +257,330 @@ class ReadingProgress(Base):
         ForeignKey("sync_keys.id", ondelete="SET NULL"), default=None
     )
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+# --- Audio, alignment, and canonical positions (contracts for milestones 2-4) --------------
+#
+# A work has one text timeline (spine_index, char offset into the normalised text of that
+# spine item; see docs/contracts.md) and one audio timeline (seconds from the start of track
+# 0, tracks laid end to end). Sentences are the join between the two.
+
+
+class AudioTrack(Base):
+    """One audio file of a work's audiobook, placed on the work's single audio timeline."""
+
+    __tablename__ = "audio_tracks"
+    __table_args__ = (
+        UniqueConstraint("work_id", "position", name="uq_audio_track_position"),
+        UniqueConstraint("work_id", "rel_path", name="uq_audio_track_path"),
+        UniqueConstraint("work_id", "sha256", name="uq_audio_track_sha256"),
+        CheckConstraint("position >= 0", name="ck_audio_track_position"),
+        CheckConstraint("duration_s >= 0", name="ck_audio_track_duration"),
+        CheckConstraint("offset_s >= 0", name="ck_audio_track_offset"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer)  # 0-based play order
+    rel_path: Mapped[str] = mapped_column(String(1024))  # relative to the work dir
+    media_type: Mapped[str] = mapped_column(String(128))
+    codec: Mapped[str] = mapped_column(String(32))  # e.g. "mp3", "aac", "opus"
+    duration_s: Mapped[float] = mapped_column(Float)
+    offset_s: Mapped[float] = mapped_column(Float)  # start of this track on the work timeline
+    size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    # [{"title": str, "start_s": float}], start_s relative to this track.
+    chapters: Mapped[list | None] = mapped_column(JSON, default=None)
+    added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    work: Mapped[Work] = relationship()
+
+
+class Sentence(Base):
+    """A sentence of the work's text and, once aligned, where it is spoken."""
+
+    __tablename__ = "sentences"
+    __table_args__ = (
+        UniqueConstraint("work_id", "n", name="uq_sentence_n"),
+        CheckConstraint("n >= 0", name="ck_sentence_n"),
+        CheckConstraint("char_end > char_start AND char_start >= 0", name="ck_sentence_span"),
+        CheckConstraint(
+            "(audio_start_s IS NULL) = (audio_end_s IS NULL)", name="ck_sentence_audio_pair"
+        ),
+        CheckConstraint(
+            "audio_end_s IS NULL OR audio_end_s >= audio_start_s", name="ck_sentence_audio_span"
+        ),
+        CheckConstraint("NOT matched OR audio_start_s IS NOT NULL", name="ck_sentence_matched"),
+        Index("ix_sentences_text", "work_id", "spine_index", "char_start"),
+        Index("ix_sentences_audio", "work_id", "audio_start_s"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    n: Mapped[int] = mapped_column(Integer)  # 0-based, contiguous, in reading order
+    spine_index: Mapped[int] = mapped_column(Integer)
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)  # exclusive
+    audio_start_s: Mapped[float | None] = mapped_column(Float, default=None)  # work timeline
+    audio_end_s: Mapped[float | None] = mapped_column(Float, default=None)
+    matched: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AlignmentStatus(enum.StrEnum):
+    PENDING = "pending"  # queued, no result yet
+    RUNNING = "running"  # a worker holds the job lease
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"  # terminal: retries exhausted or non-retryable error
+    STALE = "stale"  # succeeded, but the EPUB or audio changed since
+
+
+class Alignment(Base):
+    """The current text<->audio alignment of a work. One row per work; history lives in jobs."""
+
+    __tablename__ = "alignments"
+    __table_args__ = (
+        CheckConstraint(
+            "coverage IS NULL OR (coverage >= 0 AND coverage <= 1)", name="ck_alignment_coverage"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), unique=True)
+    model: Mapped[str] = mapped_column(String(64))  # aligner identifier, e.g. "whisperx-large-v3"
+    status: Mapped[AlignmentStatus] = mapped_column(
+        Enum(AlignmentStatus, native_enum=False, length=16), index=True
+    )
+    coverage: Mapped[float | None] = mapped_column(Float, default=None)  # matched / total
+    sentence_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    # Inputs the result was computed from; a mismatch with the work's files makes it STALE.
+    epub_sha256: Mapped[str] = mapped_column(String(64))
+    audio_fingerprint: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+class ProgressSource(enum.StrEnum):
+    KOREADER = "koreader"
+    WEB = "web"
+    AUDIO = "audio"
+
+
+class WorkProgress(Base):
+    """Canonical position per user and work, in sentence coordinates.
+
+    ``reading_progress`` keeps KOReader's own document-hash-keyed record; this table is what
+    the web reader and audio player read and write, and what KOReader positions are projected
+    onto (lectern.positions) once the work has a sentence map.
+    """
+
+    __tablename__ = "work_progress"
+    __table_args__ = (
+        UniqueConstraint("user_id", "work_id", name="uq_work_progress_user_work"),
+        CheckConstraint("sentence_n >= 0 AND sentence_offset >= 0", name="ck_work_progress_pos"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    sentence_n: Mapped[int] = mapped_column(Integer)
+    sentence_offset: Mapped[int] = mapped_column(Integer, default=0)  # chars into the sentence
+    source: Mapped[ProgressSource] = mapped_column(
+        Enum(ProgressSource, native_enum=False, length=16)
+    )
+    raw: Mapped[str] = mapped_column(Text)  # xpointer, "<seconds>", or "<n>:<offset>"
+    device: Mapped[str] = mapped_column(String(128), default="")
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+# --- Invites ---------------------------------------------------------------------------
+
+
+class Invite(Base):
+    """Single-use owner-issued sign-up link. token_hash = SHA-256(token)."""
+
+    __tablename__ = "invites"
+    __table_args__ = (
+        CheckConstraint("role IN ('MEMBER', 'READER')", name="ck_invite_role"),
+        CheckConstraint("(used_at IS NULL) = (used_by IS NULL)", name="ck_invite_used"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    role: Mapped[Role] = mapped_column(Enum(Role, native_enum=False, length=16))
+    note: Mapped[str] = mapped_column(String(128), default="")  # who it is for
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    used_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+    def usable_at(self, now: datetime) -> bool:
+        return self.used_at is None and self.revoked_at is None and now < self.expires_at
+
+
+# --- Shelves and grants ------------------------------------------------------------------
+#
+# Visibility rule: owners and members see the whole library; readers see only works on
+# shelves granted to them (lectern.access).
+
+
+class Shelf(Base):
+    __tablename__ = "shelves"
+    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_shelf_owner_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    # Reserved for smart shelves: a JSON rule evaluated instead of shelf_items. NULL = manual.
+    rule: Mapped[dict | None] = mapped_column(JSON, default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+    items: Mapped[list[ShelfItem]] = relationship(
+        back_populates="shelf", cascade="all, delete-orphan", order_by="ShelfItem.position"
+    )
+    grants: Mapped[list[ShelfGrant]] = relationship(
+        back_populates="shelf", cascade="all, delete-orphan"
+    )
+
+
+class ShelfItem(Base):
+    __tablename__ = "shelf_items"
+
+    shelf_id: Mapped[int] = mapped_column(
+        ForeignKey("shelves.id", ondelete="CASCADE"), primary_key=True
+    )
+    work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    shelf: Mapped[Shelf] = relationship(back_populates="items")
+
+
+class ShelfPermission(enum.StrEnum):
+    VIEW = "view"  # see and read the shelf's works
+    EDIT = "edit"  # also add and remove works
+
+
+class ShelfGrant(Base):
+    __tablename__ = "shelf_grants"
+
+    shelf_id: Mapped[int] = mapped_column(
+        ForeignKey("shelves.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    permission: Mapped[ShelfPermission] = mapped_column(
+        Enum(ShelfPermission, native_enum=False, length=16)
+    )
+    granted_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    shelf: Mapped[Shelf] = relationship(back_populates="grants")
+
+
+# --- Job queue and external workers ---------------------------------------------------------
+
+
+class WorkerCredential(Base):
+    """Bearer credential for an external alignment worker. key_hash = SHA-256(secret).
+
+    Owner-issued, shown once, revocable. It authenticates only the /api/worker/* routes, so a
+    leaked worker key can claim jobs and fetch their inputs but never touch user data.
+    """
+
+    __tablename__ = "worker_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(String(128))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+    @property
+    def active(self) -> bool:
+        return self.revoked_at is None
+
+
+class JobStatus(enum.StrEnum):
+    QUEUED = "queued"
+    LEASED = "leased"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+JOB_ACTIVE_STATUSES = (JobStatus.QUEUED, JobStatus.LEASED)
+
+
+class Job(Base):
+    """Durable job queue. Claims are atomic (UPDATE ... WHERE status='QUEUED') and leased.
+
+    ``payload`` is the input snapshot (for ``align``: epub_sha256, audio_fingerprint, model);
+    a result is accepted only while the lease is held and the snapshot still matches the work.
+    """
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint("attempts >= 0 AND max_attempts >= 1", name="ck_job_attempts"),
+        # A leased job always has a lease token; finished jobs keep their last one so a
+        # repeated result upload from the same lease can be answered idempotently.
+        CheckConstraint("status <> 'LEASED' OR lease_token_hash IS NOT NULL", name="ck_job_lease"),
+        Index("ix_jobs_claim", "status", "run_after", "priority"),
+        # At most one live job of a kind per work; finished jobs stay for history.
+        Index(
+            "uq_jobs_active_work_kind",
+            "work_id",
+            "kind",
+            unique=True,
+            sqlite_where=text("status IN ('QUEUED', 'LEASED')"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)  # "align"
+    work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), default=None, index=True
+    )
+    status: Mapped[JobStatus] = mapped_column(Enum(JobStatus, native_enum=False, length=16))
+    priority: Mapped[int] = mapped_column(Integer, default=0)  # lower runs first
+    attempts: Mapped[int] = mapped_column(Integer, default=0)  # claims so far
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    run_after: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)  # backoff
+    payload: Mapped[dict | None] = mapped_column(JSON, default=None)
+    result: Mapped[dict | None] = mapped_column(JSON, default=None)
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    # Lease: who holds it, until when, proven by the lease token handed out at claim time.
+    leased_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("worker_credentials.id", ondelete="SET NULL"), default=None
+    )
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64), default=None)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)

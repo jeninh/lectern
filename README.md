@@ -71,7 +71,20 @@ values to enter, then waits and confirms the device's first sync live.
   changes, and downloads.
 - `POST /users/create` (KOReader's Register button) always returns 403; keys come from
   the web UI.
-- Non-goals: DRM circumvention, download/search integrations, anonymous access.
+- Non-goals: anonymous access, and the two below.
+
+## What Lectern does not do
+
+- **No DRM removal or circumvention.** Lectern only reads EPUBs and audio files you already own
+  and can open. It contains no code to strip, bypass, or work around any copy protection.
+- **No book searching or downloading integrations.** There is no catalogue search, no
+  connection to any download site, store, or torrent/IRC/Usenet source, and no fetching of
+  books or audiobooks from the Internet. Content enters the library only through your own
+  uploads and the inbox folder. (The test suite contains one documented public-domain fixture
+  from Project Gutenberg and LibriVox; see `tests/fixtures/magi/PROVENANCE.md`.)
+
+The data model and API contracts for audiobooks, text–audio alignment, shelves, invites, and
+external alignment workers are in [`docs/contracts.md`](docs/contracts.md).
 
 ## Development
 

@@ -12,3 +12,6 @@ build/
 .env
 src/lectern/static/app/
 frontend/node_modules/
+
+# fixture helper output (full LibriVox file is not checked in)
+tests/fixtures/magi/full/
