@@ -42,6 +42,13 @@ jobs:
           EPUBCHECK_REQUIRED: "1"
   docker:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extras: ["", "align"]
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t lectern:ci .
+      - run: docker build --build-arg LECTERN_EXTRAS=${{ matrix.extras }} -t lectern:ci .
+      - name: CLI and optional transcription import
+        run: |
+          docker run --rm lectern:ci lectern worker --help
+          docker run --rm lectern:ci python -c "from lectern.align.transcribe import transcription_available as t; print('faster-whisper:', t()); assert t() == ('${{ matrix.extras }}' == 'align')"

@@ -110,7 +110,7 @@ def settings(tmp_path: Path) -> Settings:
 
 @pytest.fixture
 def app(settings: Settings):
-    return create_app(settings, start_watcher=False)
+    return create_app(settings, start_watcher=False, start_background=False)
 
 
 @pytest.fixture

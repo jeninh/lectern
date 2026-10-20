@@ -65,3 +65,12 @@ listening to / transcribing the cut between the boundaries. Observations:
 
 The `text` fields are copies of the exact normalised EPUB text and are checked against the EPUB by
 `tests/test_contracts.py`.
+
+## Recorded transcript
+
+`transcript_small.json` is the word list faster-whisper produced for `excerpt.mp3` (model
+`small`, `int8` on CPU, beam size 5, VAD filter, word timestamps; 207 words as
+`[text, start_s, end_s, probability]`). It lets the matcher and the worker protocol be tested
+end to end in CI without downloading a model. Regenerate it with
+`lectern align-transcribe tests/fixtures/magi/excerpt.mp3` (see docs/alignment.md); timings of a
+different faster-whisper/CTranslate2 build may differ by a few hundredths of a second.

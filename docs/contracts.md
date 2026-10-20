@@ -10,8 +10,9 @@ sentences, progress with cross-device hand-off, shelves, invites, resumable uplo
 notification and download-cap routes (`lectern.routes.api.works`, `…shelves`, `…uploads`,
 `…notifications`, `lectern.routes.invites`, `lectern.routes.library`, migration `0006`).
 Milestone 4 implements spine text and the read-aloud routes (see [`read-aloud.md`](read-aloud.md));
-its interim `lectern.routes.media` was replaced by milestone 2's routes. **The alignment-worker
-routes (milestone 3) are not implemented yet.**
+its interim `lectern.routes.media` was replaced by milestone 2's routes. Milestone 3 implements
+the jobs routes, worker credentials, the whole worker protocol, the alignment diagnosis in
+the track list, and the KOReader progress projection (see [`alignment.md`](alignment.md)).
 
 Conventions used throughout:
 
@@ -155,6 +156,14 @@ Rules enforced by the schema (each one is a test case in `tests/test_contracts.p
 
 `alignment` is `null` when no alignment row exists. `tracks` is empty for a text-only work.
 `404` if the work is not visible to the caller.
+
+Implemented (milestone 2, `lectern.routes.api.works`). Milestone 3 adds to `alignment`:
+`sentence_count`, `error`, `completed_at`, `span_coverage`, `diagnosis`, `warnings`
+(`low_coverage`, `likely_abridged`, `stale`), and `suggested_model`; see
+[`alignment.md`](alignment.md#coverage-diagnosis-abridgment). Tracks are the audio files under
+the work directory (subfolders included, `derived/` and hidden entries excluded): imports from
+the inbox and uploads place them under `audio/`, and the alignment rescan (at startup and every
+`LECTERN_TRACK_RESCAN_SECONDS`) also picks up files copied there by hand.
 
 ### Streaming — `GET /library/tracks/{track_id}/stream`
 
@@ -322,6 +331,13 @@ clamped to the sentence. Additions beyond the shape above:
   position newer than the last one it wrote or accepted exists, comes from another device, and
   is at least 0.5 % of the book (reading) or 20 s (listening) away. Clients save only positions
   the reader moved to, so opening a book never overwrites a newer position.
+- **KOReader projection** (milestone 3, `lectern.routes.kosync`): a `PUT /syncs/progress`
+  for a document hash whose EPUB is the exact edition the work was aligned against (and whose
+  work the caller can see) also writes `work_progress` (source `koreader`), and
+  `GET /syncs/progress/{document}` answers with a newer web/audio position converted back to
+  an xpointer for that document (`device_id` `lectern-web` / `lectern-audio`). Other editions
+  and hidden works sync exactly like koreader-sync-server. KOReader's own `reading_progress`
+  row and its document-hash mapping are unchanged.
 
 ### Read-aloud EPUB — `GET /library/works/{work_id}/read-aloud.epub`
 
@@ -381,6 +397,14 @@ the existing active job for that work (the partial unique index makes a duplicat
 With `force: true` an existing active job is cancelled first. `POST …/cancel` moves a
 `queued`/`leased` job to `cancelled`; a worker still holding the lease gets `409 lease_lost` on
 its next call.
+
+Implemented (milestone 3). `force: true` is refused with `409 job_running` while a worker
+holds the active job's lease (cancel it explicitly instead); a queued job is replaced. Each job
+also reports `model`, `audio_s` (its audio duration), and
+`eta`: `null` until an alignment has been measured on this server, then
+`{"seconds", "speed", "basis"}` from the median measured speed (see
+[`alignment.md`](alignment.md#jobs-leases-and-the-eta)). `result.stats` holds the matcher's
+statistics and timings. `GET /api/jobs` adds `measured_speed`.
 
 ### Shelves — `/api/shelves`
 
@@ -522,6 +546,24 @@ Milestone 3 implements this; Step 0 fixes the schema and the rules.
   the library, progress, or any other route. Sessions and app passwords are in turn rejected by
   `/api/worker/*`. A leaked worker key can claim jobs and download the inputs of jobs it holds,
   nothing else.
+
+### Implementation notes (milestone 3)
+
+- A lease is bound to the credential that claimed it: the token alone is not enough, every
+  later call must come with the same worker key (`409 lease_lost` otherwise).
+- Rate limits: failed credential checks are limited per client address (the ordinary
+  per-minute limit; once over it, the address gets `429` before any lookup). A valid key has
+  its own bucket of `LECTERN_WORKER_REQUESTS_PER_MINUTE` (default 1200) requests, enough for
+  ranged downloads of every track; `/fail` is exempt so a lease is never left to expire.
+- Claim, heartbeat, and fail bodies are capped at 64 KiB (`413`). Heartbeat `stats` is a typed
+  model (`lectern.align.jobs.AlignStats`): finite numbers in range, `speed` > 0, `diagnosis` one of
+  the documented values; unknown keys are dropped and anything else is `422`.
+- Results: floats must be finite, and the map's track list must equal the job's
+  (durations and offsets within 0.05 s, else `422 input_mismatch`). The result is validated
+  and applied in a worker thread, not on the event loop.
+- A spine item that is missing, dangling, empty, over 8 MiB, or unparseable contributes no
+  text (and keeps its index), as does everything past 64 MiB of spine per book; items are
+  parsed one at a time.
 
 ### Claim — `POST /api/worker/jobs/claim`
 
@@ -725,13 +767,14 @@ class SentenceIndex:                         # built from Sentence rows or Sente
     to_time(pos: SentencePos) -> float | None       # unmatched → end of previous matched
 
 xpointer_spine_index(xpointer: str) -> int | None   # DocFragment[k] → k - 1
-xpointer_to_text(xpointer: str, spine_item_xhtml: bytes) -> TextPos   # M4: NotImplementedError
-text_to_xpointer(pos: TextPos, spine_item_xhtml: bytes) -> str        # M4: NotImplementedError
+xpointer_to_text(xpointer: str, spine_item_xhtml: bytes) -> TextPos   # M3, via lectern.textmap
+text_to_xpointer(pos: TextPos, spine_item_xhtml: bytes) -> str        # M3, via lectern.textmap
 ```
 
-The implemented parts are exercised by `tests/test_contracts.py` against the fixture map; the
-two xpointer functions raise `NotImplementedError` until milestone 4 and that is tested too, so
-the first real implementation has to update the test on purpose.
+All of it is exercised by `tests/test_contracts.py` against the fixture map. The xpointer
+functions (milestone 3) follow crengine's path conventions and round-trip every character of
+the fixture story and of generated XHTML (`tests/test_align.py`); unresolvable paths clamp to
+the nearest position instead of failing.
 
 ## Fixture
 
