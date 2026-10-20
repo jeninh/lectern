@@ -298,7 +298,7 @@ def test_chapter_and_track_boundaries(tmp_path):
 
 def test_unsupported_audio_and_unmatched_only_are_refused(tmp_path):
     m = load_sentence_map(MAP)
-    with pytest.raises(OverlayError, match="cannot be embedded"):
+    with pytest.raises(OverlayError, match="can't be embedded"):
         build_read_aloud_epub(
             EPUB, tmp_path / "x.epub", m.sentences,
             [OverlayTrack(EXCERPT, "audio/flac", 0.0, 77.0)], modified=NOW,
@@ -307,7 +307,7 @@ def test_unsupported_audio_and_unmatched_only_are_refused(tmp_path):
         s.model_copy(update={"matched": False, "audio_start_s": None, "audio_end_s": None})
         for s in m.sentences
     ]
-    with pytest.raises(OverlayError, match="no sentence has audio"):
+    with pytest.raises(OverlayError, match="No sentence has audio"):
         build_read_aloud_epub(
             EPUB, tmp_path / "y.epub", unmatched, _fixture_tracks(m), modified=NOW
         )

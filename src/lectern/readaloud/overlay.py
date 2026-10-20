@@ -639,7 +639,8 @@ def build_read_aloud_epub(
     for t in tracks:
         if t.media_type not in AUDIO_EXTENSIONS:
             raise OverlayError(
-                f"audio type {t.media_type} cannot be embedded; EPUB 3 readers need MP3 or AAC (M4A)"
+                f"Audio in {t.media_type} can't be embedded in an EPUB; "
+                "EPUB 3 readers need MP3 or AAC (M4A) tracks."
             )
     report = OverlayReport()
     with zipfile.ZipFile(source) as zin:
@@ -734,7 +735,7 @@ def build_read_aloud_epub(
             report.smil[smil_name] = doc_name
 
         if not overlay_ms:
-            raise OverlayError("no sentence has audio to play")
+            raise OverlayError("No sentence has audio to play yet.")
         report.overlays = len(overlay_ms)
 
         if epub2:

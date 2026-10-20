@@ -5,8 +5,10 @@ uploads), 3 (alignment workers) and 4 (positions and read-aloud) build on. Step 
 database tables (migration `0005`), the sentence-map schema (`lectern.sentence_map`), the
 position interface (`lectern.positions`), the visibility predicates (`lectern.access`), the
 trusted-proxy client-address rule (`lectern.security.proxy`, **implemented**), and this
-document. **The other HTTP routes below are not implemented yet**; they are the contract the
-milestones implement.
+document. Milestone 4 implements the sentences, progress (web and audio sources), spine text,
+and read-aloud routes below (see [`read-aloud.md`](read-aloud.md)), plus an interim copy of the
+milestone 2 track list and stream in `lectern.routes.media`. **The other HTTP routes are not
+implemented yet**; they are the contract the milestones implement.
 
 Conventions used throughout:
 
@@ -211,9 +213,33 @@ Query, exactly one of:
 }
 ```
 
-Sentence text is not returned; clients take it from the EPUB with the same normalisation (the
-rules are deliberately simple enough to reimplement in the web reader). `count` is `0` and
-`sentences` is `[]` for a work without a sentence map.
+Sentence text is not returned; clients take it from the spine text route below (or from the
+EPUB with the same normalisation). `count` is `0` and `sentences` is `[]` for a work without a
+sentence map. Implemented in milestone 4; a request with none or several of the three forms is
+`400`.
+
+### Spine text — `GET /api/works/{work_id}/text/{spine_index}` (milestone 4)
+
+The normalised text of one spine item of the aligned EPUB (the first EPUB if there is no
+alignment), split into display blocks, so the web read-along needs no EPUB parsing and no
+markup reaches the browser:
+
+```json
+{
+  "work_id": 12, "file_id": 31, "spine_index": 2, "length": 29283,
+  "blocks": [{"kind": "p", "start": 0, "text": "One dollar and eighty-seven cents. …"}]
+}
+```
+
+`start` is the code-point offset of the block's first character in the spine item's normalised
+text (the sentence-map coordinates); `kind` is `p`, `h1`–`h6`, `li`, `quote`, or `pre`. Blocks
+are the text grouped by nearest block-level element; the single spaces between blocks are not
+in any block. `404` for an invisible work, a work without an EPUB, or an index past the spine.
+
+Note on the frozen normalisation: the parser keeps unresolved named entity references
+(`&nbsp;`, `&mdash;` in EPUB 2 files without a loaded DTD) as entity nodes, and
+`normalize_spine_text` skips them, so `a&nbsp;b` normalises to `ab`. Aligners see the same text,
+so maps stay consistent; the narrated EPUB writes those entities out as characters.
 
 ### Progress — `GET` / `PUT /api/works/{work_id}/progress`
 
@@ -259,24 +285,42 @@ Response is the same shape as `GET`. Rules:
 - `404` if the work is not visible; `source: "koreader"` is rejected (`422`), that source is only
   written by the sync projection.
 
+Status: `GET` and `PUT` are implemented (milestone 4) and used by the web read-along
+(`source: web` while reading along, `audio` in listen-only mode). A `sentence_n` past the last
+sentence is `422`; `offset` is clamped to the sentence. The KOReader projection (xpointer ↔
+sentence, `lectern.positions.xpointer_to_text`) is not implemented yet.
+
 ### Read-aloud EPUB — `GET /library/works/{work_id}/read-aloud.epub`
 
 The work's EPUB with EPUB 3 Media Overlays added: every sentence wrapped in
 `<span id="s{n}">`, one SMIL `<par>` per matched sentence pointing at the embedded audio
-tracks, so Thorium, Apple Books, and KOReader can play it with highlighting. Decisions:
+tracks. Readers with Media Overlay support (Thorium; BookFusion and Colibrio are reported to
+work) play it with highlighting. **KOReader does not support Media Overlays and Apple Books
+plays read-aloud only for fixed-layout books**; both open the file as an ordinary EPUB (see
+[`read-aloud.md`](read-aloud.md#which-apps-play-it)). EPUB 2 sources are upgraded to EPUB 3.
+Decisions:
 
 - The audio is embedded, so the file is roughly EPUB + audio size; it is generated on first
   request and cached **next to the work**, at
   `<LECTERN_LIBRARY_DIR>/<work.dir_path>/derived/read-aloud.epub` (i.e.
-  `/library/<Author>/<Title>/derived/`), keyed by `(epub_sha256, audio_fingerprint)` in a
-  sidecar `derived/read-aloud.json` and regenerated when either changes. Only sentence maps
-  live under `<LECTERN_DATA_DIR>/align/`; everything derived from a work's own files lives in
-  its `derived/` directory so it travels (and is deleted) with the work. Scanners never ingest
+  `/library/<Author>/<Title>/derived/`), keyed by `(epub_sha256, audio_fingerprint)` plus a
+  generator version and a SHA-256 over the sentence list (so a re-alignment of the same files
+  also rebuilds) in a sidecar `derived/read-aloud.json`. It is published by writing a temporary
+  file and renaming it, never rewritten in place. Only sentence maps live under
+  `<LECTERN_DATA_DIR>/align/`; everything derived from a work's own files lives in its
+  `derived/` directory so it travels (and is deleted) with the work. Scanners never ingest
   from `derived/`.
-- `409 no_alignment` unless `alignments.status` is `succeeded`. Generation is synchronous
-  (seconds for a typical work); if it turns out to be slow, milestone 4 may move it to a
-  `readaloud` job kind and answer `202` with a job id.
-- Audited as a download, same as the plain EPUB. Auth and visibility as for downloads.
+- `409` with `no_alignment` unless `alignments.status` is `succeeded`, `alignment_stale` when
+  the alignment is stale or its EPUB/audio no longer match the work's files, `no_audio`, or
+  `missing_file`. A build that cannot produce a valid file (for example FLAC audio, which EPUB
+  3 cannot embed) is `422` with the reason. Generation on download is synchronous; the web app
+  instead starts it in the background with `POST /api/works/{work_id}/read-aloud` (`202`, CSRF)
+  and polls `GET /api/works/{work_id}/read-aloud`:
+  `{"work_id", "status": "unavailable" | "not_generated" | "generating" | "ready" | "failed",
+  "reason", "message", "readalong", "alignment", "download_url", "size", "generated_at",
+  "duration_s"}`. Both need visibility of the work, like the download.
+- Audited as a download (`target = "read-aloud:<work_id>"`), same as the plain EPUB. Auth and
+  visibility as for the web download (session; OPDS does not list it yet).
 - The derived file has a different `partial_md5` and different DOM paths from the original, so
   KOReader treats it as a separate document. Milestone 4 maps both documents' xpointers onto the
   same sentence coordinates; until then progress from the read-aloud copy is not merged.

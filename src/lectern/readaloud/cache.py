@@ -331,6 +331,7 @@ def _message(exc: BaseException) -> str:
     if isinstance(exc, Unavailable):
         return exc.message
     if isinstance(exc, OverlayError):
-        return str(exc)
+        text = str(exc)
+        return text[:1].upper() + text[1:]
     log.error("read-aloud build failed", exc_info=exc)
     return "The read-aloud EPUB could not be built; see the server log."

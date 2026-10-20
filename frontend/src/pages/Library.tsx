@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
+import { ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Download, Search as SearchIcon, Upload } from "../components/Icons";
 import { fold } from "../lib/fuzzy";
 import { Sheet } from "../components/Sheet";
@@ -266,6 +267,12 @@ function WorkDetail({ work }: { work: Work }) {
             ))}
           </tbody>
         </table>
+      </div>
+      <div>
+        <h3 style={{ margin: "0 0 8px", fontSize: 14, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Read-along</h3>
+        <ul className="slots">
+          <ReadAloudFormats work={work} active />
+        </ul>
       </div>
       <div className="hint">
         {showTech && <>Stored at <code style={{ fontFamily: "var(--font-mono)" }}>{work.dir_path}</code>. </>}Add it to KOReader from the OPDS catalogue on a <Link to="/app/devices">connected device</Link>.
