@@ -28,6 +28,7 @@ def user_json(u: User) -> dict:
         "is_active": u.is_active,
         "created_at": iso(u.created_at),
         "last_login_at": iso(u.last_login_at),
+        "download_cap_per_hour": u.download_cap_per_hour,
     }
 
 
@@ -45,7 +46,14 @@ def file_json(f: BookFile) -> dict:
     }
 
 
-def work_json(w: Work, files: list[BookFile] | None = None) -> dict:
+def work_json(
+    w: Work,
+    files: list[BookFile] | None = None,
+    audio: tuple[int, float] | None = None,
+    position: dict | None = None,
+) -> dict:
+    """``audio`` is (track count, total seconds); ``position`` the caller's canonical
+    position summary (web reader or audio player), see routes.api.core."""
     return {
         "id": w.id,
         "title": w.title,
@@ -64,6 +72,8 @@ def work_json(w: Work, files: list[BookFile] | None = None) -> dict:
         "created_at": iso(w.created_at),
         "updated_at": iso(w.updated_at),
         "files": [file_json(f) for f in (files if files is not None else w.files)],
+        "audio": {"tracks": audio[0], "duration_s": round(audio[1], 3)} if audio else None,
+        "position": position,
     }
 
 
@@ -98,6 +108,7 @@ def app_password_json(k: AppPassword) -> dict:
         "created_at": iso(k.created_at),
         "last_used_at": iso(k.last_used_at),
         "revoked_at": iso(k.revoked_at),
+        "download_cap_per_hour": k.download_cap_per_hour,
     }
 
 

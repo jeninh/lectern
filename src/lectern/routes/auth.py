@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import func, select
 
 from lectern.models import LoginAttempt, Passkey, User, utcnow
-from lectern.security import audit
+from lectern.security import alerts, audit
 from lectern.security.deps import AuthOptional, DbDep, SettingsDep
 from lectern.security.passwords import hash_password, needs_rehash, verify_password
 from lectern.security.sessions import (
@@ -115,10 +115,12 @@ def login_password(
     _record_attempt(db, username, True)
     token = create_session(db, user, request, settings)
     audit.record(db, "login.success", actor_user_id=user.id, ip=ip, detail="password")
+    device_token = alerts.on_sign_in(db, request, user, "a password")
     db.commit()
     request.app.state.limiters["login"].reset(ip or "?")
     response = RedirectResponse(_safe_next(next), status_code=status.HTTP_303_SEE_OTHER)
     set_session_cookie(response, token, settings)
+    alerts.set_device_cookie(response, device_token, settings)
     return response
 
 
@@ -174,9 +176,11 @@ async def passkey_login_verify(request: Request, settings: SettingsDep, db: DbDe
     passkey.last_used_at = utcnow()
     token = create_session(db, user, request, settings)
     audit.record(db, "login.success", actor_user_id=user.id, ip=ip, detail="passkey")
+    device_token = alerts.on_sign_in(db, request, user, "a passkey")
     db.commit()
     resp = JSONResponse({"ok": True, "next": _safe_next(request.query_params.get("next"))})
     set_session_cookie(resp, token, settings)
+    alerts.set_device_cookie(resp, device_token, settings)
     resp.delete_cookie(WA_COOKIE, path="/login")
     return resp
 

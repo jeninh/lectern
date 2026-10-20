@@ -8,6 +8,7 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse
 
+from lectern.access import visible_works
 from lectern.models import Work
 from lectern.routes.library import (
     PAGE_SIZE,
@@ -17,6 +18,7 @@ from lectern.routes.library import (
     search_works,
 )
 from lectern.security.deps import DbDep, OpdsUser, SettingsDep
+from lectern.security.downloads import Device
 from lectern.security.sessions import client_ip
 
 router = APIRouter(prefix="/opds")
@@ -127,7 +129,7 @@ def _acquisition(
 @router.get("/all", include_in_schema=False)
 def all_books(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
     page = max(1, page)
-    works, total = search_works(db, None, page)
+    works, total = search_works(db, user, None, page)
     return _acquisition("All books", f"/opds/all?page={page}", works, page, total)
 
 
@@ -137,10 +139,11 @@ def recent(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
     from sqlalchemy.orm import selectinload
 
     page = max(1, page)
-    total = db.scalar(select(func.count()).select_from(Work)) or 0
+    total = db.scalar(select(func.count()).select_from(Work).where(visible_works(user))) or 0
     works = db.scalars(
         select(Work)
         .options(selectinload(Work.files))
+        .where(visible_works(user))
         .order_by(Work.created_at.desc(), Work.id.desc())
         .offset((page - 1) * PAGE_SIZE)
         .limit(PAGE_SIZE)
@@ -166,7 +169,7 @@ def search(user: OpdsUser, db: DbDep, q: str = "", page: int = 1) -> Response:
 
     page = max(1, page)
     q = q.strip()[:200]
-    works, total = search_works(db, q or None, page)
+    works, total = search_works(db, user, q or None, page)
     return _acquisition(
         f"Search: {q}",
         f"/opds/search?page={page}&q={quote(q)}",
@@ -179,10 +182,11 @@ def search(user: OpdsUser, db: DbDep, q: str = "", page: int = 1) -> Response:
 
 @router.get("/works/{work_id}/cover.jpg", include_in_schema=False)
 def cover(user: OpdsUser, db: DbDep, settings: SettingsDep, work_id: int):
-    return FileResponse(resolve_cover(db, settings, work_id), media_type="image/jpeg")
+    return FileResponse(resolve_cover(db, settings, work_id, user), media_type="image/jpeg")
 
 
 @router.get("/files/{file_id}/download", include_in_schema=False)
 def download(request: Request, user: OpdsUser, db: DbDep, settings: SettingsDep, file_id: int):
-    book, path = resolve_file(db, settings, file_id)
-    return download_response(db, book, path, user, client_ip(request), "opds")
+    book, path = resolve_file(db, settings, file_id, user)
+    device = Device.app_password(request.state.app_password)
+    return download_response(db, settings, book, path, user, device, client_ip(request), "opds")

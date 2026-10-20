@@ -9,9 +9,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from lectern.models import Passkey, Session, utcnow
-from lectern.routes.api.serializers import passkey_json, session_json
-from lectern.security import audit
+from lectern.models import KnownDevice, Passkey, Session, utcnow
+from lectern.routes.api.serializers import iso, passkey_json, session_json
+from lectern.security import audit, downloads
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 from lectern.security.passwords import hash_password, validate_password_strength, verify_password
 from lectern.security.sessions import client_ip, revoke_all_sessions
@@ -42,7 +42,36 @@ def overview(auth: Auth, db: DbDep, settings: SettingsDep) -> dict:
         "totp_enabled": auth.user.totp_enabled,
         "has_password": bool(auth.user.password_hash),
         "sessions": [session_json(s, auth.session.id) for s in sessions],
+        "downloads": downloads.usage(db, auth.user, settings),
+        "known_devices": [
+            {
+                "id": d.id,
+                "label": d.label,
+                "first_seen_at": iso(d.first_seen_at),
+                "last_seen_at": iso(d.last_seen_at),
+                "last_ip": d.last_ip,
+            }
+            for d in db.scalars(
+                select(KnownDevice)
+                .where(KnownDevice.user_id == auth.user.id)
+                .order_by(KnownDevice.last_seen_at.desc())
+            )
+        ],
     }
+
+
+@router.post("/known-devices/{device_id}/forget")
+def forget_device(request: Request, auth: AuthCsrf, db: DbDep, device_id: int) -> dict:
+    """Forget a recognised browser: its next sign-in alerts as a new device again."""
+    row = db.get(KnownDevice, device_id)
+    if row is None or row.user_id != auth.user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    db.delete(row)
+    audit.record(
+        db, "device.forget", actor_user_id=auth.user.id, target=row.label, ip=client_ip(request)
+    )
+    db.commit()
+    return {"ok": True}
 
 
 class PasswordChange(BaseModel):

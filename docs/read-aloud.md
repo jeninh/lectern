@@ -148,7 +148,9 @@ progress from it is not merged with the plain EPUB's.
   background thread when started from the web app. Very large audiobooks take as long as
   copying their audio once.
 - Not in this milestone: KOReader xpointer ↔ sentence projection (`lectern.positions`), merging
-  progress across the plain and narrated EPUBs, an OPDS link to the narrated EPUB, and the
-  audiobook player/upload of milestone 2. Until milestone 2 lands, `lectern.routes.media`
-  serves the contract's track list and range streaming (session auth only) so the read-along
-  works; milestone 2 replaces that module.
+  progress across the plain and narrated EPUBs, and an OPDS link to the narrated EPUB. The
+  track list, range streaming, sentences, and progress the read-along uses are milestone 2's
+  (`lectern.routes.api.works`, `lectern.routes.library`), which replaced this milestone's
+  interim `lectern.routes.media`. The narrated EPUB download accepts OPDS app passwords and
+  counts against the hourly download caps. The plain web reader is at `/app/reader/<id>`;
+  read-along keeps `/app/read/<id>`.

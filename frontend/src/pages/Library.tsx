@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
-import { Book, Close, Download, Search as SearchIcon, Upload } from "../components/Icons";
+import { Book, Close, Download, Headphones, Plus, Reader, Search as SearchIcon, Shelf as ShelfIcon, Upload } from "../components/Icons";
+import { OverflowMenu } from "../components/Menu";
+import { del, get, patch, post, put } from "../lib/api";
+import { clock, usePlayer } from "../lib/player";
+import type { MatchSuggestion, Shelf, ShelfGrant, User } from "../lib/types";
 import { fold } from "../lib/fuzzy";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -55,7 +59,7 @@ const STATUS_LABEL: Record<Status, string> = { all: "All", reading: "Reading", u
 const SORT_LABEL: Record<Sort, string> = { title: "Title", author: "Author", added: "Newest" };
 
 export function LibraryPage() {
-  const { works, worksLoaded, me, refreshLibrary, canUpload, pickBooks } = useStore();
+  const { works, worksLoaded, me, refreshLibrary, canUpload, pickBooks, toast } = useStore();
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
   const sort = (params.get("sort") as Sort) || "title";
@@ -65,10 +69,37 @@ export function LibraryPage() {
   const nav = useNavigate();
   const loc = useLocation();
   const input = useRef<HTMLInputElement>(null);
+  const shelfId = params.get("shelf");
+  const [shelves, setShelves] = useState<Shelf[]>([]);
+  const [canCreateShelf, setCanCreateShelf] = useState(false);
+  const [shelfWorks, setShelfWorks] = useState<Set<number> | null>(null);
+  const [suggestions, setSuggestions] = useState<MatchSuggestion[]>([]);
+  const [manageShelves, setManageShelves] = useState(false);
+  const review = params.get("review") === "1";
+
+  const loadShelves = useCallback(async () => {
+    const d = await get<{ shelves: Shelf[]; can_create: boolean }>("/api/shelves");
+    setShelves(d.shelves);
+    setCanCreateShelf(d.can_create);
+  }, []);
+  const loadSuggestions = useCallback(async () => {
+    if (!canUpload) return;
+    setSuggestions((await get<{ suggestions: MatchSuggestion[] }>("/api/suggestions")).suggestions);
+  }, [canUpload]);
 
   useEffect(() => {
     refreshLibrary().catch(() => {});
-  }, [refreshLibrary]);
+    loadShelves().catch(() => {});
+  }, [refreshLibrary, loadShelves]);
+  useEffect(() => {
+    loadSuggestions().catch(() => {});
+  }, [loadSuggestions, works.length]);
+  useEffect(() => {
+    if (!shelfId) return setShelfWorks(null);
+    get<{ works: Work[] }>(`/api/shelves/${shelfId}`)
+      .then((d) => setShelfWorks(new Set(d.works.map((w) => w.id))))
+      .catch(() => setShelfWorks(new Set()));
+  }, [shelfId, shelves]);
 
   const counts = useMemo(() => {
     const c: Record<Status, number> = { all: works.length, reading: 0, unread: 0, finished: 0 };
@@ -79,6 +110,7 @@ export function LibraryPage() {
   const filtered = useMemo(() => {
     const needle = fold(q.trim());
     let list = needle ? works.filter((w) => fold(`${w.title} ${w.author} ${w.isbn ?? ""}`).includes(needle)) : works.slice();
+    if (shelfWorks) list = list.filter((w) => shelfWorks.has(w.id));
     if (status !== "all") list = list.filter((w) => statusOf(w) === status);
     const by: Record<Sort, (a: Work, b: Work) => number> = {
       title: (a, b) => a.sort_title.localeCompare(b.sort_title),
@@ -86,7 +118,7 @@ export function LibraryPage() {
       added: (a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""),
     };
     return list.sort(by[sort]);
-  }, [works, q, sort, status]);
+  }, [works, q, sort, status, shelfWorks]);
 
   const selected = id ? works.find((w) => w.id === Number(id)) ?? null : null;
   const setParam = (k: string, v: string, dflt: string) => {
@@ -96,16 +128,38 @@ export function LibraryPage() {
     setParams(next, { replace: true });
   };
   const open = (w: Work) => nav(`/app/library/${w.id}${loc.search}`);
-  const filtering = !!q || status !== "all";
+  const filtering = !!q || status !== "all" || !!shelfId;
+  const reader = me?.user.role === "reader";
 
   return (
     <>
       <PageTitle
         sub={worksLoaded ? `${works.length} ${works.length === 1 ? "book" : "books"} · ${counts.reading} reading · ${counts.finished} finished` : undefined}
-        aside={canUpload ? <button className="btn ghost" onClick={pickBooks}><Upload /> Upload</button> : undefined}
+        aside={
+          <>
+            {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
+            {canUpload && <button className="btn ghost" onClick={pickBooks}><Upload /> Upload</button>}
+          </>
+        }
       >
         Library
       </PageTitle>
+      {suggestions.length > 0 && (
+        <div className="alert review-banner" role="status">
+          <span><strong>{suggestions.length === 1 ? "One upload" : `${suggestions.length} uploads`}</strong> might belong to a book you already have.</span>
+          <button className="btn sm" onClick={() => setParam("review", "1", "")}>Review</button>
+        </div>
+      )}
+      {shelves.length > 0 && (
+        <div className="chips shelf-chips" role="group" aria-label="Shelves">
+          {!reader && <button className="chip subtle" aria-pressed={!shelfId} onClick={() => setParam("shelf", "", "")}>Everything</button>}
+          {shelves.map((sh) => (
+            <button key={sh.id} className="chip subtle" aria-pressed={shelfId === String(sh.id)} onClick={() => setParam("shelf", shelfId === String(sh.id) ? "" : String(sh.id), "")}>
+              <ShelfIcon width={14} height={14} /> {sh.name} <span className="n">{sh.work_count}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="filter-bar" role="search" aria-label="Library">
         <div className="filter-input">
           <SearchIcon aria-hidden="true" />
@@ -162,16 +216,22 @@ export function LibraryPage() {
       {!worksLoaded ? (
         <div className="book-grid" aria-busy="true" aria-label="Loading">{Array.from({ length: 6 }, (_, i) => <div key={i} className="book skeleton"><div className="cover" /></div>)}</div>
       ) : works.length === 0 ? (
-        <EmptyState icon={<Book />} title="No books yet" action={canUpload ? <button className="btn primary" onClick={pickBooks}><Upload /> Upload EPUBs</button> : undefined}>
-          Upload EPUBs or drop them into <code>{me?.inbox_path ?? "the inbox"}</code>. Lectern reads their metadata, files them under author and title, and lists them here.
-        </EmptyState>
+        reader ? (
+          <EmptyState icon={<ShelfIcon />} title="No shelves shared with you yet">
+            Your household shares books with you shelf by shelf. Ask the owner to add you to one.
+          </EmptyState>
+        ) : (
+          <EmptyState icon={<Book />} title="No books yet" action={canUpload ? <button className="btn primary" onClick={pickBooks}><Upload /> Upload books</button> : undefined}>
+            Upload EPUBs and audiobooks (M4B or MP3) or drop them into <code>{me?.inbox_path ?? "the inbox"}</code>. Lectern reads their metadata, files them under author and title, and lists them here.
+          </EmptyState>
+        )
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={<SearchIcon />}
           title={q ? `Nothing matches “${q}”` : `No ${STATUS_LABEL[status].toLowerCase()} books`}
           action={<button className="btn" onClick={() => setParams(new URLSearchParams(sort === "title" ? {} : { sort }), { replace: true })}>Clear filters</button>}
         >
-          {q ? "Try a shorter word, an author’s surname, or another status." : "Books move here as KOReader reports progress."}
+          {q ? "Try a shorter word, an author’s surname, or another status." : shelfId ? "This shelf has nothing in this view yet." : "Books move here as KOReader reports progress."}
         </EmptyState>
       ) : view === "grid" ? (
         <ul className="book-grid" aria-label="Books">
@@ -183,7 +243,7 @@ export function LibraryPage() {
                   {w.progress && <ProgressRing value={w.progress.percentage} />}
                 </span>
                 <strong><Highlight text={w.title} q={q} /></strong>
-                <span><Highlight text={w.author} q={q} /></span>
+                <span><Highlight text={w.author} q={q} />{w.audio && <Headphones className="has-audio" aria-label="Has audiobook" />}</span>
               </button>
             </li>
           ))}
@@ -207,7 +267,19 @@ export function LibraryPage() {
       )}
 
       <Sheet open={!!selected} onClose={() => nav(`/app/library${loc.search}`)} title={selected?.title ?? ""}>
-        {selected && <WorkDetail work={selected} />}
+        {selected && <WorkDetail work={selected} shelves={shelves} onShelvesChanged={() => loadShelves().catch(() => {})} />}
+      </Sheet>
+      <Sheet open={manageShelves} onClose={() => setManageShelves(false)} title="Shelves" labelledBy="shelves-title">
+        <ShelvesManager shelves={shelves} canCreate={canCreateShelf} reload={() => loadShelves().catch(() => {})} />
+      </Sheet>
+      <Sheet open={review} onClose={() => setParam("review", "", "")} title="Review matches" labelledBy="review-title">
+        <SuggestionReview
+          items={suggestions}
+          onResolved={async (msg) => {
+            toast(msg);
+            await Promise.all([loadSuggestions(), refreshLibrary()]).catch(() => {});
+          }}
+        />
       </Sheet>
     </>
   );
@@ -220,9 +292,43 @@ const ListIcon = () => (
   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" /></svg>
 );
 
-function WorkDetail({ work }: { work: Work }) {
+function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: Shelf[]; onShelvesChanged: () => void }) {
   const p = work.progress;
-  const showTech = !!useStore().me?.preferences.show_technical_details;
+  const { me, canUpload, works, toast, refreshLibrary, now } = useStore();
+  const player = usePlayer();
+  const nav = useNavigate();
+  const showTech = !!me?.preferences.show_technical_details;
+  const ebook = work.files.find((f) => f.kind === "ebook");
+  const pos = work.position;
+  const editable = shelves.filter((sh) => sh.permission !== "view" && !sh.smart);
+  const [member, setMember] = useState<Set<number> | null>(null);
+  const [merging, setMerging] = useState(false);
+
+  useEffect(() => {
+    if (!editable.length) return;
+    Promise.all(editable.map((sh) => get<{ works: Work[] }>(`/api/shelves/${sh.id}`).then((d) => [sh.id, d.works.some((w) => w.id === work.id)] as const)))
+      .then((pairs) => setMember(new Set(pairs.filter(([, on]) => on).map(([id]) => id))))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [work.id, shelves.length]);
+
+  const toggleShelf = async (sh: Shelf) => {
+    const on = member?.has(sh.id);
+    try {
+      if (on) await del(`/api/shelves/${sh.id}/items/${work.id}`);
+      else await post(`/api/shelves/${sh.id}/items`, { work_id: work.id });
+      setMember((m) => {
+        const n = new Set(m);
+        if (on) n.delete(sh.id);
+        else n.add(sh.id);
+        return n;
+      });
+      onShelvesChanged();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
+
   return (
     <div className="stack" style={tintStyle(work)}>
       <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 18 }}>
@@ -234,30 +340,47 @@ function WorkDetail({ work }: { work: Work }) {
             {work.published && <span className="badge">{work.published.slice(0, 4)}</span>}
             {work.isbn && <span className="badge">ISBN {work.isbn}</span>}
             {work.publisher && <span className="badge">{work.publisher}</span>}
+            {work.audio && <span className="badge"><Headphones width={13} height={13} /> {clock(work.audio.duration_s)}</span>}
           </div>
+          <div className="row">
+            {ebook && <button className="btn primary" onClick={() => nav(`/app/reader/${work.id}`)}><Reader /> {pos?.source === "web" || p ? "Continue reading" : "Read"}</button>}
+            {work.audio && (
+              <button className={`btn ${ebook ? "" : "primary"}`} onClick={() => { player.open(work, { autoplay: true }); }}>
+                <Headphones /> {pos?.audio_s ? `Listen from ${clock(pos.audio_s)}` : "Listen"}
+              </button>
+            )}
+          </div>
+          {pos && (
+            <div>
+              <div className="progress-bar"><span style={{ width: `${Math.round((pos.fraction ?? 0) * 100)}%` }} /></div>
+              <div className="hint" style={{ marginTop: 6 }}>
+                <strong style={{ color: "var(--tint)" }}>{percent(pos.fraction)}</strong> · {pos.source === "audio" ? "listening" : "reading"} on {pos.device || "the web"} · {relativeTime(pos.received_at, now)}
+              </div>
+            </div>
+          )}
           {p ? (
             <div>
-              <div className="progress-bar"><span style={{ width: `${Math.round(p.percentage * 100)}%` }} /></div>
+              {!pos && <div className="progress-bar"><span style={{ width: `${Math.round(p.percentage * 100)}%` }} /></div>}
               <div className="hint" style={{ marginTop: 6 }}>
-                <strong style={{ color: "var(--tint)" }}>{percent(p.percentage)}</strong> · {p.device || p.sync_key_label || "device"} · {relativeTime(p.updated_at)}
+                KOReader: <strong style={{ color: "var(--tint)" }}>{percent(p.percentage)}</strong> · {p.device || p.sync_key_label || "device"} · {relativeTime(p.updated_at, now)}
               </div>
             </div>
           ) : (
-            <div className="hint">Not started on any synced device.</div>
+            !pos && <div className="hint">Not started yet.</div>
           )}
         </div>
       </div>
       {work.description && <p style={{ margin: 0, color: "var(--ink-2)" }}>{work.description.length > 900 ? work.description.slice(0, 900) + "…" : work.description}</p>}
       <div>
-        <h3 style={{ margin: "0 0 8px", fontSize: 14, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Files</h3>
+        <h3 className="detail-h">Files</h3>
         <table className="list">
           <tbody>
-            {work.files.map((f) => (
+            {ebook && [ebook, ...work.files.filter((f) => f.kind === "ebook" && f !== ebook)].map((f) => (
               <tr key={f.id}>
                 <td>
                   <strong>EPUB</strong>
                   <div className="hint">{bytes(f.size)} · added {relativeTime(f.added_at)}</div>
-                  {showTech && f.partial_md5 && <div className="hint" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>Document id {f.partial_md5}</div>}
+                  {showTech && f.partial_md5 && <div className="hint mono">Document id {f.partial_md5}</div>}
                   {f.progress && <div className="hint">{percent(f.progress.percentage)} synced {absoluteTime(f.progress.updated_at)}</div>}
                 </td>
                 <td style={{ textAlign: "right" }}>
@@ -265,6 +388,17 @@ function WorkDetail({ work }: { work: Work }) {
                 </td>
               </tr>
             ))}
+            {work.audio && (
+              <tr>
+                <td>
+                  <strong>Audiobook</strong>
+                  <div className="hint">{work.audio.tracks} {work.audio.tracks === 1 ? "file" : "files"} · {clock(work.audio.duration_s)}</div>
+                </td>
+                <td style={{ textAlign: "right" }}>
+                  <Link className="btn sm" to="/app/listening" onClick={() => { if (player.work?.id !== work.id) player.open(work); }}>Files and downloads</Link>
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -274,9 +408,267 @@ function WorkDetail({ work }: { work: Work }) {
           <ReadAloudFormats work={work} active />
         </ul>
       </div>
+      {editable.length > 0 && (
+        <div>
+          <h3 className="detail-h">Shelves</h3>
+          <div className="chips" role="group" aria-label="Shelves for this book">
+            {editable.map((sh) => (
+              <button key={sh.id} className="chip subtle" aria-pressed={!!member?.has(sh.id)} onClick={() => toggleShelf(sh)} disabled={!member}>
+                {member?.has(sh.id) ? "✓ " : "+ "}{sh.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {canUpload && (
+        <div>
+          {merging ? (
+            <MergeForm work={work} works={works} onCancel={() => setMerging(false)} onDone={async (target) => {
+              setMerging(false);
+              toast(`Merged into ${target.title}`);
+              await refreshLibrary();
+              nav(`/app/library/${target.id}`);
+            }} />
+          ) : (
+            <button className="btn sm ghost" onClick={() => setMerging(true)}>Same book as another entry? Merge…</button>
+          )}
+        </div>
+      )}
       <div className="hint">
-        {showTech && <>Stored at <code style={{ fontFamily: "var(--font-mono)" }}>{work.dir_path}</code>. </>}Add it to KOReader from the OPDS catalogue on a <Link to="/app/devices">connected device</Link>.
+        {showTech && <>Stored at <code className="mono">{work.dir_path}</code>. </>}Add it to KOReader from the OPDS catalogue on a <Link to="/app/devices">connected device</Link>.
       </div>
+    </div>
+  );
+}
+
+function MergeForm({ work, works, onCancel, onDone }: { work: Work; works: Work[]; onCancel: () => void; onDone: (target: Work) => void }) {
+  const { toast } = useStore();
+  const [target, setTarget] = useState("");
+  const options = works.filter((w) => w.id !== work.id).sort((a, b) => a.sort_title.localeCompare(b.sort_title));
+  return (
+    <form
+      className="merge-form"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        const t = options.find((w) => String(w.id) === target);
+        if (!t) return;
+        try {
+          await post(`/api/works/${work.id}/merge`, { target_work_id: t.id });
+          onDone(t);
+        } catch (ex) {
+          toast((ex as Error).message, "error");
+        }
+      }}
+    >
+      <label className="field">
+        <span>Move this entry’s files into</span>
+        <select className="select" value={target} onChange={(e) => setTarget(e.target.value)} required data-autofocus>
+          <option value="">Choose a book…</option>
+          {options.map((w) => <option key={w.id} value={w.id}>{w.title} — {w.author}{w.audio ? " (audio)" : ""}</option>)}
+        </select>
+      </label>
+      <p className="hint">“{work.title}” disappears and its EPUB or audio joins the chosen book. Reading positions follow.</p>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
+        <button className="btn primary" disabled={!target}>Merge</button>
+      </div>
+    </form>
+  );
+}
+
+function SuggestionReview({ items, onResolved }: { items: MatchSuggestion[]; onResolved: (msg: string) => Promise<void> }) {
+  const { toast } = useStore();
+  if (!items.length) return <p className="hint">Nothing to review. Uploads that only loosely match a book you have show up here.</p>;
+  const act = async (s: MatchSuggestion, what: "merge" | "dismiss") => {
+    try {
+      await post(`/api/suggestions/${s.id}/${what}`);
+      await onResolved(what === "merge" ? `Merged into ${s.candidate.title}` : `Kept “${s.work.title}” separate`);
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
+  const label = (w: Work) => [w.files.some((f) => f.kind === "ebook") ? "EPUB" : null, w.audio ? `audio ${clock(w.audio.duration_s)}` : null].filter(Boolean).join(" + ");
+  return (
+    <ul className="review-list">
+      {items.map((s) => (
+        <li key={s.id} className="card">
+          <p className="sub" style={{ marginTop: 0 }}>Is the new upload the same book? <span className="badge">{Math.round(s.score)}% match · {s.reason}</span></p>
+          <div className="pair">
+            <div style={tintStyle(s.work)}>
+              <Cover work={s.work} />
+              <strong>{s.work.title}</strong>
+              <span className="hint">{s.work.author} · {label(s.work)} · new</span>
+            </div>
+            <div style={tintStyle(s.candidate)}>
+              <Cover work={s.candidate} />
+              <strong>{s.candidate.title}</strong>
+              <span className="hint">{s.candidate.author} · {label(s.candidate)}</span>
+            </div>
+          </div>
+          <div className="row" style={{ justifyContent: "flex-end" }}>
+            <button className="btn ghost" onClick={() => act(s, "dismiss")}>Different books</button>
+            <button className="btn primary" onClick={() => act(s, "merge")}>Same book — merge</button>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ShelvesManager({ shelves, canCreate, reload }: { shelves: Shelf[]; canCreate: boolean; reload: () => void }) {
+  const { toast, me } = useStore();
+  const [name, setName] = useState("");
+  const [open, setOpen] = useState<number | null>(null);
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await post("/api/shelves", { name: name.trim() });
+      setName("");
+      reload();
+    } catch (ex) {
+      toast((ex as Error).message, "error");
+    }
+  };
+  return (
+    <div className="stack">
+      <p className="sub" style={{ margin: 0 }}>
+        {me?.user.role === "reader"
+          ? "Shelves the household shares with you. You see only the books on them."
+          : "Group books, and share a shelf with readers in your household: readers see only the shelves they are given."}
+      </p>
+      {canCreate && (
+        <form className="row" onSubmit={create}>
+          <label className="sr-only" htmlFor="new-shelf">New shelf name</label>
+          <input id="new-shelf" className="input" style={{ flex: 1 }} placeholder="New shelf, e.g. Kids" value={name} onChange={(e) => setName(e.target.value)} maxLength={128} required />
+          <button className="btn primary"><Plus /> Create</button>
+        </form>
+      )}
+      {shelves.length === 0 ? (
+        <p className="hint">No shelves yet.</p>
+      ) : (
+        <ul className="shelf-list">
+          {shelves.map((sh) => (
+            <li key={sh.id}>
+              <div className="shelf-row">
+                <ShelfIcon />
+                <div>
+                  <strong>{sh.name}</strong>
+                  <div className="hint">
+                    {sh.work_count} {sh.work_count === 1 ? "book" : "books"}
+                    {sh.permission === "owner" ? ` · shared with ${sh.grant_count}` : ` · ${sh.owner ? `@${sh.owner}’s` : "shared"} · you can ${sh.permission}`}
+                  </div>
+                </div>
+                {sh.permission === "owner" && (
+                  <>
+                    <button className="btn sm ghost" aria-expanded={open === sh.id} onClick={() => setOpen(open === sh.id ? null : sh.id)}>Sharing</button>
+                    <OverflowMenu
+                      label={`More for ${sh.name}`}
+                      actions={[
+                        {
+                          label: "Rename",
+                          onSelect: async () => {
+                            const n = window.prompt("Shelf name", sh.name)?.trim();
+                            if (!n || n === sh.name) return;
+                            try {
+                              await patch(`/api/shelves/${sh.id}`, { name: n });
+                              reload();
+                            } catch (e) {
+                              toast((e as Error).message, "error");
+                            }
+                          },
+                        },
+                        {
+                          label: "Delete shelf",
+                          danger: true,
+                          onSelect: async () => {
+                            if (!window.confirm(`Delete “${sh.name}”? Books stay in the library; people it was shared with lose access to them.`)) return;
+                            try {
+                              await del(`/api/shelves/${sh.id}`);
+                              reload();
+                            } catch (e) {
+                              toast((e as Error).message, "error");
+                            }
+                          },
+                        },
+                      ]}
+                    />
+                  </>
+                )}
+              </div>
+              {open === sh.id && <Grants shelf={sh} onChanged={reload} />}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function Grants({ shelf, onChanged }: { shelf: Shelf; onChanged: () => void }) {
+  const { me, toast } = useStore();
+  const [grants, setGrants] = useState<ShelfGrant[] | null>(null);
+  const [users, setUsers] = useState<User[] | null>(null);
+  const [pick, setPick] = useState("");
+  const isOwner = me?.user.role === "owner";
+  const load = useCallback(() => get<{ grants: ShelfGrant[] }>(`/api/shelves/${shelf.id}/grants`).then((d) => setGrants(d.grants)), [shelf.id]);
+  useEffect(() => {
+    load().catch(() => setGrants([]));
+    if (isOwner) get<{ users: User[] }>("/api/admin/users").then((d) => setUsers(d.users)).catch(() => {});
+  }, [load, isOwner]);
+  const grant = async (userId: number, permission: "view" | "edit") => {
+    try {
+      await put(`/api/shelves/${shelf.id}/grants/${userId}`, { permission });
+      await load();
+      onChanged();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
+  const revoke = async (userId: number) => {
+    try {
+      await del(`/api/shelves/${shelf.id}/grants/${userId}`);
+      await load();
+      onChanged();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
+  const granted = new Set(grants?.map((g) => g.user.id));
+  const candidates = (users ?? []).filter((u) => u.role !== "owner" && u.id !== me?.user.id && u.is_active && !granted.has(u.id));
+  return (
+    <div className="grants">
+      {grants === null ? (
+        <div className="hint">Loading…</div>
+      ) : grants.length === 0 ? (
+        <div className="hint">Not shared with anyone.</div>
+      ) : (
+        <ul>
+          {grants.map((g) => (
+            <li key={g.user.id}>
+              <span><strong>{g.user.display_name}</strong> <span className="hint">@{g.user.username} · {g.user.role}</span></span>
+              <select className="select sm" value={g.permission} aria-label={`Access for ${g.user.username}`} onChange={(e) => grant(g.user.id, e.target.value as "view" | "edit")}>
+                <option value="view">Can view</option>
+                <option value="edit">Can add books</option>
+              </select>
+              <button className="btn sm ghost" onClick={() => revoke(g.user.id)}>Remove</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {isOwner ? (
+        candidates.length > 0 && (
+          <form className="row" onSubmit={(e) => { e.preventDefault(); if (pick) grant(Number(pick), "view").then(() => setPick("")); }}>
+            <label className="sr-only" htmlFor={`grant-${shelf.id}`}>Share with</label>
+            <select id={`grant-${shelf.id}`} className="select" style={{ flex: 1 }} value={pick} onChange={(e) => setPick(e.target.value)}>
+              <option value="">Share with…</option>
+              {candidates.map((u) => <option key={u.id} value={u.id}>{u.display_name} (@{u.username}, {u.role})</option>)}
+            </select>
+            <button className="btn sm" disabled={!pick}>Share</button>
+          </form>
+        )
+      ) : (
+        <p className="hint">Ask the owner to share this shelf with a reader.</p>
+      )}
     </div>
   );
 }

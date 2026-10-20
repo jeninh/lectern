@@ -9,6 +9,7 @@ export interface User {
   is_active: boolean;
   created_at: string | null;
   last_login_at: string | null;
+  download_cap_per_hour?: number | null;
 }
 
 export interface Me {
@@ -19,8 +20,9 @@ export interface Me {
   opds_url: string;
   sync_url: string;
   inbox_path: string;
-  counts: { works: number; users: number };
+  counts: { works: number; users: number; unread_notifications: number };
   preferences: Preferences;
+  upload: { max_bytes: number; chunk_bytes: number; max_active: number };
 }
 
 export interface Preferences {
@@ -70,8 +72,12 @@ export interface Work {
   created_at: string | null;
   updated_at: string | null;
   files: BookFile[];
+  audio: AudioSummary | null;
+  position: PositionSummary | null;
   progress?: Progress | null;
   progress_file_id?: number;
+  /** /api/continue: which record is newer, KOReader's or the canonical one. */
+  latest?: "koreader" | "canonical";
 }
 
 export interface SyncKey {
@@ -82,7 +88,9 @@ export interface SyncKey {
   revoked_at: string | null;
 }
 
-export type AppPassword = SyncKey;
+export interface AppPassword extends SyncKey {
+  download_cap_per_hour?: number | null;
+}
 
 export interface Passkey {
   id: number;
@@ -108,6 +116,8 @@ export interface SecurityOverview {
   totp_enabled: boolean;
   has_password: boolean;
   sessions: SessionInfo[];
+  downloads: { used: number; cap: number; device_cap: number; burst_count: number; burst_window_s: number };
+  known_devices: KnownDevice[];
 }
 
 export interface ActivityEvent {
@@ -164,6 +174,25 @@ export interface AlignmentSummary {
   coverage: number | null;
 }
 
+/** Canonical position summary (web reader / audio player) on list items. */
+export interface PositionSummary {
+  fraction: number | null;
+  source: "web" | "audio" | "koreader";
+  device: string;
+  received_at: string | null;
+  audio_s: number | null;
+}
+
+export interface AudioSummary {
+  tracks: number;
+  duration_s: number;
+}
+
+export interface Chapter {
+  title: string;
+  start_s: number;
+}
+
 export interface Track {
   id: number;
   position: number;
@@ -173,16 +202,35 @@ export interface Track {
   offset_s: number;
   size: number;
   sha256: string;
-  chapters: { title: string; start_s: number }[];
+  chapters: Chapter[];
   stream_url: string;
+  download_url: string;
+  variants: { low: { codec: string; bitrate_kbps: number; size: number; stream_url: string } | null };
 }
 
 export interface TracksResponse {
   work_id: number;
-  audio_fingerprint: string | null;
+  audio_fingerprint: string;
   total_duration_s: number;
   alignment: AlignmentSummary | null;
   tracks: Track[];
+  transcode: { status: string; progress: number | null; total: number } | null;
+}
+
+export interface TextPosition {
+  spine_index: number;
+  char: number;
+}
+
+export interface HandoffCandidate {
+  source: "web" | "audio" | "koreader";
+  device: string;
+  received_at: string | null;
+  percent: number | null;
+  raw: string | null;
+  text: TextPosition | null;
+  audio_s: number | null;
+  estimated: boolean;
 }
 
 export interface SentenceInfo {
@@ -219,13 +267,17 @@ export interface SpineTextResponse {
 export interface WorkProgressResponse {
   work_id: number;
   position: { sentence_n: number; offset: number } | null;
-  source: "koreader" | "web" | "audio" | null;
+  source: "web" | "audio" | null;
   raw: string | null;
   device: string | null;
   received_at: string | null;
-  text: { spine_index: number; char: number } | null;
+  text: TextPosition | null;
   audio_s: number | null;
   percent: number | null;
+  estimated: boolean;
+  count: number;
+  total_duration_s: number;
+  koreader: HandoffCandidate | null;
 }
 
 export type ReadAloudState = "unavailable" | "not_generated" | "generating" | "ready" | "failed";
@@ -241,4 +293,80 @@ export interface ReadAloudStatus {
   size: number | null;
   generated_at: string | null;
   duration_s: number | null;
+}
+
+export interface Shelf {
+  id: number;
+  name: string;
+  owner: string | null;
+  owner_id: number;
+  permission: "owner" | "edit" | "view";
+  work_count: number;
+  grant_count: number;
+  smart: boolean;
+}
+
+export interface ShelfGrant {
+  user: { id: number; username: string; display_name: string; role: Role };
+  permission: "view" | "edit";
+  granted_by: string | null;
+  created_at: string | null;
+}
+
+export interface Invite {
+  id: number;
+  role: "member" | "reader";
+  note: string;
+  state: "pending" | "used" | "expired" | "revoked";
+  created_by: string | null;
+  created_at: string | null;
+  expires_at: string | null;
+  used_at: string | null;
+  used_by: string | null;
+  revoked_at: string | null;
+  url?: string;
+  token?: string;
+}
+
+export interface AppNotification {
+  id: number;
+  kind: string;
+  severity: "info" | "warning";
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+  created_at: string | null;
+  read_at: string | null;
+}
+
+export interface UploadSessionInfo {
+  id: string;
+  filename: string;
+  media_type: string;
+  size: number;
+  chunk_size: number;
+  received_bytes: number;
+  status: "active" | "completed" | "cancelled" | "expired" | "failed";
+  error: string | null;
+  created_at: string | null;
+  expires_at: string | null;
+  inbox_name: string | null;
+  user?: string;
+}
+
+export interface MatchSuggestion {
+  id: number;
+  score: number;
+  reason: string;
+  created_at: string | null;
+  work: Work;
+  candidate: Work;
+}
+
+export interface KnownDevice {
+  id: number;
+  label: string;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  last_ip: string | null;
 }

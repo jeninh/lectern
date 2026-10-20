@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Join Lectern{% endblock %}
+{% block content %}
+<h1>Join this Lectern</h1>
+<p>{% if inviter %}{{ inviter }} invited you{% else %}You were invited{% endif %} as a <strong>{{ role }}</strong>{% if role == "reader" %}: you will see the shelves shared with you{% else %}: you will see the whole library{% endif %}. Choose your own username and password.</p>
+<form method="post" action="/invite/{{ token }}" class="card">
+  <label>Username <input name="username" required pattern="[a-z0-9][a-z0-9._-]{1,31}" value="{{ username or '' }}" autocomplete="username" autocapitalize="none"></label>
+  <label>Display name <input name="display_name" maxlength="128" value="{{ display_name or '' }}"></label>
+  <label>Password (12+ characters) <input name="password" type="password" required minlength="12" autocomplete="new-password"></label>
+  <label>Confirm password <input name="password_confirm" type="password" required minlength="12" autocomplete="new-password"></label>
+  <button type="submit">Create account</button>
+</form>
+<p class="muted">This link works once{% if expires %} and expires {{ expires }}{% endif %}. Add a passkey or two-factor codes under Security after signing in.</p>
+{% endblock %}
