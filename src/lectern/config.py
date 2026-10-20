@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Ingest
     inbox_poll_seconds: float = 5.0
     ingest_enabled: bool = True
+    upload_max_bytes: int = 200 * 1024 * 1024
 
     log_level: str = "INFO"
 

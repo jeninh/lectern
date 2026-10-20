@@ -10,3 +10,5 @@ build/
 /library/
 /.amp/in/
 .env
+src/lectern/static/app/
+frontend/node_modules/

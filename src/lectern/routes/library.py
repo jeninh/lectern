@@ -1,4 +1,4 @@
-"""Browser-facing library pages plus cover and download endpoints shared with OPDS."""
+"""Cover and download endpoints shared by the SPA (cookie auth) and OPDS (Basic auth)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from lectern.models import BookFile, User, Work
 from lectern.security import audit
 from lectern.security.deps import Auth, DbDep, SettingsDep
 from lectern.security.sessions import client_ip
-from lectern.templating import render
 
 router = APIRouter()
 
@@ -67,31 +66,11 @@ def download_response(
     return FileResponse(path, media_type=book.media_type, filename=filename)
 
 
-@router.get("/library", include_in_schema=False)
-def library_page(request: Request, auth: Auth, db: DbDep, q: str = "", page: int = 1):
-    request.state.auth = auth
-    page = max(1, page)
-    works, total = search_works(db, q or None, page)
-    pages = max(1, -(-total // PAGE_SIZE))
-    return render(
-        request,
-        "library.html",
-        {"works": works, "q": q, "page": page, "pages": pages, "total": total},
-    )
-
-
-@router.get("/library/works/{work_id}", include_in_schema=False)
-def work_page(request: Request, auth: Auth, db: DbDep, work_id: int):
-    request.state.auth = auth
-    work = db.scalar(select(Work).options(selectinload(Work.files)).where(Work.id == work_id))
-    if work is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    return render(request, "work.html", {"work": work})
-
-
 @router.get("/library/works/{work_id}/cover.jpg", include_in_schema=False)
 def work_cover(auth: Auth, db: DbDep, settings: SettingsDep, work_id: int):
-    return FileResponse(resolve_cover(db, settings, work_id), media_type="image/jpeg")
+    resp = FileResponse(resolve_cover(db, settings, work_id), media_type="image/jpeg")
+    resp.headers["Cache-Control"] = "private, max-age=3600"
+    return resp
 
 
 @router.get("/library/files/{file_id}/download", include_in_schema=False)
