@@ -117,7 +117,9 @@ def test_metadata_save_moves_folder_and_keeps_hashes_and_sync(client, owner, set
     assert ed["version"] == before["version"] + 1
     m = ed["metadata"]
     assert m["tags"] == ["SF", "Utopia"] and m["isbn"] == "9780060512750"
-    assert [a["sort"] for a in m["authors"]] == ["le guin, ursula k", "Author, Second"]
+    # Derived sort keys come back empty (the form shows a placeholder); chosen ones verbatim.
+    assert [a["sort"] for a in m["authors"]] == [None, "Author, Second"]
+    assert m["sort_title"] is None
     new_dir = settings.library_dir / "Ursula K. Le Guin" / "The Dispossessed An Ambiguous Utopia"
     assert ed["work"]["dir_path"] == "Ursula K. Le Guin/The Dispossessed An Ambiguous Utopia"
     assert not old_dir.exists() and (new_dir / "book.epub").is_file()
@@ -177,9 +179,18 @@ def test_stale_version_is_a_conflict_with_the_current_state(client, owner, setti
     )
     # Invalid fields are refused by the schema, with nothing applied.
     bad = patch(
-        client, csrf, wid, {"version": v + 1, "metadata": {**cur["metadata"], "isbn": "123"}}
+        client,
+        csrf,
+        wid,
+        {"version": v + 1, "metadata": {**cur["metadata"], "isbn": "ISBN-SECRET-123"}},
     )
     assert bad.status_code == 422
+    # The form can say which field to fix; the submitted value is never echoed back.
+    err = bad.json()
+    assert err["detail"] == "Invalid request"
+    assert err["errors"][0]["loc"] == ["metadata", "isbn"] and "ISBN" in err["errors"][0]["msg"]
+    assert "SECRET" not in bad.text
+    assert editor(client, wid)["metadata"]["isbn"] is None
 
 
 def test_concurrent_saves_one_wins(client, owner, settings):

@@ -227,8 +227,17 @@ def create_app(
             return JSONResponse(
                 {"message": "Invalid request"}, status_code=status.HTTP_400_BAD_REQUEST
             )
+        # Field and message only (never the submitted input), so forms can say what to fix.
+        errors = [
+            {
+                "loc": [str(p) for p in e.get("loc", ())][1:],
+                "msg": str(e.get("msg", ""))[:200],
+            }
+            for e in exc.errors()[:20]
+        ]
         return JSONResponse(
-            {"detail": "Invalid request"}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+            {"detail": "Invalid request", "errors": errors},
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
 
     return app

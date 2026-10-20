@@ -150,3 +150,30 @@ export const Shelf = (p: P) => (
 export const Link2 = (p: P) => (
   <svg {...base} {...p}><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" /><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" /></svg>
 );
+export const Folder = (p: P) => (
+  <svg {...base} {...p}><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" /></svg>
+);
+export const Pencil = (p: P) => (
+  <svg {...base} {...p}><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z" /><path d="m13.5 6.5 4 4" /></svg>
+);
+export const Trash = (p: P) => (
+  <svg {...base} {...p}><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12.5A1.5 1.5 0 0 0 8.5 21h7a1.5 1.5 0 0 0 1.5-1.5L18 7M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7" /></svg>
+);
+export const Retry = (p: P) => (
+  <svg {...base} {...p}><path d="M4 12a8 8 0 1 0 2.4-5.7L4 8.5" /><path d="M4 4v4.5h4.5" /></svg>
+);
+export const Undo = (p: P) => (
+  <svg {...base} {...p}><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg>
+);
+export const Sparkle = (p: P) => (
+  <svg {...base} {...p}><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6" /></svg>
+);
+export const Up = (p: P) => (
+  <svg {...base} {...p}><path d="m6 15 6-6 6 6" /></svg>
+);
+export const Down = (p: P) => (
+  <svg {...base} {...p}><path d="m6 9 6 6 6-6" /></svg>
+);
+export const Select = (p: P) => (
+  <svg {...base} {...p}><rect x="3.5" y="3.5" width="17" height="17" rx="4" /><path d="m8 12 3 3 5-6" /></svg>
+);

@@ -118,6 +118,28 @@ export function SecurityPage() {
           </div>
         </section>
 
+        {(me?.user.role === "owner" || me?.user.role === "member") && (
+          <section className="card" id="adding" aria-labelledby="add-h" data-highlight={hash === "adding" || undefined}>
+            <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+              <div>
+                <h2 id="add-h">File certain matches automatically</h2>
+                <p className="sub" id="add-sub">When an upload’s ISBN, or its exact title and author, matches a book you already have, add it without asking. Anything less certain still waits for your review. Off by default.</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                className="switch"
+                aria-checked={!!me?.preferences.auto_file_imports}
+                aria-labelledby="add-h"
+                aria-describedby="add-sub"
+                onClick={() => setPreference("auto_file_imports", !me?.preferences.auto_file_imports)}
+              >
+                <span aria-hidden="true" />
+              </button>
+            </div>
+          </section>
+        )}
+
         <section className="card" id="downloads" aria-labelledby="dl-h" data-highlight={hash === "downloads" || undefined}>
           <h2 id="dl-h">Downloads and alerts</h2>
           <p className="sub">

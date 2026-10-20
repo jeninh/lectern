@@ -492,3 +492,15 @@ def test_folder_of_mp3s_becomes_one_audiobook(client, owner, settings, tmp_path)
     r = file_it(client, csrf, imp2["id"], {"audio": "append"})
     assert r.status_code == 200
     assert len(client.get(f"/api/works/{wid}/tracks").json()["tracks"]) == 4
+
+
+def test_inbox_files_keep_series_narrators_and_tags(client, owner, settings):
+    """Books dropped into the inbox get the same detected metadata as reviewed uploads."""
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    epub_with_series(
+        settings.inbox_path / "tombs.epub", "The Tombs of Atuan", authors=["Ursula K. Le Guin"]
+    )
+    drain_inbox(settings)
+    (w,) = client.get("/api/library").json()["works"]
+    assert (w["series"], w["series_index"]) == ("Earthsea", 2)
+    assert w["narrators"] == ["Rob Inglis"] and w["tags"] == ["Fantasy"]

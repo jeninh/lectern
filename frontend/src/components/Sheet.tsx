@@ -11,9 +11,13 @@ interface Props {
   /** "sheet" slides from the side (bottom on phones); "dialog" is centred. */
   variant?: "sheet" | "dialog";
   labelledBy?: string;
+  /** Wider side sheet for editors (still full screen on phones). */
+  wide?: boolean;
+  /** Sticky action bar at the bottom of the sheet. */
+  footer?: ReactNode;
 }
 
-export function Sheet({ open, onClose, title, children, variant = "sheet", labelledBy = "sheet-title" }: Props) {
+export function Sheet({ open, onClose, title, children, variant = "sheet", labelledBy = "sheet-title", wide, footer }: Props) {
   const ref = useFocusTrap(open);
   useEffect(() => {
     if (!open) return;
@@ -44,9 +48,10 @@ export function Sheet({ open, onClose, title, children, variant = "sheet", label
     <>
       <div className="scrim" onClick={onClose} aria-hidden="true" />
       {variant === "sheet" ? (
-        <div className="sheet" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={ref} tabIndex={-1}>
+        <div className={`sheet${wide ? " wide" : ""}${footer ? " has-footer" : ""}`} role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={ref} tabIndex={-1}>
           {panel}
           {children}
+          {footer && <div className="sheet-foot">{footer}</div>}
         </div>
       ) : (
         <div className="dialog">

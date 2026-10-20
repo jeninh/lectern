@@ -515,6 +515,82 @@ Rules:
   checkable (`ck_upload_received`, `ck_upload_completed`). Parallel chunks would need indexed
   parts; a home uplink gains nothing from them.
 
+### Imports (review before filing) — `/api/imports`
+
+HTTP-free service in `lectern.imports`; the routes are thin wrappers, so a later automation
+client (for example an MCP server) calls the same functions with the same schemas. Every route
+is owner/member only, session + CSRF, and an import is visible only to its uploader (`404`
+otherwise). Machine-readable errors are `{"detail": "<code>", ...}`; validation errors are
+`422 {"detail": "Invalid request", "errors": [{"loc": [...], "msg": "..."}]}` (never echoing
+the input).
+
+| Call | Purpose |
+| --- | --- |
+| `POST /api/imports {label}` (+`Idempotency-Key`) | Create an import (`uploading`). Same key returns the same import. |
+| `POST /api/uploads {..., import_id}` | Resumable upload into the import: finalize stages the verified file in `<library>/_staging/<id>/` instead of the inbox and reports `file.status` `ok`/`duplicate`. |
+| `POST /api/imports/{id}/complete` | All files are in: detect metadata and propose a target. With `auto_file_imports`, a certain match is filed in the same call. |
+| `GET /api/imports[?status=open\|all\|ready\|filed]`, `GET /api/imports/{id}` | `ImportInfo`: files, `detected`, draft `metadata`, `proposal {action, work_id, confidence high\|medium\|low, score, reason, candidates[≤5], siblings}`, `target`, `use_cover`, `version`. |
+| `PATCH /api/imports/{id} {version, metadata?, target?, use_cover?}` | Edit the draft (optimistic `version`). |
+| `POST /api/imports/{id}/file {version?, metadata?, target?, use_cover?, audio: refuse\|append}` (+`Idempotency-Key`) | File it. `target {action: new\|join, work_id}`. Joining fills only empty fields; adding tracks to a work with audio needs `audio: "append"` (`409 target_has_audio`). Duplicates are skipped. Replays return the first answer. |
+| `POST /api/imports/{id}/combine {other_id}`, `DELETE /api/imports/{id}/files/{file_id}`, `DELETE /api/imports/{id}` | Merge two imports, drop a file, discard. |
+
+Lifecycle: `uploading → ready → filed | discarded`, or `failed` (`all_duplicates`, unreadable).
+Unfiled imports expire after 7 days; orphaned staging folders are swept hourly.
+
+### Editing — `/api/works/{id}/edit`, `PATCH /api/works/{id}`
+
+`GET …/edit` returns `EditorState` (metadata, files, tracks, shelves the caller may change,
+cover, alignment, read-aloud, folder, last revision, `version`). `PATCH` takes a `WorkPatch`:
+`{version, metadata?, shelves?, primary_file_id?, playback_default?, readalong_enabled?,
+tracks?: [{id, title?, chapters?}] (full order), remove_file_ids?, remove_track_ids?, cover?:
+{action: upload|embedded|remove, token?}}`. Only sent parts change. A stale `version` is
+`409 version_conflict` with `current` (the fresh `EditorState`). An `Idempotency-Key` replays
+the first answer; reusing a key with a different body is `422 idempotency_key_reused`. Keys are
+scoped per user and route and kept 24 h.
+
+Each save runs under the library lock with a journal of file steps (folder move, track renames,
+formats to trash, cover backups) that is rolled back if any step or the commit fails. It writes
+a `WorkRevision` (before/after of every changed aspect) and the per-work `book.json`.
+`POST …/undo {revision_id}` reverts it while the work is still at that revision's
+`version_after` (`409 undo_conflict` otherwise). Cover uploads are staged first:
+`POST /api/works/{id}/cover` (raw JPEG/PNG/WebP ≤ 10 MiB) → `{token, preview_url}`.
+
+Folder moves never overwrite: same filesystem uses rename; across filesystems (`EXDEV`) the file
+is copied to a hidden temp name, fsynced, size- and SHA-256-verified, renamed, then the source is
+removed. Paths are checked against traversal. A move is deferred while a read-aloud build is
+running for the work. Changing the primary EPUB, removing a format, or reordering tracks rebuilds
+sentences and cancels or stales the alignment, which is re-queued with the same model.
+
+Bulk: `POST /api/works/bulk {work_ids[≤500], action: set_authors|set_series|add_tags|
+remove_tags|add_to_shelves|remove_from_shelves|trash, ...}` (+`Idempotency-Key`) → `{batch_id,
+results: [{work_id, ok, error?}]}`; each work is its own transaction and revision.
+`POST /api/works/bulk/{batch_id}/undo` reverts the batch.
+
+### Trash — `/api/trash`
+
+`POST /api/works/{id}/trash {version?}` moves the folder to `_trash/works/` and hides the work
+everywhere (library, OPDS, KOReader, search, matching). Removed formats go to `_trash/files/`
+with their DB rows kept as JSON. `GET /api/trash`; `POST /api/trash/works|files/{id}/restore`
+(owner/member; restores to the original folder or a free one); `DELETE …` purges now (owner
+only). Housekeeping purges after 30 days.
+
+### Metadata suggestions — `POST /api/metadata/lookup`
+
+Off until the owner sets `PUT /api/library-settings {metadata_lookup_enabled: true}` (instance
+setting, audited). Body `{isbn?, title?, author?, providers?}`; with an ISBN only the ISBN is
+sent. Fixed HTTPS origins (`openlibrary.org`, `www.googleapis.com`), redirects refused, 6 s
+per request and 10 s total, 1 MiB body cap, JSON only, 24 h cache, per-user and per-provider
+rate limits. Returns `{sent, suggestions: [{provider, provider_name, source_url, fetched_at,
+fields}], errors}`; fields are validated against the same `Metadata` schema. Nothing is ever
+written by a lookup.
+
+### Audit actions added
+
+`import.file`, `import.auto_file`, `import.combine`, `import.discard`, `work.edit`,
+`work.bulk_edit`, `work.bulk`, `work.bulk_undo`, `work.undo`, `work.trash`, `work.restore`,
+`work.purge`, `file.restore`, `file.purge`, `metadata.lookup`, `settings.change`,
+`readaloud.regenerate`.
+
 ## Worker protocol
 
 External alignment workers (a GPU box, a laptop) pull jobs from the server; the server never

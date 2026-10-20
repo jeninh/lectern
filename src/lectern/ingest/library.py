@@ -113,6 +113,10 @@ def ingest_epub(
             publisher=meta.publisher,
             published=meta.published,
         )
+        work.series = meta.series
+        work.series_index = meta.series_index if meta.series else None
+        work.tags = list(meta.tags)
+        work.narrators = list(meta.narrators)
         created = True
         if match.work is not None:
             db.add(

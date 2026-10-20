@@ -10,6 +10,7 @@ import { SecurityPage } from "./pages/Security";
 import { AdminPage } from "./pages/Admin";
 import { HighlightsPage } from "./pages/Placeholder";
 import { ListeningPage } from "./pages/Listening";
+import { TrashPage } from "./pages/Trash";
 import { ReaderPage } from "./pages/Reader";
 import { PlayerProvider } from "./lib/player";
 
@@ -17,6 +18,12 @@ function OwnerOnly({ children }: { children: JSX.Element }) {
   const { me } = useStore();
   if (!me) return null;
   return me.user.role === "owner" ? children : <Navigate to="/app" replace />;
+}
+
+function EditorsOnly({ children }: { children: JSX.Element }) {
+  const { me, canEdit } = useStore();
+  if (!me) return null;
+  return canEdit ? children : <Navigate to="/app" replace />;
 }
 
 export default function App() {
@@ -36,6 +43,7 @@ export default function App() {
           <Route path="/app/highlights" element={<HighlightsPage />} />
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
+          <Route path="/app/trash" element={<EditorsOnly><TrashPage /></EditorsOnly>} />
           <Route path="/app/admin" element={<OwnerOnly><AdminPage /></OwnerOnly>} />
           <Route path="/app/users" element={<Navigate to="/app/admin" replace />} />
           <Route path="*" element={<Navigate to="/app" replace />} />

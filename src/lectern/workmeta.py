@@ -123,10 +123,15 @@ def display_author(authors: list[dict]) -> str:
 
 
 def metadata_of(work: Work) -> dict:
+    """Editable metadata. Sort forms Lectern derives itself are ``None`` (shown as a
+    placeholder); only a sort title or sort name someone chose is returned as a value."""
     return {
         "title": work.title,
-        "sort_title": work.sort_title,
-        "authors": authors_of(work),
+        "sort_title": None if work.sort_title == sort_title(work.title) else work.sort_title,
+        "authors": [
+            {"name": a["name"], "sort": None if a["sort"] == sort_author(a["name"]) else a["sort"]}
+            for a in authors_of(work)
+        ],
         "series": work.series,
         "series_index": work.series_index,
         "description": work.description,

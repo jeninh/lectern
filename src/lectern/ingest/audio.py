@@ -401,6 +401,9 @@ def ingest_audio(
             isbn=info.isbn,
             published=info.year,
         )
+        work.series = info.series
+        work.series_index = info.series_index if info.series else None
+        work.narrators = [info.narrator] if info.narrator else []
         created = True
         if match.work is not None:
             db.add(
