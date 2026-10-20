@@ -80,24 +80,55 @@ def _text(el) -> str:
     return " ".join("".join(el.itertext()).split()) if el is not None else ""
 
 
-def read_epub_metadata(path: Path) -> EpubMetadata:
+def _open_zip(path: Path) -> zipfile.ZipFile:
     try:
-        zf = zipfile.ZipFile(path)
+        return zipfile.ZipFile(path)
     except zipfile.BadZipFile as exc:
         raise EpubError("not a zip file") from exc
-    with zf:
-        try:
-            container = _read_xml(zf, "META-INF/container.xml")
-        except KeyError as exc:
-            raise EpubError("missing META-INF/container.xml") from exc
-        rootfile = container.find(".//c:rootfile", NS)
-        if rootfile is None or not rootfile.get("full-path"):
-            raise EpubError("container.xml has no rootfile")
-        opf_path = rootfile.get("full-path")
-        try:
-            opf = _read_xml(zf, opf_path)
-        except KeyError as exc:
-            raise EpubError(f"missing OPF {opf_path}") from exc
+
+
+def _read_opf(zf: zipfile.ZipFile) -> tuple[etree._Element, str]:
+    """The package document and its path inside the zip."""
+    try:
+        container = _read_xml(zf, "META-INF/container.xml")
+    except KeyError as exc:
+        raise EpubError("missing META-INF/container.xml") from exc
+    rootfile = container.find(".//c:rootfile", NS)
+    if rootfile is None or not rootfile.get("full-path"):
+        raise EpubError("container.xml has no rootfile")
+    opf_path = rootfile.get("full-path")
+    try:
+        return _read_xml(zf, opf_path), opf_path
+    except KeyError as exc:
+        raise EpubError(f"missing OPF {opf_path}") from exc
+
+
+def read_spine(path: Path) -> list[str]:
+    """Zip member names of the spine items in reading order.
+
+    The list index is the ``spine_index`` used by sentence maps, ``sentences`` rows, and
+    KOReader's ``DocFragment[n]`` (which is this index plus one).
+    """
+    with _open_zip(path) as zf:
+        opf, opf_path = _read_opf(zf)
+        opf_dir = posixpath.dirname(opf_path)
+        manifest = opf.find("opf:manifest", NS)
+        spine = opf.find("opf:spine", NS)
+        if manifest is None or spine is None:
+            raise EpubError("OPF has no manifest or spine")
+        hrefs = {it.get("id"): it.get("href") for it in manifest.findall("opf:item", NS)}
+        names = []
+        for ref in spine.findall("opf:itemref", NS):
+            href = hrefs.get(ref.get("idref"))
+            if not href:
+                raise EpubError(f"spine itemref {ref.get('idref')!r} is not in the manifest")
+            names.append(posixpath.normpath(posixpath.join(opf_dir, href)))
+        return names
+
+
+def read_epub_metadata(path: Path) -> EpubMetadata:
+    with _open_zip(path) as zf:
+        opf, opf_path = _read_opf(zf)
         meta = opf.find("opf:metadata", NS)
         if meta is None:
             raise EpubError("OPF has no metadata")
