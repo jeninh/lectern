@@ -22,6 +22,7 @@ Concurrency
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert
@@ -274,12 +275,29 @@ def pending_devices(db: Session, owner_ids: list[int], work_id: int) -> set[int]
     )
 
 
-def mark_delivered(pw_id: int, file_id: int, ip: str | None) -> bool:
-    """Called when device ``pw_id`` was sent every byte of EPUB ``file_id``: its pending item
-    for that work, if any, becomes delivered. Atomic (one conditional ``UPDATE``) and with its
-    own session, since it runs after the response body, outside the request's session."""
+def pending_item(db: Session, pw_id: int, work_id: int) -> tuple[int, datetime] | None:
+    """``(item id, queued_at)`` of the work's pending item on this device, if any: taken when a
+    download starts, so that only that queueing of the work can be delivered by it."""
+    row = db.execute(
+        select(DeviceQueueItem.id, DeviceQueueItem.queued_at).where(
+            DeviceQueueItem.app_password_id == pw_id,
+            DeviceQueueItem.work_id == work_id,
+            DeviceQueueItem.status == QueueStatus.PENDING.name,
+        )
+    ).first()
+    return (row[0], row[1]) if row else None
+
+
+def mark_delivered(pw_id: int, file_id: int, ip: str | None, item: tuple[int, datetime]) -> bool:
+    """Called when device ``pw_id`` was sent every byte of EPUB ``file_id`` in a response that
+    started while ``item`` (:func:`pending_item`) was pending: that item becomes delivered if it
+    is still pending and was not removed and queued again meanwhile (a new ``queued_at``), so a
+    transfer that began before the current queueing never completes it. Atomic (one
+    conditional ``UPDATE``) and with its own session, since it runs after the response body,
+    outside the request's session."""
     from lectern.db import session_factory
 
+    item_id, queued_at = item
     with session_factory()() as db:
         book = db.get(BookFile, file_id)
         if book is None or book.kind != FileKind.EBOOK:
@@ -288,9 +306,11 @@ def mark_delivered(pw_id: int, file_id: int, ip: str | None) -> bool:
         row = db.execute(
             update(DeviceQueueItem)
             .where(
+                DeviceQueueItem.id == item_id,
                 DeviceQueueItem.app_password_id == pw_id,
                 DeviceQueueItem.work_id == book.work_id,
                 DeviceQueueItem.status == QueueStatus.PENDING.name,
+                DeviceQueueItem.queued_at == queued_at,
             )
             .values(
                 status=QueueStatus.DELIVERED.name,

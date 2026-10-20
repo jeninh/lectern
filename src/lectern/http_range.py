@@ -92,7 +92,7 @@ def _completed(blocks: Iterator[bytes], length: int, done: Callable[[], None]) -
         done()
 
 
-def _etag_matches(header: str, etag: str) -> bool:
+def etag_matches(header: str, etag: str) -> bool:
     tags = [t.strip() for t in header.split(",")]
     bare = etag.removeprefix("W/")
     return "*" in tags or any(t.removeprefix("W/") == bare for t in tags)
@@ -121,7 +121,7 @@ def file_response(
         **(headers or {}),
     }
     inm = request.headers.get("if-none-match")
-    if inm and _etag_matches(inm, etag):
+    if inm and etag_matches(inm, etag):
         return Response(status_code=304, headers=base)
 
     range_header = request.headers.get("range")

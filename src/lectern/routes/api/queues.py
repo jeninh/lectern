@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from lectern import device_queue
+from lectern.access import can_see_work
 from lectern.models import DeviceQueueItem, User, Work
 from lectern.routes.api.serializers import iso
 from lectern.security.deps import Auth, AuthCsrf, DbDep
@@ -74,7 +75,12 @@ def list_targets(auth: Auth, db: DbDep, work_id: int | None = None) -> dict:
     found = device_queue.targets(db, auth.user)
     out = [_device_json(db, t, auth.user) for t in found]
     if work_id is not None:
-        queued = device_queue.pending_devices(db, [t.owner.id for t in found], work_id)
+        # a work the caller cannot see is pending nowhere, so its id reveals nothing
+        queued = (
+            device_queue.pending_devices(db, [t.owner.id for t in found], work_id)
+            if can_see_work(db, auth.user, work_id)
+            else set()
+        )
         for d in out:
             d["queued"] = d["id"] in queued
     return {"devices": out}

@@ -439,6 +439,47 @@ def test_a_refused_download_does_not_deliver(home):
     assert item_status(kobo["id"], ids["Delta"]) == QueueStatus.PENDING
 
 
+def test_a_transfer_started_before_a_requeue_does_not_deliver_it(home):
+    """Regression: the delivery matched any pending row of the work, so a download that began
+    while the book was queued, then removed and queued again, delivered the new queueing."""
+    owner, ids = home["owner"], home["ids"]
+    kobo = owner.devices["Kobo"]
+    a = ids["Alpha"]
+    file_id = home["files"]["Alpha"][0]
+    owner.queue(kobo["id"], a)
+    r = owner.http.get(f"/opds/files/{file_id}/download", headers=kobo["headers"])
+    assert r.status_code == 200  # delivered: the transfer we will replay below is "old"
+    assert statuses(owner.queue(kobo["id"], a)) == {a: "requeued"}
+    with session_factory()() as db:
+        current = device_queue.pending_item(db, kobo["id"], a)
+    stale = (current[0], current[1].replace(year=current[1].year - 1))
+    assert not device_queue.mark_delivered(kobo["id"], file_id, None, stale)
+    # another work's file, or another device, cannot deliver the item either
+    other = home["files"]["Bravo"][0]
+    assert not device_queue.mark_delivered(kobo["id"], other, None, current)
+    assert not device_queue.mark_delivered(owner.devices["Phone"]["id"], file_id, None, current)
+    assert item_status(kobo["id"], a) == QueueStatus.PENDING
+    assert device_queue.mark_delivered(kobo["id"], file_id, None, current)
+    assert item_status(kobo["id"], a) == QueueStatus.DELIVERED
+
+
+def test_a_wildcard_or_weak_if_none_match_is_a_free_304(home):
+    """Regression: only an exact strong ETag skipped the cap; ``*`` or ``W/"sha"`` was counted
+    as a download and then answered 304 by the file response, with no bytes sent."""
+    owner, ids = home["owner"], home["ids"]
+    kobo = owner.devices["Kobo"]
+    file_id, sha = home["files"]["Charlie"]
+    owner.queue(kobo["id"], ids["Charlie"])
+    for inm in ("*", f'W/"{sha}"', f'"x", "{sha}"'):
+        r = owner.http.get(
+            f"/opds/files/{file_id}/download", headers={**kobo["headers"], "if-none-match": inm}
+        )
+        assert r.status_code == 304
+    with session_factory()() as db:
+        assert db.scalar(select(func.count()).select_from(DownloadEvent)) == 0
+    assert item_status(kobo["id"], ids["Charlie"]) == QueueStatus.PENDING
+
+
 def test_an_abandoned_transfer_never_completes():
     """The client went away after the first block: the body generator is closed there."""
     from lectern.http_range import _completed
@@ -478,10 +519,12 @@ def test_concurrent_enqueues_and_deliveries_land_once(home):
     assert sorted(results) == ["already_queued"] * 7 + ["queued"]
     delivered: list[bool] = []
     barrier = threading.Barrier(8)
+    with session_factory()() as db:
+        item = device_queue.pending_item(db, kobo["id"], a)
 
     def deliver():
         barrier.wait()
-        ok = device_queue.mark_delivered(kobo["id"], file_id, None)
+        ok = device_queue.mark_delivered(kobo["id"], file_id, None, item)
         with lock:
             delivered.append(ok)
 
@@ -563,6 +606,9 @@ def test_unsharing_hides_queued_works_and_revoking_closes_the_queue(home):
         rex.http.get(f"/opds/files/{file_id}/download", headers=boox["headers"]).status_code == 404
     )
     assert item_status(boox["id"], a) == QueueStatus.PENDING  # kept, just not visible
+    # nor can rex probe the hidden work's id through the send dialog's "already queued"
+    got = rex.http.get(f"/api/device-queues?work_id={a}").json()["devices"]
+    assert [d["queued"] for d in got] == [False]
     api_post(owner.http, f"/api/shelves/{home['shelf']}/items", owner.csrf, {"work_id": a})
     assert titles(feed(rex.http, "/opds/queue", boox["headers"])) == ["Alpha"]
     # a revoked device: its catalogue closes and nobody can queue to it

@@ -8,6 +8,7 @@ streaming for playback does not.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from urllib.parse import quote
 
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from lectern import device_queue
 from lectern.access import can_see_work, visible_works
-from lectern.http_range import file_response
+from lectern.http_range import etag_matches, file_response
 from lectern.ingest.library import safe_component
 from lectern.ingest.sentences import primary_epub
 from lectern.jobs import MEDIA_TYPE, find_variant, variant_sha256
@@ -30,6 +31,7 @@ from lectern.security.deps import DbDep, LibraryUser, SettingsDep
 from lectern.security.sessions import client_ip
 
 router = APIRouter()
+log = logging.getLogger("lectern.library")
 
 PAGE_SIZE = 50
 
@@ -111,7 +113,7 @@ def download_response(
     (lectern.device_queue); a probe, a partial range, or an interrupted transfer does not."""
     etag = f'"{book.sha256}"'
     inm = request.headers.get("if-none-match")
-    if inm and etag in [t.strip() for t in inm.split(",")]:
+    if inm and etag_matches(inm, etag):  # the same test file_response applies
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-store"})
     downloads.admit(db, settings, user, device, f"file:{book.id}", ip)
     work = db.get(Work, book.work_id)
@@ -126,11 +128,20 @@ def download_response(
     )
     on_complete = None
     pw_id = device.app_password_id
-    if pw_id is not None and book.kind == FileKind.EBOOK:
+    item = (
+        device_queue.pending_item(db, pw_id, book.work_id)
+        if pw_id is not None and book.kind == FileKind.EBOOK
+        else None
+    )
+    if item is not None:
         file_id = book.id
 
         def on_complete() -> None:
-            device_queue.mark_delivered(pw_id, file_id, ip)
+            # Every byte was sent; a database hiccup must not turn that into a broken body.
+            try:
+                device_queue.mark_delivered(pw_id, file_id, ip, item)
+            except Exception:  # noqa: BLE001
+                log.exception("could not mark file %d delivered to device %d", file_id, pw_id)
 
     return file_response(
         request,
