@@ -8,7 +8,10 @@ import { LibraryPage } from "./pages/Library";
 import { ReadAlongPage } from "./pages/ReadAlong";
 import { SecurityPage } from "./pages/Security";
 import { AdminPage } from "./pages/Admin";
-import { HighlightsPage, ListeningPage } from "./pages/Placeholder";
+import { HighlightsPage } from "./pages/Placeholder";
+import { ListeningPage } from "./pages/Listening";
+import { ReaderPage } from "./pages/Reader";
+import { PlayerProvider } from "./lib/player";
 
 function OwnerOnly({ children }: { children: JSX.Element }) {
   const { me } = useStore();
@@ -19,6 +22,7 @@ function OwnerOnly({ children }: { children: JSX.Element }) {
 export default function App() {
   return (
     <StoreProvider>
+      <PlayerProvider>
       <Shell>
         <Routes>
           <Route path="/app" element={<HomePage />} />
@@ -28,6 +32,7 @@ export default function App() {
           <Route path="/app/devices" element={<DevicesPage />} />
           <Route path="/app/devices/new" element={<DevicesPage />} />
           <Route path="/app/listening" element={<ListeningPage />} />
+          <Route path="/app/read/:id" element={<ReaderPage />} />
           <Route path="/app/highlights" element={<HighlightsPage />} />
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
@@ -36,6 +41,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
       </Shell>
+      </PlayerProvider>
     </StoreProvider>
   );
 }

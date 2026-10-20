@@ -54,7 +54,7 @@ export function saveProgress(
   at: { sentence_n: number } | { audio_s: number },
   keepalive = false,
 ): Promise<WorkProgressResponse> {
-  return put<WorkProgressResponse>(`/api/works/${workId}/progress`, { source, device: "Web", ...at }, { keepalive });
+  return put<WorkProgressResponse>(`/api/works/${workId}/progress`, { source, device: "Web", ...at }, keepalive);
 }
 
 export function readAloudStatus(workId: number): Promise<ReadAloudStatus> {

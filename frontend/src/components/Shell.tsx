@@ -5,7 +5,10 @@ import { logout } from "../lib/api";
 import { initials } from "../lib/format";
 import { useHotkeys, useLocalStorage } from "../lib/hooks";
 import { useStore } from "../lib/store";
+import { usePlayer } from "../lib/player";
 import { CommandPalette } from "./CommandPalette";
+import { NotificationBell, UploadTray } from "./Notifications";
+import { MiniPlayer } from "./Player";
 import { Devices, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun } from "./Icons";
 import { Sheet } from "./Sheet";
 
@@ -21,7 +24,7 @@ interface NavEntry {
 const READ: NavEntry[] = [
   { to: "/app", label: "Home", icon: <Home />, keys: "g h", end: true },
   { to: "/app/library", label: "Library", icon: <Library />, keys: "g l" },
-  { to: "/app/listening", label: "Listening", icon: <Headphones />, soon: true },
+  { to: "/app/listening", label: "Listening", icon: <Headphones />, keys: "g p" },
   { to: "/app/highlights", label: "Highlights", icon: <Highlighter />, soon: true },
 ];
 const MANAGE: NavEntry[] = [
@@ -53,6 +56,10 @@ export function Shell({ children }: { children: ReactNode }) {
   const nav = useNavigate();
   const loc = useLocation();
   const isOwner = me?.user.role === "owner";
+  const player = usePlayer();
+  // The reader takes the whole window; the sidebar, top bar, and tab bar step aside.
+  const immersive = loc.pathname.startsWith("/app/read/");
+  const fullPlayer = loc.pathname === "/app/listening";
 
   // Sheet sub-routes (/app/library/12, /app/devices/new) belong to their section; opening or
   // closing them must not steal focus from the sheet or from the element that opened it.
@@ -63,6 +70,21 @@ export function Shell({ children }: { children: ReactNode }) {
     document.getElementById("main")?.focus({ preventScroll: true });
     window.scrollTo({ top: 0 });
   }, [section]);
+
+  // Space plays or pauses the audiobook when focus is not on a control (buttons and fields keep
+  // their own Space behaviour) and no dialog is open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== " " || e.repeat || e.metaKey || e.ctrlKey || e.altKey || !player.work || immersive) return;
+      const a = document.activeElement;
+      if (a && a !== document.body && a.id !== "main" && a.closest("a, button, input, select, textarea, [role=slider], [contenteditable], [tabindex]:not(#main)")) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      e.preventDefault();
+      player.toggle();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [player, immersive]);
 
   const toggleTheme = () => setTheme(resolvedTheme === "dark" ? "light" : "dark");
 
@@ -85,6 +107,7 @@ export function Shell({ children }: { children: ReactNode }) {
     { keys: "n", handler: () => nav("/app/devices/new") },
     { keys: "g h", handler: () => nav("/app") },
     { keys: "g l", handler: () => nav("/app/library") },
+    { keys: "g p", handler: () => nav("/app/listening") },
     { keys: "g d", handler: () => nav("/app/devices") },
     { keys: "g s", handler: () => nav("/app/security") },
     { keys: "g a", handler: () => nav("/app/activity") },
@@ -95,7 +118,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const name = me?.user.display_name || me?.user.username || "";
 
   return (
-    <div className="shell" data-collapsed={collapsed || undefined}>
+    <div className="shell" data-collapsed={collapsed || undefined} data-immersive={immersive || undefined} data-playing={(player.work && !immersive && !fullPlayer) || undefined}>
       <a className="skip-link" href="#main">Skip to content</a>
       <aside className="sidebar" aria-label="Sidebar">
         <div className="brand-row">
@@ -155,6 +178,7 @@ export function Shell({ children }: { children: ReactNode }) {
       <main className="main" id="main" tabIndex={-1}>
         <header className="topbar">
           <div className="title-slot" ref={setSlot} />
+          <NotificationBell />
           <button className="icon-btn mobile-only" onClick={() => setPaletteOpen(true)} aria-label="Search books, pages, and actions">
             <Search />
           </button>
@@ -162,8 +186,11 @@ export function Shell({ children }: { children: ReactNode }) {
         <TitleSlot.Provider value={slot}>{children}</TitleSlot.Provider>
       </main>
 
+      {!immersive && !fullPlayer && <MiniPlayer />}
+      {!immersive && <UploadTray />}
+
       <nav className="bottom-nav" aria-label="Primary">
-        {[READ[0], READ[1], MANAGE[0], MANAGE[1], MANAGE[2]].map((n) => (
+        {[READ[0], READ[1], READ[2], MANAGE[0], MANAGE[1]].map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end}>
             {n.icon}
             <span>{n.label}</span>
@@ -179,6 +206,8 @@ export function Shell({ children }: { children: ReactNode }) {
           <dt><kbd>N</kbd></dt><dd>Add a device</dd>
           <dt><kbd>G</kbd> then <kbd>H</kbd></dt><dd>Home</dd>
           <dt><kbd>G</kbd> then <kbd>L</kbd></dt><dd>Library</dd>
+          <dt><kbd>G</kbd> then <kbd>P</kbd></dt><dd>Listening (player)</dd>
+          <dt><kbd>Space</kbd></dt><dd>Play or pause the audiobook</dd>
           <dt><kbd>G</kbd> then <kbd>D</kbd></dt><dd>Devices</dd>
           <dt><kbd>G</kbd> then <kbd>S</kbd></dt><dd>Security</dd>
           <dt><kbd>G</kbd> then <kbd>A</kbd></dt><dd>Activity</dd>
