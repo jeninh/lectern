@@ -19,6 +19,13 @@ Put a TLS-terminating reverse proxy in front of port 8080. Passkeys require HTTP
 stable hostname; until then, password + TOTP sign-in works. For local plain-http testing
 set `LECTERN_INSECURE_HTTP=1` and `LECTERN_BASE_URL=http://localhost:8080`.
 
+Running at home without opening a port? See [`docs/deploy-tailscale.md`](docs/deploy-tailscale.md)
+for Lectern + Tailscale in one Compose file: `tailscale serve` gives you a trusted HTTPS
+address on your private tailnet (so passkeys work), nothing is published on the LAN or the
+Internet, and the guide covers Kindle/Kobo with KOReader. When a proxy sits in front, set
+`LECTERN_TRUSTED_PROXIES` to its address so rate limits and the audit log see your readers'
+IPs instead of the proxy's. Lectern's own sign-in is always required, private network or not.
+
 ## Adding books
 
 Upload EPUBs from the web app (**Upload** in the Library, or "Upload book" in the
@@ -54,6 +61,8 @@ values to enter, then waits and confirms the device's first sync live.
 | `LECTERN_LOGIN_LOCKOUT_SECONDS` | 900 | Lockout window |
 | `LECTERN_RATE_LIMIT_PER_MINUTE` | 60 | Per-IP limit on OPDS/sync auth attempts |
 | `LECTERN_UPLOAD_MAX_BYTES` | 200 MiB | Largest EPUB accepted by browser upload |
+| `LECTERN_TRUSTED_PROXIES` | empty | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed (`127.0.0.1` for `tailscale serve`); empty trusts nobody |
+| `LECTERN_TRUST_CF_CONNECTING_IP` | false | Also believe `CF-Connecting-IP` from a trusted proxy. Only for Cloudflare Tunnel, with `LECTERN_TRUSTED_PROXIES` limited to the `cloudflared` connector; any other proxy passes the header through from the client |
 
 ## Security model
 
@@ -68,10 +77,26 @@ values to enter, then waits and confirms the device's first sync live.
   per-session CSRF token and a same-origin `Origin`/`Sec-Fetch-Site`.
 - Roles: owner (user admin, audit log), member, reader.
 - Per-IP rate limits, per-account lockout, and an audit log of logins, credential
-  changes, and downloads.
+  changes, and downloads. The client IP is the socket peer unless that peer is listed in
+  `LECTERN_TRUSTED_PROXIES`; only then is `X-Forwarded-For` honoured, read right to left so a
+  client-supplied entry is never believed. `CF-Connecting-IP` is ignored unless
+  `LECTERN_TRUST_CF_CONNECTING_IP` is on (details in `docs/contracts.md`).
 - `POST /users/create` (KOReader's Register button) always returns 403; keys come from
   the web UI.
-- Non-goals: DRM circumvention, download/search integrations, anonymous access.
+- Non-goals: anonymous access, and the two below.
+
+## What Lectern does not do
+
+- **No DRM removal or circumvention.** Lectern only reads EPUBs and audio files you already own
+  and can open. It contains no code to strip, bypass, or work around any copy protection.
+- **No book searching or downloading integrations.** There is no catalogue search, no
+  connection to any download site, store, or torrent/IRC/Usenet source, and no fetching of
+  books or audiobooks from the Internet. Content enters the library only through your own
+  uploads and the inbox folder. (The test suite contains one documented public-domain fixture
+  from Project Gutenberg and LibriVox; see `tests/fixtures/magi/PROVENANCE.md`.)
+
+The data model and API contracts for audiobooks, text–audio alignment, shelves, invites, and
+external alignment workers are in [`docs/contracts.md`](docs/contracts.md).
 
 ## Development
 

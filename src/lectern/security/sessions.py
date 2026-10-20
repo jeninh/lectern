@@ -10,15 +10,26 @@ from sqlalchemy.orm import Session as DbSession
 
 from lectern.config import Settings
 from lectern.models import Session, User, utcnow
+from lectern.security.proxy import resolve_client_ip
 from lectern.security.tokens import new_secret, sha256_hex
 
 COOKIE_NAME = "lectern_session"
 
 
 def client_ip(request: Request) -> str | None:
-    # Trust only the direct peer. A reverse proxy should be configured with
-    # uvicorn --proxy-headers / forwarded-allow-ips so request.client reflects the real IP.
-    return request.client.host if request.client else None
+    """The client's address: the socket peer, unless the peer is a configured trusted proxy.
+
+    Everything that keys on an address (rate limits, lockout records, audit rows, sessions)
+    must use this so a deployment behind `tailscale serve` sees the same IP everywhere.
+    """
+    peer = request.client.host if request.client else None
+    settings: Settings = request.app.state.settings
+    return resolve_client_ip(
+        peer,
+        request.headers,
+        settings.trusted_proxy_networks,
+        trust_cf_connecting_ip=settings.trust_cf_connecting_ip,
+    )
 
 
 def create_session(db: DbSession, user: User, request: Request, settings: Settings) -> str:

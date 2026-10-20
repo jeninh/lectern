@@ -16,7 +16,7 @@ from lectern.config import Settings
 from lectern.db import get_db
 from lectern.models import AppPassword, Role, Session, SyncKey, User, utcnow
 from lectern.security.csrf import verify_csrf
-from lectern.security.sessions import load_session
+from lectern.security.sessions import client_ip, load_session
 from lectern.security.tokens import sha256_hex
 
 log = logging.getLogger("lectern.auth")
@@ -116,7 +116,7 @@ def opds_user(request: Request, db: DbDep) -> User:
         username, _, secret = decoded.partition(":")
     except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
         raise _basic_unauthorized() from exc
-    ip = request.client.host if request.client else "?"
+    ip = client_ip(request) or "?"
     _rate_limited(request, "basic", f"{ip}:{username[:64]}")
     row = db.scalar(select(AppPassword).where(AppPassword.key_hash == sha256_hex(secret)))
     if row is None or row.revoked_at is not None:
@@ -150,7 +150,7 @@ def kosync_auth(request: Request, db: DbDep) -> SyncAuth:
     key = request.headers.get("x-auth-key", "")
     if not username or not key or len(username) > 64 or len(key) > 128:
         raise _sync_unauthorized()
-    ip = request.client.host if request.client else "?"
+    ip = client_ip(request) or "?"
     _rate_limited(request, "kosync", f"{ip}:{username[:64]}")
     # KOReader sends md5(password) as x-auth-key; we store sha256 of that string.
     row = db.scalar(select(SyncKey).where(SyncKey.key_hash == sha256_hex(key.lower())))

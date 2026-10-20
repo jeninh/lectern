@@ -1,0 +1,169 @@
+{
+ "version": 1,
+ "work_id": 1,
+ "epub_sha256": "072d238c79d0d485837dbe17ea8f5a6eb1906603a863f0902b8cdb9017ba8479",
+ "audio_fingerprint": "4d9977658906ea5e368b77c70df8acc9b39112963bd12cf16b1bad25a9552f6a",
+ "model": "hand-checked",
+ "language": "en",
+ "generated_at": "2026-10-20T00:00:00Z",
+ "tracks": [
+  {
+   "position": 0,
+   "sha256": "6fbc9ec61ad5b6384dd3b0b4363cdf50bca7dd891ac1d2f26b042da91d60bd91",
+   "duration_s": 77.166,
+   "offset_s": 0.0
+  }
+ ],
+ "sentences": [
+  {
+   "n": 0,
+   "spine_index": 2,
+   "char_start": 0,
+   "char_end": 34,
+   "audio_start_s": 0.25,
+   "audio_end_s": 2.78,
+   "matched": true,
+   "text": "One dollar and eighty-seven cents."
+  },
+  {
+   "n": 1,
+   "spine_index": 2,
+   "char_start": 35,
+   "char_end": 48,
+   "audio_start_s": 3.28,
+   "audio_end_s": 4.01,
+   "matched": true,
+   "text": "That was all."
+  },
+  {
+   "n": 2,
+   "spine_index": 2,
+   "char_start": 49,
+   "char_end": 86,
+   "audio_start_s": 4.88,
+   "audio_end_s": 6.96,
+   "matched": true,
+   "text": "And sixty cents of it was in pennies."
+  },
+  {
+   "n": 3,
+   "spine_index": 2,
+   "char_start": 87,
+   "char_end": 284,
+   "audio_start_s": 7.81,
+   "audio_end_s": 20.18,
+   "matched": true,
+   "text": "Pennies saved one and two at a time by bulldozing the grocer and the vegetable man and the butcher until one’s cheeks burned with the silent imputation of parsimony that such close dealing implied."
+  },
+  {
+   "n": 4,
+   "spine_index": 2,
+   "char_start": 285,
+   "char_end": 314,
+   "audio_start_s": 20.98,
+   "audio_end_s": 22.68,
+   "matched": true,
+   "text": "Three times Della counted it."
+  },
+  {
+   "n": 5,
+   "spine_index": 2,
+   "char_start": 315,
+   "char_end": 349,
+   "audio_start_s": 23.28,
+   "audio_end_s": 25.61,
+   "matched": true,
+   "text": "One dollar and eighty-seven cents."
+  },
+  {
+   "n": 6,
+   "spine_index": 2,
+   "char_start": 350,
+   "char_end": 386,
+   "audio_start_s": 26.33,
+   "audio_end_s": 28.13,
+   "matched": true,
+   "text": "And the next day would be Christmas."
+  },
+  {
+   "n": 7,
+   "spine_index": 2,
+   "char_start": 387,
+   "char_end": 469,
+   "audio_start_s": 28.95,
+   "audio_end_s": 33.34,
+   "matched": true,
+   "text": "There was clearly nothing to do but flop down on the shabby little couch and howl."
+  },
+  {
+   "n": 8,
+   "spine_index": 2,
+   "char_start": 470,
+   "char_end": 486,
+   "audio_start_s": 33.93,
+   "audio_end_s": 34.9,
+   "matched": true,
+   "text": "So Della did it."
+  },
+  {
+   "n": 9,
+   "spine_index": 2,
+   "char_start": 487,
+   "char_end": 605,
+   "audio_start_s": 35.89,
+   "audio_end_s": 43.72,
+   "matched": true,
+   "text": "Which instigates the moral reflection that life is made up of sobs, sniffles, and smiles, with sniffles predominating."
+  },
+  {
+   "n": 10,
+   "spine_index": 2,
+   "char_start": 606,
+   "char_end": 720,
+   "audio_start_s": 44.48,
+   "audio_end_s": 50.57,
+   "matched": true,
+   "text": "While the mistress of the home is gradually subsiding from the first stage to the second, take a look at the home."
+  },
+  {
+   "n": 11,
+   "spine_index": 2,
+   "char_start": 721,
+   "char_end": 753,
+   "audio_start_s": 51.05,
+   "audio_end_s": 53.04,
+   "matched": true,
+   "text": "A furnished flat at $8 per week."
+  },
+  {
+   "n": 12,
+   "spine_index": 2,
+   "char_start": 754,
+   "char_end": 864,
+   "audio_start_s": 53.87,
+   "audio_end_s": 60.15,
+   "matched": true,
+   "text": "It did not exactly beggar description, but it certainly had that word on the lookout for the mendicancy squad."
+  },
+  {
+   "n": 13,
+   "spine_index": 2,
+   "char_start": 865,
+   "char_end": 1005,
+   "audio_start_s": 61.03,
+   "audio_end_s": 69.82,
+   "matched": true,
+   "text": "In the vestibule below was a letter-box into which no letter would go, and an electric button from which no mortal finger could coax a ring."
+  },
+  {
+   "n": 14,
+   "spine_index": 2,
+   "char_start": 1006,
+   "char_end": 1091,
+   "audio_start_s": 70.49,
+   "audio_end_s": 76.85,
+   "matched": true,
+   "text": "Also appertaining thereunto was a card bearing the name “Mr. James Dillingham Young.”"
+  }
+ ]
+}
