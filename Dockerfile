@@ -1,4 +1,6 @@
-FROM node:22-alpine AS ui
+# The web app is static output, so build it natively even when targeting another platform
+# (e.g. linux/arm64 under QEMU in CI); only the Python stages need the target architecture.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui
 WORKDIR /ui
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
