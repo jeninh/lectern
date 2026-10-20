@@ -299,7 +299,6 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
   const nav = useNavigate();
   const showTech = !!me?.preferences.show_technical_details;
   const ebook = work.files.find((f) => f.kind === "ebook");
-  const audioFiles = work.files.filter((f) => f.kind === "audio");
   const pos = work.position;
   const editable = shelves.filter((sh) => sh.permission !== "view" && !sh.smart);
   const [member, setMember] = useState<Set<number> | null>(null);
@@ -389,22 +388,14 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
                 </td>
               </tr>
             ))}
-            {audioFiles.length > 0 && (
+            {work.audio && (
               <tr>
                 <td>
                   <strong>Audiobook</strong>
-                  <div className="hint">
-                    {audioFiles.length} {audioFiles.length === 1 ? "file" : "files"} · {bytes(audioFiles.reduce((n, f) => n + f.size, 0))}
-                    {work.audio ? ` · ${clock(work.audio.duration_s)}` : ""}
-                  </div>
-                  {showTech && audioFiles.map((f) => <div key={f.id} className="hint mono">{f.rel_path}</div>)}
+                  <div className="hint">{work.audio.tracks} {work.audio.tracks === 1 ? "file" : "files"} · {clock(work.audio.duration_s)}</div>
                 </td>
                 <td style={{ textAlign: "right" }}>
-                  {audioFiles.length === 1 ? (
-                    <a className="btn sm" href={audioFiles[0].download_url}><Download /> Download</a>
-                  ) : (
-                    <Link className="btn sm" to="/app/listening" onClick={() => player.open(work)}>Files</Link>
-                  )}
+                  <Link className="btn sm" to="/app/listening" onClick={() => { if (player.work?.id !== work.id) player.open(work); }}>Files and downloads</Link>
                 </td>
               </tr>
             )}

@@ -3322,9 +3322,19 @@ pre.ra-b {
   width: min(720px, calc(100% - 24px));
   color: var(--ink);
 }
+.reader-bar {
+  grid-row: 1;
+}
+.reader-handoff {
+  grid-row: 2;
+}
 .reader-stage {
+  grid-row: 3;
   position: relative;
   min-height: 0;
+}
+.reader-foot {
+  grid-row: 4;
 }
 .reader-host,
 .reader-host .foliate {
@@ -3486,4 +3496,10 @@ pre.ra-b {
 .swatch.dark {
   background: #1b1712;
   color: #e6dccb;
+}
+@media (max-width: 900px) {
+  /* Title keeps a readable width; actions wrap under it on phones. */
+  .title-text {
+    flex: 1 1 200px;
+  }
 }

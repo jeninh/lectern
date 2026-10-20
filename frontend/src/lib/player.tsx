@@ -42,7 +42,7 @@ interface Player {
   skip: (delta: number) => void;
   setRate: (r: number) => void;
   setSleep: (s: "chapter" | number | null) => void;
-  setDataSaver: (v: boolean) => void;
+  setDataSaver: (v: boolean) => Promise<void>;
   nextChapter: () => void;
   prevChapter: () => void;
   acceptHandoff: () => void;
@@ -236,7 +236,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (audio.current) audio.current.volume = 1;
   }, [chapter]);
 
-  const setDataSaver = useCallback((v: boolean) => {
+  const setDataSaver = useCallback(async (v: boolean) => {
+    const w = state.current.work;
+    if (v && w) {
+      // A data-saver copy may have been made since the tracks were loaded.
+      try {
+        const tr = await get<TracksResponse>(`/api/works/${w.id}/tracks`);
+        if (state.current.work?.id === w.id) {
+          state.current.tracks = tr.tracks;
+          setTracks(tr.tracks);
+        }
+      } catch {
+        /* keep what we have */
+      }
+    }
     setDataSaverState(v);
   }, [setDataSaverState]);
   // Switching renditions keeps the place (timings are the same in both).
@@ -246,7 +259,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!el || !tr) return;
     const want = srcFor(tr);
     if (el.getAttribute("src") && el.getAttribute("src") !== want) load(state.current.index, el.currentTime, !el.paused);
-  }, [srcFor, load]);
+  }, [srcFor, load, tracks]);
 
   const close = useCallback(() => {
     save().catch(() => {});

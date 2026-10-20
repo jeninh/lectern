@@ -49,8 +49,8 @@ export function bookCss(s: ReaderSettings, resolved: Exclude<ReaderTheme, "auto"
     p, li, blockquote, dd, dt, div, span, h1, h2, h3, h4, h5, h6, td, th { font-family: inherit !important; }`;
   return `
     @namespace epub "http://www.idpf.org/2007/ops";
-    html { color-scheme: ${p.scheme}; font-size: ${s.size}% !important; }
-    html, body { background: ${p.bg} !important; color: ${p.ink} !important; }
+    html { color-scheme: ${p.scheme}; font-size: ${s.size}% !important; --theme-bg-color: ${p.bg}; background: ${p.bg} !important; color: ${p.ink} !important; }
+    body { background: transparent !important; color: ${p.ink} !important; }
     p, li, blockquote, dd, dt, span, div, h1, h2, h3, h4, h5, h6, td, th, em, i, b, strong, small, sup, sub { color: inherit !important; background-color: transparent !important; }
     a:link, a:visited { color: ${p.link} !important; }
     p, li, blockquote, dd { line-height: ${s.lineHeight} !important; text-align: ${s.justify ? "justify" : "start"}; hyphens: ${s.justify ? "auto" : "manual"}; widows: 2; orphans: 2; }
