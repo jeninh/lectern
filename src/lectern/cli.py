@@ -14,8 +14,9 @@ def main() -> None:
         factory=True,
         host=settings.host,
         port=settings.port,
-        proxy_headers=True,
-        forwarded_allow_ips="*",
+        # request.client stays the socket peer; lectern.security.proxy applies forwarding
+        # headers itself, and only for peers listed in LECTERN_TRUSTED_PROXIES.
+        proxy_headers=False,
         log_level=settings.log_level.lower(),
         access_log=False,
     )

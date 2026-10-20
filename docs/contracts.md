@@ -1,10 +1,12 @@
 # Lectern contracts (Step 0)
 
-The shared schema and interfaces that milestones 2 (audio + shelves + invites), 3 (alignment
-workers) and 4 (positions and read-aloud) build on. Step 0 ships the database tables
-(migration `0005`), the sentence-map schema (`lectern.sentence_map`), the position interface
-(`lectern.positions`), the visibility predicates (`lectern.access`), and this document. **The
-HTTP routes below are not implemented yet**; they are the contract the milestones implement.
+The shared schema and interfaces that milestones 2 (audio + shelves + invites + resumable
+uploads), 3 (alignment workers) and 4 (positions and read-aloud) build on. Step 0 ships the
+database tables (migration `0005`), the sentence-map schema (`lectern.sentence_map`), the
+position interface (`lectern.positions`), the visibility predicates (`lectern.access`), the
+trusted-proxy client-address rule (`lectern.security.proxy`, **implemented**), and this
+document. **The other HTTP routes below are not implemented yet**; they are the contract the
+milestones implement.
 
 Conventions used throughout:
 
@@ -63,15 +65,18 @@ upper-case values. Timestamps are `UTCDateTime` (aware UTC in, aware UTC out).
 | `shelf_grants` | Reader access to a shelf | PK `(shelf_id, user_id)`; `permission ∈ {VIEW, EDIT}` |
 | `worker_credentials` | Hashed bearer keys for external workers | unique `key_hash`; `revoked_at` |
 | `jobs` | Durable job queue with leases | `attempts >= 0`, `max_attempts >= 1`; `LEASED ⇒ lease_token_hash set`; index `(status, run_after, priority)`; **partial unique** `(work_id, kind) WHERE status IN ('QUEUED','LEASED')` |
+| `upload_sessions` | Resumable browser uploads (chunks ≤ 50 MiB) | unique `public_id`; `size > 0`; `0 < chunk_size <= 52428800`; `0 <= received_bytes <= size`; `COMPLETED ⇒ received_bytes = size AND inbox_name set`; indexes `(user_id, status)`, `(status, expires_at)` |
 
 Deletion behaviour (all `ON DELETE` at the SQL level; `PRAGMA foreign_keys=ON` is set by
 `lectern.db`):
 
 - Deleting a **work** removes its tracks, sentences, alignment, progress, shelf items, and
   jobs.
-- Deleting a **user** removes their progress, grants, and *the shelves they own* (and so the
-  grants on those shelves). The owner UI should warn before deleting a member who owns shelves.
-  Their invites, credentials, and jobs survive with `created_by`/`used_by` set to NULL.
+- Deleting a **user** removes their progress, grants, upload sessions, and *the shelves they
+  own* (and so the grants on those shelves). The owner UI should warn before deleting a member
+  who owns shelves. Their invites, credentials, and jobs survive with `created_by`/`used_by`
+  set to NULL. The partial-upload file of a deleted user's session is removed by the sweeper
+  (it finds `.part` files with no row).
 - Deleting a **shelf** removes its items and grants; works are untouched.
 - Deleting a **worker credential** is not offered; revoke it (`revoked_at`) so job history keeps
   `leased_by_id`.
@@ -163,6 +168,27 @@ players seek with `Range`.
   written to the audit log per request (a player issues many); starting playback of a work is
   recorded once per session in milestone 2's player.
 
+#### Optional low-bitrate variant (milestone 2 may implement)
+
+Over a tunnel from home, a 320 kb/s MP3 audiobook is slow to seek. Milestone 2 *may* add a
+`variant=low` query parameter that streams a once-generated ~64 kb/s Opus (fallback AAC)
+rendition. The contract leaves room for it without requiring it:
+
+- Originals are never modified, re-encoded in place, or deleted; `GET /library/tracks/{id}/stream`
+  without `variant` always serves the original bytes, and the plain download continues to
+  work.
+- The derivative lives in the work directory at
+  `derived/audio/<original sha256>.<opus|m4a>`, keyed by the original's hash so a replaced
+  track invalidates it. It is produced by a `transcode` job (same queue, `kind = "transcode"`,
+  payload `{"track_id", "sha256", "codec", "bitrate_kbps"}`), on the server with `ffmpeg`
+  when available or by an external worker. No schema is needed: existence of the file *is*
+  the state; the track object in `GET /api/works/{id}/tracks` gains
+  `"variants": {"low": {"codec": "opus", "bitrate_kbps": 64, "size": …, "stream_url": "…?variant=low"} | null}`.
+- Requesting `variant=low` before it exists answers `404 variant_unavailable`; clients fall
+  back to the original. `ETag` for the variant is its own file hash. Sentence timings are on
+  the work timeline and do not depend on which rendition plays; the encoder must preserve
+  duration (no trimming of leading silence).
+
 ### Sentences — `GET /api/works/{work_id}/sentences`
 
 Query, exactly one of:
@@ -239,8 +265,13 @@ The work's EPUB with EPUB 3 Media Overlays added: every sentence wrapped in
 tracks, so Thorium, Apple Books, and KOReader can play it with highlighting. Decisions:
 
 - The audio is embedded, so the file is roughly EPUB + audio size; it is generated on first
-  request and cached at `<LECTERN_DATA_DIR>/align/<work_id>.readaloud.epub`, keyed by
-  `(epub_sha256, audio_fingerprint)` and regenerated when either changes.
+  request and cached **next to the work**, at
+  `<LECTERN_LIBRARY_DIR>/<work.dir_path>/derived/read-aloud.epub` (i.e.
+  `/library/<Author>/<Title>/derived/`), keyed by `(epub_sha256, audio_fingerprint)` in a
+  sidecar `derived/read-aloud.json` and regenerated when either changes. Only sentence maps
+  live under `<LECTERN_DATA_DIR>/align/`; everything derived from a work's own files lives in
+  its `derived/` directory so it travels (and is deleted) with the work. Scanners never ingest
+  from `derived/`.
 - `409 no_alignment` unless `alignments.status` is `succeeded`. Generation is synchronous
   (seconds for a typical work); if it turns out to be slow, milestone 4 may move it to a
   `readaloud` job kind and answer `202` with a job id.
@@ -313,6 +344,67 @@ Owner-only management; the sign-up page is the only unauthenticated route added.
   user in, and redirects to `/app`. Used, expired, revoked, or unknown tokens all answer `404`
   (not distinguished). The route shares the per-IP login rate limit. Passkeys/TOTP are set up
   afterwards from the normal security settings.
+
+### Resumable uploads — `/api/uploads`
+
+`POST /api/books/upload` (one request, whole file) stays for small EPUBs. Behind Cloudflare
+Tunnel every request body is capped at 100 MB, and a home uplink drops long transfers, so
+milestone 2 adds a resumable session upload for EPUBs and audiobooks. The schema
+(`upload_sessions`, migration `0005`) is in place; the routes are M2's. **The inbox folder
+remains the path for very large local imports** (a 2 GB audiobook on the same LAN is a file
+copy, not an upload).
+
+```diagram
+ browser                                   server
+   │ POST /api/uploads {filename,size,sha256}  │  row: ACTIVE, received_bytes=0,
+   │ ─────────────────────────────────────────▶│  file: <data>/uploads/<public_id>.part
+   │ ◀── 201 {id, chunk_size, expires_at} ─────│
+   │ PUT /api/uploads/{id}/chunk  Upload-Offset: 0        X-Chunk-SHA256: …
+   │ ─────────── ≤ 50 MiB body ───────────────▶│  verify hash, append, received += len
+   │ ◀── 204  Upload-Offset: <received> ───────│
+   │ … (network drops) …                       │
+   │ GET /api/uploads/{id}  ──────────────────▶│
+   │ ◀── 200 {received_bytes: 52428800, …} ────│  client resumes from that offset
+   │ PUT …/chunk  Upload-Offset: 52428800 …  ─▶│
+   │ POST /api/uploads/{id}/finalize ─────────▶│  received == size, sha256 matches,
+   │ ◀── 200 {status: completed, queued: …} ───│  rename into inbox → ordinary ingest
+```
+
+Routes (session + CSRF + same-origin `Origin` on every write, owner and member only; a reader
+gets `403`; a session that belongs to another user is `404`, so ids cannot be probed):
+
+| Route | Behaviour |
+| --- | --- |
+| `POST /api/uploads` `{filename, size, media_type, sha256?}` | `201 {id, chunk_size, received_bytes: 0, expires_at}`. `size` ≤ `LECTERN_UPLOAD_MAX_BYTES` (`413` otherwise); `media_type` ∈ `application/epub+zip`, `audio/mpeg`, `audio/mp4`, `audio/ogg`, `audio/flac` (`415`). `chunk_size` is chosen by the server: `min(50 MiB, size)`. `sha256`, if given, is checked at finalize; if omitted it must be sent to finalize. `id` is `public_id`, 22 URL-safe chars. `expires_at = now + 24 h`, extended by each accepted chunk. |
+| `PUT /api/uploads/{id}/chunk` | Headers `Upload-Offset: <int>`, `X-Chunk-SHA256: <hex>`, raw body ≤ `chunk_size` bytes (a larger body is `413` before anything is written). Every chunk except the last must be exactly `chunk_size` long (`400 short_chunk`). `Upload-Offset` must equal `received_bytes` (`409 offset_mismatch` with the current `Upload-Offset` header; the client reads it and resumes). A replay with `Upload-Offset + len == received_bytes` and the same `X-Chunk-SHA256` as the recorded last chunk answers `204` without writing (idempotent retry after a lost response); any other overlap is `409`. The body is hashed while streaming to the `.part` file; a mismatch truncates the file back to the previous offset and answers `422 chunk_checksum`. Success: `204` with `Upload-Offset: <new received_bytes>`. |
+| `GET /api/uploads/{id}` | `{id, filename, size, chunk_size, received_bytes, status, error, expires_at, inbox_name}`. The resume point is `received_bytes`. |
+| `GET /api/uploads` | The caller's sessions (owner: everyone's, with `user`), newest first, so the UI can offer to resume or discard. |
+| `POST /api/uploads/{id}/finalize` `{sha256?}` | Requires `received_bytes == size` (`409 incomplete` with `received_bytes`) and a declared or supplied `sha256` (`400 sha256_required`). The server hashes the whole `.part` and compares (`422 checksum_mismatch` → status `FAILED`, file deleted). For EPUBs the zip magic is checked as `/api/books/upload` does. Then the file is renamed into `<inbox>/<stem>-<hex>.<ext>` and the row becomes `COMPLETED` with `inbox_name`; the ordinary watcher ingests it. Response `200` with the status shape plus `queued` (the inbox name) and `title` when readable. Finalize is idempotent: on a `COMPLETED` session it returns the same `200`. |
+| `DELETE /api/uploads/{id}` | Cancel: status `CANCELLED`, `.part` deleted. `204`. Idempotent. |
+
+Rules:
+
+- **Ownership and isolation.** Only the creating user (and the owner role for listing and
+  cancelling) can see a session. Partial files live under `<LECTERN_DATA_DIR>/uploads/`, not in
+  the inbox, so the watcher never sees a half-uploaded file.
+- **Idempotency.** `POST /api/uploads` accepts an optional `Idempotency-Key` header
+  (≤ 64 chars); a repeat with the same key and user within 24 h returns the existing session
+  (`200`) instead of creating another. Chunk replay and finalize replay are defined above.
+- **Expiry and cleanup.** A sweeper (on startup and hourly) marks `ACTIVE` sessions past
+  `expires_at` as `EXPIRED` and deletes their `.part` files, deletes `.part` files with no
+  `ACTIVE` row, and deletes rows in a terminal state after 7 days. A chunk for an `EXPIRED`,
+  `CANCELLED`, `FAILED`, or `COMPLETED` session answers `410 gone`.
+- **Limits.** `size` and the running total are checked against `LECTERN_UPLOAD_MAX_BYTES`
+  (which M2 raises to a value suitable for audiobooks, e.g. 4 GiB; the old 200 MiB default is
+  for EPUBs). At most 5 `ACTIVE` sessions per user (`429 too_many_uploads`); the sum of their
+  `size` is the user's in-flight quota. Chunk uploads share the normal per-IP limiter for
+  writes. Disk is checked at create (`507` if the data volume has less free space than `size`).
+- **Audit.** `upload.start`, `upload.complete` (with the inbox name), `upload.fail`, and
+  `upload.cancel`; not one row per chunk.
+- **Why offsets, not indexed parts.** One append-only `.part` file needs no reassembly step and
+  no per-part bookkeeping; `received_bytes` *is* the state, which keeps the SQL constraints
+  checkable (`ck_upload_received`, `ck_upload_completed`). Parallel chunks would need indexed
+  parts; a home uplink gains nothing from them.
 
 ## Worker protocol
 
@@ -450,6 +542,36 @@ When a work's EPUB or audio changes (re-ingest, track added or removed), the ser
 
 `failed` and `cancelled` jobs are never retried automatically; `POST /api/works/{id}/align`
 creates a new one. History is kept: finished jobs are not deleted with their leases.
+
+## Client addresses behind a proxy (implemented)
+
+Lectern is meant to sit behind a reverse proxy or tunnel (see
+[`deploy-cloudflare-tunnel.md`](deploy-cloudflare-tunnel.md)), so the socket peer is often the
+proxy, not the reader. `lectern.security.proxy.resolve_client_ip` decides what counts as the
+client address, and **every** consumer uses it through `lectern.security.sessions.client_ip`:
+the per-IP rate limiters (login, setup, WebAuthn, OPDS Basic auth, KOReader sync), the
+`ip` stored on sessions and audit rows, and anything milestone 2+ adds (invites, uploads,
+streaming). Account lockout is per username and does not use the address.
+
+Rules:
+
+1. `LECTERN_TRUSTED_PROXIES` is a comma-separated list of IPs or CIDRs (default empty). A
+   peer is *trusted* only if `request.client.host` parses as an IP inside one of them. Unix
+   sockets and non-IP peers are never trusted.
+2. For an **untrusted** peer the client address is the peer. `CF-Connecting-IP` and
+   `X-Forwarded-For` are ignored completely, so a client that reaches Lectern directly cannot
+   choose which bucket it is throttled in or what the audit log records.
+3. For a **trusted** peer: `CF-Connecting-IP`, if it is a valid IP, wins (cloudflared sets it
+   to the visitor and strips any copy the visitor sent); otherwise the **first valid hop** of
+   `X-Forwarded-For` (leftmost; `host:port` and `[v6]:port` forms are accepted, junk entries
+   are skipped); otherwise the peer itself.
+4. uvicorn's own `--proxy-headers` handling is disabled (`lectern.cli`), so the rule above is
+   the only place forwarding headers are interpreted.
+
+The leftmost-hop rule is right for a *single* trusted proxy that appends the real client, which
+is the deployment this project documents. A chain of proxies where only the last is trusted
+would need right-to-left stripping; that is deliberately not implemented, and the guide tells
+people to point the tunnel straight at Lectern. Tests: `tests/test_proxy.py`.
 
 ## `lectern.positions` interface
 

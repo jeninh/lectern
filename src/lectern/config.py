@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import secrets
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from lectern.security.proxy import Network, parse_networks
 
 
 class Settings(BaseSettings):
@@ -27,6 +29,10 @@ class Settings(BaseSettings):
 
     host: str = "0.0.0.0"  # noqa: S104 - container default; bind narrower via env if needed
     port: int = 8080
+
+    # Comma-separated IPs/CIDRs of reverse proxies whose CF-Connecting-IP / X-Forwarded-For
+    # headers are believed, e.g. "127.0.0.1,172.18.0.0/16". Empty = trust nobody (default).
+    trusted_proxies: str = Field(default="")
 
     session_ttl_seconds: int = 60 * 60 * 24 * 30
     setup_token_ttl_seconds: int = 60 * 30
@@ -47,6 +53,16 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _valid_networks(cls, v: str) -> str:
+        parse_networks(v)  # fail at startup, not on the first request
+        return v
+
+    @cached_property
+    def trusted_proxy_networks(self) -> list[Network]:
+        return parse_networks(self.trusted_proxies)
 
     @property
     def inbox_path(self) -> Path:

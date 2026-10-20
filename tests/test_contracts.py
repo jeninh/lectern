@@ -27,6 +27,7 @@ from lectern.ingest.epub import read_spine
 from lectern.ingest.hashing import sha256_file
 from lectern.migrate import alembic_config, upgrade_to_head
 from lectern.models import (
+    UPLOAD_CHUNK_MAX_BYTES,
     Alignment,
     AlignmentStatus,
     AudioTrack,
@@ -40,6 +41,8 @@ from lectern.models import (
     ShelfGrant,
     ShelfItem,
     ShelfPermission,
+    UploadSession,
+    UploadStatus,
     User,
     Work,
     WorkerCredential,
@@ -79,6 +82,7 @@ NEW_TABLES = {
     "shelf_grants",
     "worker_credentials",
     "jobs",
+    "upload_sessions",
 }
 
 
@@ -302,6 +306,46 @@ def test_work_progress_is_one_row_per_user_and_work(db):
             raw="x",
         ),
     )
+
+
+def test_upload_session_constraints(db):
+    u = _user(db, "up", Role.MEMBER)
+    later = utcnow() + timedelta(hours=24)
+
+    def session(**kw) -> UploadSession:
+        base = dict(
+            public_id=kw.pop("public_id", "u" + str(len(db.new) + len(db.identity_map))),
+            user_id=u.id,
+            filename="book.epub",
+            media_type="application/epub+zip",
+            size=100,
+            chunk_size=UPLOAD_CHUNK_MAX_BYTES,
+            expires_at=later,
+        )
+        base.update(kw)
+        return UploadSession(**base)
+
+    ok = session(public_id="ok")
+    db.add(ok)
+    db.flush()
+    assert ok.status is UploadStatus.ACTIVE and ok.received_bytes == 0
+
+    _rejected(db, session(public_id="ok"))  # public_id is unique
+    _rejected(db, session(size=0))
+    _rejected(db, session(chunk_size=UPLOAD_CHUNK_MAX_BYTES + 1))  # one request > 50 MiB
+    _rejected(db, session(chunk_size=0))
+    _rejected(db, session(received_bytes=101))  # more than declared
+    _rejected(db, session(received_bytes=-1))
+    # COMPLETED needs every byte and the inbox hand-off name.
+    _rejected(db, session(status=UploadStatus.COMPLETED, received_bytes=100))
+    _rejected(db, session(status=UploadStatus.COMPLETED, inbox_name="book-abc.epub"))
+    done = session(status=UploadStatus.COMPLETED, received_bytes=100, inbox_name="book-abc.epub")
+    db.add(done)
+    db.flush()
+
+    db.delete(u)  # a user's partial uploads go with them
+    db.flush()
+    assert db.scalar(sa.select(sa.func.count()).select_from(UploadSession)) == 0
 
 
 def test_invite_role_and_usability(db):

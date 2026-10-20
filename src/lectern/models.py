@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -584,3 +585,62 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+# --- Resumable browser uploads (contract for milestone 2) --------------------------------------
+
+UPLOAD_CHUNK_MAX_BYTES = 50 * 1024 * 1024  # each request stays under Cloudflare's 100 MB cap
+
+
+class UploadStatus(enum.StrEnum):
+    ACTIVE = "active"  # accepting chunks
+    COMPLETED = "completed"  # verified and handed to the inbox
+    CANCELLED = "cancelled"  # by the uploader
+    EXPIRED = "expired"  # abandoned; partial file swept
+    FAILED = "failed"  # checksum or validation failure at finalize
+
+
+class UploadSession(Base):
+    """One resumable upload: bytes are appended in order to ``<data>/uploads/<public_id>.part``.
+
+    ``received_bytes`` is the resume offset the client asks for after an interruption. Finalize
+    checks the whole-file SHA-256 and moves the file into the inbox, where the ordinary ingest
+    picks it up; the session row then records the inbox file name.
+    """
+
+    __tablename__ = "upload_sessions"
+    __table_args__ = (
+        CheckConstraint("size > 0", name="ck_upload_size"),
+        CheckConstraint(
+            f"chunk_size > 0 AND chunk_size <= {UPLOAD_CHUNK_MAX_BYTES}",
+            name="ck_upload_chunk_size",
+        ),
+        CheckConstraint(
+            "received_bytes >= 0 AND received_bytes <= size", name="ck_upload_received"
+        ),
+        CheckConstraint(
+            "status <> 'COMPLETED' OR (received_bytes = size AND inbox_name IS NOT NULL)",
+            name="ck_upload_completed",
+        ),
+        Index("ix_upload_sessions_user_status", "user_id", "status"),
+        Index("ix_upload_sessions_sweep", "status", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)  # opaque URL id
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    filename: Mapped[str] = mapped_column(String(600))  # as the browser named it (sanitised)
+    media_type: Mapped[str] = mapped_column(String(64))  # application/epub+zip, audio/mpeg, ...
+    size: Mapped[int] = mapped_column(BigInteger)  # declared total, fixed at create
+    chunk_size: Mapped[int] = mapped_column(Integer)
+    received_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    sha256: Mapped[str | None] = mapped_column(String(64), default=None)  # expected whole-file
+    status: Mapped[UploadStatus] = mapped_column(
+        Enum(UploadStatus, native_enum=False, length=16), default=UploadStatus.ACTIVE, index=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    inbox_name: Mapped[str | None] = mapped_column(String(256), default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)

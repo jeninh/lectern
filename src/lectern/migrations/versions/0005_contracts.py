@@ -1,5 +1,5 @@
 """shared contracts for milestones 2-4: audio tracks, sentences, alignments, canonical
-progress, invites, shelves and grants, job queue, worker credentials
+progress, invites, shelves and grants, job queue, worker credentials, resumable uploads
 
 Revision ID: 0005
 Revises: 0004
@@ -279,8 +279,67 @@ def upgrade() -> None:
     )
     op.create_index("ix_shelf_grants_user_id", "shelf_grants", ["user_id"], unique=False)
 
+    op.create_table(
+        "upload_sessions",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("public_id", sa.String(length=32), nullable=False),
+        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("filename", sa.String(length=600), nullable=False),
+        sa.Column("media_type", sa.String(length=64), nullable=False),
+        sa.Column("size", sa.BigInteger(), nullable=False),
+        sa.Column("chunk_size", sa.Integer(), nullable=False),
+        sa.Column("received_bytes", sa.BigInteger(), nullable=False),
+        sa.Column("sha256", sa.String(length=64), nullable=True),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "ACTIVE",
+                "COMPLETED",
+                "CANCELLED",
+                "EXPIRED",
+                "FAILED",
+                name="uploadstatus",
+                native_enum=False,
+                length=16,
+            ),
+            nullable=False,
+        ),
+        sa.Column("error", sa.Text(), nullable=True),
+        sa.Column("inbox_name", sa.String(length=256), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.CheckConstraint("size > 0", name="ck_upload_size"),
+        sa.CheckConstraint(
+            "chunk_size > 0 AND chunk_size <= 52428800", name="ck_upload_chunk_size"
+        ),
+        sa.CheckConstraint(
+            "received_bytes >= 0 AND received_bytes <= size", name="ck_upload_received"
+        ),
+        sa.CheckConstraint(
+            "status <> 'COMPLETED' OR (received_bytes = size AND inbox_name IS NOT NULL)",
+            name="ck_upload_completed",
+        ),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("ix_upload_sessions_public_id", "upload_sessions", ["public_id"], unique=True)
+    op.create_index("ix_upload_sessions_status", "upload_sessions", ["status"], unique=False)
+    op.create_index(
+        "ix_upload_sessions_user_status", "upload_sessions", ["user_id", "status"], unique=False
+    )
+    op.create_index(
+        "ix_upload_sessions_sweep", "upload_sessions", ["status", "expires_at"], unique=False
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("ix_upload_sessions_sweep", table_name="upload_sessions")
+    op.drop_index("ix_upload_sessions_user_status", table_name="upload_sessions")
+    op.drop_index("ix_upload_sessions_status", table_name="upload_sessions")
+    op.drop_index("ix_upload_sessions_public_id", table_name="upload_sessions")
+    op.drop_table("upload_sessions")
     op.drop_index("ix_shelf_grants_user_id", table_name="shelf_grants")
     op.drop_table("shelf_grants")
     op.drop_index("ix_shelf_items_work_id", table_name="shelf_items")

@@ -11,6 +11,8 @@ services:
       # Set to "1" only for local http testing; it un-sets the Secure cookie flag.
       LECTERN_INSECURE_HTTP: ${LECTERN_INSECURE_HTTP:-0}
       LECTERN_LOG_LEVEL: ${LECTERN_LOG_LEVEL:-INFO}
+      # Reverse proxy / tunnel addresses whose forwarding headers to believe (see README).
+      LECTERN_TRUSTED_PROXIES: ${LECTERN_TRUSTED_PROXIES:-}
     volumes:
       - lectern-data:/data
       - ./library:/library
