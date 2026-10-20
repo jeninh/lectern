@@ -24,11 +24,12 @@ from pathlib import Path
 from pydantic import ValidationError
 from sqlalchemy.orm import sessionmaker
 
-from lectern.align import jobs
+from lectern.align import isolate, jobs
 from lectern.align.pipeline import AlignOutput, TrackInput, TranscribeFn, align_work
 from lectern.align.tracks import work_epub, work_tracks
 from lectern.align.transcribe import Transcriber, TranscriptionUnavailable, transcribe_tracks
 from lectern.models import Job, Work
+from lectern.sentence_map import SentenceMap
 
 log = logging.getLogger("lectern.align.worker")
 
@@ -106,10 +107,14 @@ def _error_text(exc: BaseException) -> str:
 
 
 class LocalWorker:
-    """Claims and runs ``align`` jobs inside the server process.
+    """Claims ``align`` jobs for the server and runs them.
 
-    ``transcribe`` defaults to faster-whisper through ``transcriber``; tests inject a function
-    that returns recorded words.
+    With ``isolated`` (what the server uses) each job runs in a supervised child process
+    (:mod:`lectern.align.isolate`): this thread keeps the lease and the heartbeat, and a
+    crash or out-of-memory kill of the child fails the job instead of the server. Without it
+    the pipeline runs in this thread, which is how tests inject ``transcribe`` (a function
+    returning recorded words). An isolated worker can use recorded words too (``transcript``,
+    a JSON file in the ``lectern align-transcribe`` format).
     """
 
     def __init__(
@@ -124,6 +129,10 @@ class LocalWorker:
         name: str = "local",
         lease_s: int = DEFAULT_LEASE_S,
         poll_s: float = DEFAULT_POLL_S,
+        isolated: bool = False,
+        memory_limit_mb: int | None = None,
+        transcript: Path | None = None,
+        child_command: list[str] | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.data_dir = data_dir
@@ -134,6 +143,11 @@ class LocalWorker:
         self.name = name
         self.lease_s = lease_s
         self.poll_s = poll_s
+        self.isolated = isolated
+        # resolved once: None = no cap of our own (see lectern.align.isolate)
+        self.memory_limit_mb = isolate.resolve_limit_mb(memory_limit_mb) if isolated else None
+        self.transcript = transcript
+        self.child_command = child_command
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._current: tuple[int, str] | None = None  # (job id, lease token) while running
@@ -168,19 +182,7 @@ class LocalWorker:
     def _transcribe_for(self, model: str) -> tuple[TranscribeFn, str]:
         if self._transcribe is not None:
             return self._transcribe, self._model_label or f"recorded-{model}"
-        base = self.transcriber or Transcriber()
-        tr = (
-            base
-            if base.model_name == model
-            else Transcriber(
-                model,
-                device=base.device,
-                compute_type=base.compute_type,
-                threads=base.threads,
-                download_root=base.download_root,
-                beam_size=base.beam_size,
-            )
-        )
+        tr = (self.transcriber or Transcriber()).with_model(model)
         return transcriber_fn(tr), tr.label
 
     def run_once(self) -> bool:
@@ -197,6 +199,7 @@ class LocalWorker:
                 return False
             job, token = claimed
             job_id, payload, work_id = job.id, dict(job.payload or {}), job.work_id
+            attempt = job.attempts
             work = db.get(Work, work_id)
             found = work_epub(db, self.library, work) if work else None
             tracks = [
@@ -227,6 +230,10 @@ class LocalWorker:
         self._current = (job_id, token)
         log.info("job %d: aligning work %s with %s", job_id, work_id, payload.get("model"))
         try:
+            if self.isolated:
+                return self._align_isolated(
+                    job_id, token, attempt, payload, work_id, found, tracks, hb
+                )
             return self._align(job_id, token, payload, work_id, found, tracks, hb)
         finally:
             self._current = None
@@ -260,16 +267,101 @@ class LocalWorker:
             return True
         finally:
             hb.stop()
-        self._submit(job_id, token, out)
+        self._submit(job_id, token, out.sentence_map.model_dump_json().encode(), out.stats)
         return True
 
-    def _submit(self, job_id: int, token: str, out: AlignOutput) -> None:
-        body = out.sentence_map.model_dump_json().encode()
+    def _align_isolated(self, job_id, token, attempt, payload, work_id, found, tracks, hb) -> bool:
+        """The same job in a supervised child process (``lectern.align.isolate``)."""
+        model = payload.get("model") or "small"
+        spec: dict = {
+            "work_id": work_id,
+            "epub_path": str(found[1]),
+            "epub_sha256": found[0].sha256,
+            "language": payload.get("language"),
+            "tracks": [
+                {
+                    "position": t.position,
+                    "path": str(t.path),
+                    "sha256": t.sha256,
+                    "duration_s": t.duration_s,
+                    "offset_s": t.offset_s,
+                }
+                for t in tracks
+            ],
+        }
+        if self.transcript is not None:
+            spec["transcript"] = str(self.transcript)
+            spec["model_label"] = self._model_label or f"recorded-{model}"
+        else:
+            tr = (self.transcriber or Transcriber()).with_model(model)
+            spec["transcriber"] = {
+                "model": tr.model_name,
+                "device": tr.device,
+                "compute_type": tr.compute_type,
+                "threads": tr.threads,
+                "download_root": str(tr.download_root) if tr.download_root else None,
+                "beam_size": tr.beam_size,
+                "window_s": tr.window_s,
+                "overlap_s": tr.overlap_s,
+            }
+
+        def progress(frac: float, message: str) -> None:
+            hb.progress, hb.message = frac, message
+
+        def interrupt() -> str | None:
+            if hb.lost.is_set():
+                return "abandon"
+            if self._stop.is_set():
+                return "stop"
+            return None
+
+        try:
+            outcome = isolate.run(
+                spec,
+                workdir=self.data_dir / "tmp",
+                log_path=isolate.log_path_for(self.data_dir, job_id, attempt),
+                on_progress=progress,
+                interrupt=interrupt,
+                memory_limit_mb=self.memory_limit_mb,
+                command=self.child_command,
+            )
+        except OSError as exc:  # could not start a process at all
+            log.exception("job %d: could not start the alignment process", job_id)
+            hb.stop()
+            self._fail(job_id, token, _error_text(exc), retryable=True)
+            return True
+        hb.stop()
+        if outcome.kind == "abandoned":
+            log.warning("job %d: lease lost, alignment process stopped", job_id)
+        elif outcome.kind == "stopped":
+            log.info("job %d: worker stopping, releasing the job", job_id)
+            self._release(job_id, token)
+        elif outcome.kind == "ok":
+            result = outcome.result or {}
+            self._submit(
+                job_id,
+                token,
+                SentenceMap.model_validate(result.get("sentence_map")).model_dump_json().encode(),
+                result.get("stats") or {},
+            )
+        else:
+            log.error(
+                "job %d: alignment process %s (exit %s, peak %s MiB): %s",
+                job_id,
+                outcome.kind,
+                outcome.returncode,
+                outcome.peak_rss_mb,
+                (outcome.error or "").splitlines()[0] if outcome.error else "",
+            )
+            self._fail(job_id, token, outcome.error or outcome.kind, retryable=outcome.retryable)
+        return True
+
+    def _submit(self, job_id: int, token: str, body: bytes, raw_stats: dict) -> None:
         with self.session_factory() as db:
             try:
                 job = jobs.verify_lease(db, job_id, token)
                 try:
-                    stats = jobs.AlignStats.model_validate(out.stats)
+                    stats = jobs.AlignStats.model_validate(raw_stats)
                 except ValidationError:
                     log.warning("job %d: dropping stats that do not validate", job_id)
                     stats = None
@@ -289,8 +381,8 @@ class LocalWorker:
             job_id,
             result["sentence_count"],
             result["coverage"],
-            out.stats["elapsed_s"],
-            out.stats.get("speed") or 0.0,
+            raw_stats.get("elapsed_s") or 0.0,
+            raw_stats.get("speed") or 0.0,
         )
 
     def _fail(self, job_id: int, token: str, error: str, *, retryable: bool) -> None:
@@ -454,19 +546,7 @@ class RemoteWorker:
     def _transcribe_for(self, model: str) -> tuple[TranscribeFn, str]:
         if self._transcribe is not None:
             return self._transcribe, self._model_label or f"recorded-{model}"
-        base = self.transcriber or Transcriber()
-        tr = (
-            base
-            if base.model_name == model
-            else Transcriber(
-                model,
-                device=base.device,
-                compute_type=base.compute_type,
-                threads=base.threads,
-                download_root=base.download_root,
-                beam_size=base.beam_size,
-            )
-        )
+        tr = (self.transcriber or Transcriber()).with_model(model)
         return transcriber_fn(tr), tr.label
 
     def _download(self, url: str, dest: Path, headers: dict, expected_sha256: str) -> Path:

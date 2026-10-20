@@ -54,6 +54,12 @@ class Device:
     def app_password(cls, pw: AppPassword) -> Device:
         return cls(f"app_password:{pw.id}", pw.label, pw.download_cap_per_hour)
 
+    @property
+    def app_password_id(self) -> int | None:
+        """The OPDS device's app password id; ``None`` for a browser session."""
+        kind, _, num = self.credential.partition(":")
+        return int(num) if kind == "app_password" and num.isdigit() else None
+
 
 def user_cap(user: User, settings: Settings) -> int:
     return (

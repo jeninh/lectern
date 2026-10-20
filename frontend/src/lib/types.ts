@@ -573,3 +573,47 @@ export interface BulkResult {
   action: string;
   results: { work_id: number; ok: boolean; changed?: string[]; error?: string }[];
 }
+
+// --- Per-device queues (docs/device-queues.md) --------------------------------------------
+
+/** An OPDS device (app password) the caller may send books to. */
+export interface QueueDevice {
+  id: number;
+  /** The Devices page id of the paired device ("k12") or lone app password ("p3"). */
+  device_id: string;
+  label: string;
+  own: boolean;
+  user: { id: number; username: string; display_name: string };
+  last_used_at: string | null;
+  revoked: boolean;
+  pending: number;
+  /** With ?work_id=: that work is already waiting on this device. */
+  queued?: boolean;
+}
+
+export type QueueStatus = "pending" | "delivered" | "removed";
+
+export interface QueueItem {
+  id: number;
+  status: QueueStatus;
+  position: number;
+  queued_at: string | null;
+  queued_by: string | null;
+  delivered_at: string | null;
+  removed_at: string | null;
+  removed_by: string | null;
+  work: Pick<Work, "id" | "title" | "author" | "has_cover" | "cover_url" | "cover_tint">;
+}
+
+export interface DeviceQueue {
+  device: QueueDevice;
+  pending: QueueItem[];
+  history: QueueItem[];
+}
+
+export type QueueResultStatus = "queued" | "requeued" | "already_queued" | "not_found" | "not_visible_to_device" | "no_ebook";
+
+export interface QueueResult {
+  work_id: number;
+  status: QueueResultStatus;
+}

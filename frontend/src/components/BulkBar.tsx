@@ -3,7 +3,7 @@ import { post } from "../lib/api";
 import { bulkSummary } from "../lib/editor";
 import { useStore } from "../lib/store";
 import type { BulkResult, Shelf } from "../lib/types";
-import { Close, Trash } from "./Icons";
+import { Close, Send, Trash } from "./Icons";
 import { ChipInput } from "./MetadataForm";
 import { Sheet } from "./Sheet";
 
@@ -11,7 +11,7 @@ type Action = "author" | "series" | "tags" | "shelves";
 const uuid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 /** Sticky bar for the Library's selection mode: one change to many books, with Undo. */
-export function BulkBar({ ids, visible, shelves, onSelectAll, onDone, onClose }: { ids: number[]; visible: number[]; shelves: Shelf[]; onSelectAll: (ids: number[]) => void; onDone: () => Promise<void>; onClose: () => void }) {
+export function BulkBar({ ids, visible, shelves, onSelectAll, onDone, onClose, canEdit = true, onSend }: { ids: number[]; visible: number[]; shelves: Shelf[]; onSelectAll: (ids: number[]) => void; onDone: () => Promise<void>; onClose: () => void; canEdit?: boolean; onSend?: () => void }) {
   const { toast, works } = useStore();
   const [dialog, setDialog] = useState<Action | null>(null);
   const [busy, setBusy] = useState(false);
@@ -59,17 +59,22 @@ export function BulkBar({ ids, visible, shelves, onSelectAll, onDone, onClose }:
         <strong aria-live="polite">{n ? `${n} selected` : "Select books"}</strong>
         <button className="btn sm ghost" onClick={() => onSelectAll(allPicked ? [] : visible)}>{allPicked ? "Select none" : `Select all ${visible.length}`}</button>
         <span className="spacer" />
-        <button className="btn sm" disabled={!n} onClick={() => setDialog("author")}>Author</button>
-        <button className="btn sm" disabled={!n} onClick={() => setDialog("series")}>Series</button>
-        <button className="btn sm" disabled={!n} onClick={() => setDialog("tags")}>Tags</button>
-        {shelves.length > 0 && <button className="btn sm" disabled={!n} onClick={() => setDialog("shelves")}>Shelves</button>}
-        <button
-          className="btn sm danger"
-          disabled={!n || busy}
-          onClick={() => window.confirm(`Move ${n} ${n === 1 ? "book" : "books"} to the trash? You can restore them for 30 days.`) && run({ action: "trash" }, "Moved to trash:")}
-        >
-          <Trash /> Trash
-        </button>
+        {onSend && <button className="btn sm" disabled={!n} onClick={onSend}><Send /> Send to device</button>}
+        {canEdit && (
+          <>
+            <button className="btn sm" disabled={!n} onClick={() => setDialog("author")}>Author</button>
+            <button className="btn sm" disabled={!n} onClick={() => setDialog("series")}>Series</button>
+            <button className="btn sm" disabled={!n} onClick={() => setDialog("tags")}>Tags</button>
+            {shelves.length > 0 && <button className="btn sm" disabled={!n} onClick={() => setDialog("shelves")}>Shelves</button>}
+            <button
+              className="btn sm danger"
+              disabled={!n || busy}
+              onClick={() => window.confirm(`Move ${n} ${n === 1 ? "book" : "books"} to the trash? You can restore them for 30 days.`) && run({ action: "trash" }, "Moved to trash:")}
+            >
+              <Trash /> Trash
+            </button>
+          </>
+        )}
         <button className="icon-btn ghost sm" onClick={onClose} aria-label="Leave selection mode"><Close /></button>
       </div>
       <Sheet open={dialog !== null} onClose={() => setDialog(null)} title={dialog ? `${dialog === "author" ? "Set author" : dialog === "series" ? "Set series" : dialog === "tags" ? "Tags" : "Shelves"} for ${n} ${n === 1 ? "book" : "books"}` : ""} variant="dialog" labelledBy="bulk-title">

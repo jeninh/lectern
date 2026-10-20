@@ -932,3 +932,54 @@ class InstanceSetting(Base):
         ForeignKey("users.id", ondelete="SET NULL"), default=None
     )
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+# --- Per-device queues (migration 0008) -------------------------------------------------------
+
+
+class QueueStatus(enum.StrEnum):
+    PENDING = "pending"  # waiting in the device's "Queued for this device" feed
+    DELIVERED = "delivered"  # that device downloaded the whole EPUB while it was pending
+    REMOVED = "removed"  # taken off the queue before delivery
+
+
+class DeviceQueueItem(Base):
+    """A work queued for one OPDS device (its app password).
+
+    One row per device and work: queueing again a delivered or removed work makes the same row
+    pending again (the audit log keeps the history), so enqueueing is idempotent and the row
+    can be claimed for delivery with one conditional ``UPDATE``. ``user_id`` is the device's
+    owner, kept here so every query is scoped by it without a join.
+    """
+
+    __tablename__ = "device_queue_items"
+    __table_args__ = (
+        UniqueConstraint("app_password_id", "work_id", name="uq_device_queue_device_work"),
+        Index("ix_device_queue_items_feed", "app_password_id", "status", "position"),
+        CheckConstraint(
+            "status <> 'DELIVERED' OR delivered_at IS NOT NULL", name="ck_device_queue_delivered"
+        ),
+        CheckConstraint(
+            "status <> 'REMOVED' OR removed_at IS NOT NULL", name="ck_device_queue_removed"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    app_password_id: Mapped[int] = mapped_column(ForeignKey("app_passwords.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    status: Mapped[QueueStatus] = mapped_column(Enum(QueueStatus, native_enum=False, length=16))
+    position: Mapped[int] = mapped_column(Integer)  # feed order among the device's items
+    queued_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    queued_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    delivered_file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("book_files.id", ondelete="SET NULL"), default=None
+    )
+    removed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    removed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)

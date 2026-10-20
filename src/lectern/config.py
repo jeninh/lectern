@@ -7,7 +7,7 @@ from functools import cached_property, lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from lectern.security.proxy import Network, parse_networks
@@ -90,7 +90,16 @@ class Settings(BaseSettings):
     align_device: str = "cpu"
     align_compute_type: str = "int8"
     align_threads: int = 0  # 0 = CTranslate2 default
+    # Audio is decoded as a stream and transcribed in windows of this many seconds that
+    # overlap by align_overlap_seconds, so memory does not grow with the length of a track.
+    align_window_seconds: float = Field(default=300.0, ge=10.0, le=4 * 3600)
+    align_overlap_seconds: float = Field(default=15.0, ge=0.0, le=600.0)
     align_local_worker: bool = True
+    # The local worker aligns in a child process so that running out of memory or crashing
+    # cannot take the server down. The child's resident memory is capped at this many MiB
+    # (it is killed and the job failed above it). Unset: 75 % of the memory available to the
+    # server (physical RAM or its cgroup limit, whichever is lower); 0: no cap of our own.
+    align_memory_limit_mb: int | None = Field(default=None, ge=0)
     # Lease sweeps, audio rescans, and the local worker. Off = the server only serves.
     background_jobs: bool = True
     worker_poll_seconds: float = 10.0
@@ -103,6 +112,12 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @model_validator(mode="after")
+    def _window_has_room(self) -> Settings:
+        if self.align_overlap_seconds > self.align_window_seconds / 3:
+            raise ValueError("LECTERN_ALIGN_OVERLAP_SECONDS must be at most a third of the window")
+        return self
 
     @field_validator("trusted_proxies")
     @classmethod

@@ -13,6 +13,7 @@ from lectern.routes.api import (
     editor,
     imports,
     notifications,
+    queues,
     readalong,
     security,
     shelves,
@@ -24,6 +25,7 @@ from lectern.routes.api import (
 router = APIRouter(prefix="/api")
 router.include_router(core.router)
 router.include_router(devices.router)
+router.include_router(queues.router)
 router.include_router(security.router)
 router.include_router(admin.router)
 router.include_router(books.router)

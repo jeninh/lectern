@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { EmptyState } from "../components/EmptyState";
-import { Book, Close, Download, Plus, Reader, Sync } from "../components/Icons";
+import { DeviceQueueView } from "../components/DeviceQueue";
+import { Book, Close, Download, Plus, Reader, Send, Sync } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -9,7 +10,7 @@ import { get, post } from "../lib/api";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
-import type { Device } from "../lib/types";
+import type { Device, QueueDevice } from "../lib/types";
 import { AddDeviceFlow } from "./AddDevice";
 
 const ACTIVE_MS = 5 * 60 * 1000;
@@ -30,11 +31,16 @@ export function DevicesPage() {
   const [confirm, setConfirm] = useState<Device | null>(null);
   const [capFor, setCapFor] = useState<Device | null>(null);
   const [showRevoked, setShowRevoked] = useState(false);
+  const [queues, setQueues] = useState<QueueDevice[]>([]);
+  const [queueFor, setQueueFor] = useState<QueueDevice | null>(null);
 
   const load = useCallback(async () => {
-    const d = await get<{ devices: Device[] }>("/api/devices");
+    const [d, q] = await Promise.all([get<{ devices: Device[] }>("/api/devices"), get<{ devices: QueueDevice[] }>("/api/device-queues")]);
     setDevices(d.devices);
+    setQueues(q.devices);
   }, []);
+  const queueOf = (d: Device) => (d.app_password ? queues.find((q) => q.id === d.app_password!.id && q.own) : undefined);
+  const household = queues.filter((q) => !q.own);
   useEffect(() => {
     load().catch(() => {});
   }, [load]);
@@ -88,9 +94,27 @@ export function DevicesPage() {
           ) : (
             <ul className="device-grid" aria-label="Active devices">
               {active.map((d) => (
-                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} />
+                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} queue={queueOf(d)} onQueue={(q) => setQueueFor(q)} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} />
               ))}
             </ul>
+          )}
+          {household.length > 0 && (
+            <section aria-labelledby="household-h">
+              <div className="section-head"><h2 id="household-h">Household devices</h2></div>
+              <p className="hint" style={{ marginTop: 0 }}>As the owner you can send books to anyone’s e-reader and tidy their queues. They only receive books they can already see.</p>
+              <ul className="queue-devices">
+                {household.map((q) => (
+                  <li key={q.id}>
+                    <span className="device-icon" aria-hidden="true"><Reader /></span>
+                    <span className="queue-text">
+                      <strong>{q.label}</strong>
+                      <span className="hint">{q.user.display_name || q.user.username} · {q.pending ? `${q.pending} waiting` : "queue empty"} · catalogue {relativeTime(q.last_used_at, now)}</span>
+                    </span>
+                    <button className="btn sm" onClick={() => setQueueFor(q)}>Open queue</button>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
           {revoked.length > 0 && (
             <section aria-labelledby="revoked-h">
@@ -111,6 +135,10 @@ export function DevicesPage() {
 
       <Sheet open={adding} onClose={() => nav("/app/devices")} title="Add a device" labelledBy="add-device-title">
         <AddDeviceFlow onDone={() => nav("/app/devices")} onCreated={() => load().catch(() => {})} />
+      </Sheet>
+
+      <Sheet open={!!queueFor} onClose={() => setQueueFor(null)} title={queueFor ? `Queue for ${queueFor.label}` : ""} labelledBy="queue-title">
+        {queueFor && <DeviceQueueView deviceId={queueFor.id} onChanged={() => load().catch(() => {})} />}
       </Sheet>
 
       <Sheet open={!!confirm} onClose={() => setConfirm(null)} title={`Revoke “${confirm?.label}”?`} variant="dialog" labelledBy="revoke-title">
@@ -174,7 +202,7 @@ export function CapForm({ initial, what, onSave, lowerOnly = false }: { initial:
   );
 }
 
-function DeviceCard({ d, now, highlight, onRevoke, onCap }: { d: Device; now: number; highlight?: boolean; onRevoke?: () => void; onCap?: () => void }) {
+function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap }: { d: Device; now: number; highlight?: boolean; queue?: QueueDevice; onQueue?: (q: QueueDevice) => void; onRevoke?: () => void; onCap?: () => void }) {
   const s = deviceStatus(d, now);
   return (
     <li className="device-card" id={`device-${d.id}`} data-tone={s.tone} data-highlight={highlight || undefined}>
@@ -191,6 +219,7 @@ function DeviceCard({ d, now, highlight, onRevoke, onCap }: { d: Device; now: nu
           <OverflowMenu
             label={`Actions for ${d.label}`}
             actions={[
+              ...(queue && onQueue ? [{ label: "Queue…", icon: <Send />, onSelect: () => onQueue(queue) }] : []),
               ...(d.app_password && onCap ? [{ label: "Download limit…", icon: <Download />, onSelect: onCap }] : []),
               { label: "Revoke device", icon: <Close />, danger: true, onSelect: onRevoke },
             ]}
@@ -216,6 +245,13 @@ function DeviceCard({ d, now, highlight, onRevoke, onCap }: { d: Device; now: nu
         {d.app_password && <span className="cap"><Book /> Catalogue</span>}
         {d.app_password?.download_cap_per_hour != null && <span className="cap"><Download /> {d.app_password.download_cap_per_hour ? `${d.app_password.download_cap_per_hour}/h` : "no limit"}</span>}
       </div>
+      {queue && onQueue && (
+        <button className="queue-summary" onClick={() => onQueue(queue)} aria-label={`Queue for ${d.label}: ${queue.pending ? `${queue.pending} waiting` : "empty"}. Open queue`}>
+          <Send aria-hidden="true" />
+          <span>{queue.pending ? <><strong>{queue.pending}</strong> {queue.pending === 1 ? "book" : "books"} waiting to download</> : "Nothing queued"}</span>
+          <span className="go" aria-hidden="true">Open queue</span>
+        </button>
+      )}
     </li>
   );
 }
