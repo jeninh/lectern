@@ -5,10 +5,13 @@ uploads), 3 (alignment workers) and 4 (positions and read-aloud) build on. Step 
 database tables (migration `0005`), the sentence-map schema (`lectern.sentence_map`), the
 position interface (`lectern.positions`), the visibility predicates (`lectern.access`), the
 trusted-proxy client-address rule (`lectern.security.proxy`, **implemented**), and this
-document. Milestone 4 implements the sentences, progress (web and audio sources), spine text,
-and read-aloud routes below (see [`read-aloud.md`](read-aloud.md)), plus an interim copy of the
-milestone 2 track list and stream in `lectern.routes.media`. **The other HTTP routes are not
-implemented yet**; they are the contract the milestones implement.
+document. Milestone 2 implements tracks, range streaming and the low-bitrate variant,
+sentences, progress with cross-device hand-off, shelves, invites, resumable uploads, and the
+notification and download-cap routes (`lectern.routes.api.works`, `…shelves`, `…uploads`,
+`…notifications`, `lectern.routes.invites`, `lectern.routes.library`, migration `0006`).
+Milestone 4 implements spine text and the read-aloud routes (see [`read-aloud.md`](read-aloud.md));
+its interim `lectern.routes.media` was replaced by milestone 2's routes. **The alignment-worker
+routes (milestone 3) are not implemented yet.**
 
 Conventions used throughout:
 
@@ -170,7 +173,7 @@ players seek with `Range`.
   written to the audit log per request (a player issues many); starting playback of a work is
   recorded once per session in milestone 2's player.
 
-#### Optional low-bitrate variant (milestone 2 may implement)
+#### Optional low-bitrate variant (implemented in milestone 2)
 
 Away from home, every byte still crosses the home uplink (over Tailscale or any other route), so
 a 320 kb/s MP3 audiobook is slow to seek on a phone. Milestone 2 *may* add a
@@ -182,9 +185,14 @@ rendition. The contract leaves room for it without requiring it:
   work.
 - The derivative lives in the work directory at
   `derived/audio/<original sha256>.<opus|m4a>`, keyed by the original's hash so a replaced
-  track invalidates it. It is produced by a `transcode` job (same queue, `kind = "transcode"`,
-  payload `{"track_id", "sha256", "codec", "bitrate_kbps"}`), on the server with `ffmpeg`
-  when available or by an external worker. No schema is needed: existence of the file *is*
+  track invalidates it. It is produced by a `transcode` job (same queue, `kind = "transcode"`),
+  on the server with `ffmpeg` when available or by an external worker. **As implemented**, one
+  job covers the whole work, because the active-job index allows one active job per work and
+  kind: payload `{"tracks": [{"track_id", "sha256"}], "codec", "bitrate_kbps"}`, `result.done`
+  counts finished tracks. A `<file>.sha256` sidecar holds the rendition's own hash for its
+  `ETag`. Default codec is AAC in `.m4a` (plays on iOS), `LECTERN_AUDIO_LOW_CODEC=opus` for Opus.
+  `POST /api/works/{id}/transcode` (owner, member) queues it; `GET …/tracks` reports
+  `transcode: {status, progress, total} | null`. No schema is needed: existence of the file *is*
   the state; the track object in `GET /api/works/{id}/tracks` gains
   `"variants": {"low": {"codec": "opus", "bitrate_kbps": 64, "size": …, "stream_url": "…?variant=low"} | null}`.
 - Requesting `variant=low` before it exists answers `404 variant_unavailable`; clients fall
@@ -285,10 +293,24 @@ Response is the same shape as `GET`. Rules:
 - `404` if the work is not visible; `source: "koreader"` is rejected (`422`), that source is only
   written by the sync projection.
 
-Status: `GET` and `PUT` are implemented (milestone 4) and used by the web read-along
-(`source: web` while reading along, `audio` in listen-only mode). A `sentence_n` past the last
-sentence is `422`; `offset` is clamped to the sentence. The KOReader projection (xpointer ↔
-sentence, `lectern.positions.xpointer_to_text`) is not implemented yet.
+Status: implemented (milestone 2's `lectern.progress`, used by the web reader, the audio player,
+and milestone 4's read-along). A `sentence_n` past the last sentence is `422`; `offset` is
+clamped to the sentence. Additions beyond the shape above:
+
+- Every EPUB gets a **text-only sentence list at ingest** (all `matched = false`), so progress
+  works before alignment. Until a work is aligned, audio ↔ text conversion is proportional
+  over the total duration and the response says `"estimated": true`.
+- `PUT` with `source: "web"` may carry `raw` (≤ 1024 chars), the reader's own precise locator
+  (an EPUB CFI), returned as `raw` so the same browser restores the exact page.
+- `count` (sentences) and `total_duration_s` are included; `percent` is a fraction `0..1`.
+- `koreader`: KOReader's latest `reading_progress` for the work's EPUB, as a read-only hand-off
+  candidate `{source: "koreader", device, received_at, percent, raw, text, audio_s, estimated}`
+  (text from the xpointer's `DocFragment` plus the percentage, so `estimated: true`). KOReader
+  progress itself is unchanged and still keyed by document hash.
+- **Hand-off rule (client):** a device offers "<device>, <time>: continue here?" only when a
+  position newer than the last one it wrote or accepted exists, comes from another device, and
+  is at least 0.5 % of the book (reading) or 20 s (listening) away. Clients save only positions
+  the reader moved to, so opening a book never overwrites a newer position.
 
 ### Read-aloud EPUB — `GET /library/works/{work_id}/read-aloud.epub`
 
@@ -356,7 +378,7 @@ Visibility rule, implemented by `lectern.access`:
 > Owners and members see the whole library. Readers see only works on shelves they hold a
 > grant for.
 
-`visible_works(user)` is a SQL predicate that milestone 2 adds to `/api/library`,
+`visible_works(user)` is a SQL predicate that milestone 2 applies to `/api/library`,
 `/api/works/{id}`, `/api/continue`, covers, downloads, OPDS, and all routes in this document.
 A role change takes effect on the next request.
 
@@ -396,7 +418,8 @@ Owner-only management; the sign-up page is the only unauthenticated route added.
 long transfers, and some proxies cap request bodies (Cloudflare: 100 MB; Tailscale has no such
 cap, but the 50 MiB chunk limit keeps one contract for every deployment), so milestone 2 adds a
 resumable session upload for EPUBs and audiobooks. The schema
-(`upload_sessions`, migration `0005`) is in place; the routes are M2's. **The inbox folder
+(`upload_sessions`, migration `0005`, plus `idempotency_key` and `last_chunk_sha256` in `0006`)
+backs the routes below, implemented in milestone 2. **The inbox folder
 remains the path for very large local imports** (a 2 GB audiobook on the same LAN is a file
 copy, not an upload).
 
@@ -637,6 +660,35 @@ Rules:
 Tests: `tests/test_proxy.py` (spoofed leftmost entries, all-trusted chains, malformed hops,
 IPv4/IPv6 and port forms, trusted and untrusted peers, `CF-Connecting-IP` ignored by default
 and honoured only with the flag on, and the rate-limit buckets and audit rows through the app).
+
+## Notifications, alerts, and download caps (milestone 2)
+
+Tables `notifications`, `known_devices`, `download_events` and the cap columns
+`users.download_cap_per_hour` and `app_passwords.download_cap_per_hour` are in migration `0006`.
+
+- **Alerts.** A sign-in from a browser without a recognised `lectern_device` cookie notifies
+  the user and every owner (`device.new`, audit `device.new`); a known browser gets an info
+  note. The first use of a sync key or app password notifies the user (`device.connected`,
+  audit `device.first_use`). `download_burst_count` downloads within
+  `download_burst_window_seconds` notify the user and owners once per hour (`download.burst`).
+- **Caps.** Whole-file transfers (`/library/files/{id}/download`, OPDS downloads,
+  `/library/works/{id}/book.epub`, `/library/tracks/{id}/download`,
+  `/library/works/{id}/read-aloud.epub`) are counted per user and, for OPDS app passwords,
+  per device over a rolling hour. Over a cap: `429 {"detail": "download_cap", "message",
+  "scope": "user"|"device", "limit", "retry_after"}` with `Retry-After`, an audit
+  `download.blocked`, and a `download.cap` notification. Streaming is not counted. Overrides:
+  `POST /api/admin/users/{id}/download-cap {cap}` (owner) and
+  `POST /api/devices/app-passwords/{id}/download-cap {cap}` (that user); `null` means the
+  server default, `0` no cap. `GET /api/security` reports `downloads` usage and
+  `known_devices`; `POST /api/security/known-devices/{id}/forget` forgets one.
+- **Reading them.** `GET /api/notifications?limit=` → `{items: [{id, kind, severity, title,
+  body, data, created_at, read_at}], unread}`; `POST /api/notifications/read {ids?, all?}`.
+  `/api/me` includes `counts.unread_notifications`.
+- **Extension point for e-mail or webhooks.** Lectern ships in-app delivery only, because
+  external channels need configuration a household server does not have by default. Implement
+  `lectern.notify.Sink` (`deliver(db, note, user)`, must return quickly and not commit) and call
+  `notify.register_sink(...)` at startup, gated by your own setting; every notification reaches
+  it after the row is written. Failures are logged, never raised.
 
 ## `lectern.positions` interface
 
