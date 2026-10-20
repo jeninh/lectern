@@ -173,11 +173,16 @@ players seek with `Range`.
 - Visibility is checked through the track's work (`404` otherwise). Streaming is **not**
   written to the audit log per request (a player issues many); starting playback of a work is
   recorded once per session in milestone 2's player.
-- **Metering.** Bytes served are tallied per credential (session or app password) and track
-  for the hour. Once they reach `stream_meter_bytes` (default 8 MiB) the track counts as one
-  download for that credential for the hour: caps (`429 download_cap`), a `download` audit row
-  (`target stream:<track_id>`, `detail stream`), and burst alerts apply. Later range
-  requests in that hour are free, so seeking never multiplies the charge.
+- **Metering.** Metering is per **work**: an audiobook counts as one download per credential
+  (session or app password) per hour, whichever tracks and ranges were played. The bytes
+  actually sent (counted as the response body is written, not the declared `Content-Length`,
+  so an open-ended `bytes=N-` the player abandons costs only what it received) are summed over
+  all tracks of the work. Once they reach `stream_meter_bytes` (default 8 MiB) the work is
+  admitted exactly once: caps, a `download` audit row (`target stream:work:<work_id>`,
+  `detail stream`), and burst alerts apply. Later requests that hour are free. If admission
+  is refused mid-response the body ends early; later requests for that work answer
+  `429 download_cap` without writing more events, audit rows, or notifications while the
+  credential stays over the cap.
 
 #### Optional low-bitrate variant (implemented in milestone 2)
 
@@ -688,7 +693,7 @@ Tables `notifications`, `known_devices`, `download_events` and the cap columns
   per device over a rolling hour. Over a cap: `429 {"detail": "download_cap", "message",
   "scope": "user"|"device", "limit", "retry_after"}` with `Retry-After`, an audit
   `download.blocked`, and a `download.cap` notification. Streams count once per credential and
-  track per hour after `stream_meter_bytes` (see Streaming); read-along chapter text
+  work per hour after `stream_meter_bytes` were sent (see Streaming); read-along chapter text
   (`GET /api/works/{id}/text/{n}`) counts once per session and work per hour on the first
   chapter (`target text:<work_id>`). Counting and recording are atomic, so concurrent requests
   cannot overshoot a cap. Overrides: `POST /api/admin/users/{id}/download-cap {cap}` (owner) and

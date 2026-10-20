@@ -166,30 +166,25 @@ def stream_track(
     track_id: int,
     variant: str | None = None,
 ):
-    """Range-capable playback. Bytes served are tallied per credential and track; past
-    ``stream_meter_bytes`` in an hour the track counts once as a download (caps, audit, alerts)."""
+    """Range-capable playback, metered per work: once ``stream_meter_bytes`` of a work's audio
+    (any tracks, any ranges) were actually sent to this credential in an hour, the audiobook
+    counts once as a download (caps, audit, alerts). Declared lengths are never charged."""
     track, work, path = resolve_track(db, settings, track_id, auth.user)
+    meter = downloads.StreamMeter(
+        settings, auth.user.id, auth.device, f"stream:work:{work.id}", client_ip(request)
+    )
+    meter.gate(db, auth.user)
     if variant is None:
-        resp = file_response(request, path, track.media_type, track.sha256)
-    elif variant != "low":
+        return file_response(request, path, track.media_type, track.sha256, on_sent=meter.sent)
+    if variant != "low":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown_variant")
-    else:
-        found = find_variant(settings.library_dir, work, track.sha256)
-        if found is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "variant_unavailable")
-        vpath, codec = found
-        resp = file_response(request, vpath, MEDIA_TYPE[codec], variant_sha256(vpath))
-    if resp.status_code in (200, 206):
-        downloads.meter_stream(
-            db,
-            settings,
-            auth.user,
-            auth.device,
-            f"stream:{track.id}",
-            client_ip(request),
-            int(resp.headers["content-length"]),
-        )
-    return resp
+    found = find_variant(settings.library_dir, work, track.sha256)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "variant_unavailable")
+    vpath, codec = found
+    return file_response(
+        request, vpath, MEDIA_TYPE[codec], variant_sha256(vpath), on_sent=meter.sent
+    )
 
 
 @router.get("/library/tracks/{track_id}/download", include_in_schema=False)

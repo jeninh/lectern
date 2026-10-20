@@ -260,3 +260,34 @@ def test_range_parser_rejects_absurd_numbers():
     assert parse_range("bytes=" + "9" * 30 + "-", 100) is None
     assert parse_range("bytes=0-" + "1" * 20, 100) is None
     assert parse_range("bytes=0-" + "9" * 19, 100) == (0, 99)
+
+
+def test_concurrent_range_fetches_charge_a_work_once(client, owner, settings):
+    """Many responses for one work sending their last blocks at once: one charge, no extras."""
+    import threading
+
+    from lectern.db import session_factory
+    from lectern.models import DownloadEvent, User
+    from lectern.security import downloads
+
+    settings.stream_meter_bytes = 1000
+    with session_factory()() as db:
+        uid = db.query(User).filter_by(username="owner").one().id
+    device = downloads.Device("session:1", "Web browser")
+    start = threading.Barrier(8)
+    results: list[bool] = []
+
+    def player():
+        meter = downloads.StreamMeter(settings, uid, device, "stream:work:7", None)
+        start.wait()
+        results.extend(meter.sent(300) for _ in range(3))
+
+    threads = [threading.Thread(target=player) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert all(results)
+    with session_factory()() as db:
+        rows = db.query(DownloadEvent).all()
+    assert [(r.target, r.blocked) for r in rows] == [("stream:work:7", False)]

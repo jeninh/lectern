@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 
@@ -66,6 +66,16 @@ def _iter_file(path: Path, start: int, length: int) -> Iterator[bytes]:
             yield block
 
 
+def _metered(blocks: Iterator[bytes], on_sent: Callable[[int], bool]) -> Iterator[bytes]:
+    """Report each block's size after the server took it (it asks for the next block only once
+    the previous one was written). A client that disconnects closes the generator at ``yield``,
+    so its unsent block is never counted. ``on_sent`` returning False ends the body early."""
+    for block in blocks:
+        yield block
+        if not on_sent(len(block)):
+            return
+
+
 def _etag_matches(header: str, etag: str) -> bool:
     tags = [t.strip() for t in header.split(",")]
     bare = etag.removeprefix("W/")
@@ -80,6 +90,7 @@ def file_response(
     *,
     cache_control: str = "private, max-age=3600",
     headers: dict[str, str] | None = None,
+    on_sent: Callable[[int], bool] | None = None,
 ) -> Response:
     st = os.stat(path)
     size = st.st_size
@@ -109,13 +120,17 @@ def file_response(
             except (TypeError, ValueError):
                 range_header = None
 
+    def body(start: int, length: int) -> Iterator[bytes]:
+        blocks = _iter_file(path, start, length)
+        return blocks if on_sent is None else _metered(blocks, on_sent)
+
     try:
         rng = parse_range(range_header, size)
     except Unsatisfiable:
         return Response(status_code=416, headers={**base, "Content-Range": f"bytes */{size}"})
     if rng is None:
         return StreamingResponse(
-            _iter_file(path, 0, size),
+            body(0, size),
             status_code=200,
             media_type=media_type,
             headers={**base, "Content-Length": str(size)},
@@ -123,7 +138,7 @@ def file_response(
     start, end = rng
     length = end - start + 1
     return StreamingResponse(
-        _iter_file(path, start, length),
+        body(start, length),
         status_code=206,
         media_type=media_type,
         headers={

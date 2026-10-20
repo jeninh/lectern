@@ -5,11 +5,13 @@ web reader's copy of an EPUB) goes through :func:`admit`. It counts the user's a
 transfers in the last hour, refuses with ``429 download_cap`` once either cap is reached, and
 raises a burst alert when many downloads happen in a short window.
 
-Streaming and read-along text are metered with :func:`admit_once`: a track (or a work's spine
-text) counts as one download per credential per hour, so a player's many range requests and a
-reader's page turns are free once admitted. Streams count only after ``stream_meter_bytes``
-were served for that track in the hour, so probing metadata or a few seconds of playback is
-never charged.
+Streaming and read-along text are metered with :func:`admit_once`: an audiobook (all tracks
+of one work) or a work's chapter text counts as one download per credential per hour, so a
+player's many range requests, chapter skips, and a reader's page turns are free once admitted.
+Streams count only after ``stream_meter_bytes`` were actually sent for that work in the hour
+(see :class:`StreamMeter`), so probing, seeking, and open-ended ``bytes=N-`` requests that the
+browser abandons after one block are never charged for bytes they did not receive. A credential
+that was refused for a target gets ``429`` again without new audit rows or notifications.
 
 Counting and recording happen under one process-wide lock, and the event row is inserted
 *before* counting: on SQLite the insert takes the write lock, so two concurrent requests (in
@@ -33,7 +35,7 @@ from lectern.models import AppPassword, DownloadEvent, User, utcnow
 from lectern.security import audit
 
 HOUR = timedelta(hours=1)
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 
 @dataclass
@@ -103,34 +105,58 @@ def admit(
         _admit(db, settings, user, device, target, ip)
 
 
+def _over(db: Session, settings: Settings, user: User, device: Device, since, extra: int):
+    """(scope, limit, where) of the first cap that ``extra`` more downloads would exceed."""
+    ucap, dcap = user_cap(user, settings), device_cap(device, settings)
+    n_user = _count(db, DownloadEvent.user_id == user.id, DownloadEvent.at >= since)
+    n_dev = _count(db, DownloadEvent.credential == device.credential, DownloadEvent.at >= since)
+    if ucap and n_user + extra > ucap:
+        return "user", ucap, (DownloadEvent.user_id == user.id)
+    if dcap and n_dev + extra > dcap:
+        return "device", dcap, (DownloadEvent.credential == device.credential)
+    return None
+
+
+def _retry_after(db: Session, where, now) -> int:
+    oldest = db.scalar(
+        select(func.min(DownloadEvent.at)).where(
+            ~DownloadEvent.blocked, DownloadEvent.at >= now - HOUR, where
+        )
+    )
+    return max(1, int(((oldest or now) + HOUR - now).total_seconds()) + 1)
+
+
+def _too_many(scope: str, limit: int, retry: int) -> HTTPException:
+    return HTTPException(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        {
+            "detail": "download_cap",
+            "message": f"Download limit of {limit} per hour reached for this {scope}.",
+            "scope": scope,
+            "limit": limit,
+            "retry_after": retry,
+        },
+        headers={"Retry-After": str(retry)},
+    )
+
+
 def _admit(
     db: Session, settings: Settings, user: User, device: Device, target: str, ip: str | None
 ) -> None:
     now = utcnow()
     since = now - HOUR
-    ucap, dcap = user_cap(user, settings), device_cap(device, settings)
     # Insert first, then count including it: the insert holds the write lock until commit.
     event = DownloadEvent(
         user_id=user.id, credential=device.credential, target=target, ip=ip, at=now
     )
     db.add(event)
     db.flush()
-    n_user = _count(db, DownloadEvent.user_id == user.id, DownloadEvent.at >= since)
-    n_dev = _count(db, DownloadEvent.credential == device.credential, DownloadEvent.at >= since)
-    scope = None
-    if ucap and n_user > ucap:
-        scope, limit, where = "user", ucap, (DownloadEvent.user_id == user.id)
-    elif dcap and n_dev > dcap:
-        scope, limit, where = "device", dcap, (DownloadEvent.credential == device.credential)
-    if scope is not None:
+    over = _over(db, settings, user, device, since, 0)
+    if over is not None:
+        scope, limit, where = over
         event.blocked = True
         db.flush()
-        oldest = db.scalar(
-            select(func.min(DownloadEvent.at)).where(
-                ~DownloadEvent.blocked, DownloadEvent.at >= since, where
-            )
-        )
-        retry = max(1, int(((oldest or now) + HOUR - now).total_seconds()) + 1)
+        retry = _retry_after(db, where, now)
         who = "account" if scope == "user" else f"device {device.label}"
         audit.record(
             db,
@@ -152,17 +178,7 @@ def _admit(
             dedupe=HOUR,
         )
         db.commit()
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            {
-                "detail": "download_cap",
-                "message": f"Download limit of {limit} per hour reached for this {scope}.",
-                "scope": scope,
-                "limit": limit,
-                "retry_after": retry,
-            },
-            headers={"Retry-After": str(retry)},
-        )
+        raise _too_many(scope, limit, retry)
 
     window = timedelta(seconds=settings.download_burst_window_seconds)
     if settings.download_burst_count:
@@ -192,13 +208,17 @@ def _admit(
     db.commit()
 
 
-def counted_recently(db: Session, credential: str, target: str) -> bool:
+def _recent(db: Session, credential: str, target: str, blocked: bool) -> bool:
     return bool(
-        _count(
-            db,
-            DownloadEvent.credential == credential,
-            DownloadEvent.target == target,
-            DownloadEvent.at >= utcnow() - HOUR,
+        db.scalar(
+            select(func.count())
+            .select_from(DownloadEvent)
+            .where(
+                DownloadEvent.blocked.is_(blocked),
+                DownloadEvent.credential == credential,
+                DownloadEvent.target == target,
+                DownloadEvent.at >= utcnow() - HOUR,
+            )
         )
     )
 
@@ -213,42 +233,81 @@ def admit_once(
     detail: str,
 ) -> bool:
     """Count ``target`` as one download per credential per hour (or raise 429). Returns True
-    when this call counted it; then a ``download`` audit row with ``detail`` is written too."""
+    when this call counted it; then a ``download`` audit row with ``detail`` is written too.
+
+    A credential already refused for ``target`` this hour is refused again without writing
+    anything while it is still over a cap, so repeated range requests cannot flood the audit
+    log or the notifications."""
     with _lock:
-        if counted_recently(db, device.credential, target):
+        if _recent(db, device.credential, target, blocked=False):
             return False
+        if _recent(db, device.credential, target, blocked=True):
+            now = utcnow()
+            over = _over(db, settings, user, device, now - HOUR, 1)
+            if over is not None:
+                scope, limit, where = over
+                raise _too_many(scope, limit, _retry_after(db, where, now))
         _admit(db, settings, user, device, target, ip)
         audit.record(db, "download", actor_user_id=user.id, target=target, ip=ip, detail=detail)
         db.commit()
         return True
 
 
-# Bytes served per (credential, target) in the current hour. In memory on purpose: losing it on
-# restart only means a stream is charged a little later; the admitted state is in the database.
-_streamed: dict[tuple[str, str], tuple[float, int]] = {}
+# Per (credential, target): [hour start (monotonic), bytes sent, admitted]. In memory on
+# purpose: losing it on restart only means a stream is charged a little later; the admitted
+# state that matters for caps is in the database.
+_streamed: dict[tuple[str, str], list] = {}
 
 
-def stream_bytes(credential: str, target: str, n: int) -> int:
-    """Add ``n`` bytes to this hour's tally for (credential, target); return the new total."""
+def _entry(key: tuple[str, str]) -> list:
     now = time.monotonic()
-    with _lock:
-        for k in [k for k, (t0, _) in _streamed.items() if now - t0 > 3600]:
-            del _streamed[k]
-        t0, total = _streamed.get((credential, target), (now, 0))
-        total += n
-        _streamed[(credential, target)] = (t0, total)
-        return total
+    for k in [k for k, (t0, _, _) in _streamed.items() if now - t0 > 3600]:
+        del _streamed[k]
+    return _streamed.setdefault(key, [now, 0, False])
 
 
-def meter_stream(
-    db: Session,
-    settings: Settings,
-    user: User,
-    device: Device,
-    target: str,
-    ip: str | None,
-    nbytes: int,
-) -> None:
-    """Charge a stream once it has served ``stream_meter_bytes`` in the hour (or raise 429)."""
-    if stream_bytes(device.credential, target, nbytes) >= settings.stream_meter_bytes:
-        admit_once(db, settings, user, device, target, ip, "stream")
+class StreamMeter:
+    """Charges one work's audio to a credential once ``stream_meter_bytes`` were actually sent.
+
+    :meth:`gate` runs before a response starts: if this credential already crossed the threshold
+    for the work without being admitted (it was refused), it re-checks the caps and raises 429.
+    :meth:`sent` is called by the response's file iterator after each block went out, from the
+    threadpool, with its own database session (the request's may be closed by then). Returning
+    False stops the stream: the headers are gone, so a refusal mid-response ends the body early
+    and the next request gets the 429.
+    """
+
+    def __init__(self, settings: Settings, user_id: int, device: Device, target: str, ip):
+        self.settings, self.user_id, self.device = settings, user_id, device
+        self.target, self.ip = target, ip
+        self.key = (device.credential, target)
+
+    def gate(self, db: Session, user: User) -> None:
+        with _lock:
+            _t0, total, admitted = _entry(self.key)
+            if admitted or total < self.settings.stream_meter_bytes:
+                return
+            self._charge(db, user)
+
+    def _charge(self, db: Session, user: User) -> None:
+        # Caller holds _lock (re-entrant), so concurrent ranges cannot both charge.
+        admit_once(db, self.settings, user, self.device, self.target, self.ip, "stream")
+        _entry(self.key)[2] = True
+
+    def sent(self, n: int) -> bool:
+        from lectern.db import session_factory
+
+        with _lock:
+            entry = _entry(self.key)
+            entry[1] += n
+            if entry[2] or entry[1] < self.settings.stream_meter_bytes:
+                return True
+            try:
+                with session_factory()() as db:
+                    user = db.get(User, self.user_id)
+                    if user is None:
+                        return False
+                    self._charge(db, user)
+            except HTTPException:
+                return False
+            return True

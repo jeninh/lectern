@@ -296,45 +296,169 @@ def _used(client):
     return client.get("/api/security").json()["downloads"]["used"]
 
 
-def test_streams_are_metered_per_credential_and_track(client, owner, magi_track, settings):
-    _work_, track = magi_track
-    url, size = track["stream_url"], track["size"]
-    settings.stream_meter_bytes = 1000
+def _basic(secret):
+    return {"authorization": "Basic " + base64.b64encode(f"owner:{secret}".encode()).decode()}
+
+
+def _audiobook(settings, album, tracks, seconds=3.0):
+    folder = settings.inbox_path / album
+    folder.mkdir(parents=True)
+    for n in range(1, tracks + 1):
+        make_mp3(folder / f"{n:02d}.mp3", seconds, title=f"Ch {n}", album=album,
+                 artist="Ann Writer", track=n, freq=200 + n * 37 + len(album))  # fmt: skip
+    drain_inbox(settings)
+
+
+def _read_blocks(client, url, headers, blocks):
+    """Request ``url`` through the ASGI app and disconnect after ``blocks`` body messages, the
+    way a browser abandons an open-ended ``bytes=N-`` request when the listener skips ahead."""
+    import anyio
+
+    raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    if client.cookies:
+        raw.append((b"cookie", "; ".join(f"{k}={v}" for k, v in client.cookies.items()).encode()))
+    path, _, query = url.partition("?")
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+             "http_version": "1.1", "method": "GET", "scheme": "http", "path": path,
+             "raw_path": path.encode(), "query_string": query.encode(), "root_path": "",
+             "headers": [(b"host", b"testserver"), *raw], "client": ("127.0.0.1", 1),
+             "server": ("testserver", 80), "state": {}}  # fmt: skip
+    got: list[bytes] = []
+    status_: list[int] = []
+
+    async def receive():
+        await anyio.sleep_forever()
+
+    async def send(message):
+        if len(got) >= blocks:
+            raise OSError("client went away")  # what the server reports on a closed socket
+        if message["type"] == "http.response.start":
+            status_.append(message["status"])
+        elif message.get("body"):
+            got.append(message["body"])
+
+    async def run():
+        from starlette.requests import ClientDisconnect
+
+        with anyio.fail_after(10):
+            try:
+                await client.app(scope, receive, send)
+            except (OSError, ClientDisconnect):
+                pass
+
+    anyio.run(run)
+    return status_[0], b"".join(got)
+
+
+def _audit_rows(client, prefix):
+    rows = client.get("/api/admin/audit").json()["rows"]
+    return [r for r in rows if (r["target"] or "").startswith(prefix)]
+
+
+def test_skipping_through_one_audiobook_counts_once(client, owner, settings, monkeypatch):
+    """Open-ended ranges are charged for the bytes actually sent, summed over all tracks of the
+    work: skipping chapters is free, a full listen is one download per credential, no alerts."""
+    from lectern import http_range
+
+    monkeypatch.setattr(http_range, "CHUNK", 1024)
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    _audiobook(settings, "Long Book", 6)
+    work = _work(client, "Long Book")
+    tracks = client.get(f"/api/works/{work['id']}/tracks").json()["tracks"]
+    total = sum(t["size"] for t in tracks)
+    settings.stream_meter_bytes = total // 2
     settings.download_burst_count = 2
-    # Small range requests (player probing, seeking) are free below the threshold.
-    for start in (0, 300, 600):
-        assert client.get(url, headers={"range": f"bytes={start}-{start + 99}"}).status_code == 206
+    assert len(tracks) == 6 and all(t["size"] > 4 * 1024 for t in tracks)
+
+    # Chapter skipping: bytes=0- on every track, the player drops each after two blocks.
+    for t in tracks:
+        st, body = _read_blocks(client, t["stream_url"], {"range": "bytes=0-"}, 2)
+        assert st == 206 and 0 < len(body) < t["size"]
+        st, _body = _read_blocks(client, t["stream_url"], {"range": "bytes=2048-"}, 1)
+        assert st == 206
     assert _used(client) == 0
-    # Crossing it charges the track once; later range requests in the hour are free.
-    assert client.get(url, headers={"range": "bytes=0-999"}).status_code == 206
-    assert _used(client) == 1
-    for _ in range(3):
-        assert client.get(url).status_code == 200
-    assert _used(client) == 1
-    rows = [e for e in client.get("/api/admin/audit").json()["rows"] if e["action"] == "download"]
-    assert [(r["target"], r["detail"]) for r in rows] == [(f"stream:{track['id']}", "stream")]
+    # Normal closed ranges are tallied by what they send too.
+    r = client.get(tracks[0]["stream_url"], headers={"range": "bytes=0-99"})
+    assert r.status_code == 206 and len(r.content) == 100
+    assert _used(client) == 0
 
-    # An app password is another credential: it is charged separately, and caps apply.
-    def basic(secret):
-        return {"authorization": "Basic " + base64.b64encode(f"owner:{secret}".encode()).decode()}
+    # Listening through the whole book (open-ended ranges, every byte read) counts once.
+    for t in tracks:
+        r = client.get(t["stream_url"], headers={"range": "bytes=0-"})
+        assert r.status_code == 206 and len(r.content) == t["size"]
+    for t in tracks:  # and listening again within the hour is free
+        assert client.get(t["stream_url"]).status_code == 200
+    assert _used(client) == 1
+    rows = _audit_rows(client, "stream:")
+    assert [(r["action"], r["target"], r["detail"]) for r in rows] == [
+        ("download", f"stream:work:{work['id']}", "stream")
+    ]
+    kinds = [i["kind"] for i in client.get("/api/notifications").json()["items"]]
+    assert "download.burst" not in kinds and "download.cap" not in kinds
 
-    phone = basic(make_app_password(client, owner["csrf"], "Phone"))
-    tablet = basic(make_app_password(client, owner["csrf"], "Tablet"))
+    # An app password is its own credential: charged once for the same book, after its bytes.
+    phone = _basic(make_app_password(client, owner["csrf"], "Phone"))
     cookies = dict(client.cookies)
     client.cookies.clear()
-    assert client.get(url, headers=phone).status_code == 200  # whole file: over the threshold
-    settings.download_cap_per_hour = 2
-    assert client.get(url, headers={**phone, "range": "bytes=0-1"}).status_code == 206
-    assert client.get(url, headers={**tablet, "range": "bytes=0-99"}).status_code == 206
-    r = client.get(url, headers=tablet)
-    assert r.status_code == 429 and r.json()["detail"] == "download_cap"
-    assert r.json()["scope"] == "user" and "retry-after" in r.headers
+    st, _body = _read_blocks(client, tracks[0]["stream_url"], {**phone, "range": "bytes=0-"}, 1)
+    assert st == 206
+    for t in tracks:
+        assert (
+            client.get(t["stream_url"], headers={**phone, "range": "bytes=0-"}).status_code == 206
+        )
     client.cookies.update(cookies)
+    assert _used(client) == 2
+    assert len(_audit_rows(client, "stream:")) == 2
+
+
+def test_many_audiobooks_still_hit_caps_once_without_storms(client, owner, settings, monkeypatch):
+    """Distinct works each count; past the cap the stream is refused with one audit row and one
+    notification, however many range requests follow."""
+    from lectern import http_range
+    from lectern.models import DownloadEvent
+
+    monkeypatch.setattr(http_range, "CHUNK", 1024)
+
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    for album in ("Book A", "Book B", "Book C"):
+        _audiobook(settings, album, 2)
+    works = [_work(client, t) for t in ("Book A", "Book B", "Book C")]
+    tracks = {w["id"]: client.get(f"/api/works/{w['id']}/tracks").json()["tracks"] for w in works}
+    settings.stream_meter_bytes = 1000
+    settings.download_burst_count = 2
+    settings.download_cap_per_hour = 2
+    tablet = _basic(make_app_password(client, owner["csrf"], "Tablet"))
+    cookies = dict(client.cookies)
+    client.cookies.clear()
+
+    def listen(work, **headers):
+        return [
+            client.get(t["stream_url"], headers={**tablet, **headers}) for t in tracks[work["id"]]
+        ]
+
+    assert all(r.status_code == 206 for r in listen(works[0], range="bytes=0-"))
+    assert all(r.status_code == 206 for r in listen(works[1], range="bytes=0-"))
+    # The third book crosses the threshold over the cap: the body stops, then 429s follow.
+    first = client.get(tracks[works[2]["id"]][0]["stream_url"], headers=tablet)
+    assert first.status_code == 200 and len(first.content) < tracks[works[2]["id"]][0]["size"]
+    for _ in range(5):
+        for rng in ("bytes=0-", "bytes=0-99", "bytes=500-"):
+            r = client.get(
+                tracks[works[2]["id"]][1]["stream_url"], headers={**tablet, "range": rng}
+            )
+            assert r.status_code == 429 and r.json()["detail"] == "download_cap"
+            assert int(r.headers["retry-after"]) >= 1
+    # Already-admitted books keep playing.
+    assert all(r.status_code == 206 for r in listen(works[0], range="bytes=0-"))
+
+    client.cookies.update(cookies)
+    assert _used(client) == 2
+    blocked = [r for r in _audit_rows(client, "stream:") if r["action"] == "download.blocked"]
+    assert len(blocked) == 1 and blocked[0]["target"] == f"stream:work:{works[2]['id']}"
+    with session_factory()() as db:
+        assert db.query(DownloadEvent).filter_by(blocked=True).count() == 1
     kinds = [i["kind"] for i in client.get("/api/notifications").json()["items"]]
-    assert "download.burst" in kinds and "download.cap" in kinds
-    audit = client.get("/api/admin/audit").json()["rows"]
-    assert any(a["action"] == "download.blocked" and "Tablet" in a["detail"] for a in audit)
-    assert size > 1000
+    assert kinds.count("download.cap") == 1 and kinds.count("download.burst") == 1
 
 
 def test_rewind_point_is_cached_rate_limited_and_private(client, owner, magi_track, monkeypatch):
