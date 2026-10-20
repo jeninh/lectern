@@ -19,10 +19,23 @@ import threading
 import time
 from pathlib import Path
 
+_out = sys.stdout  # the protocol stream; see _own_stdout
+
 
 def _emit(msg: dict) -> None:
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    _out.write(json.dumps(msg) + "\n")
+    _out.flush()
+
+
+def _own_stdout() -> None:
+    """Keep the protocol on a private copy of fd 1 and point fd 1 (and ``sys.stdout``) at
+    stderr, so whatever a native library prints lands in the log, not in a JSON line."""
+    global _out
+    with contextlib.suppress(OSError, ValueError):
+        sys.stdout.flush()
+        _out = os.fdopen(os.dup(1), "w", buffering=1)
+        os.dup2(2, 1)
+        sys.stdout = sys.stderr
 
 
 def _confine() -> None:
@@ -123,6 +136,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    _own_stdout()
     _confine()
     spec = json.loads(sys.stdin.read())
     from lectern.align.transcribe import TranscriptionUnavailable

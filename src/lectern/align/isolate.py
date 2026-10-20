@@ -47,6 +47,7 @@ EXIT_MEMORY = 3
 POLL_S = 0.2
 TERM_GRACE_S = 3.0
 KEEP_LOGS = 50
+MAX_LINE = 64 * 1024  # longest protocol line read from the child
 # Of the memory available to the server, what the child may use by default.
 AUTO_LIMIT_FRACTION = 0.75
 
@@ -170,7 +171,9 @@ def run(
 
     def _read() -> None:
         assert proc.stdout is not None
-        for raw in proc.stdout:
+        # Bounded lines: a runaway write without a newline cannot grow the server's memory;
+        # the pieces are not JSON and are skipped.
+        for raw in iter(lambda: proc.stdout.readline(MAX_LINE), b""):
             try:
                 msg = json.loads(raw)
             except ValueError:
@@ -187,37 +190,46 @@ def run(
 
     reader = threading.Thread(target=_read, name="lectern-align-child-out", daemon=True)
     reader.start()
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps(spec).encode())
-        proc.stdin.close()
-    except (BrokenPipeError, OSError):
-        pass  # the child died at once; its exit status says how
-
     peak = 0.0
     ended_by: str | None = None
-    while proc.poll() is None:
-        reason = interrupt()
-        if reason is not None:
-            ended_by = reason
-            _terminate(proc, graceful=reason == "stop")
-            break
-        rss = rss_mb(proc.pid)
-        if rss is not None:
-            peak = max(peak, rss)
-            if memory_limit_mb and rss > memory_limit_mb:
-                ended_by = "memory"
-                log.warning(
-                    "alignment child %d uses %.0f MiB, over the %d MiB limit: killing it",
-                    proc.pid,
-                    rss,
-                    memory_limit_mb,
-                )
-                _terminate(proc, graceful=False)
+    try:
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps(spec).encode())
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass  # the child died at once; its exit status says how
+        while not _exited(proc):
+            reason = interrupt()
+            if reason is not None:
+                ended_by = reason
+                _terminate(proc, graceful=reason == "stop")
                 break
-        time.sleep(POLL_S)
-    rc = proc.wait()
-    reader.join(timeout=5)
+            rss = rss_mb(proc.pid)
+            if rss is not None:
+                peak = max(peak, rss)
+                if memory_limit_mb and rss > memory_limit_mb:
+                    ended_by = "memory"
+                    log.warning(
+                        "alignment child %d uses %.0f MiB, over the %d MiB limit: killing it",
+                        proc.pid,
+                        rss,
+                        memory_limit_mb,
+                    )
+                    _terminate(proc, graceful=False)
+                    break
+            time.sleep(POLL_S)
+    finally:
+        # Whatever ended the run (including an exception here), nothing the child started
+        # outlives it: the child is killed if still running, then its whole process group
+        # (its own session) while the unreaped child still holds the group id, then reaped.
+        if not _exited(proc):
+            _terminate(proc, graceful=False)
+        _exited(proc, block=True)
+        _kill_group(proc.pid)
+        rc = proc.wait()
+        reader.join(timeout=5)
+        result_path.with_suffix(".tmp").unlink(missing_ok=True)
     peak_mb = round(peak, 1) if peak else None
     try:
         return _classify(rc, ended_by, messages, result_path, log_path, peak_mb, memory_limit_mb)
@@ -225,16 +237,44 @@ def run(
         result_path.unlink(missing_ok=True)
 
 
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """``sig`` to the child's process group (it leads its own session), else to the child."""
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError, AttributeError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.send_signal(sig)
+
+
+def _kill_group(pgid: int) -> None:
+    """SIGKILL whatever is left of the child's process group (grandchildren)."""
+    with contextlib.suppress(ProcessLookupError, PermissionError, AttributeError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def _exited(proc: subprocess.Popen, *, block: bool = False) -> bool:
+    """Whether the child has exited, *without* reaping it (``WNOWAIT``): until it is reaped
+    its pid, and so its process group id, cannot be reused."""
+    if proc.returncode is not None:
+        return True
+    if not hasattr(os, "waitid"):  # pragma: no cover - not POSIX
+        return (proc.wait() if block else proc.poll()) is not None
+    flags = os.WEXITED | os.WNOWAIT | (0 if block else os.WNOHANG)
+    try:
+        return os.waitid(os.P_PID, proc.pid, flags) is not None
+    except ChildProcessError:  # already reaped
+        return True
+
+
 def _terminate(proc: subprocess.Popen, *, graceful: bool) -> None:
-    with contextlib.suppress(ProcessLookupError):
-        if graceful:
-            proc.terminate()
-            try:
-                proc.wait(TERM_GRACE_S)
+    if graceful:
+        _signal_group(proc, signal.SIGTERM)
+        deadline = time.monotonic() + TERM_GRACE_S
+        while time.monotonic() < deadline:
+            if _exited(proc):
                 return
-            except subprocess.TimeoutExpired:
-                pass
-        proc.kill()
+            time.sleep(0.05)
+    _signal_group(proc, signal.SIGKILL)
 
 
 def _signal_name(rc: int) -> str:

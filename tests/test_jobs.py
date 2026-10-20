@@ -1054,3 +1054,74 @@ def test_a_lost_lease_kills_the_child(client, owner, work_id, settings, tmp_path
     assert done.wait(30)  # the next heartbeat (every second here) finds the lease gone
     assert db_job(job_id).status == JobStatus.CANCELLED
     assert not _alive(pid)
+
+
+GRANDCHILD = (
+    "import subprocess\n"
+    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+    "open(os.environ['PIDFILE'], 'w').write(str(p.pid))\n"
+)
+
+
+@pytest.mark.parametrize("ending", ["sys.exit(7)", "time.sleep(60)"])
+def test_nothing_the_child_started_outlives_it(
+    client, owner, work_id, settings, tmp_path, monkeypatch, ending
+):
+    """A crash, and a lost lease, take the child's whole process group with it."""
+    monkeypatch.setattr("lectern.align.worker.MAX_HEARTBEAT_S", 1.0)
+    pidfile = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("PIDFILE", str(pidfile))
+    worker = isolated_worker(settings, tmp_path, child_command=child(GRANDCHILD + ending))
+    job_id = request_align(client, owner, work_id).json()["id"]
+    done = threading.Event()
+    threading.Thread(target=lambda: (worker.run_once(), done.set())).start()
+    assert _wait_for(lambda: pidfile.exists() and pidfile.read_text() != "")
+    if ending.startswith("time"):
+        api_post(client, f"/api/jobs/{job_id}/cancel", owner["csrf"])
+    assert done.wait(30)
+    assert _wait_for(lambda: not _alive(int(pidfile.read_text())), timeout=5)
+
+
+def test_native_output_on_stdout_does_not_break_the_protocol(
+    client, owner, work_id, settings, tmp_path
+):
+    """Libraries in the child that print to fd 1 (no newline) end up in the log; before, the
+    noise glued onto the "done" line and a successful alignment counted as a crash."""
+    code = (
+        "import os\nimport lectern.align.child as c\nemit = c._emit\n"
+        "def noisy(msg):\n    os.write(1, b'native noise ')\n    emit(msg)\n"
+        "c._emit = noisy\nc.main()\n"
+    )
+    worker = isolated_worker(settings, tmp_path, child_command=[sys.executable, "-c", code])
+    job_id = request_align(client, owner, work_id).json()["id"]
+    assert worker.run_once()
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "succeeded", job
+    log = settings.data_dir / "logs" / "align" / f"job-{job_id}-attempt-1.log"
+    assert "native noise" in log.read_text()
+
+
+def test_the_supervisor_kills_the_child_if_it_fails_itself(tmp_path, monkeypatch):
+    from lectern.align import isolate
+
+    pidfile = tmp_path / "child.pid"
+    monkeypatch.setenv("PIDFILE", str(pidfile))
+    calls = []
+
+    def interrupt():
+        calls.append(1)
+        if pidfile.exists() and pidfile.read_text():
+            raise RuntimeError("supervisor bug")
+        return None
+
+    with pytest.raises(RuntimeError):
+        isolate.run(
+            {},
+            workdir=tmp_path,
+            log_path=None,
+            on_progress=lambda *_: None,
+            interrupt=interrupt,
+            memory_limit_mb=None,
+            command=child(SLOW_CHILD),
+        )
+    assert not _alive(int(pidfile.read_text()))
