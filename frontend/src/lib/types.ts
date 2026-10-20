@@ -20,6 +20,11 @@ export interface Me {
   sync_url: string;
   inbox_path: string;
   counts: { works: number; users: number };
+  preferences: Preferences;
+}
+
+export interface Preferences {
+  show_technical_details: boolean;
 }
 
 export interface Progress {

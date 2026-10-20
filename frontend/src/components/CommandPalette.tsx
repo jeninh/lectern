@@ -93,6 +93,7 @@ export function CommandPalette() {
 
       { id: "s-pk", group: "Settings", label: "Passkeys", keywords: "webauthn face id touch id security key", icon: <Key />, run: () => go("/app/security#passkeys") },
       { id: "s-totp", group: "Settings", label: "Two-factor codes", keywords: "totp authenticator 2fa otp", icon: <Shield />, run: () => go("/app/security#totp") },
+      { id: "s-tech", group: "Settings", label: "Show technical details", keywords: "koreader xpointer md5 path debug developer", icon: <Gear />, run: () => go("/app/security#display") },
       { id: "s-pw", group: "Settings", label: "Change password", icon: <Key />, run: () => go("/app/security#password") },
       { id: "s-ses", group: "Settings", label: "Signed-in sessions", keywords: "browsers sign out", icon: <Shield />, run: () => go("/app/security#sessions") },
       ...(isOwner ? [{ id: "s-users", group: "Settings" as Group, label: "Add a user", keywords: "member reader invite", icon: <Person />, run: () => go("/app/admin?new=1") }] : []),

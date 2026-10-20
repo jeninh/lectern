@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { get, setCsrfToken, uploadBook } from "./api";
+import { get, post, setCsrfToken, uploadBook } from "./api";
 import { useLocalStorage } from "./hooks";
-import type { Me, Work } from "./types";
+import type { Me, Preferences, Work } from "./types";
 
 type Theme = "light" | "dark" | "system";
 
@@ -31,6 +31,8 @@ interface Store {
   canUpload: boolean;
   /** Opens the file picker; chosen EPUBs are streamed to the inbox. */
   pickBooks: () => void;
+  /** Saved per user on the server. */
+  setPreference: <K extends keyof Preferences>(key: K, value: Preferences[K]) => Promise<void>;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -91,6 +93,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3800);
   }, []);
 
+  const setPreference = useCallback(async <K extends keyof Preferences>(key: K, value: Preferences[K]) => {
+    setMe((m) => (m ? { ...m, preferences: { ...m.preferences, [key]: value } } : m));
+    try {
+      const r = await post<{ preferences: Preferences }>("/api/me/preferences", { [key]: value });
+      setMe((m) => (m ? { ...m, preferences: r.preferences } : m));
+    } catch (e) {
+      toast((e as Error).message, "error");
+      await refreshMe().catch(() => {});
+    }
+  }, [refreshMe, toast]);
+
   const canUpload = me?.user.role === "owner" || me?.user.role === "member";
   const pickBooks = useCallback(() => fileInput.current?.click(), []);
   const onFiles = async (files: FileList | null) => {
@@ -131,8 +144,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       now,
       canUpload,
       pickBooks,
+      setPreference,
     }),
-    [me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, paletteOpen, helpOpen, now, canUpload, pickBooks],
+    [me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, paletteOpen, helpOpen, now, canUpload, pickBooks, setPreference],
   );
   return (
     <Ctx.Provider value={value}>

@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from lectern.models import AuditLog, BookFile, ReadingProgress, Role, SyncKey, User, Work
 from lectern.routes.api.serializers import iso, progress_json, user_json, work_json
-from lectern.security.deps import Auth, DbDep, SettingsDep
+from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 
 router = APIRouter()
 
@@ -30,7 +31,25 @@ def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
         "sync_url": f"{settings.base_url}/",
         "inbox_path": str(settings.inbox_path),
         "counts": counts,
+        "preferences": _preferences(auth.user),
     }
+
+
+def _preferences(user: User) -> dict:
+    return {"show_technical_details": user.show_technical_details}
+
+
+class PreferencesIn(BaseModel):
+    show_technical_details: bool | None = None
+
+
+@router.post("/me/preferences")
+def update_preferences(auth: AuthCsrf, db: DbDep, body: PreferencesIn) -> dict:
+    """Per-user display preferences. Only fields present in the body change."""
+    if body.show_technical_details is not None:
+        auth.user.show_technical_details = body.show_technical_details
+    db.commit()
+    return {"preferences": _preferences(auth.user)}
 
 
 def _progress_by_doc(db, user_id: int) -> dict[str, tuple[ReadingProgress, SyncKey | None]]:
@@ -177,6 +196,12 @@ def activity(
         }
         for r in db.scalars(audit_stmt.order_by(AuditLog.id.desc()).limit(limit)).all()
     ]
+    uploaded = {e["target"] for e in events if e["action"] == "book.upload" and e["target"]}
+    if uploaded:
+        ids = dict(db.execute(select(Work.title, Work.id).where(Work.title.in_(uploaded))).all())
+        for e in events:
+            if e["action"] == "book.upload" and e["target"] in ids:
+                e["work_id"] = ids[e["target"]]
 
     sync_stmt = (
         select(ReadingProgress, SyncKey, BookFile, Work)

@@ -9,8 +9,11 @@ import { useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
 import type { ActivityEvent } from "../lib/types";
 
-function describe(e: ActivityEvent): { icon: JSX.Element; cls: string; text: JSX.Element } {
-  const who = e.actor ? <strong>{e.actor}</strong> : <strong>someone</strong>;
+function describe(e: ActivityEvent, self: string | undefined): { icon: JSX.Element; cls: string; text: JSX.Element } {
+  const mine = !!self && e.actor === self;
+  const who = <strong>{mine ? "You" : e.actor ?? "Someone"}</strong>;
+  const book = (title: string | null) =>
+    e.work_id ? <Link className="book-link" to={`/app/library/${e.work_id}`}>{title}</Link> : <strong>{title}</strong>;
   switch (e.action) {
     case "sync.progress":
       return {
@@ -18,7 +21,7 @@ function describe(e: ActivityEvent): { icon: JSX.Element; cls: string; text: JSX
         cls: "sync",
         text: (
           <>
-            {who} reached <strong>{percent(e.percentage)}</strong> in {e.work_id ? <Link to={`/app/library/${e.work_id}`}>{e.target}</Link> : e.target}
+            {who} reached <strong>{percent(e.percentage)}</strong> in {book(e.target)}
             {e.device && <span> on {e.device}</span>}
           </>
         ),
@@ -50,7 +53,7 @@ function describe(e: ActivityEvent): { icon: JSX.Element; cls: string; text: JSX
     case "totp.disable":
       return { icon: <Shield />, cls: "warn", text: <>{who} disabled two-factor codes</> };
     case "password.change":
-      return { icon: <Shield />, cls: "ok", text: <>{who} changed their password</> };
+      return { icon: <Shield />, cls: "ok", text: <>{who} changed {mine ? "your" : "their"} password</> };
     case "session.revoke":
       return { icon: <Shield />, cls: "", text: <>{who} signed out {e.target === "others" ? `${e.detail} other session(s)` : "a session"}</> };
     case "user.create":
@@ -64,7 +67,7 @@ function describe(e: ActivityEvent): { icon: JSX.Element; cls: string; text: JSX
     case "device.revoke":
       return { icon: <Devices />, cls: "warn", text: <>{who} revoked device <strong>{e.target}</strong></> };
     case "book.upload":
-      return { icon: <Upload />, cls: "", text: <>{who} uploaded <strong>{e.target}</strong></> };
+      return { icon: <Upload />, cls: "", text: <>{who} uploaded {book(e.target)}</> };
     case "setup.owner_created":
       return { icon: <Users />, cls: "ok", text: <>Owner account <strong>{e.target}</strong> created</> };
     default:
@@ -76,7 +79,7 @@ export function ActivityFeed({ limit = 50, compact = false }: { limit?: number; 
   const [events, setEvents] = useState<ActivityEvent[] | null>(null);
   const since = useRef<string | null>(null);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
-  const { now } = useStore();
+  const { now, me } = useStore();
 
   const load = useCallback(async () => {
     if (since.current) {
@@ -108,7 +111,7 @@ export function ActivityFeed({ limit = 50, compact = false }: { limit?: number; 
   return (
     <div className="timeline" role="feed" aria-busy="false">
       {events.map((e) => {
-        const d = describe(e);
+        const d = describe(e, me?.user.username);
         return (
           <article className="event" key={e.id} aria-label={typeof e.action === "string" ? e.action : undefined} data-fresh={fresh.has(e.id) || undefined}>
             <span className={`ico ${d.cls}`} aria-hidden="true">{d.icon}</span>

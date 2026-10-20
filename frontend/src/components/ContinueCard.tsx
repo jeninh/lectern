@@ -13,7 +13,8 @@ function position(p: string): string {
 }
 
 export function ContinueCard({ work }: { work: Work }) {
-  useStore(); // re-render on the shared clock tick so relative times stay fresh
+  const { me } = useStore(); // also re-renders on the shared clock tick so relative times stay fresh
+  const showTech = !!me?.preferences.show_technical_details;
   const [open, setOpen] = useState(false);
   const p = work.progress;
   if (!p) return null;
@@ -88,26 +89,37 @@ export function ContinueCard({ work }: { work: Work }) {
               ))}
             </ul>
           </section>
-          <section>
-            <h4>File</h4>
+          <section className="reading">
+            <h4>Reading</h4>
             <dl className="kv">
+              <dt>Position</dt>
+              <dd>{position(p.progress)} · {pct}%</dd>
               <dt>Last sync</dt>
               <dd>{absoluteTime(p.updated_at)}</dd>
-              <dt>Position</dt>
-              <dd><code>{p.progress}</code></dd>
-              {file?.partial_md5 && (
-                <>
-                  <dt>KOReader id</dt>
-                  <dd><code>{file.partial_md5}</code></dd>
-                </>
-              )}
-              {file && (
-                <>
-                  <dt>Stored at</dt>
-                  <dd><code>{file.rel_path}</code></dd>
-                </>
-              )}
+              <dt>Device</dt>
+              <dd>{device}</dd>
             </dl>
+            {showTech && (
+              <details className="tech">
+                <summary>Technical details</summary>
+                <dl className="kv">
+                  <dt>KOReader position</dt>
+                  <dd><code>{p.progress}</code></dd>
+                  {file?.partial_md5 && (
+                    <>
+                      <dt>Document id</dt>
+                      <dd><code>{file.partial_md5}</code></dd>
+                    </>
+                  )}
+                  {file && (
+                    <>
+                      <dt>Stored at</dt>
+                      <dd><code>{work.dir_path}/{file.rel_path}</code></dd>
+                    </>
+                  )}
+                </dl>
+              </details>
+            )}
             <div className="row" style={{ marginTop: 12 }}>
               <Link className="btn sm" to={`/app/library/${work.id}`}>Open in library</Link>
             </div>

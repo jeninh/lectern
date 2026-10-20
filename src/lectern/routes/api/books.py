@@ -9,6 +9,7 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
+from lectern.ingest.epub import EpubError, read_epub_metadata
 from lectern.ingest.library import safe_component
 from lectern.models import Role
 from lectern.security import audit
@@ -59,6 +60,13 @@ async def upload_book(
                 fh.write(chunk)
         if not head.startswith(_ZIP_MAGIC):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "That is not an EPUB file")
+        try:
+            # Read the title now so Activity can name the book, not the queued file.
+            title = read_epub_metadata(tmp).title.strip()[:200]
+            if title == tmp.stem:  # no dc:title; the reader fell back to the temp name
+                title = None
+        except EpubError:
+            title = None  # the watcher rejects it; the filename stays the label
         dest = inbox / f"{stem}-{secrets.token_hex(3)}.epub"
         tmp.replace(dest)
     finally:
@@ -68,9 +76,9 @@ async def upload_book(
         db,
         "book.upload",
         actor_user_id=auth.user.id,
-        target=dest.name,
-        detail=f"{size} bytes",
+        target=title or dest.name,
+        detail=dest.name,
         ip=client_ip(request),
     )
     db.commit()
-    return {"queued": dest.name, "size": size}
+    return {"queued": dest.name, "size": size, "title": title}

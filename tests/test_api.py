@@ -242,8 +242,43 @@ def test_upload_streams_into_inbox_and_ingests(client, owner, settings, tmp_path
     w = InboxWatcher(settings.inbox_path, settings.library_dir, session_factory(), 0.01)
     w.scan_once()
     w.scan_once()
-    titles = [x["title"] for x in client.get("/api/library").json()["works"]]
-    assert titles == ["Uploaded Tale"]
+    works = client.get("/api/library").json()["works"]
+    assert [x["title"] for x in works] == ["Uploaded Tale"]
+    # Activity names the book (and links it), not the queued filename.
+    ev = next(
+        e for e in client.get("/api/activity").json()["events"] if e["action"] == "book.upload"
+    )
+    assert ev["target"] == "Uploaded Tale" and ev["detail"] == queued.name
+    assert ev["work_id"] == works[0]["id"]
+
+
+def test_technical_details_preference(client, owner):
+    me = client.get("/api/me").json()
+    assert me["preferences"] == {"show_technical_details": False}
+    # Writes need the CSRF token.
+    r = client.post(
+        "/api/me/preferences", json={"show_technical_details": True}, headers={"origin": ORIGIN}
+    )
+    assert r.status_code == 403
+    assert client.get("/api/me").json()["preferences"]["show_technical_details"] is False
+    r = api_post(client, "/api/me/preferences", owner["csrf"], {"show_technical_details": True})
+    assert r.status_code == 200 and r.json()["preferences"]["show_technical_details"] is True
+    assert api_post(client, "/api/me/preferences", owner["csrf"], {}).status_code == 200
+    assert client.get("/api/me").json()["preferences"]["show_technical_details"] is True
+    # Per user: a new member starts with it off.
+    api_post(
+        client,
+        "/api/admin/users",
+        owner["csrf"],
+        {"username": "mem", "role": "member", "password": "member password 123"},
+    )
+    post_form(client, "/logout", {"csrf_token": owner["csrf"]})
+    login(client, "mem", "member password 123")
+    assert client.get("/api/me").json()["preferences"]["show_technical_details"] is False
+    post_form(client, "/logout", {"csrf_token": csrf_of(client)})
+    assert (
+        client.post("/api/me/preferences", json={}, headers={"origin": ORIGIN}).status_code == 401
+    )
 
 
 def test_upload_limits_and_roles(client, owner, settings, tmp_path):

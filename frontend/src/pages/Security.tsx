@@ -11,7 +11,8 @@ import type { SecurityOverview } from "../lib/types";
 import { passkeysSupported, registerPasskey } from "../lib/webauthn";
 
 export function SecurityPage() {
-  const { toast, refreshMe } = useStore();
+  const { toast, refreshMe, me, setPreference } = useStore();
+  const showTech = !!me?.preferences.show_technical_details;
   const [sec, setSec] = useState<SecurityOverview | null>(null);
   const [dialog, setDialog] = useState<"password" | "totp" | "totp-off" | "passkey" | null>(null);
   const load = useCallback(() => get<SecurityOverview>("/api/security").then(setSec), []);
@@ -94,6 +95,26 @@ export function SecurityPage() {
             ) : (
               <button className="btn" onClick={() => setDialog("totp")}><Shield /> Enable</button>
             )}
+          </div>
+        </section>
+
+        <section className="card" id="display" aria-labelledby="disp-h" data-highlight={hash === "display" || undefined}>
+          <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+            <div>
+              <h2 id="disp-h">Show technical details</h2>
+              <p className="sub" id="disp-sub">KOReader positions, document ids, and storage paths on book cards and in the library. Off by default.</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              className="switch"
+              aria-checked={showTech}
+              aria-labelledby="disp-h"
+              aria-describedby="disp-sub"
+              onClick={() => setPreference("show_technical_details", !showTech)}
+            >
+              <span aria-hidden="true" />
+            </button>
           </div>
         </section>
 

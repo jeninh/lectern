@@ -2195,3 +2195,82 @@ mark {
   scroll-margin: 24px;
   transition: border-color var(--dur), box-shadow var(--dur);
 }
+
+/* Book titles in activity: links without underline; colour + soft fill on hover, ring on focus. */
+.event .book-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+  border-radius: 4px;
+  padding: 0 2px;
+  margin: 0 -2px;
+  transition: background var(--dur), color var(--dur);
+}
+.event .book-link:hover {
+  background: var(--accent-soft);
+}
+.event .book-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  background: var(--accent-soft);
+}
+
+/* Technical details: opt-in, collapsed by default */
+details.tech {
+  margin-top: 12px;
+  border: 1px dashed var(--line-2);
+  border-radius: 10px;
+  padding: 6px 12px;
+}
+details.tech summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  padding: 4px 0;
+  border-radius: 6px;
+}
+details.tech[open] summary {
+  margin-bottom: 8px;
+}
+
+/* On/off switch (role="switch") */
+.switch {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background var(--dur), border-color var(--dur);
+}
+.switch span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform var(--dur-spring) var(--spring);
+}
+.switch[aria-checked="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.switch[aria-checked="true"] span {
+  transform: translateX(18px);
+}
+.ccard-more-inner > section.reading {
+  grid-column: 1 / -1;
+}
+details.tech .kv {
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+details.tech .kv dt:not(:first-child) {
+  margin-top: 8px;
+}

@@ -221,6 +221,7 @@ const ListIcon = () => (
 
 function WorkDetail({ work }: { work: Work }) {
   const p = work.progress;
+  const showTech = !!useStore().me?.preferences.show_technical_details;
   return (
     <div className="stack" style={tintStyle(work)}>
       <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 18 }}>
@@ -253,9 +254,9 @@ function WorkDetail({ work }: { work: Work }) {
             {work.files.map((f) => (
               <tr key={f.id}>
                 <td>
-                  <strong>{f.rel_path}</strong>
+                  <strong>EPUB</strong>
                   <div className="hint">{bytes(f.size)} · added {relativeTime(f.added_at)}</div>
-                  {f.partial_md5 && <div className="hint" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>KOReader id {f.partial_md5}</div>}
+                  {showTech && f.partial_md5 && <div className="hint" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>Document id {f.partial_md5}</div>}
                   {f.progress && <div className="hint">{percent(f.progress.percentage)} synced {absoluteTime(f.progress.updated_at)}</div>}
                 </td>
                 <td style={{ textAlign: "right" }}>
@@ -267,7 +268,7 @@ function WorkDetail({ work }: { work: Work }) {
         </table>
       </div>
       <div className="hint">
-        Stored at <code style={{ fontFamily: "var(--font-mono)" }}>{work.dir_path}</code>. Add it to KOReader from the OPDS catalogue on a <Link to="/app/devices">connected device</Link>.
+        {showTech && <>Stored at <code style={{ fontFamily: "var(--font-mono)" }}>{work.dir_path}</code>. </>}Add it to KOReader from the OPDS catalogue on a <Link to="/app/devices">connected device</Link>.
       </div>
     </div>
   );
