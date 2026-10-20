@@ -137,7 +137,7 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
               </button>
               <span id="saver-l">Data saver</span>
             </span>
-            {ebook && <Link className="btn sm ghost" to={`/app/read/${w.id}`}><Reader /> Read</Link>}
+            {ebook && <Link className="btn sm ghost" to={`/app/reader/${w.id}`}><Reader /> Read</Link>}
           </div>
           <p className="hint" id="saver-d">
             {p.dataSaver

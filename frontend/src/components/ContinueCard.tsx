@@ -70,7 +70,7 @@ export function ContinueCard({ work }: { work: Work }) {
                   <Book />
                   <span><strong>EPUB</strong> <span className="hint">{bytes(f.size)}</span></span>
                   <span className="row" style={{ gap: 4 }}>
-                    <button className="btn sm" onClick={() => nav(`/app/read/${work.id}`)} aria-label={`Read ${work.title}`}><Reader /> Read</button>
+                    <button className="btn sm" onClick={() => nav(`/app/reader/${work.id}`)} aria-label={`Read ${work.title}`}><Reader /> Read</button>
                     <a className="btn sm ghost" href={f.download_url} aria-label={`Download EPUB of ${work.title}`}><Download /></a>
                   </span>
                 </li>

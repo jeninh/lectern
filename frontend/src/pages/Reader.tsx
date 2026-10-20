@@ -130,6 +130,9 @@ export function ReaderPage() {
   const saveTimer = useRef<number | null>(null);
   const lastSaved = useRef<string>("");
   const pending = useRef<{ spine_index: number; char: number; raw: string } | null>(null);
+  // Only a position the reader moved to is saved: opening a book, or leaving it untouched,
+  // must never overwrite a newer position from another device.
+  const dirty = useRef(false);
 
   useEffect(() => {
     if (!work || work.id !== id) get<Work>(`/api/works/${id}`).then(setWork).catch((e) => setError((e as Error).message));
@@ -138,10 +141,11 @@ export function ReaderPage() {
   const save = useCallback(
     async (keepalive = false) => {
       const p = pending.current;
-      if (!p) return;
+      if (!p || !dirty.current) return;
       const key = `${p.spine_index}:${p.char}`;
       if (key === lastSaved.current) return;
       lastSaved.current = key;
+      dirty.current = false;
       try {
         const r = await put<WorkProgressResponse>(`/api/works/${id}/progress`, { source: "web", device: deviceName, ...p }, keepalive);
         writeMark(id, { cfi: p.raw, seenAt: r.received_at });
@@ -198,6 +202,7 @@ export function ReaderPage() {
           const doc = node.ownerDocument ?? (node as Document);
           pending.current = { spine_index: index, char: offsetOf(doc, node, d.range.startOffset), raw: d.cfi };
           if (!ready.current) return; // restoring, not reading
+          dirty.current = true;
           setHandoff(null);
           if (saveTimer.current) window.clearTimeout(saveTimer.current);
           saveTimer.current = window.setTimeout(() => save().catch(() => {}), 1500);

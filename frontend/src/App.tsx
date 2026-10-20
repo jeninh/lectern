@@ -32,7 +32,7 @@ export default function App() {
           <Route path="/app/devices" element={<DevicesPage />} />
           <Route path="/app/devices/new" element={<DevicesPage />} />
           <Route path="/app/listening" element={<ListeningPage />} />
-          <Route path="/app/read/:id" element={<ReaderPage />} />
+          <Route path="/app/reader/:id" element={<ReaderPage />} />
           <Route path="/app/highlights" element={<HighlightsPage />} />
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />

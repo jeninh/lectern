@@ -58,8 +58,13 @@ export function Shell({ children }: { children: ReactNode }) {
   const isOwner = me?.user.role === "owner";
   const player = usePlayer();
   // The reader takes the whole window; the sidebar, top bar, and tab bar step aside.
-  const immersive = loc.pathname.startsWith("/app/read/");
+  const immersive = loc.pathname.startsWith("/app/reader/");
   const fullPlayer = loc.pathname === "/app/listening";
+  // The read-along page (milestone 4) has its own audio and Space shortcut.
+  const readAlong = loc.pathname.startsWith("/app/read/");
+  useEffect(() => {
+    if (readAlong && player.playing) player.pause();
+  }, [readAlong, player]);
 
   // Sheet sub-routes (/app/library/12, /app/devices/new) belong to their section; opening or
   // closing them must not steal focus from the sheet or from the element that opened it.
@@ -75,7 +80,7 @@ export function Shell({ children }: { children: ReactNode }) {
   // their own Space behaviour) and no dialog is open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== " " || e.repeat || e.metaKey || e.ctrlKey || e.altKey || !player.work || immersive) return;
+      if (e.key !== " " || e.repeat || e.metaKey || e.ctrlKey || e.altKey || !player.work || immersive || readAlong) return;
       const a = document.activeElement;
       if (a && a !== document.body && a.id !== "main" && a.closest("a, button, input, select, textarea, [role=slider], [contenteditable], [tabindex]:not(#main)")) return;
       if (document.querySelector('[aria-modal="true"]')) return;
@@ -84,7 +89,7 @@ export function Shell({ children }: { children: ReactNode }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [player, immersive]);
+  }, [player, immersive, readAlong]);
 
   const toggleTheme = () => setTheme(resolvedTheme === "dark" ? "light" : "dark");
 
@@ -118,7 +123,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const name = me?.user.display_name || me?.user.username || "";
 
   return (
-    <div className="shell" data-collapsed={collapsed || undefined} data-immersive={immersive || undefined} data-playing={(player.work && !immersive && !fullPlayer) || undefined}>
+    <div className="shell" data-collapsed={collapsed || undefined} data-immersive={immersive || undefined} data-playing={(player.work && !immersive && !fullPlayer && !readAlong) || undefined}>
       <a className="skip-link" href="#main">Skip to content</a>
       <aside className="sidebar" aria-label="Sidebar">
         <div className="brand-row">
@@ -186,7 +191,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <TitleSlot.Provider value={slot}>{children}</TitleSlot.Provider>
       </main>
 
-      {!immersive && !fullPlayer && <MiniPlayer />}
+      {!immersive && !fullPlayer && !readAlong && <MiniPlayer />}
       {!immersive && <UploadTray />}
 
       <nav className="bottom-nav" aria-label="Primary">

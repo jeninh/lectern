@@ -104,7 +104,7 @@ export function CommandPalette() {
       ...(isOwner ? [{ id: "s-users", group: "Settings" as Group, label: "Add a user", keywords: "member reader invite", icon: <Person />, run: () => go("/app/admin?new=1") }] : []),
 
       ...works.map<Item>((w) => ({ id: `w${w.id}`, group: "Books", label: w.title, detail: w.author, keywords: w.isbn ?? "", work: w, run: () => go(`/app/library/${w.id}`) })),
-      ...works.filter((w) => w.files.some((f) => f.kind === "ebook")).map<Item>((w) => ({ id: `r${w.id}`, group: "Actions", label: `Read ${w.title}`, keywords: `open ${w.author}`, icon: <Reader />, run: () => go(`/app/read/${w.id}`) })),
+      ...works.filter((w) => w.files.some((f) => f.kind === "ebook")).map<Item>((w) => ({ id: `r${w.id}`, group: "Actions", label: `Read ${w.title}`, keywords: `open ${w.author}`, icon: <Reader />, run: () => go(`/app/reader/${w.id}`) })),
       ...works.filter((w) => w.audio).map<Item>((w) => ({ id: `l${w.id}`, group: "Actions", label: `Listen to ${w.title}`, keywords: `play audiobook ${w.author}`, icon: <Headphones />, run: () => { close(); player.open(w, { autoplay: true }); } })),
       ...[...new Set(works.map((w) => w.author))].map<Item>((a) => {
         const n = works.filter((w) => w.author === a).length;

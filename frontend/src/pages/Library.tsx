@@ -343,7 +343,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
             {work.audio && <span className="badge"><Headphones width={13} height={13} /> {clock(work.audio.duration_s)}</span>}
           </div>
           <div className="row">
-            {ebook && <button className="btn primary" onClick={() => nav(`/app/read/${work.id}`)}><Reader /> {pos?.source === "web" || p ? "Continue reading" : "Read"}</button>}
+            {ebook && <button className="btn primary" onClick={() => nav(`/app/reader/${work.id}`)}><Reader /> {pos?.source === "web" || p ? "Continue reading" : "Read"}</button>}
             {work.audio && (
               <button className={`btn ${ebook ? "" : "primary"}`} onClick={() => { player.open(work, { autoplay: true }); }}>
                 <Headphones /> {pos?.audio_s ? `Listen from ${clock(pos.audio_s)}` : "Listen"}
