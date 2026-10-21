@@ -10,7 +10,7 @@ import type { CreatedDevice, SyncKeyStatus } from "../lib/types";
 type Step = 1 | 2 | 3;
 const SUGGESTIONS = ["Kobo Clara", "Kindle (KOReader)", "Boox Page", "PocketBook", "Phone"];
 
-function CopyButton({ value, label }: { value: string; label: string }) {
+export function CopyButton({ value, label }: { value: string; label: string }) {
   const { toast } = useStore();
   const [done, setDone] = useState(false);
   return (
@@ -34,7 +34,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   );
 }
 
-function Value({ label, value, secret }: { label: string; value: string; secret?: boolean }) {
+export function Value({ label, value, secret }: { label: string; value: string; secret?: boolean }) {
   return (
     <div className={`value-row${secret ? " secret" : ""}`}>
       <span className="value-label">{label}</span>

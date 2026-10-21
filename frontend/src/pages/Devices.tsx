@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { AIToolsSection } from "../components/AITools";
 import { EmptyState } from "../components/EmptyState";
 import { DeviceQueueView } from "../components/DeviceQueue";
 import { Book, Close, Download, Plus, Reader, Send, Sync } from "../components/Icons";
@@ -132,6 +133,10 @@ export function DevicesPage() {
           )}
         </div>
       )}
+
+      <div style={{ marginTop: 28 }}>
+        <AIToolsSection />
+      </div>
 
       <Sheet open={adding} onClose={() => nav("/app/devices")} title="Add a device" labelledBy="add-device-title">
         <AddDeviceFlow onDone={() => nav("/app/devices")} onCreated={() => load().catch(() => {})} />

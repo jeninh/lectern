@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from lectern.routes.api import (
     admin,
+    ai_keys,
     align,
     books,
     core,
@@ -25,6 +26,7 @@ from lectern.routes.api import (
 router = APIRouter(prefix="/api")
 router.include_router(core.router)
 router.include_router(devices.router)
+router.include_router(ai_keys.router)
 router.include_router(queues.router)
 router.include_router(security.router)
 router.include_router(admin.router)
