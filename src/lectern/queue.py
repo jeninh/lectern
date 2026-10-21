@@ -113,6 +113,11 @@ def _load_builtin() -> None:
         import lectern.align.jobs  # noqa: F401 - registers "align"
         import lectern.jobs  # noqa: F401 - registers "transcode"
 
+        try:
+            import lectern.tts.jobs  # noqa: F401 - registers "tts" (generated audiobooks)
+        except ImportError:
+            pass
+
 
 def tts_capability(payload: dict | None) -> str:
     engine = str((payload or {}).get("engine") or "").strip().lower()

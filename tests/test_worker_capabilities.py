@@ -305,10 +305,14 @@ def tts_kind(settings, tmp_path):
         applied.append(data)
         return {"job_id": job.id, "status": "succeeded"}
 
+    previous = queue.handler("tts")  # the real handler, once generated audiobooks exist
     queue.register(queue.KindHandler(kind="tts", capability=queue.tts_capability,
                                      inputs=inputs, apply_result=apply))  # fmt: skip
     yield applied
-    queue._HANDLERS.pop("tts", None)
+    if previous is None:
+        queue._HANDLERS.pop("tts", None)
+    else:
+        queue.register(previous)
 
 
 @needs_ffmpeg
