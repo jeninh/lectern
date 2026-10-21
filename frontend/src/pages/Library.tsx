@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
+import { MakeAudiobookRow } from "../components/MakeAudiobook";
 import { NeedsEpub, ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
@@ -569,6 +570,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
       <div>
         <h3 style={{ margin: "0 0 8px", fontSize: 14, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Read-along</h3>
         <ul className="slots">
+          {epub && !work.audio && canUpload && <MakeAudiobookRow work={work} />}
           {epub ? <ReadAloudFormats work={work} active /> : <NeedsEpub />}
         </ul>
       </div>

@@ -406,6 +406,17 @@ also reports `model`, `audio_s` (its audio duration), and
 [`alignment.md`](alignment.md#jobs-leases-and-the-eta)). `result.stats` holds the matcher's
 statistics and timings. `GET /api/jobs` adds `measured_speed`.
 
+### Generated audiobooks — `tts` jobs
+
+`kind = "tts"` jobs narrate a text-only work into an audiobook edition whose sentence map
+comes from the synthesis (`alignments.model` = `tts-<engine>-<voice>`, `source: "synthesis"`
+in the alignment JSON; coverage is not a quality warning there). They are listed and cancelled
+through the routes above (`GET /api/jobs?kind=tts`, `POST /api/jobs/{id}/cancel`); their job
+JSON adds `capability`, `engine`, `voice`, `speed`, `chapters`, `sentences`, `characters`,
+`progress`, `message`, and, for ElevenLabs, `cap_credits` and `spent_credits`. Cancelling a
+`tts` job leaves the work's alignment row alone. Routes, the payload/script/artifact/result
+wire format, and the ElevenLabs rules are in [`tts.md`](tts.md).
+
 ### Shelves — `/api/shelves`
 
 Visibility rule, implemented by `lectern.access`:
@@ -640,7 +651,9 @@ written by a lookup.
 `import.file`, `import.auto_file`, `import.combine`, `import.discard`, `work.edit`,
 `work.bulk_edit`, `work.bulk`, `work.bulk_undo`, `work.undo`, `work.trash`, `work.restore`,
 `work.purge`, `file.restore`, `file.purge`, `metadata.lookup`, `settings.change`,
-`readaloud.regenerate`.
+`readaloud.regenerate`, `tts.request`, `tts.retry`, `integration.elevenlabs.set`,
+`integration.elevenlabs.test`, `integration.elevenlabs.revoke`, `integration.elevenlabs.preview`,
+`integration.elevenlabs.use`.
 
 ## Worker protocol
 
@@ -922,9 +935,9 @@ every artifact's hash, requires one rendition (no duplicates) for every payload 
 
 ### Generated audiobooks: the `tts` kind
 
-Agreed with the generated-audiobooks work, which owns the server side (enqueue, the script
-input, `apply_result`, the edition and sentence map, Piper and ElevenLabs runners). The Mac
-worker implements the Kokoro client (`lectern.worker.runners.KokoroRunner`).
+The server side (enqueue, the script input, `apply_result`, the edition and sentence map, the
+Piper and ElevenLabs runners) is `lectern.tts` ([`tts.md`](tts.md)); the Mac worker implements
+the Kokoro client (`lectern.worker.runners.KokoroRunner`).
 
 - kind `tts`, capability `tts-<engine>`; `tts-elevenlabs` is server-only.
 - payload: `{"engine": "kokoro", "model": "kokoro-82m", "voice": "af_heart", "speed": 1.0,
@@ -943,8 +956,8 @@ worker implements the Kokoro client (`lectern.worker.runners.KokoroRunner`).
   monotone times within the duration.
 - heartbeat `progress` = sentences done / total.
 
-Migrations: this branch adds `0012_worker_capabilities` (down `0011`); the TTS branch adds its
-own `0012_*` from `main`, and whichever merges second points its `down_revision` at the other.
+Migrations: `0012_worker_capabilities` (down `0011`), then `0012_tts` (down
+`0012_worker_capabilities`), which adds the generated-audiobook tables.
 
 ## Client addresses behind a proxy (implemented)
 

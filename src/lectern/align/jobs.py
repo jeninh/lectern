@@ -59,6 +59,8 @@ STALL_S = 3600.0
 # An external worker that polled within this window counts as an alignment engine.
 WORKER_SEEN_S = queue.WORKER_SEEN_S
 DOCS_URL = "https://github.com/jeninh/lectern/blob/main/docs/alignment.md#turning-it-on"
+# Sentence maps a generated audiobook installs are labelled "tts-<engine>-<voice>".
+SYNTHESIZED_PREFIX = "tts-"
 
 
 class LeaseLost(Exception):
@@ -1028,7 +1030,14 @@ def alignment_json(
         job = db.get(Job, alignment.job_id)
         stats = _stored_stats(job.result) if job is not None else {}
     diagnosis = stats.get("diagnosis")
-    if alignment.status == AlignmentStatus.SUCCEEDED and alignment.coverage is not None:
+    # A generated audiobook's map comes from the synthesis: sentences outside the narrated
+    # chapters are unmatched by choice, so coverage is not a quality signal there.
+    synthesized = alignment.model.startswith(SYNTHESIZED_PREFIX)
+    if (
+        alignment.status == AlignmentStatus.SUCCEEDED
+        and alignment.coverage is not None
+        and not synthesized
+    ):
         if alignment.coverage < LOW_COVERAGE:
             warnings.append("low_coverage")
             if diagnosis in (None, "poor_transcription", "no_match"):
@@ -1040,6 +1049,7 @@ def alignment_json(
     return {
         "status": alignment.status.value,
         "model": alignment.model,
+        "source": "synthesis" if synthesized else "alignment",
         "coverage": alignment.coverage,
         "span_coverage": stats.get("span_coverage"),
         "diagnosis": diagnosis,
@@ -1161,8 +1171,11 @@ _COMPUTE_TYPES = ("int8", "int8_float16", "int8_float32", "float16", "float32")
 
 
 def _model_name(label: str) -> str:
-    """``faster-whisper-small-int8`` / ``mlx-whisper-small`` → ``small``; anything else is
-    returned as is."""
+    """``faster-whisper-small-int8`` / ``mlx-whisper-small`` → ``small``; a generated
+    audiobook's ``tts-…`` label (re-aligning its edited audio) → the default model; anything
+    else is returned as is."""
+    if label.startswith(SYNTHESIZED_PREFIX):
+        return DEFAULT_MODEL
     if label.startswith("mlx-whisper-"):
         return label[len("mlx-whisper-") :]
     if label.startswith("faster-whisper-"):
