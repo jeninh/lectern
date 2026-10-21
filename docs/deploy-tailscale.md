@@ -245,7 +245,10 @@ Kindle.
    does that.
 5. Note the Lectern server's address from your Machines page, say `100.101.102.103`.
 
-Now in KOReader, use **`http://100.101.102.103:8080`**, not the `https://lectern…ts.net`
+The easiest way to set up KOReader is the **Lectern plugin**: download a per-device zip
+under **Devices**, copy it to `koreader/plugins`, and it configures progress sync and the
+catalogue by itself, with automatic sync ([docs/koreader-plugin.md](koreader-plugin.md)). To
+set it up by hand instead, in KOReader use **`http://100.101.102.103:8080`**, not the `https://lectern…ts.net`
 name, for both:
 
 - **Progress sync:** Settings → Progress sync → Custom sync server `http://100.101.102.103:8080/`,

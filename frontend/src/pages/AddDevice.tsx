@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Check, Copy } from "../components/Icons";
+import { KOReaderPlugin } from "../components/KOReaderPlugin";
 import { get, post } from "../lib/api";
 import { percent, relativeTime } from "../lib/format";
 import { useInterval } from "../lib/hooks";
@@ -192,6 +193,13 @@ export function AddDeviceFlow({ onDone, onCreated }: { onDone: () => void; onCre
             </div>
           )}
 
+          {step === 2 && (
+            <details className="config plugin-choice" open>
+              <summary><strong>Kindle or Kobo with KOReader?</strong> Download the Lectern plugin instead of typing these</summary>
+              <p className="hint">The plugin configures progress sync and the catalogue itself, and replaces the passwords below with its own on first start.</p>
+              <KOReaderPlugin device={created.device} onChanged={onCreated} />
+            </details>
+          )}
           <section className="config" aria-labelledby="ko-h">
             <h4 id="ko-h">1 · KOReader progress sync</h4>
             <p className="hint">Tools → Progress sync → Custom sync server, then <strong>Login</strong> (not Register).</p>

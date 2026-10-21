@@ -41,6 +41,15 @@ KOReader. With any other reverse proxy in front, set
 `LECTERN_TRUSTED_PROXIES` to its address so rate limits and the audit log see your readers'
 IPs instead of the proxy's. Lectern's own sign-in is always required, private network or not.
 
+## KOReader plugin
+
+**Devices → Add device** offers a per-device `lectern.koplugin.zip` for Kindle, Kobo, and
+PocketBook. Copy the folder to `koreader/plugins` over USB; on first start it sets up progress
+sync and the Lectern catalogue, then syncs automatically (pull on open, push on close, sleep,
+and every 10 pages, queued while Wi‑Fi is off). Re-pair after a reset with a 6-digit code.
+See [`docs/koreader-plugin.md`](docs/koreader-plugin.md), including Tailscale on a Kindle
+(KUAL extension, kernel TUN mode).
+
 ## Adding books
 
 Owners and members add books from the web app: **Add books** in the Library (its menu also has

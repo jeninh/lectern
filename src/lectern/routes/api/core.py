@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from lectern import instance
@@ -316,6 +316,13 @@ _ACTIVITY_ACTIONS = {
     "queue.add",
     "queue.remove",
     "queue.delivered",
+    "koplugin.download",
+    "koplugin.bootstrap",
+    "koplugin.bootstrap_failed",
+    "koplugin.pairing_code",
+    "koplugin.paired",
+    "koplugin.pair_failed",
+    "koplugin.revoke",
 }
 
 
@@ -340,7 +347,15 @@ def activity(
     audit_stmt = select(AuditLog).where(AuditLog.action.in_(_ACTIVITY_ACTIONS))
     if auth.user.role != Role.OWNER:
         audit_stmt = audit_stmt.where(
-            or_(AuditLog.actor_user_id == auth.user.id, AuditLog.target == auth.user.username)
+            or_(
+                AuditLog.actor_user_id == auth.user.id,
+                # Plugin rows name a device, not a person: a device labelled "bob" must not
+                # show its addresses to Bob.
+                and_(
+                    AuditLog.target == auth.user.username,
+                    AuditLog.action.not_like("koplugin.%"),
+                ),
+            )
         )
     if since_dt:
         audit_stmt = audit_stmt.where(AuditLog.at > since_dt)

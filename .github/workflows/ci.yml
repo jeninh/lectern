@@ -19,8 +19,8 @@ jobs:
         working-directory: frontend
       - run: npm test
         working-directory: frontend
-      - name: Install ffmpeg (audio ingest, transcode, and range tests) and Noto CJK (generated covers)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-cjk
+      - name: Install ffmpeg (audio ingest, transcode, and range tests), Noto CJK (generated covers), and LuaJIT with LuaSocket/cjson (KOReader plugin)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-cjk luajit lua-socket lua-cjson
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -44,6 +44,8 @@ jobs:
           CJK_FONTS_REQUIRED: "1"
           # tests/test_deploy_tailscale.py runs `docker compose config`; never skip it here.
           COMPOSE_REQUIRED: "1"
+          # tests/test_koplugin.py runs the KOReader plugin under LuaJIT; never skip it here.
+          LUAJIT_REQUIRED: "1"
   docker:
     runs-on: ubuntu-latest
     strategy:
