@@ -357,7 +357,7 @@ What we recommend, and what we have and have not measured:
   a ~64 kb/s data-saver copy per audiobook you listen to that way. To keep the checkout on
   the SD card and the library on the SSD, set `LECTERN_LIBRARY_PATH` (and optionally
   `LECTERN_DATA_PATH`) in `.env` to absolute paths on the SSD, created and owned by your
-  user.
+  user. Never keep backups on the SD card: see [SD-card wear](backups.md#sd-card-wear).
 - **Image:** keep the default image (`LECTERN_EXTRAS` empty). Do **not** build the `align`
   image on a Pi.
 
@@ -470,43 +470,33 @@ Lectern's own record of sign-ins and admin actions is the **Activity** page in t
 
 ## Backups and restore
 
+Lectern has built-in nightly backups, **off until you turn them on** in **Admin → Nightly
+backups**: a consistent copy of the database while it runs (SQLite online backup), the
+signing key, settings, sentence maps, every book's metadata and cover, and optionally the
+library files, into an encrypted restic repository, with retention and failure alerts.
+Point `LECTERN_BACKUP_PATH` in `.env` at a USB drive, not the SD card. Setup, SD-card wear,
+and the tested `lectern restore` command are in [Backups and restore](backups.md).
+
 Four things hold state:
 
-| What | Where | Why it matters |
+| What | Where | In Lectern's backup |
 | --- | --- | --- |
-| Library | `~/lectern/library` (or `LECTERN_LIBRARY_PATH`) | your books, audiobooks, and covers |
-| Lectern database and signing key | `~/lectern/data/lectern` (or `LECTERN_DATA_PATH`) | users, passkeys, devices, reading progress, audit log |
-| Settings | `~/lectern/.env` | the base URL and options; keep a copy in your password manager |
-| Tailscale node state | `~/lectern/data/tailscale` (or `TS_STATE_PATH`), owned by root | the machine identity; losing it means signing the node in again |
+| Library | `~/lectern/library` (or `LECTERN_LIBRARY_PATH`) | metadata and covers always; files if you include them |
+| Lectern database and signing key | `~/lectern/data/lectern` (or `LECTERN_DATA_PATH`) | yes |
+| Settings | `~/lectern/.env` | the `LECTERN_*` values only; keep `.env` in your password manager |
+| Tailscale node state | `~/lectern/data/tailscale` (or `TS_STATE_PATH`), owned by root | no; it holds the node's private key |
 
-Back up the first three; the fourth is optional but makes a restore seamless. A simple
-nightly job:
+The Tailscale state makes a restore seamless (same machine name and address). Back it up
+yourself, and protect the archive:
 
 ```sh
-cd ~/lectern
-mkdir -p backups
-docker compose --env-file .env -f deploy/tailscale/compose.yaml stop lectern
-tar czf "backups/lectern-data-$(date +%F).tgz" -C data/lectern .
-docker compose --env-file .env -f deploy/tailscale/compose.yaml start lectern
-rsync -a --delete library/ backups/library/
-# optional; it contains the node's private key, so protect the archive:
-sudo tar czf "backups/tailscale-state-$(date +%F).tgz" -C data/tailscale .
+sudo tar czf "/media/usb/lectern-backups/tailscale-state-$(date +%F).tgz" -C ~/lectern/data/tailscale .
 ```
 
-Stopping Lectern for the few seconds the copy takes guarantees a consistent SQLite file.
-`backups/` is git-ignored, but it is on the same disk: copy it somewhere else (an external
-drive, another machine on the tailnet, cloud storage); the whole point of a personal library
-is not losing it.
-
-**Restore** onto a fresh clone (or a new Pi), with `.env` copied back:
+**Restore** onto a fresh clone (or a new Pi) with `.env` copied back: follow
+[Restore](backups.md#restore), then, with the Tailscale backup:
 
 ```sh
-cd ~/lectern
-docker compose --env-file .env -f deploy/tailscale/compose.yaml down
-mkdir -p data/lectern library/_inbox
-tar xzf /path/to/lectern-data-2026-10-20.tgz -C data/lectern
-rsync -a /path/to/backups/library/ library/
-# with the Tailscale backup:
 sudo install -d -m 700 data/tailscale
 sudo tar xzf /path/to/tailscale-state-2026-10-20.tgz -C data/tailscale
 docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build

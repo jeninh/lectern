@@ -69,7 +69,7 @@ services:
       LECTERN_LOG_LEVEL: ${LECTERN_LOG_LEVEL:-INFO}
       # Address baked into KOReader plugin zips; empty = the detected Tailscale IP, :8080.
       LECTERN_DEVICE_URL: ${LECTERN_DEVICE_URL:-}
-    # Create both directories yourself, owned by LECTERN_UID:LECTERN_GID. Docker would
+    # Create data and library yourself, owned by LECTERN_UID:LECTERN_GID. Docker would
     # otherwise create them owned by root, and Lectern could not write to them.
     volumes:
       - type: bind
@@ -82,6 +82,14 @@ services:
         target: /library
         bind:
           create_host_path: false
+      # Backup target (Admin → Backups, off by default), e.g. a USB drive on a Pi. Created
+      # if missing so upgrades start without it; chown it to LECTERN_UID:LECTERN_GID before
+      # turning backups on (docs/backups.md).
+      - type: bind
+        source: ${LECTERN_BACKUP_PATH:-../../backups}
+        target: /backups
+        bind:
+          create_host_path: true
     read_only: true
     tmpfs:
       - /tmp

@@ -19,6 +19,7 @@ services:
     volumes:
       - lectern-data:/data
       - ./library:/library
+      - ./backups:/backups   # opt-in backups (docs/backups.md); owned by UID 1000
     read_only: true
     tmpfs:
       - /tmp

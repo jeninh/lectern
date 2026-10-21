@@ -85,8 +85,36 @@ class Housekeeping:
             self._stop.wait(max(0.1, min(next_rescan, next_sweep) - time.monotonic()))
 
 
+class Maintenance:
+    """One thread for the owner's opt-in nightly backup (off by default); each tick reads
+    the switch from the database."""
+
+    def __init__(self, session_factory: sessionmaker, settings: Settings) -> None:
+        self.session_factory = session_factory
+        self.settings = settings
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="lectern-maintenance", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        from lectern import backups
+
+        while not self._stop.wait(self.settings.maintenance_poll_seconds):
+            try:
+                backups.tick(self.session_factory, self.settings)
+            except Exception:  # noqa: BLE001
+                log.exception("backup tick failed")
+
+
 def start_services(session_factory: sessionmaker, settings: Settings) -> list:
-    """Housekeeping always; the in-process worker only when faster-whisper is importable."""
+    """Housekeeping and maintenance always; the in-process worker only when its engine is
+    available."""
     from lectern.align.transcribe import Transcriber
 
     with session_factory() as db:
@@ -94,7 +122,10 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
         # the OOM killer): its lease would otherwise hold the job for up to the lease length.
         if n := jobs.reclaim_expired(db, orphaned_local=True, stall_s=settings.align_stall_seconds):
             log.warning("requeued %d alignment job(s) interrupted by a restart", n)
-    started: list = [Housekeeping(session_factory, settings)]
+    started: list = [
+        Housekeeping(session_factory, settings),
+        Maintenance(session_factory, settings),
+    ]
     missing = jobs.local_engine_missing(settings)
     if missing is None:
         started.append(

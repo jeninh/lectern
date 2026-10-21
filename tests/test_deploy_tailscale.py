@@ -68,6 +68,10 @@ def test_nothing_is_published_and_lectern_shares_the_sidecar_network(compose_con
     assert set(services) == {"tailscale", "lectern"}
     for name, svc in services.items():
         assert not svc.get("ports"), f"{name} publishes ports"
+        # No Docker socket for either container.
+        assert not any("docker.sock" in str(v.get("source", "")) for v in svc.get("volumes", [])), (
+            name
+        )
         assert svc.get("network_mode") != "host", name
     lectern, ts = services["lectern"], services["tailscale"]
     assert lectern["network_mode"] == "service:tailscale"
@@ -95,6 +99,9 @@ def test_paths_resolve_against_the_repository_root(compose_config):
     mounts = {m["target"]: m for m in lectern["volumes"] + ts["volumes"]}
     assert Path(mounts["/data"]["source"]) == ROOT / "data" / "lectern"
     assert Path(mounts["/library"]["source"]) == ROOT / "library"
+    assert Path(mounts["/backups"]["source"]) == ROOT / "backups"
+    # Created if missing so `git pull && up` works without it; backups are off by default.
+    assert mounts["/backups"]["bind"]["create_host_path"] is True
     assert Path(mounts["/var/lib/tailscale"]["source"]) == ROOT / "data" / "tailscale"
     assert Path(mounts["/config/serve.json"]["source"]) == SERVE
     assert mounts["/config/serve.json"]["read_only"] is True
@@ -113,6 +120,7 @@ def test_env_overrides_apply(compose_config):
     assert mounts["/data"] == "/srv/lectern/data"
     assert mounts["/library"] == "/srv/lectern/library"
     assert mounts["/var/lib/tailscale"] == "/srv/lectern/tailscale"
+    assert mounts["/backups"] == "/srv/lectern/backups"
     assert lectern["user"] == "1001:1002"
     assert lectern["environment"]["LECTERN_BASE_URL"] == "https://books.tail1234.ts.net"
     assert lectern["environment"]["LECTERN_LOG_LEVEL"] == "DEBUG"
