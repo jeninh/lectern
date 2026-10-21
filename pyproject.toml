@@ -23,6 +23,8 @@ dependencies = [
     "itsdangerous>=2.2",
     "pillow>=10.3",
     "mcp>=2.3,<3",
+    "resvg-py>=0.5",
+    "fonttools>=4.50",
 ]
 
 [project.optional-dependencies]

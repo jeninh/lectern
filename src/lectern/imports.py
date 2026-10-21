@@ -39,6 +39,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from lectern.config import Settings
+from lectern.covergen import cover_fields, tint_of
 from lectern.fsops import STAGING_DIR, checked, move_file, unique_name
 from lectern.ingest.audio import AudioError, _natural, _save_cover, probe
 from lectern.ingest.cover import dominant_tint
@@ -383,8 +384,8 @@ def _work_summary(w: Work, db: Session) -> dict:
         "series": w.series,
         "series_index": w.series_index,
         "isbn": w.isbn,
-        "cover_url": f"/library/works/{w.id}/cover.jpg?v={w.version}" if w.has_cover else None,
-        "cover_tint": w.cover_tint,
+        "cover_url": cover_fields(w)["cover_url"],
+        "cover_tint": tint_of(w),
         "has_ebook": any(f.kind == FileKind.EBOOK for f in w.files),
         "has_audio": has_audio,
     }

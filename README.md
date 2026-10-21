@@ -76,6 +76,32 @@ Rejected inbox files land in `library/_inbox/_rejected/`. Upload sessions expire
 unfiled reviews after 7 days. Limits: `LECTERN_UPLOAD_MAX_BYTES` per file,
 `LECTERN_UPLOAD_QUOTA_BYTES` in flight per user.
 
+## Generated covers
+
+A book with no cover art gets a designed cover instead of a placeholder. A hash of the title and
+author picks one of eleven muted palettes (oxblood, forest, ink, ochre, plum, teal, …) and one
+of three styles: **classic** (centred title in a border frame), **modern** (big left-aligned
+title over a colour block), or **minimal** (an SVG pattern of stripes, arcs, a grid, or dots).
+Titles are auto-fitted and balanced in the app's serif, the author is set in small caps, and a
+spine shadow runs down the left edge. Every text colour meets WCAG AA contrast.
+
+The server draws the cover (SVG rasterised by resvg) and caches it as
+`<work>/derived/cover-<key>.jpg`, so the web app, OPDS, KOReader, and Kindle all get the same image
+from `/library/works/<id>/cover.jpg`. It is redrawn when the title, author, style, or palette
+changes. Uploaded or embedded art always wins: a generated cover never touches `cover.jpg`.
+Coptic, Greek, Cyrillic, Arabic, Hebrew, and Devanagari use Noto fonts bundled in
+`src/lectern/fonts/`. Chinese, Japanese, and Korean use Noto Serif CJK (`fonts-noto-cjk`, in the
+Docker image). Right-to-left titles are set right-aligned.
+
+In the editor's **Cover** tab you can pick the style, **Shuffle colours**, and see a live
+preview. **Generate a cover** replaces art with a generated one (Undo brings the art back);
+uploading an image or **Use the EPUB's cover** goes the other way. In the Library grid,
+generated covers carry no caption underneath, since the cover already shows the title and
+author.
+
+![Library with generated covers](docs/screenshots/covers-after-light.png)
+![The three styles](docs/screenshots/covers-styles.png)
+
 ## Editing books
 
 **Edit** on a book (or "Edit …" in Cmd/Ctrl+K) opens the full editor: title and sort title;

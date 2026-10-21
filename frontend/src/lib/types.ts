@@ -93,6 +93,8 @@ export interface Work {
   has_cover: boolean;
   cover_url: string | null;
   cover_tint: string | null;
+  /** No cover art: ``cover_url`` serves the server-generated cover (title and author drawn on it). */
+  cover_generated?: boolean;
   created_at: string | null;
   updated_at: string | null;
   files: BookFile[];
@@ -506,6 +508,8 @@ export interface EditorFile {
   primary: boolean;
 }
 
+export type CoverStyle = "classic" | "modern" | "minimal";
+
 export interface EditorState {
   work: Work;
   version: number;
@@ -513,7 +517,13 @@ export interface EditorState {
   playback_default: PlaybackDefault;
   readalong_enabled: boolean;
   primary_file_id: number | null;
-  cover: { has_cover: boolean; url: string | null; source: string | null; embedded_available: boolean };
+  cover: {
+    has_cover: boolean;
+    url: string | null;
+    source: string | null;
+    embedded_available: boolean;
+    generated: { url: string | null; style: CoverStyle | null; seed: number; effective_style: CoverStyle; styles: CoverStyle[] };
+  };
   files: EditorFile[];
   tracks: EditorTrack[];
   shelves: { id: number; name: string; member: boolean }[];

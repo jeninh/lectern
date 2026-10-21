@@ -23,7 +23,11 @@ RUN uv sync --frozen --no-dev ${LECTERN_EXTRAS:+--extra $LECTERN_EXTRAS}
 FROM python:3.12-slim-bookworm
 # ffmpeg/ffprobe: audiobook metadata and chapters, data-saver renditions, sleep-timer rewind.
 # (faster-whisper in the align image decodes through PyAV's own bundled FFmpeg.)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# fonts-noto-cjk: Chinese, Japanese, and Korean titles on generated covers (lectern.covergen;
+# every other script's font ships in src/lectern/fonts). Only the serif regular face is used,
+# so the sans and bold collections (~63 MB) are removed.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk \
+ && find /usr/share/fonts/opentype/noto -name '*.ttc' ! -name 'NotoSerifCJK-Regular.ttc' -delete \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 1000 lectern && useradd -u 1000 -g lectern -m -s /usr/sbin/nologin lectern \
  && mkdir -p /data /library && chown lectern:lectern /data /library

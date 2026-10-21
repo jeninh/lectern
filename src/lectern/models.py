@@ -257,6 +257,10 @@ class Work(Base):
     playback_default: Mapped[str | None] = mapped_column(String(16), default=None)
     readalong_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     cover_source: Mapped[str | None] = mapped_column(String(16), default=None)
+    # Migration 0010: the generated cover used while there is no cover art (has_cover False).
+    # cover_style None = picked from the title/author hash; cover_seed = the editor's shuffle.
+    cover_style: Mapped[str | None] = mapped_column(String(16), default=None)
+    cover_seed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Optimistic concurrency: every edit is ``UPDATE ... WHERE version = <seen>``.
     version: Mapped[int] = mapped_column(Integer, default=1)
     # Trash: hidden from everyone, files under <library>/_trash/, purged after 30 days.

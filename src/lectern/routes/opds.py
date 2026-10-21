@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -16,6 +15,7 @@ from lectern.models import Work
 from lectern.reading_lists import continue_items, up_next_ids
 from lectern.routes.library import (
     PAGE_SIZE,
+    cover_response,
     download_response,
     resolve_cover,
     resolve_file,
@@ -55,13 +55,13 @@ def _entry(work: Work) -> str:
             f'<link rel="http://opds-spec.org/acquisition" href="/opds/files/{f.id}/download" '
             f'type="{escape(f.media_type)}" length="{f.size}"/>'
         )
-    if work.has_cover:
-        links.append(
-            f'<link rel="http://opds-spec.org/image" href="/opds/works/{work.id}/cover.jpg" type="image/jpeg"/>'
-        )
-        links.append(
-            f'<link rel="http://opds-spec.org/image/thumbnail" href="/opds/works/{work.id}/cover.jpg" type="image/jpeg"/>'
-        )
+    # Every work has a cover: its art, or the generated one (lectern.covergen).
+    links.append(
+        f'<link rel="http://opds-spec.org/image" href="/opds/works/{work.id}/cover.jpg" type="image/jpeg"/>'
+    )
+    links.append(
+        f'<link rel="http://opds-spec.org/image/thumbnail" href="/opds/works/{work.id}/cover.jpg" type="image/jpeg"/>'
+    )
     summary = (
         f'<summary type="text">{_text(work.description[:1000])}</summary>'
         if work.description
@@ -291,7 +291,7 @@ def search(user: OpdsUser, db: DbDep, q: str = "", page: int = 1) -> Response:
 
 @router.get("/works/{work_id}/cover.jpg", include_in_schema=False)
 def cover(user: OpdsUser, db: DbDep, settings: SettingsDep, work_id: int):
-    return FileResponse(resolve_cover(db, settings, work_id, user), media_type="image/jpeg")
+    return cover_response(resolve_cover(db, settings, work_id, user))
 
 
 @router.get("/files/{file_id}/download", include_in_schema=False)
