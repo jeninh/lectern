@@ -1,0 +1,911 @@
+"""AI access: an MCP server at ``/mcp`` (Streamable HTTP) for AI apps on the tailnet.
+
+How a request travels (docs/mcp.md has the user-facing version)::
+
+    AI app ──POST /mcp, Authorization: Bearer lak_…──▶ MCPEndpoint (this module)
+        refuse an address with too many failed keys (429)
+        look the key up: unknown, revoked, or user disabled → 401
+        rate limit per key (LECTERN_MCP_REQUESTS_PER_MINUTE) → 429
+        stamp last use; the first use ever alerts the key's user
+      ──▶ the MCP SDK's session manager (stateless, JSON responses)
+      ──▶ a tool: ``_call`` loads the key again (a revoke takes effect between messages),
+          checks its scope, runs the tool *as the key's user* through the same functions the
+          web app's routes use (role, visibility, and validation included), writes one audit
+          row per call, and counts the call toward the burst alert.
+
+The tools reuse the API, they do not reimplement it: uploads go through
+``routes.api.uploads`` and ``routes.api.imports`` (review before filing), sends through
+``routes.api.queues`` / ``lectern.device_queue``, shelves through ``routes.api.shelves``,
+alignment through ``routes.api.align``, and metadata edits through ``routes.api.editor``
+(``WorkPatch`` / ``Metadata`` validation, including the control-character check).
+
+Deliberately absent: any tool that returns a book file, audio, cover, or the read-aloud
+EPUB, and any tool for users, invites, keys, or server settings. An AI key is accepted only
+here, so it cannot reach ``/api``, ``/library``, or ``/opds`` either.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
+
+from fastapi import HTTPException
+from fastapi.concurrency import run_in_threadpool
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp_types import ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session, selectinload
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.types import Receive, Scope, Send
+
+from lectern import __version__, ai_keys, device_queue, imports
+from lectern.access import can_edit_library, can_see_work, visible_works
+from lectern.config import Settings
+from lectern.db import session_factory
+from lectern.models import (
+    AIKey,
+    AudioTrack,
+    FileKind,
+    Import,
+    ImportStatus,
+    Job,
+    Shelf,
+    ShelfItem,
+    User,
+    Work,
+    WorkProgress,
+)
+from lectern.routes.api.serializers import iso
+from lectern.security import audit
+from lectern.security.deps import AuthContext
+from lectern.security.sessions import client_ip
+from lectern.uploads import MEDIA_TYPES
+from lectern.workmeta import Metadata, authors_of, metadata_of
+
+log = logging.getLogger("lectern.mcp")
+
+SCOPE_KEY = "lectern.ai_key"
+# Raw bytes per upload_book chunk. Base64 makes it ~2.7 MiB, inside the SDK's 4 MiB body cap.
+CHUNK_BYTES = 2 * 1024 * 1024
+_EXTENSIONS = {ext: mt for mt, (exts, _) in MEDIA_TYPES.items() for ext in exts}
+
+INSTRUCTIONS = """\
+Lectern is a private household library of EPUB books and audiobooks. You act as one person,
+with only their permissions and only the scopes their AI key was given.
+
+- Add a book: upload_book (small files in one call; larger ones in chunks), then look at the
+  detected metadata and the proposed match, and confirm_import (accept, edit fields, join an
+  existing book, or file as new) or cancel_import. Ask the person when the match is not certain.
+- Find books with search_library / list_recent and inspect one with get_book. Book ids are
+  numbers; use them for every other tool.
+- Organize: add_to_shelf / remove_from_shelf, send_to_device / list_device_queue,
+  start_alignment / job_status, edit_metadata.
+- There is no way to download book files or audio through these tools.
+"""
+
+READ = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
+DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
+
+
+# --- the HTTP endpoint ----------------------------------------------------------------------------
+
+
+def _reply(status: int, detail: str, headers: dict | None = None) -> Response:
+    return JSONResponse({"detail": detail}, status_code=status, headers=headers)
+
+
+_CHALLENGE = {"WWW-Authenticate": 'Bearer realm="Lectern AI tools"'}
+
+
+def _admit(request: Request, secret: str) -> tuple[int, int | None]:
+    """(HTTP status, key id): 200 with the key, or 401/429. Runs in the threadpool."""
+    limiters = request.app.state.limiters
+    with session_factory()() as db:
+        found = ai_keys.authenticate(db, secret) if secret else None
+        if found is None:
+            limiters["mcp_fail"].allow(f"mcp:{client_ip(request) or '?'}")
+            return 401, None
+        key, user = found
+        if not limiters["mcp"].allow(f"key:{key.id}"):
+            return 429, key.id
+        ai_keys.record_use(
+            db, key, user, client_ip(request), request.headers.get("user-agent", "")[:128]
+        )
+        return 200, key.id
+
+
+class MCPEndpoint:
+    """ASGI app at ``/mcp``: authenticate, rate limit, then hand over to the MCP SDK."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return
+        request = Request(scope)
+        manager = getattr(request.app.state, "mcp", None)
+        if manager is None:  # app built without its lifespan (never in production)
+            await _reply(503, "unavailable")(scope, receive, send)
+            return
+        ip_key = f"mcp:{client_ip(request) or '?'}"
+        if request.app.state.limiters["mcp_fail"].exhausted(ip_key):
+            await _reply(429, "Too many requests", {"Retry-After": "60"})(scope, receive, send)
+            return
+        secret = ai_keys.bearer(request.headers.get("authorization"))
+        code, key_id = await run_in_threadpool(_admit, request, secret)
+        if code == 401:
+            await _reply(401, "AI key required", _CHALLENGE)(scope, receive, send)
+            return
+        if code == 429:
+            await _reply(429, "Too many requests", {"Retry-After": "60"})(scope, receive, send)
+            return
+        # Server-side only: the SDK hands this same scope to the tool as its Request.
+        scope[SCOPE_KEY] = key_id
+        await manager.handle_request(scope, receive, send)
+
+
+def build(settings: Settings):
+    """A fresh MCP server and its Streamable HTTP session manager (one per app lifespan)."""
+    server = MCPServer("Lectern", instructions=INSTRUCTIONS, version=__version__)
+    for fn, hints in _TOOLS:
+        server.add_tool(fn, annotations=hints)
+    base = urlsplit(settings.base_url)
+    origin = f"{base.scheme}://{base.netloc}"
+    # DNS rebinding protection: the configured hostname (the tailnet name behind
+    # `tailscale serve`) and loopback for clients on the server itself.
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[base.netloc, "127.0.0.1:*", "localhost:*", "[::1]:*"],
+        allowed_origins=[origin, "http://127.0.0.1:*", "http://localhost:*"],
+    )
+    server.streamable_http_app(json_response=True, stateless_http=True, transport_security=security)
+    return server.session_manager
+
+
+# --- calling a tool -------------------------------------------------------------------------------
+
+
+@dataclass
+class Call:
+    db: Session
+    request: Request
+    settings: Settings
+    user: User
+    key: AIKey
+
+    @property
+    def auth(self) -> AuthContext:
+        # Route functions read only ``.user`` (no session: an AI key has no cookie or CSRF).
+        return AuthContext(user=self.user, session=None)  # type: ignore[arg-type]
+
+    @property
+    def ip(self) -> str | None:
+        return client_ip(self.request)
+
+    def require_editor(self, what: str) -> None:
+        if not can_edit_library(self.user):
+            raise ToolError(f"forbidden: readers cannot {what}.")
+
+
+def _http_error(exc: HTTPException) -> ToolError:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        code = str(detail.get("detail", "error"))
+        extra = {k: v for k, v in detail.items() if k not in ("detail", "current")}
+    else:
+        code, extra = str(detail), {}
+    hint = {
+        404: "not found, or not visible to this person",
+        403: "not allowed for this person",
+        409: "conflict",
+        429: "too many requests; wait a minute",
+    }.get(exc.status_code)
+    msg = f"{code}" + (f" ({hint})" if hint and hint != code else "")
+    if extra:
+        msg += f": {json.dumps(extra, default=str)[:500]}"
+    return ToolError(msg)
+
+
+def _validation_error(exc: ValidationError) -> ToolError:
+    parts = [
+        f"{'.'.join(str(p) for p in e.get('loc', ())) or 'value'}: {e.get('msg')} [{e.get('type')}]"
+        for e in exc.errors()[:10]
+    ]
+    return ToolError("invalid: " + "; ".join(parts))
+
+
+@contextmanager
+def _call(ctx: Context, tool: str, scope: str) -> Iterator[Call]:
+    request = ctx.request_context.request
+    key_id = request.scope.get(SCOPE_KEY) if isinstance(request, Request) else None
+    if key_id is None:
+        raise ToolError("unauthenticated")
+    settings: Settings = request.app.state.settings
+    with session_factory()() as db:
+        key = db.get(AIKey, key_id)
+        user = db.get(User, key.user_id) if key else None
+        if key is None or key.revoked_at is not None or user is None or not user.is_active:
+            raise ToolError("unauthenticated: this AI key was revoked")
+        call = Call(db, request, settings, user, key)
+        who = f"key {key.label} #{key.id}"
+
+        def record(outcome: str) -> None:
+            audit.record(
+                db,
+                "mcp.call",
+                actor_user_id=user.id,
+                target=tool,
+                ip=call.ip,
+                detail=f"{who}: {outcome}"[:500],
+            )
+            limiter = request.app.state.limiters["mcp_burst"]
+            if settings.mcp_burst_count and not limiter.allow(f"key:{key.id}"):
+                ai_keys.burst_alert(
+                    db, key, user, call.ip, settings.mcp_burst_count,
+                    settings.mcp_burst_window_seconds,
+                )  # fmt: skip
+            db.commit()
+
+        if scope not in (key.scopes or []):
+            record(f"denied (needs {scope})")
+            raise ToolError(
+                f"forbidden: this AI key does not have the '{scope}' scope. Its owner can "
+                "create a key with that scope in Lectern under Devices → AI tools."
+            )
+        try:
+            yield call
+        except ToolError as exc:
+            db.rollback()
+            record(f"error {str(exc)[:200]}")
+            raise
+        except HTTPException as exc:
+            db.rollback()
+            err = _http_error(exc)
+            record(f"error {err}")
+            raise err from None
+        except ValidationError as exc:
+            db.rollback()
+            err = _validation_error(exc)
+            record(f"error {err}")
+            raise err from None
+        except Exception:
+            db.rollback()
+            record("error internal")
+            raise
+        record("ok")
+
+
+# --- shapes ---------------------------------------------------------------------------------------
+
+
+def _formats(work: Work) -> list[str]:
+    kinds = {f.kind for f in work.files}
+    return [
+        name
+        for kind, name in ((FileKind.EBOOK, "ebook"), (FileKind.AUDIO, "audiobook"))
+        if kind in kinds
+    ]
+
+
+def _summary(work: Work) -> dict:
+    return {
+        "id": work.id,
+        "title": work.title,
+        "authors": [a["name"] for a in authors_of(work)],
+        "series": work.series,
+        "series_index": work.series_index,
+        "language": work.language,
+        "formats": _formats(work),
+        "added_at": iso(work.created_at),
+    }
+
+
+def _import_summary(data: dict) -> dict:
+    """An import as the review sheet sees it, minus URLs only a browser session can open."""
+    return {
+        "import_id": data["id"],
+        "status": data["status"],
+        "error": data.get("error"),
+        "files": [
+            {
+                "filename": f["filename"],
+                "kind": f["kind"],
+                "size": f["size"],
+                "status": f["status"],
+                "duplicate_of": f["duplicate_of"],
+            }
+            for f in data["files"]
+        ],
+        "uploads_in_progress": data.get("uploads_active", 0),
+        "detected": data.get("detected"),
+        "metadata": data.get("metadata"),
+        "proposal": data.get("proposal"),
+        "target": data.get("target"),
+        "filed_book": data.get("work"),
+        "auto_filed": data.get("auto_filed"),
+        "expires_at": data.get("expires_at"),
+    }
+
+
+def _visible(db: Session, user: User, book_id: int) -> Work:
+    work = db.scalar(
+        select(Work)
+        .options(selectinload(Work.files))
+        .where(Work.id == book_id, visible_works(user))
+    )
+    if work is None:
+        raise ToolError(f"not_found: no book {book_id} that this person can see")
+    return work
+
+
+class MetadataChanges(BaseModel):
+    """Fields to change; omitted fields keep their value, ``null`` clears one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    authors: list[str] | None = Field(default=None, description="Display names, in order.")
+    sort_title: str | None = None
+    series: str | None = None
+    series_index: float | None = None
+    description: str | None = None
+    language: str | None = Field(default=None, description="BCP 47, e.g. en or fr-CA.")
+    isbn: str | None = None
+    publisher: str | None = None
+    published: str | None = Field(default=None, description="YYYY, YYYY-MM, or YYYY-MM-DD.")
+    tags: list[str] | None = None
+    narrators: list[str] | None = None
+
+
+def _merged(current: dict | None, changes: MetadataChanges | None) -> Metadata:
+    """``current`` with ``changes`` applied, through the editor's own validation."""
+    data = dict(current or {})
+    if changes is not None:
+        for name, value in changes.model_dump(exclude_unset=True).items():
+            if name == "authors":
+                value = [{"name": n} for n in (value or [])]
+            elif name in ("tags", "narrators") and value is None:
+                value = []
+            data[name] = value
+    return Metadata.model_validate(data)
+
+
+# --- tools: upload and review ---------------------------------------------------------------------
+
+
+def upload_book(
+    ctx: Context,
+    filename: Annotated[str, Field(max_length=600, description="File name with extension.")],
+    content_base64: Annotated[
+        str,
+        Field(
+            description="This chunk of the file, base64. The whole file when it is at most "
+            "2 MiB; otherwise exactly chunk_size bytes per call (the last chunk may be shorter)."
+        ),
+    ] = "",
+    total_size: Annotated[
+        int | None, Field(gt=0, description="Whole file size in bytes; needed for chunks.")
+    ] = None,
+    sha256: Annotated[
+        str | None,
+        Field(
+            pattern="^[0-9a-f]{64}$", description="SHA-256 of the whole file; needed for chunks."
+        ),
+    ] = None,
+    upload_id: Annotated[
+        str | None, Field(max_length=32, description="Continue this upload (from the first call).")
+    ] = None,
+    offset: Annotated[int, Field(ge=0, description="Byte offset of this chunk.")] = 0,
+    import_id: Annotated[
+        str | None,
+        Field(
+            max_length=32,
+            description="Add the file to this pending import (an EPUB and its "
+            "audiobook, or several audio tracks, become one book).",
+        ),
+    ] = None,
+    finish: Annotated[
+        bool,
+        Field(
+            description="When the file is complete, analyse the import and propose a match. "
+            "Set false while more files for the same book are still to come."
+        ),
+    ] = True,
+) -> dict:
+    """Upload an EPUB or audiobook file (MP3, M4B/M4A, OGG/Opus, FLAC) into "Review before
+    filing". Nothing is filed yet: when the upload is complete this returns the detected
+    metadata and the proposed match; confirm it with confirm_import. Resumable: calling with
+    upload_id and no content returns how many bytes the server has. Scope: upload."""
+    from lectern.routes.api import imports as imports_api
+    from lectern.routes.api import uploads as uploads_api
+
+    with _call(ctx, "upload_book", "upload") as c:
+        c.require_editor("upload books")
+        try:
+            data = base64.b64decode(content_base64, validate=True) if content_base64 else b""
+        except (binascii.Error, ValueError):
+            raise ToolError("invalid: content_base64 is not valid base64") from None
+        if len(data) > CHUNK_BYTES:
+            raise ToolError(f"chunk_too_large: send at most {CHUNK_BYTES} bytes per call")
+        if upload_id is None:
+            media_type = _EXTENSIONS.get(Path(filename).suffix.lower())
+            if media_type is None:
+                raise ToolError(
+                    "unsupported_media_type: use .epub, .mp3, .m4b, .m4a, .ogg, .opus, or .flac"
+                )
+            size = total_size or len(data)
+            if not size:
+                raise ToolError("invalid: empty file")
+            if size > len(data) and not sha256:
+                raise ToolError("invalid: a chunked upload needs sha256 of the whole file")
+            whole = sha256 or hashlib.sha256(data).hexdigest()
+            if import_id is None:
+                imp, _ = imports.create(c.db, c.user, Path(filename).stem[:256], None)
+                c.db.commit()
+            else:
+                imp = imports.get_owned(c.db, c.user, import_id)
+            row, _ = uploads_api.start_session(
+                c.db,
+                c.request,
+                c.auth,
+                c.settings,
+                uploads_api.CreateIn(
+                    filename=filename,
+                    size=size,
+                    media_type=media_type,
+                    sha256=whole,
+                    import_id=imp.public_id,
+                ),  # fmt: skip
+                chunk_max=CHUNK_BYTES,
+            )
+            upload_id = row.public_id
+        uploads_api._open_session(c.db, c.auth, c.settings, upload_id)
+        if data:
+            uploads_api._store_chunk(
+                c.db, c.auth, c.settings, upload_id, offset, hashlib.sha256(data).hexdigest(), data
+            )
+        row = uploads_api._own(c.db, c.auth, upload_id)
+        imp = c.db.get(Import, row.import_id) if row.import_id else None
+        if row.received_bytes < row.size:
+            return {
+                "status": "uploading",
+                "upload_id": row.public_id,
+                "import_id": imp.public_id if imp else None,
+                "size": row.size,
+                "received_bytes": row.received_bytes,
+                "next_offset": row.received_bytes,
+                "chunk_size": row.chunk_size,
+            }
+        done = uploads_api.finalize(row.public_id, c.request, c.auth, c.db, c.settings, None)
+        assert imp is not None  # MCP uploads always stage into an import
+        if not finish:
+            out = _import_summary(done["import"])
+            return {**out, "status": "uploaded", "next": "upload more files with this import_id"}
+        result = imports_api.complete_import(c.request, c.auth, c.db, c.settings, imp.public_id)
+        return _import_summary(result)
+
+
+def list_pending_imports(ctx: Context) -> dict:
+    """Uploads waiting in "Review before filing" (this person's own), with what was detected
+    and the proposed match. Scope: upload."""
+    from lectern.routes.api import imports as imports_api
+
+    with _call(ctx, "list_pending_imports", "upload") as c:
+        c.require_editor("add books")
+        found = imports_api.list_imports(c.auth, c.db, c.settings, status_="open")
+        return {"imports": [_import_summary(i) for i in found["imports"]]}
+
+
+def confirm_import(
+    ctx: Context,
+    import_id: Annotated[str, Field(max_length=32)],
+    action: Annotated[
+        Literal["accept", "new", "join"],
+        Field(
+            description="accept: file as proposed; new: file as a new book; join: add the "
+            "files to the existing book work_id (only its empty fields are filled)."
+        ),
+    ] = "accept",
+    work_id: Annotated[int | None, Field(description="The book to join (action=join).")] = None,
+    metadata: Annotated[
+        MetadataChanges | None, Field(description="Corrections to the detected metadata.")
+    ] = None,
+    use_cover: Annotated[bool | None, Field(description="Use the detected cover.")] = None,
+    add_audio_tracks: Annotated[
+        bool,
+        Field(
+            description="Joining audio to a book that already has an audiobook appends the "
+            "tracks; without this it is refused so two audiobooks never mix by accident."
+        ),
+    ] = False,
+) -> dict:
+    """File a pending import into the library, as reviewed. Scope: upload."""
+    from lectern.routes.api import imports as imports_api
+
+    with _call(ctx, "confirm_import", "upload") as c:
+        c.require_editor("add books")
+        imp = imports.get_owned(c.db, c.user, import_id)
+        if imp.status == ImportStatus.UPLOADING:
+            imports_api.complete_import(c.request, c.auth, c.db, c.settings, import_id)
+            c.db.refresh(imp)
+        if action == "join" and (work_id is None or not can_see_work(c.db, c.user, work_id)):
+            raise ToolError("invalid: action=join needs the work_id of a book you can see")
+        target = (
+            None
+            if action == "accept"
+            else imports.Target(action=action, work_id=work_id if action == "join" else None)
+        )
+        decision = imports.Decision(
+            metadata=_merged(imp.metadata_, metadata) if metadata is not None else None,
+            target=target,
+            use_cover=use_cover,
+            audio="append" if add_audio_tracks else "refuse",
+        )
+        out = imports_api.file_import(c.request, c.auth, c.db, c.settings, import_id, decision)
+        work = _visible(c.db, c.user, out["work_id"])
+        return {
+            "book": _summary(work),
+            "created": bool(out["report"].get("created")),
+            "report": out["report"],
+        }
+
+
+def cancel_import(ctx: Context, import_id: Annotated[str, Field(max_length=32)]) -> dict:
+    """Discard a pending import and its uploaded files (nothing in the library changes).
+    Scope: upload."""
+    from lectern.routes.api import imports as imports_api
+
+    with _call(ctx, "cancel_import", "upload") as c:
+        c.require_editor("add books")
+        imports_api.discard_import(c.request, c.auth, c.db, c.settings, import_id)
+        return {"import_id": import_id, "status": "discarded"}
+
+
+# --- tools: read ----------------------------------------------------------------------------------
+
+
+def search_library(
+    ctx: Context,
+    query: Annotated[
+        str,
+        Field(
+            max_length=200,
+            description="Words from the title, author, or series; empty lists everything.",
+        ),
+    ] = "",
+    limit: Annotated[int, Field(ge=1, le=100)] = 20,
+) -> dict:
+    """Find books this person can see. Scope: read."""
+    with _call(ctx, "search_library", "read") as c:
+        stmt = select(Work).options(selectinload(Work.files)).where(visible_works(c.user))
+        for word in query.split()[:8]:
+            like = f"%{word}%"
+            stmt = stmt.where(
+                or_(Work.title.ilike(like), Work.author.ilike(like), Work.series.ilike(like))
+            )
+        total = c.db.scalar(select(func.count()).select_from(stmt.subquery()))
+        works = c.db.scalars(stmt.order_by(Work.sort_title, Work.id).limit(limit)).all()
+        return {"total": total or 0, "books": [_summary(w) for w in works]}
+
+
+def get_book(ctx: Context, book_id: int) -> dict:
+    """One book: metadata, formats, audiobook length, alignment status, shelves, and this
+    person's reading or listening progress. Scope: read."""
+    from lectern.align import jobs
+    from lectern.progress import progress_json
+
+    with _call(ctx, "get_book", "read") as c:
+        work = _visible(c.db, c.user, book_id)
+        tracks = c.db.execute(
+            select(func.count(), func.sum(AudioTrack.duration_s)).where(
+                AudioTrack.work_id == work.id
+            )
+        ).one()
+        active = jobs.active_job(c.db, work.id)
+        pj = progress_json(c.db, c.user.id, work.id)
+        shelves = c.db.execute(
+            select(Shelf.id, Shelf.name)
+            .join(ShelfItem, ShelfItem.shelf_id == Shelf.id)
+            .where(ShelfItem.work_id == work.id)
+            .order_by(func.lower(Shelf.name))
+        ).all()
+        visible_shelves = {s["id"] for s in _shelves(c)}
+        return {
+            "id": work.id,
+            "version": work.version,
+            "metadata": metadata_of(work),
+            "formats": [
+                {"kind": f.kind.value, "media_type": f.media_type, "size": f.size}
+                for f in work.files
+            ],
+            "audio": {"tracks": tracks[0], "duration_s": round(float(tracks[1] or 0), 1)}
+            if tracks[0]
+            else None,
+            "alignment": jobs.alignment_json(c.db, jobs.work_alignment(c.db, work.id)),
+            "alignment_job": {"id": active.id, "status": active.status.value} if active else None,
+            "progress": {
+                "percent": pj["percent"],
+                "source": pj["source"],
+                "device": pj["device"],
+                "audio_s": pj["audio_s"],
+                "updated_at": pj["received_at"],
+            }
+            if pj["source"]
+            else None,
+            "shelves": [{"id": i, "name": n} for i, n in shelves if i in visible_shelves],
+            "added_at": iso(work.created_at),
+            "updated_at": iso(work.updated_at),
+        }
+
+
+def list_recent(
+    ctx: Context,
+    kind: Annotated[
+        Literal["added", "read"],
+        Field(
+            description="added: newest in the library; read: what this person read or "
+            "listened to most recently."
+        ),
+    ] = "added",
+    limit: Annotated[int, Field(ge=1, le=50)] = 10,
+) -> dict:
+    """Recently added books, or this person's recently read ones. Scope: read."""
+    with _call(ctx, "list_recent", "read") as c:
+        stmt = select(Work).options(selectinload(Work.files)).where(visible_works(c.user))
+        if kind == "added":
+            works = c.db.scalars(stmt.order_by(Work.created_at.desc(), Work.id.desc()).limit(limit))
+            return {"books": [_summary(w) for w in works]}
+        rows = c.db.execute(
+            stmt.add_columns(WorkProgress.received_at)
+            .join(WorkProgress, WorkProgress.work_id == Work.id)
+            .where(WorkProgress.user_id == c.user.id)
+            .order_by(WorkProgress.received_at.desc())
+            .limit(limit)
+        ).all()
+        return {"books": [{**_summary(w), "last_read_at": iso(at)} for w, at in rows]}
+
+
+# --- tools: organize ------------------------------------------------------------------------------
+
+
+def _shelves(c: Call) -> list[dict]:
+    from lectern.routes.api import shelves as shelves_api
+
+    return shelves_api.list_shelves(c.auth, c.db)["shelves"]
+
+
+def _shelf(c: Call, shelf: str) -> dict:
+    found = _shelves(c)
+    wanted = shelf.strip()
+    hits = [s for s in found if str(s["id"]) == wanted] or [
+        s for s in found if s["name"].casefold() == wanted.casefold()
+    ]
+    if len(hits) != 1:
+        names = ", ".join(f"{s['name']} (#{s['id']})" for s in found) or "none"
+        reason = "ambiguous_shelf" if hits else "not_found"
+        raise ToolError(f"{reason}: no single shelf '{shelf}'. This person's shelves: {names}")
+    return hits[0]
+
+
+def add_to_shelf(
+    ctx: Context,
+    book_id: int,
+    shelf: Annotated[str, Field(max_length=128, description="Shelf name or id.")],
+) -> dict:
+    """Put a book on a shelf this person may edit. Scope: organize."""
+    from lectern.routes.api import shelves as shelves_api
+
+    with _call(ctx, "add_to_shelf", "organize") as c:
+        s = _shelf(c, shelf)
+        _visible(c.db, c.user, book_id)
+        shelves_api.add_item(c.request, c.auth, c.db, s["id"], shelves_api.ItemIn(work_id=book_id))
+        return {"shelf": {"id": s["id"], "name": s["name"]}, "book_id": book_id, "on_shelf": True}
+
+
+def remove_from_shelf(
+    ctx: Context,
+    book_id: int,
+    shelf: Annotated[str, Field(max_length=128, description="Shelf name or id.")],
+) -> dict:
+    """Take a book off a shelf this person may edit (the book stays in the library).
+    Scope: organize."""
+    from lectern.routes.api import shelves as shelves_api
+
+    with _call(ctx, "remove_from_shelf", "organize") as c:
+        s = _shelf(c, shelf)
+        _visible(c.db, c.user, book_id)
+        shelves_api.remove_item(c.request, c.auth, c.db, s["id"], book_id)
+        return {"shelf": {"id": s["id"], "name": s["name"]}, "book_id": book_id, "on_shelf": False}
+
+
+def _device(c: Call, device: str) -> device_queue.Target:
+    found = device_queue.targets(c.db, c.user)
+    wanted = device.strip()
+    hits = [t for t in found if str(t.pw.id) == wanted] or [
+        t for t in found if t.pw.label.casefold() == wanted.casefold()
+    ]
+    if len(hits) != 1:
+        names = ", ".join(f"{t.pw.label} (#{t.pw.id})" for t in found) or "none"
+        reason = "ambiguous_device" if hits else "not_found"
+        raise ToolError(f"{reason}: no single device '{device}'. Devices: {names}")
+    return hits[0]
+
+
+def _queue_device(t: device_queue.Target, viewer: User, pending: int) -> dict:
+    return {
+        "id": t.pw.id,
+        "label": t.pw.label,
+        "owner": t.owner.username,
+        "own": t.owner.id == viewer.id,
+        "last_used_at": iso(t.pw.last_used_at),
+        "pending": pending,
+    }
+
+
+def send_to_device(
+    ctx: Context,
+    book_ids: Annotated[list[int], Field(min_length=1, max_length=device_queue.MAX_BATCH)],
+    device: Annotated[str, Field(max_length=128, description="Device name or id.")],
+) -> dict:
+    """Queue books for an e-reader (its OPDS "Send to device" feed). The reader picks them up
+    the next time it opens its queue. Scope: organize."""
+    from lectern.routes.api import queues
+
+    with _call(ctx, "send_to_device", "organize") as c:
+        t = _device(c, device)
+        out = queues.enqueue(c.request, c.auth, c.db, t.pw.id, queues.EnqueueIn(work_ids=book_ids))
+        return {
+            "device": _queue_device(t, c.user, out["device"]["pending"]),
+            "results": out["results"],
+        }
+
+
+def list_device_queue(
+    ctx: Context,
+    device: Annotated[
+        str | None,
+        Field(max_length=128, description="Device name or id; omit to list the devices."),
+    ] = None,
+) -> dict:
+    """The e-readers this person can send to, or one device's queue: pending books in order
+    and recently delivered or removed ones. Scope: organize."""
+    from lectern.routes.api import queues
+
+    with _call(ctx, "list_device_queue", "organize") as c:
+        if device is None:
+            listed = queues.list_targets(c.auth, c.db)["devices"]
+            return {
+                "devices": [
+                    {k: d[k] for k in ("id", "label", "own", "last_used_at", "pending")}
+                    | {"owner": d["user"]["username"]}
+                    for d in listed
+                ]
+            }
+        t = _device(c, device)
+        shown = queues.show(c.auth, c.db, t.pw.id)
+
+        def item(i: dict) -> dict:
+            return {
+                "book": {k: i["work"][k] for k in ("id", "title", "author")},
+                "status": i["status"],
+                "queued_at": i["queued_at"],
+                "queued_by": i["queued_by"],
+                "delivered_at": i["delivered_at"],
+            }
+
+        return {
+            "device": _queue_device(t, c.user, len(shown["pending"])),
+            "pending": [item(i) for i in shown["pending"]],
+            "history": [item(i) for i in shown["history"][:20]],
+        }
+
+
+def start_alignment(
+    ctx: Context,
+    book_id: int,
+    model: Annotated[
+        str | None, Field(max_length=64, description="Whisper model; default from the server.")
+    ] = None,
+    force: Annotated[bool, Field(description="Align again even if it is up to date.")] = False,
+) -> dict:
+    """Queue text–audio alignment for a book with both an EPUB and an audiobook (enables
+    read-along). Returns the job; follow it with job_status. Scope: organize."""
+    from lectern.routes.api import align
+
+    with _call(ctx, "start_alignment", "organize") as c:
+        c.require_editor("start alignment")
+        _visible(c.db, c.user, book_id)
+        job = align.request_align(
+            c.request, c.auth, c.db, c.settings, Response(), book_id,
+            align.AlignIn(model=model, force=force),
+        )  # fmt: skip
+        return {"job": job}
+
+
+def job_status(
+    ctx: Context,
+    job_id: int | None = None,
+    book_id: Annotated[int | None, Field(description="The book's latest alignment job.")] = None,
+) -> dict:
+    """An alignment job's state (queued, running with progress and ETA, done, failed) and the
+    book's alignment. Give job_id or book_id. Scope: organize."""
+    from lectern.align import jobs
+
+    with _call(ctx, "job_status", "organize") as c:
+        c.require_editor("see alignment jobs")
+        if job_id is not None:
+            job = c.db.get(Job, job_id)
+        elif book_id is not None:
+            _visible(c.db, c.user, book_id)
+            job = c.db.scalar(select(Job).where(Job.work_id == book_id).order_by(Job.id.desc()))
+        else:
+            raise ToolError("invalid: give job_id or book_id")
+        if job is None or (job.work_id is not None and not can_see_work(c.db, c.user, job.work_id)):
+            raise ToolError("not_found: no such job")
+        alignment = jobs.work_alignment(c.db, job.work_id) if job.work_id else None
+        return {"job": jobs.job_json(c.db, job), "alignment": jobs.alignment_json(c.db, alignment)}
+
+
+def edit_metadata(
+    ctx: Context,
+    book_id: int,
+    changes: MetadataChanges,
+    expected_version: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description="The version from get_book; the edit is refused if the book "
+            "changed since (omit to edit the current version).",
+        ),
+    ] = None,
+) -> dict:
+    """Change a book's metadata with the editor's validation (lengths, language and date
+    formats, no control characters). Undo is in the web editor's history. Scope: organize."""
+    from lectern.editing import WorkPatch
+    from lectern.routes.api import editor
+
+    with _call(ctx, "edit_metadata", "organize") as c:
+        c.require_editor("edit books")
+        work = _visible(c.db, c.user, book_id)
+        patch = WorkPatch(
+            version=expected_version or work.version,
+            metadata=_merged(metadata_of(work), changes),
+        )
+        out = editor.patch_work(c.request, c.auth, c.db, c.settings, book_id, patch)
+        fresh = _visible(c.db, c.user, book_id)
+        return {
+            "book_id": book_id,
+            "changed": out["changed"],
+            "version": fresh.version,
+            "metadata": metadata_of(fresh),
+        }
+
+
+_TOOLS: list[tuple[Any, ToolAnnotations]] = [
+    (upload_book, WRITE),
+    (list_pending_imports, READ),
+    (confirm_import, WRITE),
+    (cancel_import, DESTRUCTIVE),
+    (search_library, READ),
+    (get_book, READ),
+    (list_recent, READ),
+    (add_to_shelf, WRITE),
+    (remove_from_shelf, DESTRUCTIVE),
+    (send_to_device, WRITE),
+    (list_device_queue, READ),
+    (start_alignment, WRITE),
+    (job_status, READ),
+    (edit_metadata, WRITE),
+]

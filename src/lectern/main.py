@@ -10,8 +10,9 @@ from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Route
 
-from lectern import __version__
+from lectern import __version__, mcp_server
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
@@ -125,9 +126,16 @@ def create_app(
         if run_background:
             services = start_services(session_factory(), settings)
         app.state.services = services
+        # A fresh MCP session manager per lifespan: each one can run only once.
+        mcp_manager = mcp_server.build(settings)
         log.info("Lectern %s ready on %s", __version__, settings.base_url)
         try:
-            yield
+            async with mcp_manager.run():
+                app.state.mcp = mcp_manager
+                try:
+                    yield
+                finally:
+                    app.state.mcp = None
         finally:
             # Workers first: a running alignment hands its job back before the engine goes.
             for service in reversed(services):
@@ -172,6 +180,14 @@ def create_app(
         ),
         # Optional metadata suggestions (outbound to Open Library / Google Books), per user.
         "lookup": SlidingWindowLimiter(limit=10, window_seconds=60),
+        # AI apps on /mcp: failed AI keys per address, requests per valid key, and tool calls
+        # per key within the burst window (over it alerts; see lectern.ai_keys).
+        "mcp_fail": SlidingWindowLimiter(limit=settings.rate_limit_per_minute, window_seconds=60),
+        "mcp": SlidingWindowLimiter(limit=settings.mcp_requests_per_minute, window_seconds=60),
+        "mcp_burst": SlidingWindowLimiter(
+            limit=max(1, settings.mcp_burst_count),
+            window_seconds=settings.mcp_burst_window_seconds,
+        ),
     }
     # The only outbound HTTP Lectern makes; tests swap in a fake upstream.
     app.state.lookup_fetch = lookup_http_get
@@ -184,6 +200,9 @@ def create_app(
     if app_assets.is_dir():
         app.mount("/app/assets", StaticFiles(directory=str(app_assets)), name="app-assets")
 
+    app.state.mcp = None
+    # AI access (docs/mcp.md): Streamable HTTP, AI-key bearer auth; nothing else accepts the key.
+    app.router.routes.append(Route("/mcp", mcp_server.MCPEndpoint(), include_in_schema=False))
     app.include_router(health.router)
     app.include_router(setup.router)
     app.include_router(auth.router)

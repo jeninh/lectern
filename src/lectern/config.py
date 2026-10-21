@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     # Per worker credential: a job downloads its EPUB and every track, often in ranges.
     worker_requests_per_minute: int = 1200
 
+    # AI apps on the MCP endpoint (/mcp), per AI key: requests per minute (every MCP message,
+    # upload chunks included), and the tool calls within the window that alert the key's user
+    # and the owners (once an hour). 0 turns the alert off.
+    mcp_requests_per_minute: int = 240
+    mcp_burst_count: int = 200
+    mcp_burst_window_seconds: int = 600
+
     # Ingest
     inbox_poll_seconds: float = 5.0
     ingest_enabled: bool = True

@@ -111,6 +111,25 @@ def create(
     body: CreateIn,
     idempotency_key: Annotated[str | None, Header(max_length=64)] = None,
 ):
+    row, created = start_session(db, request, auth, settings, body, idempotency_key)
+    if not created:
+        return JSONResponse(session_json(row), status_code=status.HTTP_200_OK)
+    return session_json(row)
+
+
+def start_session(
+    db,
+    request: Request,
+    auth: AuthContext,
+    settings,
+    body: CreateIn,
+    idempotency_key: str | None = None,
+    *,
+    chunk_max: int | None = None,
+) -> tuple[UploadSession, bool]:
+    """Open an upload session (or return the one this ``Idempotency-Key`` opened). Shared by
+    the web app and the MCP ``upload_book`` tool, which needs smaller chunks (``chunk_max``)
+    because an MCP request carries a chunk as base64 inside a 4 MiB JSON-RPC body."""
     now = utcnow()
     if idempotency_key:
         prior = db.scalar(
@@ -121,7 +140,7 @@ def create(
             )
         )
         if prior is not None:
-            return JSONResponse(session_json(prior), status_code=status.HTTP_200_OK)
+            return prior, False
     if body.size > settings.upload_max_bytes:
         raise _err(status.HTTP_413_CONTENT_TOO_LARGE, "too_large", limit=settings.upload_max_bytes)
     if body.media_type not in MEDIA_TYPES:
@@ -155,7 +174,7 @@ def create(
         filename=strip_controls(Path(body.filename).name)[:600].strip() or "upload",
         media_type=body.media_type,
         size=body.size,
-        chunk_size=min(UPLOAD_CHUNK_MAX_BYTES, body.size),
+        chunk_size=min(chunk_max or UPLOAD_CHUNK_MAX_BYTES, body.size),
         sha256=body.sha256,
         expires_at=now + timedelta(seconds=settings.upload_session_ttl_seconds),
         idempotency_key=idempotency_key,
@@ -173,7 +192,7 @@ def create(
         detail=f"{body.size} bytes",
     )
     db.commit()
-    return session_json(row)
+    return row, True
 
 
 @router.get("")
