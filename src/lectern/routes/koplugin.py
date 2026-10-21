@@ -26,9 +26,10 @@ router = APIRouter(prefix="/koplugin")
 QUEUE_LIMIT = 50
 
 
-def _limited(request: Request, bucket: str, key: str) -> None:
-    if not request.app.state.limiters[bucket].allow(key):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
+def _audit_refusal(request: Request, key: str) -> bool:
+    """Audit a rate-limit refusal at most once a minute per key, so a flood stays visible in
+    Activity without writing a row per request."""
+    return request.app.state.limiters["koplugin_audit"].allow(key)
 
 
 class BootstrapIn(BaseModel):
@@ -38,7 +39,11 @@ class BootstrapIn(BaseModel):
 @router.post("/bootstrap", include_in_schema=False)
 def bootstrap(request: Request, db: DbDep, body: BootstrapIn) -> dict:
     ip = client_ip(request)
-    _limited(request, "koplugin", f"ip:{ip or '?'}")
+    if not request.app.state.limiters["koplugin"].allow(f"ip:{ip or '?'}"):
+        if _audit_refusal(request, f"bootstrap:{ip}"):
+            koplugin.record(db, "koplugin.bootstrap_failed", None, None, ip, "rate_limited")
+            db.commit()
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
     result = koplugin.exchange_bootstrap(db, body.secret.strip(), ip)
     if result.payload is None:
         db.rollback()
@@ -49,7 +54,14 @@ def bootstrap(request: Request, db: DbDep, body: BootstrapIn) -> dict:
         # Used, expired, revoked, or unknown: the plugin deletes its copy and asks for a
         # pairing code instead.
         raise HTTPException(status.HTTP_410_GONE, "setup_secret_invalid")
-    koplugin.record(db, "koplugin.bootstrap", result.user, result.label, ip)
+    koplugin.record(
+        db,
+        "koplugin.bootstrap",
+        result.user,
+        result.label,
+        ip,
+        "retry" if result.reason == "retry" else None,
+    )
     db.commit()
     return result.payload
 
@@ -61,27 +73,51 @@ class PairIn(BaseModel):
 
 @router.post("/pair", include_in_schema=False)
 def pair(request: Request, db: DbDep, body: PairIn) -> dict:
+    """Limits: per address (one device guessing for many people) counts every request; per
+    username (many addresses guessing for one person) counts only wrong guesses at a live code
+    and is checked without being charged, so junk requests, unknown names, and requests while
+    no code is shown cannot lock a person out; a successful pairing clears it. Malformed codes can never match, so they cost the
+    address bucket only, never one of the code's 5 attempts. Refusals are audited."""
     ip = client_ip(request)
     username = body.username.strip()
-    # Two limits: per address (one device guessing for many people) and per username (many
-    # addresses guessing for one person). The code's own 5 attempts come on top.
-    _limited(request, "koplugin", f"ip:{ip or '?'}")
-    _limited(request, "koplugin_pair_user", f"user:{username.lower()}")
-    code = "".join(ch for ch in body.code if ch.isdigit())
+    limiters = request.app.state.limiters
+    user_key = f"user:{username.lower()}"
     user = db.scalar(select(User).where(User.username == username))
-    if user is None or not user.is_active or len(code) != koplugin.PAIRING_DIGITS:
-        if user is not None and user.is_active:
-            # A malformed code still costs an attempt: it was a guess.
-            result = koplugin.redeem_pairing_code(db, user, "x")
-            koplugin.record(db, "koplugin.pair_failed", user, result.label, ip, result.reason)
-            db.commit()
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_code")
-    result = koplugin.redeem_pairing_code(db, user, code)
-    if result.payload is None:
-        koplugin.record(db, "koplugin.pair_failed", user, result.label, ip, result.reason)
+    active = user if user is not None and user.is_active else None
+
+    def refuse(
+        reason: str, label: str | None = None, code: int = 401, detail: str = "invalid_code"
+    ):
+        if code == 429 and not _audit_refusal(request, f"pair:{reason}:{ip}:{user_key}"):
+            raise HTTPException(code, detail)
+        koplugin.record(
+            db,
+            "koplugin.pair_failed",
+            active,
+            label,
+            ip,
+            reason if active else f"{reason} (user {username[:64]!r})",
+        )
         db.commit()
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_code")
-    koplugin.record(db, "koplugin.paired", user, result.label, ip)
+        raise HTTPException(code, detail)
+
+    if not limiters["koplugin"].allow(f"ip:{ip or '?'}"):
+        refuse("rate_limited_address", code=429, detail="rate_limited")
+    if limiters["koplugin_pair_user"].exhausted(user_key):
+        refuse("rate_limited_user", code=429, detail="rate_limited")
+    code = "".join(ch for ch in body.code if ch.isdigit())
+    if len(code) != koplugin.PAIRING_DIGITS:
+        refuse("malformed")
+    if active is None:
+        refuse("unknown_user")
+    result = koplugin.redeem_pairing_code(db, active, code)
+    if result.payload is None:
+        if result.reason in ("wrong_code", "burned"):
+            # Only a real guess at a live code counts against the person.
+            limiters["koplugin_pair_user"].allow(user_key)
+        refuse(result.reason, result.label)
+    limiters["koplugin_pair_user"].reset(user_key)
+    koplugin.record(db, "koplugin.paired", active, result.label, ip)
     db.commit()
     return result.payload
 

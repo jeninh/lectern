@@ -206,15 +206,63 @@ def test_bootstrap_is_single_use_and_rotates_both_credentials(client, owner, kin
     assert client.get("/users/auth", headers=ko("owner", md5)).status_code == 401
     assert client.get("/opds", headers=basic("owner", old_opds)).status_code == 401
 
+    # The response may never have reached the device: the same secret works again for 15
+    # minutes after its first use, rotating again, so only the last holder's keys work.
     again = bootstrap(client, secret)
-    assert again.status_code == 410 and again.json()["detail"] == "setup_secret_invalid"
+    assert again.status_code == 200, again.text
+    retried = again.json()
+    assert retried["userkey"] != creds["userkey"]
+    assert client.get("/users/auth", headers=ko("owner", creds["userkey"])).status_code == 401
+    assert client.get("/opds", headers=basic("owner", creds["app_password"])).status_code == 401
+    assert client.get("/users/auth", headers=ko("owner", retried["userkey"])).status_code == 200
+    with session_factory()() as db:
+        db.execute(
+            update(DeviceBootstrap).values(
+                used_at=utcnow() - koplugin.BOOTSTRAP_RETRY - timedelta(seconds=1)
+            )
+        )
+        db.commit()
+    late = bootstrap(client, secret)
+    assert late.status_code == 410 and late.json()["detail"] == "setup_secret_invalid"
+    assert client.get("/users/auth", headers=ko("owner", retried["userkey"])).status_code == 200
     assert client.get("/api/devices").json()["devices"][0]["plugin"]["setup_state"] == "used"
     actions = [(a.action, a.detail) for a in audit_rows() if a.action.startswith("koplugin.")]
     assert actions == [
         ("koplugin.download", SERVER),
         ("koplugin.bootstrap", None),
+        ("koplugin.bootstrap", "retry"),
         ("koplugin.bootstrap_failed", "used"),
     ]
+
+
+def test_retry_window_does_not_outlive_a_new_zip_a_code_or_revocation(client, owner, kindle):
+    csrf, dev = owner["csrf"], kindle["id"]
+    for end in ("zip", "code", "revoke"):
+        if end == "revoke":
+            dev = add_device(client, csrf, "Kobo")["device"]["id"]
+        secret = secret_of(unzip(get_zip(client, csrf, dev)))
+        assert bootstrap(client, secret).status_code == 200
+        if end == "zip":
+            get_zip(client, csrf, dev)
+        elif end == "code":
+            c = new_code(client, csrf, dev)
+            assert pair(client, c["code"]).status_code == 200
+        else:
+            assert api_post(client, f"/api/devices/{dev}/revoke", csrf).status_code == 200
+        assert bootstrap(client, secret).status_code == 410, end
+
+
+def test_a_retry_does_not_extend_the_window(client, owner, kindle):
+    secret = secret_of(unzip(get_zip(client, owner["csrf"], kindle["id"])))
+    assert bootstrap(client, secret).status_code == 200
+    first_use = utcnow() - koplugin.BOOTSTRAP_RETRY + timedelta(seconds=30)
+    with session_factory()() as db:
+        db.execute(update(DeviceBootstrap).values(used_at=first_use))
+        db.commit()
+    assert bootstrap(client, secret).status_code == 200
+    with session_factory()() as db:
+        used_at = db.scalar(select(DeviceBootstrap.used_at))
+    assert abs(used_at - first_use) < timedelta(seconds=1)
 
 
 def test_bootstrap_expires_after_seven_days(client, owner, kindle):
@@ -299,11 +347,11 @@ def test_fifth_try_still_works_and_five_wrong_tries_burn_the_code(client, owner,
     for _ in range(5):
         assert pair(client, wrong(c["code"])).status_code == 401
     assert pair(client, c["code"]).status_code == 401  # burned
-    # Malformed codes count as tries too.
+    # Malformed codes can never match, so they do not spend the code's attempts.
     c = new_code(client, csrf, dev)
-    for junk in ("12", "abcdef", "1234567", "0", "99 9"):
-        pair(client, junk)
-    assert pair(client, c["code"]).status_code == 401
+    for junk in ("12", "abcdef", "1234567", "0", "99 9", "x"):
+        assert pair(client, junk).status_code == 401
+    assert pair(client, c["code"]).status_code == 200
 
 
 def test_a_new_code_ends_the_previous_one(client, owner, kindle):
@@ -322,13 +370,60 @@ def test_pairing_is_rate_limited_per_address_and_per_username(client, owner, kin
     app.state.limiters["koplugin_pair_user"].limit = 2
     c = new_code(client, owner["csrf"], kindle["id"])
     assert [pair(client, wrong(c["code"])).status_code for _ in range(2)] == [401, 401]
-    # Even the right code waits once the username's budget is spent.
+    # Once the username's budget of wrong guesses is spent, even the right code waits.
     assert pair(client, c["code"]).status_code == 429
     app.state.limiters["koplugin_code"].limit = 1
-    assert (
-        api_post(client, f"/api/devices/{kindle['id']}/pairing-code", owner["csrf"]).status_code
-        == 429
-    )
+    r = api_post(client, f"/api/devices/{kindle['id']}/pairing-code", owner["csrf"])
+    assert r.status_code == 429
+
+
+def test_nobody_can_lock_a_person_out_without_guessing_a_live_code(client, owner, kindle, app):
+    """Regression: junk requests for a known username used to spend its 15-minute budget
+    (and the live code's attempts), so a tailnet peer could lock pairing out indefinitely."""
+    app.state.limiters["koplugin"].limit = 1000
+    limit = app.state.limiters["koplugin_pair_user"].limit
+    for i in range(limit * 3):
+        pair(client, ["x", "12", "abcdefgh", f"{i:06d}"][i % 4])  # no code shown yet
+    c = new_code(client, owner["csrf"], kindle["id"])
+    for junk in ["x", "123", "1234567"] * limit:
+        assert pair(client, junk).status_code == 401
+    assert pair(client, c["code"]).status_code == 200
+
+
+def test_a_successful_pairing_clears_the_usernames_budget(client, owner, kindle, app):
+    app.state.limiters["koplugin"].limit = 1000
+    app.state.limiters["koplugin_pair_user"].limit = 2
+    c = new_code(client, owner["csrf"], kindle["id"])
+    assert pair(client, wrong(c["code"])).status_code == 401
+    assert pair(client, c["code"]).status_code == 200
+    c = new_code(client, owner["csrf"], kindle["id"])
+    assert pair(client, wrong(c["code"])).status_code == 401
+    assert pair(client, c["code"]).status_code == 200
+
+
+def test_unknown_users_and_rate_limits_are_audited_once(client, owner, kindle, app):
+    app.state.limiters["koplugin"].limit = 2
+    for _ in range(6):
+        pair(client, "123456", "nobody")
+    for _ in range(3):
+        bootstrap(client, "lb_nope")
+    rows = [(a.action, a.actor_user_id, a.detail) for a in audit_rows()]
+    assert ("koplugin.pair_failed", None, "unknown_user (user 'nobody')") in rows
+    assert rows.count(("koplugin.pair_failed", None, "rate_limited_address (user 'nobody')")) == 1
+    assert rows.count(("koplugin.bootstrap_failed", None, "rate_limited")) == 1
+    # Owners see them in Activity.
+    actions = [e["action"] for e in client.get("/api/activity").json()["events"]]
+    assert "koplugin.pair_failed" in actions and "koplugin.bootstrap_failed" in actions
+
+
+def test_plugin_rows_do_not_leak_to_a_user_named_like_the_device(client, owner, app):
+    bob = make_user(client, owner["csrf"], "bob", "member")
+    dev = add_device(client, owner["csrf"], "bob")["device"]["id"]
+    get_zip(client, owner["csrf"], dev)
+    bob_http = TestClient(app)
+    login(bob_http, "bob", bob["password"])
+    events = bob_http.get("/api/activity").json()["events"]
+    assert not [e for e in events if e["action"].startswith("koplugin.")]
 
 
 def test_unknown_or_disabled_users_look_like_wrong_codes(client, owner, kindle):
@@ -503,6 +598,19 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     assert out["messages"] == 0
     assert out["status_line"] == "Setting up: waiting for the network"
 
+    # Wi-Fi up but Lectern not reachable yet (Tailscale still connecting): setup keeps
+    # retrying with backoff instead of waiting for the next Wi-Fi event, quietly.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    early = tmp_path / "early"
+    early.mkdir()
+    (early / "lectern.lua").write_text(f'return {{ ["server_url"] = "{dead}" }}\n')
+    out = lua(plugin, early, "setup-retry")
+    assert out["pending"] and out["delays"] == [30, 60, 120] and out["messages"] == 0
+    assert out["after_reconnect"] == 3
+    assert (plugin / "lectern_bootstrap.txt").exists()
+
     out = lua(plugin, sdir, "setup")
     assert out["paired"] and not out["secret_on_disk"]
     assert (plugin / "lectern_bootstrap.txt").exists() is False
@@ -515,7 +623,8 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     assert opds[0]["url"] == base + "/opds" and opds[0]["password"] == s["app_password"]
     assert opds[1]["title"] == "Project Gutenberg"  # the reader's own entries stay
     assert out["menu"] >= 8
-    assert http.post("/koplugin/bootstrap", json={"secret": secret}).status_code == 410
+    with session_factory()() as db:
+        assert db.scalar(select(DeviceBootstrap.used_at)) is not None
     assert httpx.get(f"{base}/users/auth", headers=ko("owner", s["userkey"])).status_code == 200
 
     # Offline in the reader: suspend and open neither prompt nor reach kosync; the push waits.
@@ -545,11 +654,21 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     assert out["messages"] == 0
     assert out["status_line"] == "Retrying · 1 position waiting to send"
 
-    # Books sent to this device: listed, and a download delivers the queue item.
+    # A wrong address that answers 404 (another web server) keeps the queued position.
+    wrong_server = tmp_path / "wrong"
+    shutil.copytree(sdir, wrong_server)
+    out = lua(plugin, wrong_server, "server-down", base + "/not-lectern")
+    assert out["outbox"] == 1 and out["messages"] == 0
+
+    # Books sent to this device: listed, and a download delivers the queue item without
+    # replacing a book of the same name that is already there.
+    (sdir / "books").mkdir()
+    (sdir / "books" / "Alpha - Ann.epub").write_bytes(b"my annotated copy")
     out = lua(plugin, sdir, "status")
     assert out["status"]["queue"]["pending"] == 1
     path = Path(out["downloaded"])
-    assert path.name == "Alpha - Ann.epub" and zipfile.is_zipfile(path)
+    assert path.name == "Alpha - Ann (2).epub" and zipfile.is_zipfile(path)
+    assert (sdir / "books" / "Alpha - Ann.epub").read_bytes() == b"my annotated copy"
     assert http.get(f"/api/device-queues/{pw_id}").json()["pending"] == []
 
     # Re-pairing after a reset with a code from the web app.

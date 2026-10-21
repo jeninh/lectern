@@ -183,6 +183,7 @@ def create_app(
         "koplugin": SlidingWindowLimiter(limit=10, window_seconds=60),
         "koplugin_pair_user": SlidingWindowLimiter(limit=10, window_seconds=15 * 60),
         "koplugin_code": SlidingWindowLimiter(limit=10, window_seconds=60),
+        "koplugin_audit": SlidingWindowLimiter(limit=1, window_seconds=60),
         # Optional metadata suggestions (outbound to Open Library / Google Books), per user.
         "lookup": SlidingWindowLimiter(limit=10, window_seconds=60),
         # AI apps on /mcp: failed AI keys per address, requests per valid key, and tool calls

@@ -48,8 +48,15 @@ device name; not secret), and `lectern_bootstrap.txt` (the one-time setup secret
      catalogue password, at the top of the list. Your other catalogues stay.
 4. Deletes `lectern_bootstrap.txt` from the plugin folder.
 
-A refused secret (used, expired, revoked) is deleted too, and the plugin tells you to pair
-with a code instead.
+If the answer never reaches the e-reader (Wi‑Fi dropped, a slow server hit the plugin's
+timeout), the plugin keeps the secret and tries again: for **15 minutes after its first use**
+the same secret can be exchanged again, and each exchange rotates the credentials again, so
+only the last one to arrive works. The window does not grow with retries, and a new zip, a
+pairing code, or revoking the device ends it at once. A refused secret (used more than 15
+minutes ago, expired, revoked) is deleted, and the plugin tells you to pair with a code
+instead. Without a reachable server at first start (Tailscale still connecting) setup retries
+quietly after 30 s, 1, 2, 5, and then every 15 minutes while Wi‑Fi stays on, and 3 s after
+Wi‑Fi comes back.
 
 ## Automatic sync
 
@@ -68,7 +75,9 @@ KOReader's own progress sync does the work; the plugin turns it on and makes it 
   and automatic pulls are skipped. When Wi‑Fi comes back the plugin waits 3 seconds for
   Tailscale and sends the outbox, oldest first. If Wi‑Fi is up but Lectern is not reachable
   (Tailscale still connecting, server down), it retries quietly after 30 s, 1, 2, 5, and then
-  every 15 minutes while the network stays up. Nothing is shown unless you asked for it.
+  every 15 minutes while the network stays up. Nothing is shown unless you asked for it. A
+  position is dropped only if Lectern answers that it is invalid (400/422); any other answer,
+  such as a 404 from a wrong address, keeps the outbox.
   **When Wi‑Fi is off → Turn Wi‑Fi on to sync** restores KOReader's behaviour of switching
   Wi‑Fi on for each sync (and sets *Action when Wi‑Fi is off* to *turn on*).
 - **Sync automatically** turns all of the above off; KOReader's Push and Pull still work.
@@ -79,7 +88,7 @@ KOReader's own progress sync does the work; the plugin turns it on and makes it 
 | --- | --- |
 | *status line* | Connected, Offline/Retrying with how many positions wait, Not reachable, or *Device revoked or replaced: pair again*. Tap for details: server, account, device, last push, books waiting. |
 | **Sync now** | Sends the current position and the outbox, pulls, and says what happened. |
-| **Books sent to this device** | The device's Send to device queue. Tap a book to download it into KOReader's download folder; a complete download marks it delivered in Lectern, as with the catalogue. |
+| **Books sent to this device** | The device's Send to device queue. Tap a book to download it into KOReader's download folder (as `Title - Author (2).epub` if that name is taken; nothing is replaced); a complete download marks it delivered in Lectern, as with the catalogue. |
 | **Sync automatically**, **Also push every N pages**, **When another device is further ahead**, **When Wi‑Fi is off** | The settings above. |
 | **Pair with a code…** | See below. |
 
@@ -91,12 +100,16 @@ code**. In KOReader choose **Tools → Lectern → Pair with a code…**. Server
 filled in from the plugin (`lectern_device.lua` or the last pairing); enter the 6 digits.
 
 - A code lasts **5 minutes** and works **once**.
-- It allows **5 attempts**: each wrong (or malformed) code entered for your username uses one;
-  the fifth wrong attempt destroys the code. The fifth attempt can still be the right one.
+- It allows **5 attempts**: each wrong 6-digit code entered for your username uses one; the
+  fifth wrong attempt destroys the code. The fifth attempt can still be the right one.
+  Malformed input (not 6 digits) can never match, so it costs no attempt.
 - Showing a new code ends your previous one: one live code per person.
-- Rate limits: 10 pair or setup requests per minute per address, 10 pair attempts per
-  15 minutes per username (whatever the address), and 10 new codes per minute per person.
-  Over a limit Lectern answers `429` and KOReader says to wait.
+- Rate limits: 10 pair or setup requests per minute per address; 10 **wrong guesses at a live
+  code** per 15 minutes per username, whatever the address (junk input, unknown names, and
+  requests while no code is shown do not count, so nobody can lock you out without racing a
+  code you are about to use; a successful pairing clears it); and 10 new codes per minute per
+  person. Over a limit Lectern answers `429` and KOReader says to wait. Refusals are audited,
+  at most once a minute per address and username.
 - Pairing replaces the device's credentials, like the first start, and makes any unused setup
   link of the device useless.
 
@@ -119,8 +132,12 @@ filled in from the plugin (`lectern_device.lua` or the last pairing); enter the 
 - **Audit events** (Activity): `koplugin.download` (with the address in the zip),
   `koplugin.bootstrap`, `koplugin.bootstrap_failed` (`used`, `expired`, `revoked`,
   `unknown`, `device_revoked`), `koplugin.pairing_code`, `koplugin.paired`,
-  `koplugin.pair_failed` (`wrong_code`, `burned`, `no_code`), and `koplugin.revoke`, next to
+  `koplugin.bootstrap` with `retry`, `koplugin.pair_failed` (`wrong_code`, `burned`,
+`no_code`, `malformed`, `unknown_user`, `rate_limited_address`, `rate_limited_user`), and `koplugin.revoke`, next to
   the existing `device.create`, `device.revoke`, and `device.first_use`.
+- **Activity:** plugin events show to the device's own user and to the owner. Unlike other
+  rows they are not matched by target name, so a device labelled like another person does
+  not show them its addresses.
 - **Plain HTTP inside the tailnet**: see [docs/deploy-tailscale.md](deploy-tailscale.md#kindle-and-kobo-with-koreader)
   for why `http://100.x.y.z:8080` is the right address and why it is still private.
 
@@ -131,7 +148,8 @@ The zip carries `http://<Lectern's Tailscale IP>:8080`. E-readers cannot use the
 KOReader's HTTPS client cannot go through a proxy. Lectern finds its own Tailscale address
 (the source address of a route to Tailscale's `100.100.100.100`, which in the
 [sidecar setup](deploy-tailscale.md) is the `tailscale0` interface) and pre-fills it; you can
-edit it before downloading. If detection fails or is wrong, set `LECTERN_DEVICE_URL` (for
+edit it before downloading; the sheet warns when a plain `http://` address is outside
+Tailscale's `100.64.0.0/10`, since the e-reader would then send its credentials unencrypted. If detection fails or is wrong, set `LECTERN_DEVICE_URL` (for
 example `http://100.101.102.103:8080`) in `.env`. The plugin remembers the address, so pairing
 later does not ask for it again.
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { get, post } from "../lib/api";
 import { relativeTime } from "../lib/format";
-import { countdown, downloadPlugin, pluginSetupText } from "../lib/koplugin";
+import { countdown, downloadPlugin, insecureServerUrl, pluginSetupText } from "../lib/koplugin";
 import { useStore } from "../lib/store";
 import type { Device, PairingCode, PluginDefaults } from "../lib/types";
 import { Download, Key } from "./Icons";
@@ -83,6 +83,11 @@ export function KOReaderPlugin({ device, onChanged }: { device: Device; onChange
               ? "From LECTERN_DEVICE_URL."
               : "Use Lectern's Tailscale IP from the Tailscale admin console, on port 8080: MagicDNS is off on e-readers."}
         </p>
+        {insecureServerUrl(server) && (
+          <div className="alert warn" role="note">
+            This is plain http outside your tailnet: the e-reader would send its sync key and catalogue password unencrypted. Use Lectern's Tailscale address (100.x.y.z) instead.
+          </div>
+        )}
         {state && (
           <p className={`status ${state.tone}`} role="status">
             <span className={`status-dot ${state.tone}`} aria-hidden="true" />

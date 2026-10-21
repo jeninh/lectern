@@ -349,8 +349,11 @@ function Core:drain()
         if code == 200 then
             table.remove(box, 1)
             sent = sent + 1
-        elseif code and code >= 400 and code < 500 and code ~= 401 and code ~= 429 then
-            table.remove(box, 1) -- the server will never accept this one; do not block the rest
+        elseif code == 400 or code == 422 then
+            -- The server read this item and will never accept it; do not block the rest.
+            -- Anything else (403, 404, 405 from a wrong address, 401, 429, 5xx) keeps the
+            -- outbox intact: the positions are still good once the address is right.
+            table.remove(box, 1)
         else
             self.store:saveSetting("outbox", box)
             self.store:flush()
@@ -394,6 +397,17 @@ function Core:download(item, dir)
     local ext = EXT[file.media_type] or (str(file.name) or ""):match("%.%w+$") or ""
     local base = safe_name(item.author and item.author ~= "" and (item.title .. " - " .. item.author) or item.title)
     local path = dir .. "/" .. base .. ext
+    local n = 1
+    local function exists(p)
+        local f = io.open(p, "rb")
+        if f then f:close() return true end
+        return false
+    end
+    -- Never replace a book already there (side-loaded, or annotated by the reader).
+    while exists(path) do
+        n = n + 1
+        path = string.format("%s/%s (%d)%s", dir, base, n, ext)
+    end
     local tmp = path .. ".part"
     local out = io.open(tmp, "wb")
     if not out then return nil, "cannot_write" end
@@ -406,7 +420,6 @@ function Core:download(item, dir)
         os.remove(tmp)
         return nil, code and ("server " .. code) or (err or "offline")
     end
-    os.remove(path)
     local ok = os.rename(tmp, path)
     if not ok then os.remove(tmp) return nil, "cannot_write" end
     return path

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countdown, pluginSetupText } from "../koplugin";
+import { countdown, insecureServerUrl, pluginSetupText } from "../koplugin";
 import type { PluginSetup } from "../types";
 
 const NOW = Date.parse("2026-10-21T12:00:00Z");
@@ -33,5 +33,17 @@ describe("countdown", () => {
     expect(countdown(new Date(NOW + 300_000).toISOString(), NOW)).toBe("5:00");
     expect(countdown(new Date(NOW + 61_001).toISOString(), NOW)).toBe("1:02");
     expect(countdown(new Date(NOW - 5_000).toISOString(), NOW)).toBe("0:00");
+  });
+});
+
+describe("insecureServerUrl", () => {
+  it("accepts the tailnet range and https, warns for other plain http", () => {
+    expect(insecureServerUrl("http://100.64.0.1:8080")).toBe(false);
+    expect(insecureServerUrl("http://100.127.255.254:8080")).toBe(false);
+    expect(insecureServerUrl("https://books.example")).toBe(false);
+    expect(insecureServerUrl("http://100.128.0.1:8080")).toBe(true);
+    expect(insecureServerUrl("http://100.63.0.1:8080")).toBe(true);
+    expect(insecureServerUrl("http://192.168.1.5:8080")).toBe(true);
+    expect(insecureServerUrl("http://evil.com:8080")).toBe(true);
   });
 });

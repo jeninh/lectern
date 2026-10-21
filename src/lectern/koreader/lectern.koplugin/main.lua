@@ -87,13 +87,17 @@ end
 function Lectern:start()
     if self.core:bootstrapSecret() and not self.core:isPaired() then
         self:trySetup()
+        if self.setup_pending and connected() then
+            self.retry_attempt = 1
+            self:scheduleRetry(self.core:retryDelay(1))
+        end
     elseif #self.core:outbox() > 0 and online() then
         self:scheduleRetry(2)
     end
 end
 
 function Lectern:trySetup()
-    if not online() then
+    if not online() and not connected() then
         self.setup_pending = true -- onNetworkConnected tries again; no prompt
         return
     end
@@ -298,9 +302,18 @@ function Lectern:scheduleRetry(seconds)
 end
 
 function Lectern:retry()
-    if self.setup_pending then self:trySetup() end
-    if #self.core:outbox() == 0 then return end
     if not connected() then return end -- Wi-Fi is off: wait for NetworkConnected
+    if self.setup_pending then
+        self:trySetup()
+        if self.setup_pending then
+            -- Tailscale (e.g. KUAL) may still be coming up: back off while Wi-Fi stays on.
+            self.retry_attempt = self.retry_attempt + 1
+            self:scheduleRetry(self.core:retryDelay(self.retry_attempt))
+            return
+        end
+        self.retry_attempt = 0
+    end
+    if #self.core:outbox() == 0 then return end
     self:flush()
 end
 

@@ -202,6 +202,7 @@ local function read_settings(name) local s = LuaSettings:open(settings_dir .. "/
 local out = {}
 if command == "setup" then
     NET.online = arg[4] ~= "offline"
+    NET.connected = NET.online
     local p, ui = make(false)
     out.pending = p.setup_pending == true
     out.paired = p.core:isPaired()
@@ -247,6 +248,20 @@ elseif command == "server-down" then
     out.retry_in_2 = UI.tasks[1] and UI.tasks[1].s
     out.messages = #UI.shown
     out.status_line = p.core:statusLine(true)
+elseif command == "setup-retry" then
+    -- Wi-Fi is up, the server is not reachable yet (Tailscale still connecting).
+    NET.online, NET.connected = true, true
+    local p = make(false)
+    out.pending = p.setup_pending == true
+    local delays = {}
+    for _ = 1, 3 do
+        delays[#delays + 1] = UI.tasks[1] and UI.tasks[1].s or -1
+        run_tasks()
+    end
+    out.delays = delays
+    p:onNetworkConnected()
+    out.after_reconnect = UI.tasks[1] and UI.tasks[1].s
+    out.messages = #UI.shown
 elseif command == "status" then
     local p = make(false)
     local status, err = p.core:status()

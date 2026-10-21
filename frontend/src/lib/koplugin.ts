@@ -50,3 +50,18 @@ export async function downloadPlugin(deviceId: string, serverUrl: string | null)
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
+
+/** True for plain-http addresses outside Tailscale's 100.64.0.0/10: credentials would travel
+ * unencrypted. (Inside the tailnet WireGuard encrypts them.) */
+export function insecureServerUrl(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url.trim());
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:") return false;
+  const m = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(u.hostname);
+  if (m && Number(m[1]) === 100 && Number(m[2]) >= 64 && Number(m[2]) <= 127) return false;
+  return !["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+}

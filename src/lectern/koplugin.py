@@ -14,7 +14,11 @@ Bootstrap
     the KOReader sync ``userkey`` (md5 of a new sync secret, which is what KOReader sends) and
     a new OPDS app password. The secret is single-use (one conditional ``UPDATE``), valid for
     7 days, and revocable. Exchanging it rotates both credentials, so a leaked older value of
-    either stops working.
+    either stops working. Because the rotation commits before the response is sent, a device
+    that never received it (Wi-Fi dropped, a slow server hit the client's timeout) may present
+    the same secret again for ``BOOTSTRAP_RETRY`` after its first use: each retry rotates again,
+    so only the last holder's credentials work. A new zip, a pairing code, or revoking ends that
+    window at once.
 
 Pairing code
     Re-pairing after a reset: a 6-digit code shown in the web app, valid 5 minutes, single
@@ -37,7 +41,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from lectern.config import Settings
@@ -67,6 +71,7 @@ DEVICE_FILE = "lectern_device.lua"
 BOOTSTRAP_FILE = "lectern_bootstrap.txt"
 
 BOOTSTRAP_TTL = timedelta(days=7)
+BOOTSTRAP_RETRY = timedelta(minutes=15)
 BOOTSTRAP_PREFIX = "lb_"
 PAIRING_TTL = timedelta(minutes=5)
 PAIRING_ATTEMPTS = 5
@@ -160,19 +165,26 @@ def _active(db: Session, key: SyncKey, pw: AppPassword) -> User | None:
     return user
 
 
-def revoke_setup(db: Session, key_id: int) -> int:
-    """Revoke unused bootstrap secrets and live pairing codes of a device. Caller commits."""
+def revoke_setup(db: Session, key_id: int, *, bootstraps: bool = True) -> int:
+    """Revoke a device's bootstrap secrets (unused ones, and used ones still in their retry
+    window) and its live pairing codes. Returns how many secrets that could still be exchanged
+    were revoked. Caller commits."""
     now = utcnow()
-    n = db.execute(
-        update(DeviceBootstrap)
-        .where(
-            DeviceBootstrap.sync_key_id == key_id,
-            DeviceBootstrap.used_at.is_(None),
-            DeviceBootstrap.revoked_at.is_(None),
-        )
-        .values(revoked_at=now)
-        .execution_options(synchronize_session=False)
-    ).rowcount
+    n = 0
+    if bootstraps:
+        n = db.execute(
+            update(DeviceBootstrap)
+            .where(
+                DeviceBootstrap.sync_key_id == key_id,
+                DeviceBootstrap.revoked_at.is_(None),
+                or_(
+                    and_(DeviceBootstrap.used_at.is_(None), DeviceBootstrap.expires_at > now),
+                    DeviceBootstrap.used_at > now - BOOTSTRAP_RETRY,
+                ),
+            )
+            .values(revoked_at=now)
+            .execution_options(synchronize_session=False)
+        ).rowcount
     db.execute(
         update(DevicePairingCode)
         .where(
@@ -249,30 +261,35 @@ def exchange_bootstrap(db: Session, secret: str, ip: str | None) -> Exchange:
     parts = device_parts(db, key) if key else None
     user = db.get(User, row.user_id)
     label = key.label if key else None
+    now = utcnow()
+    cutoff = now - BOOTSTRAP_RETRY
     state = bootstrap_state(row)
-    if state != "pending":
+    retry = state == "used" and row.revoked_at is None and row.used_at > cutoff
+    if state != "pending" and not retry:
         return Exchange(None, state or "unknown", user, label)
     if parts is None or _active(db, *parts) is None:
         return Exchange(None, "device_revoked", user, label)
-    now = utcnow()
     claimed = db.execute(
         update(DeviceBootstrap)
         .where(
             DeviceBootstrap.id == row.id,
-            DeviceBootstrap.used_at.is_(None),
             DeviceBootstrap.revoked_at.is_(None),
-            DeviceBootstrap.expires_at > now,
+            or_(
+                and_(DeviceBootstrap.used_at.is_(None), DeviceBootstrap.expires_at > now),
+                DeviceBootstrap.used_at > cutoff,
+            ),
         )
-        .values(used_at=now, used_ip=ip)
+        # The retry window runs from the first use; a retry does not extend it.
+        .values(used_at=func.coalesce(DeviceBootstrap.used_at, now), used_ip=ip)
         .execution_options(synchronize_session=False)
     ).rowcount
     if claimed != 1:
         return Exchange(None, "used", user, label)
-    # Any pairing code shown for this device is moot now.
-    revoke_setup(db, parts[0].id)
+    # Any pairing code shown for this device is moot now (this secret stays retryable).
+    revoke_setup(db, parts[0].id, bootstraps=False)
     payload = credentials_payload(user, *parts)
     payload["server_url"] = row.server_url
-    return Exchange(payload, "ok", user, label)
+    return Exchange(payload, "retry" if retry else "ok", user, label)
 
 
 # --- pairing codes ----------------------------------------------------------------------------
