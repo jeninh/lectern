@@ -2,7 +2,9 @@
 // using the shapes in docs/contracts.md (tracks, sentences, progress, read-aloud EPUB) plus
 // the milestone 4 spine-text route. If a route moves, only this file changes.
 
-import { get, post, put } from "./api";
+import { get, post } from "./api";
+import { getBook, getReadAlong, orOffline } from "./offline/store";
+import { savePosition } from "./offline/sync";
 import type {
   AlignmentSummary,
   ReadAloudStatus,
@@ -31,6 +33,13 @@ async function inBatches<T, R>(items: T[], size: number, fn: (t: T) => Promise<R
 
 export async function loadReadAlong(workId: number): Promise<ReadAlongData> {
   const base = `/api/works/${workId}`;
+  // Downloaded with read-along: everything but the latest position comes from this device, and
+  // the audio from the stored copy (its stream_url).
+  const [book, local] = await Promise.all([getBook(workId), getReadAlong(workId)]);
+  if (book?.tracks && local) {
+    const progress = await orOffline(() => get<WorkProgressResponse>(`${base}/progress`), async () => book.progress);
+    return { tracks: book.tracks, sentences: local.sentences, texts: local.texts, progress };
+  }
   const [tracks, first, progress] = await Promise.all([
     get<TracksResponse>(`${base}/tracks`),
     get<SentencesResponse>(`${base}/sentences?from=0&to=${PAGE}`),
@@ -54,8 +63,9 @@ export function saveProgress(
   source: ProgressSource,
   at: { sentence_n: number } | { audio_s: number },
   keepalive = false,
-): Promise<WorkProgressResponse> {
-  return put<WorkProgressResponse>(`/api/works/${workId}/progress`, { source, device: "Web", ...at }, keepalive);
+  title = "this book",
+): Promise<WorkProgressResponse | null> {
+  return savePosition<WorkProgressResponse>({ kind: "work", id: workId, workId, title }, { source, device: "Web", ...at }, keepalive);
 }
 
 export function readAloudStatus(workId: number): Promise<ReadAloudStatus> {

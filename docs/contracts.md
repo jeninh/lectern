@@ -889,6 +889,28 @@ which download marks an item delivered.
   `notify.register_sink(...)` at startup, gated by your own setting; every notification reaches
   it after the row is written. Failures are logged, never raised.
 
+## Offline downloads and replayed positions (installed app)
+
+Implemented in `lectern.routes.api.offline`; the app side and the rules are in
+[`offline.md`](offline.md).
+
+- `GET /api/works/{id}/offline` → `{work_id, revision, files: [{key, kind: "epub"|"pdf",
+  file_id, media_type, size, sha256, url}], audio: {tracks: [{id, position, full: {url, size,
+  media_type}, low: {…} | null}], full_bytes, low_bytes | null} | null, readalong}`. `404` if
+  not visible. `POST` (CSRF, body `{parts: [...]}`) returns the same and audits
+  `download.offline`. File URLs are the usual `/library` routes (`?offline=1` only changes the
+  audit `detail`); they are counted against the download caps as always.
+- `POST /api/offline/check` `{works: [{id, revision}]}` (≤ 1000) →
+  `{works: [{id, status: "ok"|"changed"|"gone", revision?}]}`. `gone` = deleted, trashed, or
+  not visible to the caller; the device deletes its copy. `revision` covers the work's version
+  and update time, primary file, book file hashes, track hashes, the alignment, and the
+  sentence list.
+- `PUT /api/works/{id}/progress` and `PUT /api/files/{id}/progress` accept
+  `offline: {recorded_at, sent_at, base?, keep?}` (aware ISO 8601). Without `keep`, the replay
+  is refused with `409 {"detail": "progress_conflict", "server": <position>, "recorded_at"}`
+  when the stored position is newer than `base` and newer than `recorded_at` corrected by
+  `now - sent_at` (`lectern.progress.replay_wins`); otherwise it is written like any save.
+
 ## `lectern.positions` interface
 
 ```python

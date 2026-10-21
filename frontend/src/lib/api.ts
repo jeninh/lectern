@@ -1,7 +1,39 @@
 // Thin JSON client. Every write carries the per-session CSRF token; the browser adds the
 // Origin header itself, which the server checks for same-site.
 
+import { isNetworkError, reportReachable, reportUnreachable } from "./offline/net";
+
 let csrfToken = "";
+let onUnauthorized: () => Promise<void> = async () => {};
+
+/** Run before the 401 redirect to sign-in (the installed app deletes its downloads then). */
+export function setUnauthorizedHandler(fn: () => Promise<void>) {
+  onUnauthorized = fn;
+}
+
+/** The server could not be reached (offline, or Tailscale off). */
+export class OfflineError extends Error {
+  constructor() {
+    super("You are offline. This will work again once Lectern can be reached.");
+    this.name = "OfflineError";
+  }
+}
+
+/** fetch that keeps the online indicator current and turns network failures into OfflineError. */
+export async function call(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    const res = await fetch(input, init);
+    reportReachable();
+    return res;
+  } catch (e) {
+    if ((e as Error)?.name === "AbortError") throw e;
+    if (isNetworkError(e)) {
+      reportUnreachable();
+      throw new OfflineError();
+    }
+    throw e;
+  }
+}
 
 export function setCsrfToken(token: string) {
   csrfToken = token;
@@ -113,7 +145,8 @@ async function parse(res: Response) {
   }
   if (!res.ok) {
     if (res.status === 401) {
-      window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname)}`);
+      const next = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+      onUnauthorized().finally(() => window.location.assign(next));
     }
     const d = data as { detail?: unknown; message?: string; errors?: { loc: string[]; msg: string }[] } | null;
     const code = typeof d?.detail === "string" ? d.detail : null;
@@ -126,12 +159,12 @@ async function parse(res: Response) {
 }
 
 export async function get<T>(path: string): Promise<T> {
-  const res = await fetch(path, { credentials: "same-origin", headers: { accept: "application/json" } });
+  const res = await call(path, { credentials: "same-origin", headers: { accept: "application/json" } });
   return (await parse(res)) as T;
 }
 
 async function send<T>(method: string, path: string, body?: unknown, extra?: HeadersInit, keepalive = false): Promise<T> {
-  const res = await fetch(path, {
+  const res = await call(path, {
     method,
     credentials: "same-origin",
     keepalive,
@@ -181,7 +214,13 @@ export async function putChunk(id: string, offset: number, digest: string, body:
   throw new ApiError(res.status, `Unexpected ${res.status}`);
 }
 
-export function logout() {
+/** Sign out. `beforeLeave` deletes what the installed app keeps on this device first. */
+export async function logout(beforeLeave?: () => Promise<void>) {
+  try {
+    await beforeLeave?.();
+  } catch {
+    /* the server's Clear-Site-Data still clears it */
+  }
   const form = document.createElement("form");
   form.method = "post";
   form.action = "/logout";

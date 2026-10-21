@@ -197,4 +197,8 @@ async def logout(request: Request, db: DbDep, settings: SettingsDep, auth: AuthO
         db.commit()
     response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     clear_session_cookie(response, settings)
+    # The installed app keeps books, audio, and positions on the device (docs/offline.md). The
+    # app deletes them itself before signing out; this also clears them where the browser
+    # supports it, and the HTTP cache, in case the app could not.
+    response.headers["Clear-Site-Data"] = '"cache", "storage"'
     return response

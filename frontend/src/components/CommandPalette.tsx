@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createPortal } from "react-dom";
-import { get } from "../lib/api";
+import { get, logout } from "../lib/api";
+import { clearDevice } from "../lib/offline/store";
 import { makeBackgroundInert } from "../lib/hooks";
 import { relativeTime } from "../lib/format";
 import { fuzzyScore } from "../lib/fuzzy";
@@ -10,7 +11,7 @@ import type { Device, Work } from "../lib/types";
 import { Cover } from "./Cover";
 import { usePlayer } from "../lib/player";
 import { bookFiles, readerPath } from "../lib/formats";
-import { Devices, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
+import { Devices, Download, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
 type Group = "Actions" | "Pages" | "Books" | "Authors" | "Devices" | "Settings";
 const ORDER: Group[] = ["Actions", "Books", "Authors", "Devices", "Pages", "Settings"];
@@ -101,6 +102,8 @@ export function CommandPalette() {
       { id: "p-listen", group: "Pages", label: "Listening", keywords: "audiobooks player audio", hint: "G P", icon: <Headphones />, run: () => go("/app/listening") },
       { id: "p-dev", group: "Pages", label: "Devices", hint: "G D", icon: <Devices />, run: () => go("/app/devices") },
       { id: "p-sec", group: "Pages", label: "Security", hint: "G S", icon: <Shield />, run: () => go("/app/security") },
+      { id: "p-dl", group: "Pages", label: "Downloads", keywords: "offline phone saved storage", hint: "G O", icon: <Download />, run: () => go("/app/downloads") },
+      { id: "a-signout", group: "Actions", label: "Sign out", keywords: "log out logout leave", icon: <Logout />, run: () => { close(); logout(() => clearDevice()); } },
       { id: "p-act", group: "Pages", label: "Activity", keywords: "audit log", hint: "G A", icon: <Pulse />, run: () => go("/app/activity") },
       ...(isOwner ? [{ id: "p-admin", group: "Pages" as Group, label: "Admin", keywords: "users members", hint: "G U", icon: <Gear />, run: () => go("/app/admin") }] : []),
 

@@ -44,6 +44,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if request.url.path.startswith("/app/assets/"):
             # Hashed, content-addressed build output; safe to cache hard.
             h["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif request.url.path.startswith("/app/pdfjs/"):
+            h["Cache-Control"] = "public, max-age=86400"
         else:
             h.setdefault("Cache-Control", "no-store")
         if not request.url.path.startswith(("/opds", "/syncs", "/users")):
@@ -51,12 +53,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             # stylesheets); scripts stay strictly same-origin, which is also what keeps
             # scripts inside EPUBs from running in the web reader. The reader renders book
             # sections in blob: iframes, so frames, images, fonts, and media may be blob:.
+            # frame-ancestors is 'self', not 'none': Safari (iPhone included) applies it to those
+            # blob: frames, which inherit this policy, and refused to show any book. Other
+            # origins still cannot frame Lectern (and X-Frame-Options stays DENY).
             h.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; img-src 'self' data: blob:; "
                 "style-src 'self' 'unsafe-inline' blob:; font-src 'self' data: blob:; "
                 "media-src 'self' blob:; frame-src 'self' blob:; worker-src 'self'; "
-                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+                "script-src 'self'; connect-src 'self'; frame-ancestors 'self'; "
                 "form-action 'self'; base-uri 'none'",
             )
         settings: Settings = request.app.state.settings
@@ -212,6 +217,11 @@ def create_app(
     app_assets = STATIC_DIR / "app" / "assets"
     if app_assets.is_dir():
         app.mount("/app/assets", StaticFiles(directory=str(app_assets)), name="app-assets")
+    # pdf.js character maps, standard fonts, and image decoders (vite.config.ts copies them).
+    # Without this mount the SPA route answered them with index.html.
+    pdfjs_assets = STATIC_DIR / "app" / "pdfjs"
+    if pdfjs_assets.is_dir():
+        app.mount("/app/pdfjs", StaticFiles(directory=str(pdfjs_assets)), name="app-pdfjs")
 
     app.state.mcp = None
     # AI access (docs/mcp.md): Streamable HTTP, AI-key bearer auth; nothing else accepts the key.

@@ -2,7 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  {# Same install metadata as the app (frontend/index.html): signing in from the home-screen
+     app stays inside it, so the session cookie lands in the app's own cookie jar. #}
+  <link rel="manifest" href="/app/manifest.webmanifest">
+  <meta name="theme-color" content="#f5efe4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#18140f" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Lectern">
+  <link rel="apple-touch-icon" href="/app/pwa/apple-touch-icon.png">
+  <link rel="icon" href="/app/pwa/icon.svg" type="image/svg+xml">
   <title>{% block title %}Lectern{% endblock %}</title>
   <link rel="stylesheet" href="/static/lectern.css">
   {% if csrf_token %}<meta name="csrf-token" content="{{ csrf_token }}">{% endif %}

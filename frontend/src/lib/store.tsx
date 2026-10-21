@@ -1,5 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { get, post, setCsrfToken } from "./api";
+import { get, OfflineError, post, setCsrfToken, setUnauthorizedHandler } from "./api";
+import { isOnline, probe, subscribe as onNetwork } from "./offline/net";
+import { bindOwner, clearDevice, listBooks, onChange as onOfflineChange, ownerSnapshot, revalidate, type OfflineBook } from "./offline/store";
+import { flush, refreshSyncState, registerWorker } from "./offline/sync";
 import { useLocalStorage, useVisiblePolling } from "./hooks";
 import type { AppNotification, ImportInfo, Me, Preferences, Work } from "./types";
 import { ACCEPT, filesFromDataTransfer, groupFiles, httpTransport, localStore, UploadManager, workerHasher, type PathedFile, type UploadItem } from "./uploads";
@@ -62,6 +65,10 @@ interface Store {
   unread: number;
   refreshNotifications: () => Promise<void>;
   markAllRead: () => Promise<void>;
+  /** Lectern's server can be reached (lib/offline/net.ts). */
+  online: boolean;
+  /** Books downloaded to this device. */
+  offlineBooks: OfflineBook[];
   /** How this browser names itself in positions it saves ("Firefox on Mac"). */
   deviceName: string;
   setDeviceName: (v: string) => void;
@@ -99,6 +106,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [reviewOpen, setReviewOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [editWorkId, openEditor] = useState<number | null>(null);
+  const [online, setOnline] = useState(isOnline);
+  const [offlineBooks, setOfflineBooks] = useState<OfflineBook[]>([]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 20000);
@@ -106,16 +115,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshMe = useCallback(async () => {
-    const data = await get<Me>("/api/me");
-    setCsrfToken(data.csrf_token);
-    setMe(data);
-    setUnread(data.counts.unread_notifications);
+    try {
+      const data = await get<Me>("/api/me");
+      setCsrfToken(data.csrf_token);
+      setMe(data);
+      setUnread(data.counts.unread_notifications);
+      // Downloads belong to one person: someone else signing in here never sees them.
+      if (await bindOwner(data)) setOfflineBooks([]);
+    } catch (e) {
+      if (!(e instanceof OfflineError)) throw e;
+      // Offline: who was signed in here, so the app can open downloaded books. No CSRF token,
+      // so nothing is written to the server until it is reachable again.
+      const snap = await ownerSnapshot();
+      if (snap) setMe((m) => m ?? (snap.me as Me));
+    }
   }, []);
 
   const refreshLibrary = useCallback(async () => {
-    const data = await get<{ works: Work[] }>("/api/library");
-    setWorks(data.works);
+    try {
+      const data = await get<{ works: Work[] }>("/api/library");
+      setWorks(data.works);
+    } catch (e) {
+      if (!(e instanceof OfflineError)) throw e;
+      setWorks((await listBooks()).map((b) => b.work));
+    }
     setWorksLoaded(true);
+  }, []);
+
+  // Offline support: the service worker, downloads, and the position queue.
+  useEffect(() => {
+    registerWorker();
+    // A session that ended (signed out elsewhere, revoked, expired) takes the downloads with it.
+    setUnauthorizedHandler(() => clearDevice());
+    const load = () => listBooks().then(setOfflineBooks);
+    load();
+    refreshSyncState();
+    const offChange = onOfflineChange(load);
+    const offNet = onNetwork(setOnline);
+    return () => {
+      offChange();
+      offNet();
+    };
   }, []);
 
   const refreshNotifications = useCallback(async () => {
@@ -134,7 +174,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     refreshMe().then(() => refreshNotifications()).catch(() => {});
     refreshLibrary().catch(() => {});
   }, [refreshMe, refreshLibrary, refreshNotifications]);
-  useVisiblePolling(() => me && refreshNotifications().catch(() => {}), 60000);
+  useVisiblePolling(() => me && online && refreshNotifications().catch(() => {}), 60000);
+
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -155,6 +196,40 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // Toasts with an action (Undo, Review) stay long enough to reach with a keyboard.
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), action ? 10000 : 3800);
   }, []);
+
+  // Back online, or back in the foreground: refresh the session, send queued positions, and
+  // check every downloaded book is still current and still shared with this person.
+  const reconnect = useCallback(async () => {
+    if (!isOnline()) return;
+    await refreshMe().catch(() => {});
+    await flush().catch(() => {});
+    try {
+      const { removed } = await revalidate();
+      if (removed.length) toast(`Removed from this device, no longer available to you: ${removed.join(", ")}.`, "info");
+    } catch {
+      /* try again next time */
+    }
+  }, [refreshMe, toast]);
+  const wasOnline = useRef(online);
+  useEffect(() => {
+    if (online && !wasOnline.current) {
+      reconnect();
+      refreshLibrary().catch(() => {});
+    }
+    wasOnline.current = online;
+  }, [online, reconnect, refreshLibrary]);
+  useEffect(() => {
+    if (!me) return;
+    reconnect();
+    const onFocus = () => (isOnline() ? flush().catch(() => {}) : probe());
+    const onVisible = () => !document.hidden && onFocus();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [!!me]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setPreference = useCallback(async <K extends keyof Preferences>(key: K, value: Preferences[K]) => {
     setMe((m) => (m ? { ...m, preferences: { ...m.preferences, [key]: value } } : m));
@@ -293,10 +368,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       unread,
       refreshNotifications,
       markAllRead,
+      online,
+      offlineBooks,
       deviceName,
       setDeviceName,
     }),
-    [me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, dismissToast, paletteOpen, helpOpen, now, canUpload, canEdit, pickBooks, pickFolder, addFiles, imports, refreshImports, reviewOpen, dragging, editWorkId, uploads, uploadManager, setPreference, notifications, unread, refreshNotifications, markAllRead, deviceName, setDeviceName],
+    [online, offlineBooks, me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, dismissToast, paletteOpen, helpOpen, now, canUpload, canEdit, pickBooks, pickFolder, addFiles, imports, refreshImports, reviewOpen, dragging, editWorkId, uploads, uploadManager, setPreference, notifications, unread, refreshNotifications, markAllRead, deviceName, setDeviceName],
   );
   return (
     <Ctx.Provider value={value}>

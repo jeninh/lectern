@@ -48,8 +48,9 @@ jobs:
           LUAJIT_REQUIRED: "1"
           # tests/test_backups.py round-trips a restic repository; never skip it here.
           RESTIC_REQUIRED: "1"
-  # Playwright against a seeded server (frontend/e2e/serve.sh): multi-select in the Library,
-  # Trash, and Review before filing.
+  # Playwright against seeded servers: the desktop suite (frontend/e2e/serve.sh: multi-select in
+  # the Library, Trash, Review before filing) and the installed app on phones (docs/offline.md#tests:
+  # iPhone 15 on WebKit, Pixel 7 on Chromium, offline mode included; frontend/e2e/serve.py).
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -64,21 +65,27 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
+      - name: Install ffmpeg (the seeded audiobook's data-saver copy)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
       - run: uv sync --frozen --extra dev
-      - run: npx playwright install --with-deps chromium
+      - name: Install Playwright browsers (Chromium for desktop and Android, WebKit for iPhone)
+        run: npx playwright install --with-deps chromium webkit
         working-directory: frontend
-      - run: npx playwright test
+      - run: npm run e2e
         working-directory: frontend
+        env:
+          CI: "1"
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: always()
         with:
-          name: playwright-report
+          name: e2e
           path: |
-            frontend/playwright-report
-            frontend/test-results
-          retention-days: 7
+            frontend/playwright-report/
+            frontend/e2e-screenshots/
+            frontend/test-results/
+          retention-days: 14
   docker:
     runs-on: ubuntu-latest
     strategy:

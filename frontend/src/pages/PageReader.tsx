@@ -11,7 +11,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Chevron } from "../components/Icons";
-import { ApiError, get, put } from "../lib/api";
+import { ApiError, get } from "../lib/api";
+import { getPdfInfo, orOffline } from "../lib/offline/store";
+import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
 import { useLocalStorage } from "../lib/hooks";
 import { clampPage, type Fit, fitScale, pageLabel, spreadOf, stepZoom, turn } from "../lib/pages";
@@ -106,7 +108,7 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
     let cancelled = false;
     (async () => {
       try {
-        const i = await get<PagesInfo>(`/api/files/${fileId}/pages`);
+        const i = await orOffline(() => get<PagesInfo>(`/api/files/${fileId}/pages`), () => getPdfInfo(fileId));
         if (cancelled) return;
         if (i.work_id !== workId) throw new ApiError(404, "That file belongs to another book.", null, {}, new Headers());
         setInfo(i);
@@ -156,12 +158,22 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
     if (!dirty.current || !n) return;
     dirty.current = false;
     try {
-      const r = await put<NonNullable<PagesInfo["progress"]>>(`/api/files/${fileId}/progress`, { page: p, pages: n, device: deviceName }, keepalive);
-      writeMark(fileId, { page: p, seenAt: r.updated_at });
+      const r = await savePosition<NonNullable<PagesInfo["progress"]>>({ kind: "page", id: fileId, workId, title: info?.title ?? "this book" }, { page: p, pages: n, device: deviceName }, keepalive);
+      writeMark(fileId, { page: p, seenAt: r?.updated_at ?? readMark(fileId)?.seenAt ?? null });
     } catch {
       writeMark(fileId, { page: p, seenAt: readMark(fileId)?.seenAt ?? null });
     }
-  }, [fileId, deviceName]);
+  }, [fileId, deviceName, workId, info?.title]);
+
+  // "Use the other device's" in a sync conflict (components/Offline.tsx): go to its page.
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ kind: string; id: number; server: { page?: number | null } }>).detail;
+      if (d.kind === "page" && d.id === fileId && d.server.page) setPage(clampPage(d.server.page, latest.current.total));
+    };
+    window.addEventListener("lectern:position", on);
+    return () => window.removeEventListener("lectern:position", on);
+  }, [fileId]);
 
   const go = useCallback((p: number) => {
     const next = clampPage(p, latest.current.total);
