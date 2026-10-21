@@ -631,3 +631,31 @@ def test_keep_replaced_setting_turns_the_copy_off(bclient, bowner, bsettings, mo
     assert (work / "book.json").read_text() != '{"edited": true}'
     assert not (next(bsettings.data_dir.glob("pre-restore-*")) / "library").exists()
     assert not list(bsettings.library_dir.rglob(".*.replaced-*"))
+
+
+def test_a_symlink_loop_in_the_library_does_not_fail_the_backup(bclient, bowner, bsettings):
+    """Re-review: resolve() raises on a loop (RuntimeError on 3.12) after the snapshot exists."""
+    work = _add_book(bsettings, "Loop")
+    (work / "a").symlink_to(work / "b")
+    (work / "b").symlink_to(work / "a")
+    status = _run(bsettings, include_library=True)
+    assert status["last_result"] == "ok", status
+    assert {str(work / "a"), str(work / "b")} <= set(status["last_skipped_links_outside"])
+    notes = bclient.get("/api/notifications").json()["items"]
+    assert not [n for n in notes if n["kind"] == "backup.failed"]
+
+
+def test_no_pre_restore_copy_replaces_a_folder_where_a_file_belongs(
+    bclient, bowner, bsettings, monkeypatch
+):
+    """Re-review: the replaced item may be a folder; it must be removed, not crash the restore."""
+    work = _add_book(bsettings, "Folder In The Way")
+    assert _run(bsettings)["last_result"] == "ok"
+    _stop(bclient)
+    (work / "cover.jpg").unlink()
+    (work / "cover.jpg").mkdir()
+    (work / "cover.jpg" / "junk").write_text("x")
+    _restore(bsettings, monkeypatch, "--no-pre-restore-copy")
+    assert (work / "cover.jpg").is_file()
+    assert (bsettings.data_dir / "restored-lectern.env").is_file()  # the steps after the swap ran
+    assert not list(bsettings.library_dir.rglob(".*.replaced-*"))

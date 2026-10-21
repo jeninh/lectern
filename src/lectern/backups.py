@@ -230,7 +230,12 @@ def _report_links(links: list[Path], roots: tuple[Path, ...]) -> list[str]:
     """Log skipped symlinks; return those that resolve outside every backed-up root."""
     outside = []
     for link in dict.fromkeys(links):
-        target = link.resolve()
+        try:
+            target = link.resolve()
+        except (OSError, RuntimeError):  # a symlink loop (RuntimeError on Python 3.12)
+            outside.append(str(link))
+            log.warning("backup skipped %s: a symlink that cannot be resolved (a loop?)", link)
+            continue
         if not any(target.is_relative_to(r.resolve()) for r in roots):
             outside.append(str(link))
             log.warning(
@@ -1002,7 +1007,7 @@ def restore(
                 raise BackupError(f"restore failed and was undone; nothing changed: {exc}") from exc
             for _staged, _dest, side, keep in plan:
                 if not keep:
-                    side.unlink(missing_ok=True)
+                    _discard(side)  # a file, or a folder that sat where a file is restored
             _remove_empty_tree(aside)
             _private(data / "lectern.db")
             if (data / "secret_key").is_file():
