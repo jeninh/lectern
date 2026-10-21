@@ -6,6 +6,8 @@
   ``tests/fixtures/magi/transcript_small.json`` was made).
 - ``lectern align-bench EPUB AUDIO...``: run the whole alignment offline and print timing,
   coverage, memory, and hardware (docs/alignment.md, "Benchmark").
+- ``lectern backup [--list]``: back up now with the settings saved in Admin, or list backups.
+- ``lectern restore [SNAPSHOT]``: restore a backup with the server stopped (docs/backups.md).
 """
 
 from __future__ import annotations
@@ -241,6 +243,55 @@ def align_bench(args: argparse.Namespace) -> None:
     print(json.dumps(report, indent=2))
 
 
+def backup(args: argparse.Namespace) -> None:
+    from lectern import backups
+    from lectern.config import get_settings
+    from lectern.db import init_engine, session_factory
+
+    settings = get_settings()
+    if args.list:
+        if not (settings.backup_dir / "restic" / "config").is_file():
+            sys.exit(f"no backups yet in {settings.backup_dir}")
+        try:
+            for snap in backups.restic_snapshots(settings):
+                print(f"{snap['short_id']}\t{snap['time']}")
+        except backups.BackupError as exc:
+            sys.exit(str(exc))
+        return
+    if not settings.db_path.is_file():
+        sys.exit(f"no database at {settings.db_path}")
+    init_engine(settings)
+    status = backups.run_and_record(session_factory(), settings, reason="cli")
+    if status.get("skipped"):
+        sys.exit("another backup is already running; nothing to do")
+    if status.get("last_result") != "ok":
+        sys.exit(f"backup failed: {status.get('last_error')}")
+    print(f"backup written: {status['last_location']} ({status.get('last_size_bytes')} bytes)")
+    if status.get("last_skipped_files"):
+        print(f"warning: {status['last_skipped_files']} unreadable file(s) were left out")
+
+
+def restore(args: argparse.Namespace) -> None:
+    from lectern import backups
+    from lectern.config import get_settings
+
+    settings = get_settings()
+    if args.restic_password_file:
+        settings = settings.model_copy(
+            update={"backup_restic_password_file": args.restic_password_file}
+        )
+    try:
+        backups.restore(
+            settings,
+            args.source,
+            restore_library=not args.no_library,
+            keep_replaced=False if args.no_pre_restore_copy else None,
+        )
+    except backups.BackupError as exc:
+        sys.exit(f"restore failed: {exc}")
+    print("done. Start Lectern again; it migrates the database on start if needed.")
+
+
 def _words_json(source: str, language: str | None, words) -> dict:
     """The recorded-transcript format of ``tests/fixtures/magi/transcript_small.json``."""
     return {
@@ -315,6 +366,32 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--words-out", type=Path, help="also save the transcript (re-match later)")
     b.add_argument("--language", default=None)
     _transcriber_args(b)
+
+    k = sub.add_parser("backup", help="back up now with the settings saved in Admin")
+    k.add_argument("--list", action="store_true", help="list the snapshots")
+
+    r = sub.add_parser(
+        "restore",
+        help="restore a backup (stop the server first)",
+        description="Restore a backup into LECTERN_DATA_DIR and LECTERN_LIBRARY_DIR. Refuses "
+        "while a server runs on the data directory. Replaced files are moved to "
+        "<data>/pre-restore-<time>/ (library files too); library files are never deleted. A "
+        "failure part-way through is rolled back.",
+    )
+    r.add_argument(
+        "source",
+        nargs="?",
+        default="latest",
+        help="snapshot id from `lectern backup --list`, or latest (the default)",
+    )
+    r.add_argument("--no-library", action="store_true", help="restore data only, not library files")
+    r.add_argument(
+        "--no-pre-restore-copy",
+        action="store_true",
+        help="delete replaced library files once the restore succeeded instead of keeping them "
+        "in <data>/pre-restore-*/library/ (LECTERN_RESTORE_KEEP_REPLACED=0)",
+    )
+    r.add_argument("--restic-password-file", type=Path, help="the restic password you saved")
     return parser
 
 
@@ -327,9 +404,13 @@ def main(argv: list[str] | None = None) -> None:
         level=os.environ.get("LECTERN_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    {"worker": worker, "align-transcribe": align_transcribe, "align-bench": align_bench}[
-        args.command
-    ](args)
+    {
+        "worker": worker,
+        "align-transcribe": align_transcribe,
+        "align-bench": align_bench,
+        "backup": backup,
+        "restore": restore,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

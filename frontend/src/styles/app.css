@@ -742,6 +742,29 @@ tr.revoked td:first-child {
   background: var(--ok-soft);
   color: var(--ok);
 }
+.alert code {
+  font: 12px var(--font-mono);
+  word-break: break-all;
+}
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 14px;
+  align-items: end;
+}
+.settings-check > span {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  color: var(--ink);
+  font-size: 14px;
+}
+@media (max-width: 560px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .progress-bar {
   height: 6px;
   border-radius: 999px;

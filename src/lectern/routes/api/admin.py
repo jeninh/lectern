@@ -1,15 +1,18 @@
-"""Owner-only user management and audit log."""
+"""Owner-only user management, audit log, and backups."""
 
 from __future__ import annotations
 
 import secrets
+import threading
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 
-from lectern.models import AuditLog, Role, User
+from lectern import backups
+from lectern.db import session_factory
+from lectern.models import AuditLog, Role, User, utcnow
 from lectern.routes.api.serializers import iso, user_json
 from lectern.security import audit
 from lectern.security.deps import (
@@ -183,3 +186,79 @@ def audit_log(auth: OwnerRead, db: DbDep) -> dict:
             for r in rows
         ]
     }
+
+
+# --- backups (docs/backups.md) ------------------------------------------------------------------
+
+
+def _backup_view(db, settings) -> dict:
+    return {
+        "config": backups.load_config(db).model_dump(),
+        "status": backups.load_status(db),
+        "running": backups.is_running(),
+        "target": backups.target_info(settings),
+    }
+
+
+@router.get("/backups")
+def backup_settings(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict:
+    return _backup_view(db, settings)
+
+
+class BackupConfigIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    include_library: bool | None = None
+    retention: int | None = Field(default=None, ge=1, le=365)
+    hour_utc: int | None = Field(default=None, ge=0, le=23)
+
+
+@router.put("/backups")
+def update_backup_settings(
+    request: Request, auth: OwnerWrite, db: DbDep, settings: SettingsDep, body: BackupConfigIn
+) -> dict:
+    current = backups.load_config(db)
+    changes = body.model_dump(exclude_none=True)
+    try:
+        new = backups.BackupConfig.model_validate({**current.model_dump(), **changes})
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid settings") from exc
+    if new.enabled and not backups.target_info(settings)["restic_available"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "restic_unavailable")
+    if new != current:
+        backups.save_config(db, new, auth.user.id)
+        if new.enabled and not current.enabled:
+            # The nightly schedule starts now; enabling does not back up on the spot.
+            backups.record_status(db, enabled_at=utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        diff = ", ".join(
+            f"{k}={v}" for k, v in new.model_dump().items() if getattr(current, k) != v
+        )
+        audit.record(
+            db,
+            "backup.settings",
+            actor_user_id=auth.user.id,
+            ip=client_ip(request),
+            detail=diff[:200],
+        )
+        db.commit()
+    return _backup_view(db, settings)
+
+
+@router.post("/backups/run", status_code=status.HTTP_202_ACCEPTED)
+def run_backup_now(request: Request, auth: OwnerWrite, db: DbDep, settings: SettingsDep) -> dict:
+    """Start a backup with the saved settings (even while nightly backups are off) and return;
+    poll GET /api/admin/backups for the outcome."""
+    if backups.is_running():
+        raise HTTPException(status.HTTP_409_CONFLICT, "backup_running")
+    audit.record(db, "backup.run", actor_user_id=auth.user.id, ip=client_ip(request))
+    db.commit()
+    factory = session_factory()
+    threading.Thread(
+        target=backups.run_and_record,
+        args=(factory, settings),
+        kwargs={"reason": "manual"},
+        name="lectern-backup-now",
+        daemon=True,
+    ).start()
+    return {**_backup_view(db, settings), "running": True}

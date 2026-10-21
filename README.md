@@ -50,6 +50,14 @@ and every 10 pages, queued while Wi‑Fi is off). Re-pair after a reset with a 6
 See [`docs/koreader-plugin.md`](docs/koreader-plugin.md), including Tailscale on a Kindle
 (KUAL extension, kernel TUN mode).
 
+## Backups
+
+Nightly backups are opt-in, owner-only, and off by default (Admin → Nightly backups). They
+copy the database consistently while Lectern runs, plus secrets, settings, and every book's
+metadata and cover, optionally the library files, into an encrypted restic repository on
+`LECTERN_BACKUP_PATH` (a USB drive on a Pi, not the SD card). Restore with `lectern restore`:
+[docs/backups.md](docs/backups.md).
+
 ## Adding books
 
 Owners and members add books from the web app: **Add books** in the Library (its menu also has

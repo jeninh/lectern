@@ -28,6 +28,32 @@ export interface Me {
   can_edit: boolean;
 }
 
+export interface BackupView {
+  config: { enabled: boolean; include_library: boolean; retention: number; hour_utc: number };
+  status: {
+    last_attempt_at?: string;
+    last_success_at?: string;
+    last_result?: "ok" | "failed";
+    last_error?: string | null;
+    last_error_at?: string;
+    last_location?: string;
+    last_size_bytes?: number | null;
+    last_duration_s?: number;
+    last_skipped_files?: number;
+    last_skipped_examples?: string[];
+  };
+  running: boolean;
+  target: {
+    path: string;
+    exists: boolean;
+    writable: boolean;
+    free_bytes: number | null;
+    same_disk_as_data: boolean | null;
+    restic_available: boolean;
+    restic_password_file: string;
+  };
+}
+
 export interface Preferences {
   show_technical_details: boolean;
   /** File uploads whose proposed match is certain without asking. */
