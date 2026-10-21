@@ -7,11 +7,22 @@ single-purpose devices.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from lectern.models import AppPassword, BookFile, ReadingProgress, Role, SyncKey, Work, utcnow
+from lectern import koplugin
+from lectern.models import (
+    AppPassword,
+    BookFile,
+    DeviceBootstrap,
+    ReadingProgress,
+    Role,
+    SyncKey,
+    User,
+    Work,
+    utcnow,
+)
 from lectern.routes.api.serializers import app_password_json, iso, sync_key_json
 from lectern.security import audit
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
@@ -30,7 +41,22 @@ def _latest(*values):
     return max(present) if present else None
 
 
-def _device_json(key: SyncKey | None, pw: AppPassword | None) -> dict:
+def _plugin_json(boot: DeviceBootstrap | None) -> dict | None:
+    """State of the device's newest lectern.koplugin setup secret (never the secret)."""
+    if boot is None:
+        return None
+    return {
+        "setup_state": koplugin.bootstrap_state(boot),
+        "server_url": boot.server_url,
+        "downloaded_at": iso(boot.created_at),
+        "expires_at": iso(boot.expires_at),
+        "set_up_at": iso(boot.used_at),
+    }
+
+
+def _device_json(
+    key: SyncKey | None, pw: AppPassword | None, boot: DeviceBootstrap | None = None
+) -> dict:
     parts = [p for p in (key, pw) if p is not None]
     return {
         "id": f"k{key.id}" if key else f"p{pw.id}",  # type: ignore[union-attr]
@@ -43,6 +69,9 @@ def _device_json(key: SyncKey | None, pw: AppPassword | None) -> dict:
         else None,
         "sync_key": sync_key_json(key) if key else None,
         "app_password": app_password_json(pw) if pw else None,
+        # The plugin needs both credentials of one device.
+        "koplugin": key is not None and pw is not None,
+        "plugin": _plugin_json(boot),
     }
 
 
@@ -57,7 +86,16 @@ def list_devices(auth: Auth, db: DbDep) -> dict:
         .order_by(AppPassword.created_at.desc())
     ).all()
     paired = {p.sync_key_id: p for p in pws if p.sync_key_id is not None}
-    devices = [_device_json(k, paired.get(k.id)) for k in keys]
+    newest = (
+        select(func.max(DeviceBootstrap.id))
+        .where(DeviceBootstrap.user_id == auth.user.id)
+        .group_by(DeviceBootstrap.sync_key_id)
+    )
+    boots = {
+        b.sync_key_id: b
+        for b in db.scalars(select(DeviceBootstrap).where(DeviceBootstrap.id.in_(newest)))
+    }
+    devices = [_device_json(k, paired.get(k.id), boots.get(k.id)) for k in keys]
     key_ids = {k.id for k in keys}
     devices += [_device_json(None, p) for p in pws if p.sync_key_id not in key_ids]
     devices.sort(key=lambda d: d["created_at"] or "", reverse=True)
@@ -118,6 +156,8 @@ def revoke_device(request: Request, auth: AuthCsrf, db: DbDep, device_id: str) -
         if part is not None and part.revoked_at is None:
             part.revoked_at = now
             changed = True
+    if key is not None:
+        koplugin.revoke_setup(db, key.id)
     if changed:
         audit.record(
             db,
@@ -126,8 +166,8 @@ def revoke_device(request: Request, auth: AuthCsrf, db: DbDep, device_id: str) -
             target=(key or pw).label,  # type: ignore[union-attr]
             ip=client_ip(request),
         )
-        db.commit()
-    return {"device": _device_json(key, pw)}
+    db.commit()
+    return {"device": _device_json(key, pw, koplugin.latest_bootstrap(db, key.id) if key else None)}
 
 
 @router.post("/sync-keys", status_code=status.HTTP_201_CREATED)
@@ -180,6 +220,7 @@ def revoke_sync_key(request: Request, auth: AuthCsrf, db: DbDep, key_id: int) ->
     row = db.get(SyncKey, key_id)
     if row is None or row.user_id != auth.user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    koplugin.revoke_setup(db, row.id)
     if row.revoked_at is None:
         row.revoked_at = utcnow()
         audit.record(
@@ -189,7 +230,7 @@ def revoke_sync_key(request: Request, auth: AuthCsrf, db: DbDep, key_id: int) ->
             target=row.label,
             ip=client_ip(request),
         )
-        db.commit()
+    db.commit()
     return {"sync_key": sync_key_json(row)}
 
 
@@ -219,6 +260,8 @@ def revoke_app_password(request: Request, auth: AuthCsrf, db: DbDep, key_id: int
     row = db.get(AppPassword, key_id)
     if row is None or row.user_id != auth.user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if row.sync_key_id is not None:
+        koplugin.revoke_setup(db, row.sync_key_id)
     if row.revoked_at is None:
         row.revoked_at = utcnow()
         audit.record(
@@ -228,7 +271,7 @@ def revoke_app_password(request: Request, auth: AuthCsrf, db: DbDep, key_id: int
             target=row.label,
             ip=client_ip(request),
         )
-        db.commit()
+    db.commit()
     return {"app_password": app_password_json(row)}
 
 
@@ -273,3 +316,126 @@ def set_device_download_cap(
     )
     db.commit()
     return {"app_password": app_password_json(row)}
+
+
+# --- KOReader plugin (docs/koreader-plugin.md) ----------------------------------------------
+
+
+@router.get("/koplugin")
+def koplugin_defaults(auth: Auth, settings: SettingsDep) -> dict:
+    """The address a new zip would carry: LECTERN_DEVICE_URL, else the detected Tailscale IP."""
+    url, source = koplugin.default_server_url(settings)
+    return {"server_url": url, "source": source, "port": settings.port}
+
+
+def _own_plugin_device(db, user: User, device_id: str) -> tuple[SyncKey, AppPassword]:
+    """The caller's own device with both credentials. Nobody else's, not even for the owner
+    role: the zip and the codes hand out that device's credentials."""
+    kind, num = device_id[:1], device_id[1:]
+    if kind not in ("k", "p") or not num.isdigit():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if kind == "k":
+        key = db.get(SyncKey, int(num))
+        pw = (
+            db.scalar(select(AppPassword).where(AppPassword.sync_key_id == key.id)) if key else None
+        )
+    else:
+        pw = db.get(AppPassword, int(num))
+        key = db.get(SyncKey, pw.sync_key_id) if pw and pw.sync_key_id else None
+    if key is None or pw is None or key.user_id != user.id or pw.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if key.revoked_at or pw.revoked_at:
+        raise HTTPException(status.HTTP_409_CONFLICT, "device_revoked")
+    return key, pw
+
+
+class PluginZipIn(BaseModel):
+    server_url: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/{device_id}/koplugin")
+def download_koplugin(
+    request: Request,
+    auth: AuthCsrf,
+    db: DbDep,
+    settings: SettingsDep,
+    device_id: str,
+    body: PluginZipIn,
+) -> Response:
+    """lectern.koplugin.zip for one of the caller's devices, with a fresh one-time setup
+    secret (valid 7 days). Any earlier unused secret of the device stops working."""
+    key, _pw = _own_plugin_device(db, auth.user, device_id)
+    raw = body.server_url or koplugin.default_server_url(settings)[0]
+    if not raw:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "server_url_required")
+    try:
+        server_url = koplugin.normalize_server_url(raw)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_server_url") from exc
+    boot, secret = koplugin.mint_bootstrap(db, key, server_url)
+    data = koplugin.build_zip(
+        device_lua=koplugin.device_config_lua(
+            server_url=server_url,
+            username=auth.user.username,
+            device_id=f"k{key.id}",
+            label=key.label,
+            expires_at=iso(boot.expires_at) or "",
+        ),
+        secret=secret,
+    )
+    audit.record(
+        db,
+        "koplugin.download",
+        actor_user_id=auth.user.id,
+        target=key.label,
+        ip=client_ip(request),
+        detail=server_url,
+    )
+    db.commit()
+    return Response(
+        data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{koplugin.ZIP_NAME}"'},
+    )
+
+
+@router.post("/{device_id}/koplugin/revoke")
+def revoke_koplugin_setup(request: Request, auth: AuthCsrf, db: DbDep, device_id: str) -> dict:
+    """Make the device's unused setup secret and pairing code useless. Credentials the
+    plugin already holds keep working; revoke the device to stop those."""
+    key, pw = _own_plugin_device(db, auth.user, device_id)
+    n = koplugin.revoke_setup(db, key.id)
+    audit.record(
+        db,
+        "koplugin.revoke",
+        actor_user_id=auth.user.id,
+        target=key.label,
+        ip=client_ip(request),
+        detail=str(n),
+    )
+    db.commit()
+    return {"device": _device_json(key, pw, koplugin.latest_bootstrap(db, key.id))}
+
+
+@router.post("/{device_id}/pairing-code", status_code=status.HTTP_201_CREATED)
+def new_pairing_code(request: Request, auth: AuthCsrf, db: DbDep, device_id: str) -> dict:
+    """A 6-digit code for Lectern → Pair in KOReader: 5 minutes, single use, 5 attempts.
+    Showing a new code ends the previous one (one live code per person)."""
+    key, _pw = _own_plugin_device(db, auth.user, device_id)
+    if not request.app.state.limiters["koplugin_code"].allow(f"user:{auth.user.id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
+    row, code = koplugin.new_pairing_code(db, key)
+    audit.record(
+        db,
+        "koplugin.pairing_code",
+        actor_user_id=auth.user.id,
+        target=key.label,
+        ip=client_ip(request),
+    )
+    db.commit()
+    return {
+        "code": code,
+        "expires_at": iso(row.expires_at),
+        "attempts": koplugin.PAIRING_ATTEMPTS,
+        "username": auth.user.username,
+    }

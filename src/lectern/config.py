@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"  # noqa: S104 - container default; bind narrower via env if needed
     port: int = 8080
 
+    # Address KOReader devices use, baked into each lectern.koplugin zip (docs/koreader-plugin.md),
+    # e.g. http://100.101.102.103:8080. Empty = this machine's Tailscale IP on `port`, detected.
+    device_url: str = Field(default="")
+
     # Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For is believed, e.g.
     # "127.0.0.1" for `tailscale serve` on the same host or in a sidecar sharing the network
     # namespace. Empty = trust nobody (default).
@@ -119,6 +123,18 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("device_url")
+    @classmethod
+    def _valid_device_url(cls, v: str) -> str:
+        if not v.strip():
+            return ""
+        from lectern.koplugin import normalize_server_url
+
+        try:
+            return normalize_server_url(v)
+        except ValueError as exc:
+            raise ValueError("LECTERN_DEVICE_URL must look like http://100.x.y.z:8080") from exc
 
     @model_validator(mode="after")
     def _window_has_room(self) -> Settings:

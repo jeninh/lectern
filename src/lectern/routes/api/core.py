@@ -316,6 +316,13 @@ _ACTIVITY_ACTIONS = {
     "queue.add",
     "queue.remove",
     "queue.delivered",
+    "koplugin.download",
+    "koplugin.bootstrap",
+    "koplugin.bootstrap_failed",
+    "koplugin.pairing_code",
+    "koplugin.paired",
+    "koplugin.pair_failed",
+    "koplugin.revoke",
 }
 
 

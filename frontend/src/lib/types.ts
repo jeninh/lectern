@@ -183,6 +183,31 @@ export interface Device {
   revoked_at: string | null;
   sync_key: SyncKey | null;
   app_password: AppPassword | null;
+  /** Holds both credentials, so the KOReader plugin can be set up for it. */
+  koplugin?: boolean;
+  plugin?: PluginSetup | null;
+}
+
+/** The device's newest lectern.koplugin setup secret (never the secret itself). */
+export interface PluginSetup {
+  setup_state: "pending" | "used" | "expired" | "revoked";
+  server_url: string;
+  downloaded_at: string | null;
+  expires_at: string | null;
+  set_up_at: string | null;
+}
+
+export interface PluginDefaults {
+  server_url: string | null;
+  source: "config" | "tailscale" | "none";
+  port: number;
+}
+
+export interface PairingCode {
+  code: string;
+  expires_at: string;
+  attempts: number;
+  username: string;
 }
 
 export interface CreatedDevice {

@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { AIToolsSection } from "../components/AITools";
 import { EmptyState } from "../components/EmptyState";
 import { DeviceQueueView } from "../components/DeviceQueue";
+import { KOReaderPlugin } from "../components/KOReaderPlugin";
 import { Book, Close, Download, Plus, Reader, Send, Sync } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
@@ -10,6 +11,7 @@ import { PageTitle } from "../components/Shell";
 import { get, post } from "../lib/api";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
+import { pluginSetupText } from "../lib/koplugin";
 import { useStore } from "../lib/store";
 import type { Device, QueueDevice } from "../lib/types";
 import { AddDeviceFlow } from "./AddDevice";
@@ -34,6 +36,8 @@ export function DevicesPage() {
   const [showRevoked, setShowRevoked] = useState(false);
   const [queues, setQueues] = useState<QueueDevice[]>([]);
   const [queueFor, setQueueFor] = useState<QueueDevice | null>(null);
+  const [pluginFor, setPluginFor] = useState<string | null>(null);
+  const pluginDevice = (devices ?? []).find((d) => d.id === pluginFor && !d.revoked_at) ?? null;
 
   const load = useCallback(async () => {
     const [d, q] = await Promise.all([get<{ devices: Device[] }>("/api/devices"), get<{ devices: QueueDevice[] }>("/api/device-queues")]);
@@ -95,7 +99,7 @@ export function DevicesPage() {
           ) : (
             <ul className="device-grid" aria-label="Active devices">
               {active.map((d) => (
-                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} queue={queueOf(d)} onQueue={(q) => setQueueFor(q)} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} />
+                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} queue={queueOf(d)} onQueue={(q) => setQueueFor(q)} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} onPlugin={d.koplugin ? () => setPluginFor(d.id) : undefined} />
               ))}
             </ul>
           )}
@@ -144,6 +148,10 @@ export function DevicesPage() {
 
       <Sheet open={!!queueFor} onClose={() => setQueueFor(null)} title={queueFor ? `Queue for ${queueFor.label}` : ""} labelledBy="queue-title">
         {queueFor && <DeviceQueueView deviceId={queueFor.id} onChanged={() => load().catch(() => {})} />}
+      </Sheet>
+
+      <Sheet open={!!pluginDevice} onClose={() => setPluginFor(null)} title={pluginDevice ? `KOReader plugin for ${pluginDevice.label}` : ""} labelledBy="plugin-title">
+        {pluginDevice && <KOReaderPlugin device={pluginDevice} onChanged={() => load().catch(() => {})} />}
       </Sheet>
 
       <Sheet open={!!confirm} onClose={() => setConfirm(null)} title={`Revoke “${confirm?.label}”?`} variant="dialog" labelledBy="revoke-title">
@@ -207,8 +215,9 @@ export function CapForm({ initial, what, onSave, lowerOnly = false }: { initial:
   );
 }
 
-function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap }: { d: Device; now: number; highlight?: boolean; queue?: QueueDevice; onQueue?: (q: QueueDevice) => void; onRevoke?: () => void; onCap?: () => void }) {
+function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap, onPlugin }: { d: Device; now: number; highlight?: boolean; queue?: QueueDevice; onQueue?: (q: QueueDevice) => void; onRevoke?: () => void; onCap?: () => void; onPlugin?: () => void }) {
   const s = deviceStatus(d, now);
+  const plugin = d.revoked_at ? null : pluginSetupText(d.plugin, now);
   return (
     <li className="device-card" id={`device-${d.id}`} data-tone={s.tone} data-highlight={highlight || undefined}>
       <div className="device-head">
@@ -224,6 +233,7 @@ function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap }: { d:
           <OverflowMenu
             label={`Actions for ${d.label}`}
             actions={[
+              ...(onPlugin ? [{ label: "KOReader plugin…", icon: <Download />, onSelect: onPlugin }] : []),
               ...(queue && onQueue ? [{ label: "Queue…", icon: <Send />, onSelect: () => onQueue(queue) }] : []),
               ...(d.app_password && onCap ? [{ label: "Download limit…", icon: <Download />, onSelect: onCap }] : []),
               { label: "Revoke device", icon: <Close />, danger: true, onSelect: onRevoke },
@@ -248,6 +258,7 @@ function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap }: { d:
       <div className="caps" aria-label="Capabilities">
         {d.sync_key && <span className="cap"><Sync /> Progress sync</span>}
         {d.app_password && <span className="cap"><Book /> Catalogue</span>}
+        {plugin && <span className={`cap plugin-${plugin.tone}`}><Reader /> {plugin.text}</span>}
         {d.app_password?.download_cap_per_hour != null && <span className="cap"><Download /> {d.app_password.download_cap_per_hour ? `${d.app_password.download_cap_per_hour}/h` : "no limit"}</span>}
       </div>
       {queue && onQueue && (
@@ -256,6 +267,9 @@ function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap }: { d:
           <span>{queue.pending ? <><strong>{queue.pending}</strong> {queue.pending === 1 ? "book" : "books"} waiting to download</> : "Nothing queued"}</span>
           <span className="go" aria-hidden="true">Open queue</span>
         </button>
+      )}
+      {onPlugin && !d.plugin && (
+        <button className="btn sm ghost plugin-cta" onClick={onPlugin}><Download /> Set up with the KOReader plugin</button>
       )}
     </li>
   );
