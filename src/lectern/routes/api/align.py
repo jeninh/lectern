@@ -210,7 +210,9 @@ def create_credential(request: Request, auth: OwnerOnly, db: DbDep, body: Creden
 
 
 @router.delete("/worker-credentials/{credential_id}")
-def revoke_credential(request: Request, auth: OwnerOnly, db: DbDep, credential_id: int) -> dict:
+def revoke_credential(
+    request: Request, auth: OwnerOnly, db: DbDep, settings: SettingsDep, credential_id: int
+) -> dict:
     row = db.get(WorkerCredential, credential_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
@@ -224,6 +226,7 @@ def revoke_credential(request: Request, auth: OwnerOnly, db: DbDep, credential_i
             ip=client_ip(request),
             detail=row.label,
         )
-        jobs.reclaim_expired(db)  # its leases go back to the queue now, not at the next sweep
+        # its leases go back to the queue now, not at the next sweep
+        jobs.reclaim_expired(db, stall_s=settings.align_stall_seconds)
         db.commit()
     return _credential_json(row)

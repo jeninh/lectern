@@ -214,7 +214,7 @@ tokens stored hashed, heartbeats every `min(lease_s / 3, 30 s)`, `min(30 s × 2^
 reclaim of expired leases (every 30 s and before each claim), of leases held by revoked
 credentials, of the in-process worker's lease at startup (the server restarted or was
 OOM-killed mid-run, so nobody holds it any more), and of runs whose progress has not moved
-for `LECTERN_ALIGN_STALL_SECONDS` (default 3600) even though their worker still heartbeats, three attempts, and the result checks in the contract (schema, `work_id`,
+for `LECTERN_ALIGN_STALL_SECONDS` (default 3600; in the sweep and before each claim) even though their worker still heartbeats (each reclaim changes a job only if it is still the same lease it looked at, so a result, cancel, or new claim that lands in between is kept), three attempts, and the result checks in the contract (schema, `work_id`,
 `epub_sha256` and `audio_fingerprint` against the job snapshot, the snapshot against the
 work's current files, `char_end` against the real spine item lengths). A work whose EPUB or
 audio changes gets its active job cancelled and a new one queued; a succeeded alignment becomes

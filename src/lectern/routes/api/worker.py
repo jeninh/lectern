@@ -119,9 +119,14 @@ def claim_body(job: Job, token: str, lease_s: int) -> dict:
 
 
 @router.post("/jobs/claim")
-def claim(cred: WorkerAuth, db: DbDep, body: ClaimIn = small_json(ClaimIn)):
+def claim(cred: WorkerAuth, db: DbDep, settings: SettingsDep, body: ClaimIn = small_json(ClaimIn)):
     claimed = jobs.claim(
-        db, kinds=body.kinds, worker=body.worker, lease_s=body.lease_s, credential_id=cred.id
+        db,
+        kinds=body.kinds,
+        worker=body.worker,
+        lease_s=body.lease_s,
+        credential_id=cred.id,
+        stall_s=settings.align_stall_seconds,
     )
     if claimed is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)

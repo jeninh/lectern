@@ -92,7 +92,7 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
     with session_factory() as db:
         # The in-process worker of the previous server process is gone (a restart, a crash,
         # the OOM killer): its lease would otherwise hold the job for up to the lease length.
-        if n := jobs.reclaim_expired(db, orphaned_local=True):
+        if n := jobs.reclaim_expired(db, orphaned_local=True, stall_s=settings.align_stall_seconds):
             log.warning("requeued %d alignment job(s) interrupted by a restart", n)
     started: list = [Housekeeping(session_factory, settings)]
     missing = jobs.local_engine_missing(settings)
@@ -114,6 +114,7 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
                 poll_s=settings.worker_poll_seconds,
                 isolated=True,
                 memory_limit_mb=settings.align_memory_limit_mb,
+                stall_s=settings.align_stall_seconds,
             )
         )
         log.info(

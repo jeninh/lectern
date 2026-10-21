@@ -1295,3 +1295,83 @@ def test_retry_reruns_a_failed_alignment_with_the_model_that_failed(
     al = read_aloud_alignment(client, work_id)
     assert al["status"] == "pending" and al["job"]["status"] == "queued"
     assert al["job"]["error"] is None
+
+
+def test_claims_reclaim_stalled_runs_after_the_configured_stall_time(
+    client, owner, work_id, wc, settings, tmp_path
+):
+    """LECTERN_ALIGN_STALL_SECONDS applies to the reclaim before every claim, not only to
+    the sweep: here 10 min, so a run stuck for 20 min (under the 1 h default) is reclaimed."""
+    settings.align_stall_seconds = 600
+    stuck = (utcnow() - timedelta(minutes=20)).isoformat()
+    job_id = request_align(client, owner, work_id).json()["id"]
+    lease(claim(wc))
+    set_job(job_id, result={**db_job(job_id).result, "progress_at": stuck})
+    assert claim(wc).status_code == 204  # the external worker's claim reclaims it
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.error == "no progress for 20 min"
+
+    # the same through the in-process worker's claim
+    set_job(job_id, run_after=utcnow())
+    lease(claim(wc))
+    set_job(job_id, result={**db_job(job_id).result, "progress_at": stuck})
+    worker = isolated_worker(settings, tmp_path, stall_s=settings.align_stall_seconds)
+    assert not worker.run_once()  # reclaimed, then waiting out its backoff
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.attempts == 2
+    assert job.error == "no progress for 20 min"
+
+
+@pytest.mark.parametrize("race", ["succeeded", "cancelled_and_requeued", "claimed_again"])
+def test_reclaim_leaves_a_lease_that_changed_while_it_looked_alone(
+    client, owner, work_id, wc, settings, monkeypatch, race
+):
+    """Between reading the expired lease and requeueing it, the job finishes, is cancelled
+    and replaced, or is requeued and claimed again with a new token. The reclaim must not
+    overwrite any of that (nor, for the replacement, trip the one-active-job index)."""
+    job_id = request_align(client, owner, work_id).json()["id"]
+    lease(claim(wc))
+    set_job(job_id, lease_expires_at=utcnow() - timedelta(seconds=1))
+    new_hash = "f" * 64
+    replacement: list[int] = []
+    real_backoff = jobs.backoff_s
+
+    def concurrently(attempts, rng=None):
+        monkeypatch.setattr(jobs, "backoff_s", real_backoff)  # once
+        with session_factory()() as other:
+            job = other.get(Job, job_id)
+            if race == "succeeded":
+                job.status, job.finished_at, job.lease_expires_at = (
+                    JobStatus.SUCCEEDED,
+                    utcnow(),
+                    None,
+                )
+                other.scalar(select(Alignment)).status = AlignmentStatus.SUCCEEDED
+            elif race == "cancelled_and_requeued":
+                jobs.cancel_job(other, job)
+                new, _ = jobs.enqueue_align(other, settings.library_dir, other.get(Work, work_id))
+                other.flush()
+                replacement.append(new.id)
+            else:  # requeued by its worker and leased again by another
+                job.lease_token_hash = new_hash
+                job.lease_expires_at = utcnow() + timedelta(minutes=10)
+                job.attempts = 2
+            other.commit()
+        return real_backoff(attempts, rng)
+
+    monkeypatch.setattr(jobs, "backoff_s", concurrently)
+    with session_factory()() as db:
+        assert jobs.reclaim_expired(db) == 0
+    job = db_job(job_id)
+    assert job.error is None
+    with session_factory()() as db:
+        al = db.scalar(select(Alignment))
+    if race == "succeeded":
+        assert job.status == JobStatus.SUCCEEDED and al.status == AlignmentStatus.SUCCEEDED
+    elif race == "cancelled_and_requeued":
+        assert job.status == JobStatus.CANCELLED
+        assert db_job(replacement[0]).status == JobStatus.QUEUED
+        assert al.status == AlignmentStatus.PENDING
+    else:
+        assert job.status == JobStatus.LEASED and job.lease_token_hash == new_hash
+        assert al.status == AlignmentStatus.RUNNING

@@ -321,10 +321,12 @@ def reclaim_expired(
     now = now or utcnow()
     revoked = select(WorkerCredential.id).where(WorkerCredential.revoked_at.is_not(None))
     leased = db.scalars(
-        select(Job).where(
+        select(Job)
+        .where(
             Job.kind == KIND_ALIGN,  # transcode jobs belong to lectern.jobs.JobRunner
             Job.status == JobStatus.LEASED,
         )
+        .execution_options(populate_existing=True)
     ).all()
     revoked_ids = set(db.scalars(revoked))
     reclaimed = 0
@@ -339,11 +341,64 @@ def reclaim_expired(
             error = f"no progress for {round(stalled / 60)} min"
         else:
             continue
-        _retry_or_fail(db, job, error, retryable=True, now=now)
-        reclaimed += 1
+        reclaimed += _reclaim_one(db, job, error, now)
     if reclaimed:
         db.commit()
     return reclaimed
+
+
+def _reclaim_one(db: Session, job: Job, error: str, now: datetime) -> bool:
+    """Requeue (with backoff) or fail one lease, but only if it is still exactly the lease
+    that was looked at: the same job, still ``leased``, with the same token hash. A worker
+    that succeeded, failed, or was cancelled in the meantime (and a fresh claim of a requeued
+    job, which has a new token) is left alone; requeueing a cancelled job next to its
+    replacement would also break the one-active-job-per-work index and roll everything back.
+    """
+    retry = job.attempts < job.max_attempts
+    values: dict = {
+        "error": error[:2000],
+        "lease_expires_at": None,
+        "heartbeat_at": None,
+        "updated_at": now,
+    }
+    if retry:
+        values.update(
+            status=JobStatus.QUEUED,
+            lease_token_hash=None,  # a late upload from the old lease is 409 lease_lost
+            run_after=now + timedelta(seconds=backoff_s(job.attempts)),
+            result=None,
+        )
+    else:
+        values.update(status=JobStatus.FAILED, finished_at=now)
+    done = db.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == JobStatus.LEASED,
+            Job.lease_token_hash == job.lease_token_hash,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    db.expire(job)
+    if done != 1:
+        return False
+    alignment = (
+        db.scalar(
+            select(Alignment)
+            .where(Alignment.work_id == job.work_id)
+            .execution_options(populate_existing=True)
+        )
+        if job.work_id is not None
+        else None
+    )
+    if alignment is not None:
+        if retry and alignment.status == AlignmentStatus.RUNNING:
+            alignment.status = AlignmentStatus.PENDING
+        elif not retry and alignment.status != AlignmentStatus.SUCCEEDED:
+            alignment.status = AlignmentStatus.FAILED
+            alignment.error = values["error"]
+    return True
 
 
 def _since(job: Job, key: str, now: datetime) -> float | None:
@@ -366,14 +421,16 @@ def claim(
     lease_s: int,
     credential_id: int | None,
     now: datetime | None = None,
+    stall_s: float = STALL_S,
 ) -> tuple[Job, str] | None:
-    """Atomically lease the next runnable job. Returns ``(job, lease_token)`` or ``None``."""
+    """Atomically lease the next runnable job. Returns ``(job, lease_token)`` or ``None``.
+    ``stall_s`` is ``LECTERN_ALIGN_STALL_SECONDS`` for the reclaim that runs first."""
     now = now or utcnow()
     lease_s = max(LEASE_MIN_S, min(LEASE_MAX_S, int(lease_s)))
     kinds = [k for k in kinds if k == KIND_ALIGN]  # only align jobs leave the server
     if not kinds:
         return None
-    reclaim_expired(db, now)
+    reclaim_expired(db, now, stall_s=stall_s)
     token = new_secret()
     runnable = select(Job.id).where(
         Job.status == JobStatus.QUEUED, Job.kind.in_(kinds), Job.run_after <= now

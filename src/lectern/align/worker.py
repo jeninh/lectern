@@ -133,8 +133,10 @@ class LocalWorker:
         memory_limit_mb: int | None = None,
         transcript: Path | None = None,
         child_command: list[str] | None = None,
+        stall_s: float = jobs.STALL_S,
     ) -> None:
         self.session_factory = session_factory
+        self.stall_s = stall_s
         self.data_dir = data_dir
         self.library = library
         self.transcriber = transcriber
@@ -194,6 +196,7 @@ class LocalWorker:
                 worker=self.name,
                 lease_s=self.lease_s,
                 credential_id=None,
+                stall_s=self.stall_s,
             )
             if claimed is None:
                 return False
