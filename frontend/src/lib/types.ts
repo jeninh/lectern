@@ -311,7 +311,7 @@ export type ReadAloudState = "unavailable" | "not_generated" | "generating" | "r
 export interface ReadAloudStatus {
   work_id: number;
   status: ReadAloudState;
-  reason: "no_alignment" | "alignment_stale" | "no_audio" | "no_ebook" | "missing_file" | null;
+  reason: "no_alignment" | "alignment_stale" | "no_audio" | "no_ebook" | "needs_epub" | "missing_file" | null;
   message: string | null;
   readalong: boolean;
   alignment: AlignmentSummary | null;
@@ -504,6 +504,8 @@ export interface EditorFile {
   size: number;
   sha256: string;
   partial_md5: string | null;
+  media_type: string;
+  format: "EPUB" | "PDF" | "CBZ";
   added_at: string | null;
   primary: boolean;
 }
@@ -626,4 +628,28 @@ export type QueueResultStatus = "queued" | "requeued" | "already_queued" | "not_
 export interface QueueResult {
   work_id: number;
   status: QueueResultStatus;
+}
+
+// --- Page-based books (PDF, CBZ): GET /api/files/:id/pages ----------------------------------
+
+export interface PageProgress {
+  page: number | null;
+  percentage: number;
+  device: string;
+  from_web: boolean;
+  updated_at: string | null;
+}
+
+export interface PagesInfo {
+  file_id: number;
+  work_id: number;
+  title: string;
+  media_type: string;
+  format: "PDF" | "CBZ";
+  /** Comics: the page count. PDFs: null (the PDF itself says). */
+  pages: number | null;
+  rtl: boolean;
+  /** PDFs: where pdf.js loads the file. Comics: null (pages are images). */
+  url: string | null;
+  progress: PageProgress | null;
 }

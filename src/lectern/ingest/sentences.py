@@ -93,17 +93,28 @@ def epub_sentences(path: Path) -> list[dict]:
 
 def primary_epub(db: Session, work_id: int) -> BookFile | None:
     """The EPUB the reader opens and sentence lists are built from: the one chosen in the
-    editor (``works.primary_file_id``), else the first one added."""
+    editor (``works.primary_file_id``), else the first one added. PDFs and comics are never
+    the primary EPUB: they have no text, so sentences, alignment, and read-along skip them."""
+    from lectern.ingest.formats import EPUB
     from lectern.models import Work
 
     chosen = db.scalar(select(Work.primary_file_id).where(Work.id == work_id))
     if chosen is not None:
         book = db.get(BookFile, chosen)
-        if book is not None and book.work_id == work_id and book.kind == FileKind.EBOOK:
+        if (
+            book is not None
+            and book.work_id == work_id
+            and book.kind == FileKind.EBOOK
+            and book.media_type == EPUB
+        ):
             return book
     return db.scalar(
         select(BookFile)
-        .where(BookFile.work_id == work_id, BookFile.kind == FileKind.EBOOK)
+        .where(
+            BookFile.work_id == work_id,
+            BookFile.kind == FileKind.EBOOK,
+            BookFile.media_type == EPUB,
+        )
         .order_by(BookFile.added_at, BookFile.id)
         .limit(1)
     )

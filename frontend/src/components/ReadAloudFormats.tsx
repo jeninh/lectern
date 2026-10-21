@@ -2,11 +2,26 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { bytes } from "../lib/format";
+import { READALONG_NEEDS_EPUB, hasEpub } from "../lib/formats";
 import { buildReadAloud, readAloudStatus } from "../lib/readalong";
 import type { ReadAloudStatus, Work } from "../lib/types";
 import { Book, Download, Headphones, Sync } from "./Icons";
 
 const POLL_MS = 1500;
+
+/** Read-along, alignment, and the narrated EPUB are built on text; PDFs and comics have none. */
+export function NeedsEpub() {
+  return (
+    <li className="slot" aria-disabled="true" data-state="needs-epub">
+      <Sync />
+      <span>
+        <strong>Read-along</strong>{" "}
+        <span className="hint">{READALONG_NEEDS_EPUB}. PDFs and comics have pages, not text, so alignment, read-along, and the narrated EPUB are unavailable.</span>
+      </span>
+      <span />
+    </li>
+  );
+}
 
 /**
  * Read-along rows for a work's Formats list: open the web read-along, and the EPUB 3 read-aloud
@@ -14,6 +29,11 @@ const POLL_MS = 1500;
  * while `active` (an expanded card or an open sheet), and polls only while building.
  */
 export function ReadAloudFormats({ work, active }: { work: Work; active: boolean }) {
+  if (!hasEpub(work) && work.files.some((f) => f.kind === "ebook")) return <NeedsEpub />;
+  return <ReadAloudRows work={work} active={active} />;
+}
+
+function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
   const [st, setSt] = useState<ReadAloudStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,6 +76,7 @@ export function ReadAloudFormats({ work, active }: { work: Work; active: boolean
 
   if (st.status === "unavailable") {
     const hint =
+      st.reason === "needs_epub" ? READALONG_NEEDS_EPUB :
       st.reason === "no_audio" ? "Needs a linked audiobook" :
       st.reason === "alignment_stale" ? "Audio and text changed; waiting for re-alignment" :
       st.reason === "missing_file" ? "A file is missing from the library folder" :

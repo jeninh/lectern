@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from lectern.config import Settings
 from lectern.fsops import move_file
 from lectern.ingest.audio import audio_changed, relayout
+from lectern.ingest.library import book_file_name
 from lectern.ingest.sentences import ensure_text_sentences
 from lectern.jobs import EXT
 from lectern.models import (
@@ -69,13 +70,14 @@ def merge_work(
     target_had_audio = (
         db.scalar(select(AudioTrack.id).where(AudioTrack.work_id == target.id).limit(1)) is not None
     )
-    has_ebook = any(f.kind == FileKind.EBOOK for f in target.files)
+    filed = list(target.files)
 
     for f in db.scalars(select(BookFile).where(BookFile.work_id == source.id)):
         rel = f.rel_path
-        if f.kind == FileKind.EBOOK and has_ebook:
-            rel = f"book-{f.sha256[:8]}.epub"
+        if f.kind == FileKind.EBOOK:
+            rel = book_file_name(filed, f.media_type, f.sha256)
         rel = _free_name(dst_dir, rel, f.sha256)
+        filed.append(f)
         if (src_dir / f.rel_path).exists():
             move(src_dir / f.rel_path, dst_dir / rel, f.sha256)
         f.work_id, f.rel_path = target.id, rel

@@ -25,6 +25,8 @@ dependencies = [
     "mcp>=2.3,<3",
     "resvg-py>=0.5",
     "fonttools>=4.50",
+    "pypdf>=5.1",
+    "pypdfium2>=4.30",
 ]
 
 [project.optional-dependencies]

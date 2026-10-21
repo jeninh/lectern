@@ -25,6 +25,7 @@ from lectern.align import jobs as align_jobs
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS
 from lectern.editing import EditError, Journal, WorkPatch
 from lectern.fsops import LIBRARY_LOCK
+from lectern.ingest import formats
 from lectern.models import (
     Alignment,
     Role,
@@ -147,6 +148,8 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
                 "size": f.size,
                 "sha256": f.sha256,
                 "partial_md5": f.partial_md5,
+                "media_type": f.media_type,
+                "format": formats.label_of(f.media_type),
                 "added_at": iso(f.added_at),
                 "primary": primary is not None and f.id == primary.id,
             }

@@ -184,7 +184,7 @@ def test_limits_types_quota_and_idempotency(client, owner, settings):
     settings.upload_max_active = 3
     r = create(client, csrf, b"x" * 10_001)
     assert r.status_code == 413 and r.json()["detail"] == "too_large"
-    r = create(client, csrf, b"x" * 10, media="application/pdf")
+    r = create(client, csrf, b"x" * 10, media="application/x-rar")
     assert r.status_code == 415
     r = api_post(
         client, "/api/uploads", csrf, {"filename": "a", "size": 0, "media_type": "audio/mpeg"}

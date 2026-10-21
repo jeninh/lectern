@@ -291,8 +291,8 @@ def test_duplicates_and_wrong_formats_are_explained(client, owner, settings, tmp
     fake.write_bytes(b"this is not a zip at all" * 10)
     r = upload(client, csrf, imp2["id"], fake)
     assert r.status_code == 422 and r.json()["detail"] == "not_epub"
-    r = api_post(client, "/api/uploads", csrf, {"filename": "x.pdf", "size": 10,
-                 "media_type": "application/pdf", "import_id": imp2["id"]})  # fmt: skip
+    r = api_post(client, "/api/uploads", csrf, {"filename": "x.cbr", "size": 10,
+                 "media_type": "application/vnd.comicbook-rar", "import_id": imp2["id"]})  # fmt: skip
     assert r.status_code == 415 and r.json()["detail"] == "unsupported_media_type"
     r = api_post(client, "/api/uploads", csrf, {"filename": "huge.m4b", "size": settings.upload_max_bytes + 1,
                  "media_type": "audio/mp4", "import_id": imp2["id"]})  # fmt: skip

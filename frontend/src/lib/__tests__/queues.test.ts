@@ -18,11 +18,11 @@ describe("summarizeQueueResults", () => {
     const r = summarizeQueueResults([
       { work_id: 1, status: "queued" }, { work_id: 2, status: "not_visible_to_device" }, { work_id: 3, status: "no_ebook" },
     ], dev(4, "Boox", false));
-    expect(r.text).toBe("Sent 1 book to Rex’s Boox · 1 book not shared with Rex · 1 book without an EPUB");
+    expect(r.text).toBe("Sent 1 book to Rex’s Boox · 1 book not shared with Rex · 1 book without an EPUB, PDF, or comic");
     expect(r.kind).toBe("info");
   });
   it("is an error only when nothing landed", () => {
-    expect(summarizeQueueResults([{ work_id: 2, status: "no_ebook" }], kobo)).toEqual({ text: "1 book without an EPUB", kind: "error" });
+    expect(summarizeQueueResults([{ work_id: 2, status: "no_ebook" }], kobo)).toEqual({ text: "1 book without an EPUB, PDF, or comic", kind: "error" });
     expect(summarizeQueueResults([{ work_id: 2, status: "already_queued" }], kobo)).toEqual({ text: "1 book already waiting on Kobo", kind: "info" });
   });
 });

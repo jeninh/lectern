@@ -134,7 +134,7 @@ describe("UploadManager", () => {
       throw new ApiError(413, "That file is larger than this server accepts.", "too_large");
     };
     const mgr = new UploadManager(server, nodeHasher(), memStore(), async () => {});
-    expect(mgr.add([file("x", "notes.pdf")])).toEqual(["notes.pdf"]);
+    expect(mgr.add([file("x", "saga.cbr")])).toEqual(["saga.cbr"]);
     mgr.add([file("x".repeat(10))]);
     await settle(mgr);
     expect(mgr.items[0]).toMatchObject({ state: "failed", error: "Too large for this server. Ask the owner to raise the upload limit." });

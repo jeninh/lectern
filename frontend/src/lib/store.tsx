@@ -212,7 +212,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       for (const book of groupFiles(files)) rejected.push(...uploadManager.add(book.files, { label: book.label }));
       // Folders carry cover images and cue sheets; only a lone wrong file deserves a warning.
       const shown = files.some((f) => f.relPath || f.webkitRelativePath) ? rejected.filter((n) => !/\.(jpe?g|png|webp|gif|txt|nfo|cue|m3u8?|sfv|db|ini|ds_store|pdf|json|xml|opf)$/i.test(n) && !n.startsWith(".")) : rejected;
-      if (shown.length) toast(`Wrong format, skipped: ${shown.slice(0, 4).join(", ")}${shown.length > 4 ? ` and ${shown.length - 4} more` : ""}. Lectern takes EPUB, M4B, MP3, OGG/Opus, and FLAC.`, "error");
+      if (shown.length) toast(`Wrong format, skipped: ${shown.slice(0, 4).join(", ")}${shown.length > 4 ? ` and ${shown.length - 4} more` : ""}. Lectern takes EPUB, PDF, CBZ, M4B, MP3, OGG/Opus, and FLAC.`, "error");
     },
     [uploadManager, toast],
   );

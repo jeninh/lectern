@@ -383,6 +383,29 @@ def test_upload_review_and_file_a_new_book(app, home, settings):
     assert [f["kind"] for f in book["formats"]] == ["ebook"]
 
 
+def test_upload_and_file_a_pdf_and_a_comic(app, home, settings):
+    from tests.test_pdf_comics import make_cbz, make_pdf
+
+    mcp = MCP(app, home["mia"].key("upload", "read"))
+    files = {
+        "Atlas.pdf": make_pdf(settings.data_dir / "Atlas.pdf", title="Atlas", author="A. Maker"),
+        "Strip.cbz": make_cbz(settings.data_dir / "Strip.cbz"),
+    }
+    labels = {}
+    for name, path in files.items():
+        out = mcp.ok("upload_book", filename=name,
+                     content_base64=base64.b64encode(path.read_bytes()).decode())  # fmt: skip
+        assert out["status"] == "ready"
+        book = mcp.ok(
+            "get_book", book_id=mcp.ok("confirm_import", import_id=out["import_id"])["book"]["id"]
+        )
+        labels[name] = [(f["kind"], f["format"]) for f in book["formats"]]
+    assert labels == {"Atlas.pdf": [("ebook", "PDF")], "Strip.cbz": [("ebook", "CBZ")]}
+    recent = mcp.ok("list_recent")["books"]
+    assert [b["formats"] for b in recent[:2]] == [["CBZ"], ["PDF"]]
+    assert ["EPUB"] in [b["formats"] for b in recent[2:]]
+
+
 def test_upload_proposes_joining_an_existing_book(app, home, settings):
     mcp = MCP(app, home["owner"].key("upload"))
     epub = make_epub(settings.data_dir / "Alpha2.epub", title="Alpha", authors=["Author Alpha"],
@@ -485,8 +508,10 @@ def test_a_bad_whole_file_checksum_fails_the_upload(app, home, settings):
     ok, err = mcp.call("upload_book", filename="C.epub", total_size=len(data), sha256="0" * 64,
                        content_base64=base64.b64encode(data).decode())  # fmt: skip
     assert not ok and "checksum_mismatch" in err
-    ok, err = mcp.call("upload_book", filename="C.pdf", content_base64="AAAA")
-    assert not ok and "unsupported_media_type" in err
+    ok, err = mcp.call("upload_book", filename="C.cbr", content_base64="AAAA")
+    assert not ok and "unsupported_media_type" in err and "convert it to CBZ" in err
+    ok, err = mcp.call("upload_book", filename="C.pdf", content_base64="UEsDBA==")
+    assert not ok and "not_pdf" in err  # magic bytes must match the extension
     ok, err = mcp.call("upload_book", filename="C.epub", content_base64="UEsDBA==")
     assert not ok and "not_epub" in err
     assert open_imports() == []  # neither failed one-shot upload left an import behind
