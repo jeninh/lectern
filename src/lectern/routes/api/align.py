@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from lectern.align import jobs
 from lectern.align.transcribe import MODELS
 from lectern.models import (
+    AlignmentStatus,
     Job,
     JobStatus,
     Role,
@@ -109,12 +110,24 @@ def request_align(
         # A worker is spending CPU-hours on it; force would throw that away on every click.
         # Cancelling is still possible, explicitly, with POST /api/jobs/{id}/cancel.
         raise HTTPException(status.HTTP_409_CONFLICT, "job_running")
+    alignment = jobs.work_alignment(db, work.id)
+    retry = _retry_model(db, work.id)
+    if (
+        body.model is None
+        and retry is None
+        and alignment is not None
+        and alignment.status == AlignmentStatus.FAILED
+        and jobs.out_of_memory(alignment.error)
+    ):
+        # Out of memory with the smallest model: never quietly rerun something as big or
+        # bigger. A rerun names its model (the editor's Re-run alignment always does).
+        raise HTTPException(status.HTTP_409_CONFLICT, "out_of_memory_choose_model")
     try:
         job, created = jobs.enqueue_align(
             db,
             settings.library_dir,
             work,
-            model=body.model or settings.align_model,
+            model=body.model or retry or settings.align_model,
             created_by=auth.user.id,
             force=body.force,
         )
@@ -150,6 +163,12 @@ def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
         )
         db.commit()
     return jobs.job_json(db, job, _worker_names(db))
+
+
+def _retry_model(db: Session, work_id: int) -> str | None:
+    """A Retry (no model named) of a failed alignment: the model that failed, or a smaller
+    one after running out of memory (``lectern.align.jobs.retry_model``)."""
+    return jobs.retry_model(jobs.work_alignment(db, work_id))
 
 
 def _worker_names(db: Session) -> dict[int, str]:
@@ -200,7 +219,9 @@ def create_credential(request: Request, auth: OwnerOnly, db: DbDep, body: Creden
 
 
 @router.delete("/worker-credentials/{credential_id}")
-def revoke_credential(request: Request, auth: OwnerOnly, db: DbDep, credential_id: int) -> dict:
+def revoke_credential(
+    request: Request, auth: OwnerOnly, db: DbDep, settings: SettingsDep, credential_id: int
+) -> dict:
     row = db.get(WorkerCredential, credential_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
@@ -214,6 +235,7 @@ def revoke_credential(request: Request, auth: OwnerOnly, db: DbDep, credential_i
             ip=client_ip(request),
             detail=row.label,
         )
-        jobs.reclaim_expired(db)  # its leases go back to the queue now, not at the next sweep
+        # its leases go back to the queue now, not at the next sweep
+        jobs.reclaim_expired(db, stall_s=settings.align_stall_seconds)
         db.commit()
     return _credential_json(row)

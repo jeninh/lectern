@@ -675,7 +675,9 @@ def get_book(ctx: Context, book_id: int) -> dict:
             "audio": {"tracks": tracks[0], "duration_s": round(float(tracks[1] or 0), 1)}
             if tracks[0]
             else None,
-            "alignment": jobs.alignment_json(c.db, jobs.work_alignment(c.db, work.id)),
+            "alignment": jobs.alignment_json(
+                c.db, jobs.work_alignment(c.db, work.id), detailed=can_edit_library(c.user)
+            ),
             "alignment_job": {"id": active.id, "status": active.status.value} if active else None,
             "progress": {
                 "percent": pj["percent"],

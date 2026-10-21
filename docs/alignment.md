@@ -35,12 +35,16 @@ Who runs the job depends on the installation:
 | Installation | What happens |
 | --- | --- |
 | `pip install 'lectern[align]'`, or the image built with `--build-arg LECTERN_EXTRAS=align` (1.62 GB vs. 1.04 GB default, both with ffmpeg; plus ~0.46 GB per downloaded `small` model under `/data`) | The server runs jobs itself, one at a time, in a background thread (`LECTERN_ALIGN_LOCAL_WORKER=1`, the default). |
-| Default image / plain `lectern` | Jobs wait in the queue for an external worker (`lectern worker`, below). The log says so at startup. |
+| Default image / plain `lectern` (e.g. a Raspberry Pi with an empty `LECTERN_EXTRAS`) | Jobs wait in the queue for an external worker (`lectern worker`, below). The log says so at startup, and while no worker has connected in the last 5 minutes the book's Formats card says alignment cannot run, with a link to this section, instead of "Aligning…". The jobs stay queued and start as soon as a worker connects. |
 | Either, with `LECTERN_ALIGN_LOCAL_WORKER=0` | The server never transcribes, even with the extra installed. Use this on a small host. |
 
 `LECTERN_BACKGROUND_JOBS=0` turns off the rescans, lease sweeps, and the local worker
 altogether (the server then only serves; jobs can still be requested and run by external
 workers, but expired leases are only reclaimed when a worker claims).
+
+To turn alignment on, either rebuild the image with the engine
+(`docker compose build --build-arg LECTERN_EXTRAS=align`, or set `LECTERN_EXTRAS=align` in
+`.env` for `deploy/tailscale/`) or connect an external worker as described below.
 
 A job can also be requested by hand: `POST /api/works/{id}/align {"model": "medium",
 "force": true}` (owner or member). `force` cancels the active job first. Jobs are listed at
@@ -80,7 +84,9 @@ vCPUs with 1.4 GB peak memory** on a 13-minute recording (see [Benchmark](#bench
    ```
 
    Options: `--model`, `--device`, `--compute-type`, `--threads`, `--models-dir`,
-   `--lease` (seconds, 60–3600, default 600), `--poll` (default 15 s), `--workdir` (scratch
+   `--lease` (seconds, 60–3600, default 600), `--poll` (default 15 s, at most 240 s: the
+   server treats a worker silent for 5 minutes as gone, so a longer value is lowered with a
+   warning), `--workdir` (scratch
    space for the downloaded EPUB and audio, deleted after each job), `--once`. Models are
    downloaded from Hugging Face on first use. `http://` URLs are refused unless you pass
    `--allow-http` (a trusted LAN only: the credential travels in every request).
@@ -137,6 +143,7 @@ stream and transcribed in overlapping windows, so memory stays flat however long
 | `LECTERN_BACKGROUND_JOBS` | `1` | Rescans, lease sweeps, and the local worker |
 | `LECTERN_WORKER_POLL_SECONDS` | `10` | Local worker's idle poll |
 | `LECTERN_JOB_SWEEP_SECONDS` | `30` | Expired-lease reclaim interval |
+| `LECTERN_ALIGN_STALL_SECONDS` | `3600` | A run whose progress has not moved this long is reclaimed (retried, then failed) |
 | `LECTERN_TRACK_RESCAN_SECONDS` | `60` | Audio discovery interval |
 
 Models are cached under `<LECTERN_DATA_DIR>/models` (the server) or the Hugging Face cache
@@ -206,8 +213,10 @@ whole-book coverage well under 100 %. That is expected and correct.
 `/api/worker/*` (the in-process transcode jobs from milestone 2 are `lectern.jobs` and share
 only the `jobs` table), so the rules exist once: the single-statement atomic claim, 256-bit lease
 tokens stored hashed, heartbeats every `min(lease_s / 3, 30 s)`, `min(30 s × 2^(a−1), 1 h) ± 20 %` backoff,
-reclaim of expired leases (every 30 s and before each claim) and of leases held by revoked
-credentials, three attempts, and the result checks in the contract (schema, `work_id`,
+reclaim of expired leases (every 30 s and before each claim), of leases held by revoked
+credentials, of the in-process worker's lease at startup (the server restarted or was
+OOM-killed mid-run, so nobody holds it any more), and of runs whose progress has not moved
+for `LECTERN_ALIGN_STALL_SECONDS` (default 3600; in the sweep and before each claim) even though their worker still heartbeats (each reclaim changes a job only if it is still the same lease it looked at, so a result, cancel, or new claim that lands in between is kept), three attempts, and the result checks in the contract (schema, `work_id`,
 `epub_sha256` and `audio_fingerprint` against the job snapshot, the snapshot against the
 work's current files, `char_end` against the real spine item lengths). A work whose EPUB or
 audio changes gets its active job cancelled and a new one queued; a succeeded alignment becomes
@@ -220,7 +229,25 @@ alignment has succeeded on this server. After that, `eta.seconds` is the job's a
 divided by the median speed (audio seconds per wall-clock second) of the last five successful
 runs of the same model (any model if none), scaled by the remaining progress for a running job
 and including the jobs queued ahead of it. `eta.basis` says how many runs it rests on. It
-assumes one worker draining the queue in order.
+assumes one worker draining the queue in order. Before any run has succeeded, a running job
+that is at least 5 % done is extrapolated from its own progress so far (`eta.speed` is `null`,
+`eta.basis` is "this run's progress so far").
+
+The book's Formats card (`GET /api/works/{id}/read-aloud`, `alignment.job`) shows the running
+job's heartbeat progress and ETA, a failed attempt waiting out its backoff, and, once attempts
+are exhausted, the error with a **Retry** button for owners and members.
+
+- Retry reruns the model that failed, except after running out of memory (the memory cap,
+  a `MemoryError`, the OOM killer, or a worker reporting out of memory). Then it steps one
+  size down (`medium` → `small` → `base` → `tiny`; turbo and distil count as large) and the
+  button says so ("Retry with base"). It never repeats the model that ran out of memory.
+- After running out of memory on `tiny` there is no Retry button, and
+  `POST /api/works/{id}/align {}` answers `409 out_of_memory_choose_model`: rerun it
+  deliberately from the editor (naming a model) after changing the memory limit or window,
+  or with an external worker.
+- Readers see that alignment failed, not why: the error text (which can quote file paths
+  and the alignment process's log) is `null` for them in the read-aloud status, the
+  tracks and sentences responses, and the AI tools.
 
 ## Cross-format sync
 
@@ -388,7 +415,8 @@ progress lines from the child's stdout. The server keeps the lease and the heart
 | Any other signal (e.g. `SIGSEGV`) or exit code | Retried under the usual attempts and backoff (3 attempts) |
 | Server shutting down | Child terminated, job **released** without spending an attempt |
 | Lease lost (reclaimed, cancelled, credential revoked) | Child killed, result discarded |
-| Server itself killed | Child exits; the lease expires and the sweep reclaims the job |
+| Server itself killed | Child exits; the restarted server requeues the job at once (an attempt is spent, so a server that keeps dying ends in a visible failure) |
+| Child hangs but stays alive | Reclaimed after `LECTERN_ALIGN_STALL_SECONDS` without progress, then retried or failed |
 
 External workers (`lectern worker --server …`) transcribe in their own process as before. They
 are already isolated from the server and use the same windows (`--window`, `--overlap`).

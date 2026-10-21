@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from lectern.access import can_see_work, visible_works
+from lectern.access import can_edit_library, can_see_work, visible_works
 from lectern.align import jobs as align_jobs
 from lectern.editing import Journal
 from lectern.fsops import LIBRARY_LOCK
@@ -52,10 +52,11 @@ def _visible_work(db, user, work_id: int) -> Work:
     return work
 
 
-def _alignment_json(db, work_id: int) -> dict | None:
-    """Status, coverage, and the matcher's diagnosis (``lectern.align.jobs.alignment_json``)."""
+def _alignment_json(db, work_id: int, user) -> dict | None:
+    """Status, coverage, and the matcher's diagnosis (``lectern.align.jobs.alignment_json``);
+    the error text only for owners and members."""
     al = db.scalar(select(Alignment).where(Alignment.work_id == work_id))
-    return align_jobs.alignment_json(db, al)
+    return align_jobs.alignment_json(db, al, detailed=can_edit_library(user))
 
 
 def _tracks(db, work_id: int) -> list[AudioTrack]:
@@ -103,7 +104,7 @@ def tracks(auth: Auth, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
         "work_id": work_id,
         "audio_fingerprint": audio_fingerprint(t.sha256 for t in rows),
         "total_duration_s": round(sum(t.duration_s for t in rows), 3),
-        "alignment": _alignment_json(db, work_id),
+        "alignment": _alignment_json(db, work_id, auth.user),
         "tracks": out,
         "transcode": {
             "status": job.status.value,
@@ -174,7 +175,7 @@ def sentences(
     return {
         "work_id": work_id,
         "count": count or 0,
-        "alignment": _alignment_json(db, work_id),
+        "alignment": _alignment_json(db, work_id, auth.user),
         "sentences": [
             {
                 "n": s.n,
