@@ -1011,3 +1011,57 @@ class DeviceQueueItem(Base):
         ForeignKey("users.id", ondelete="SET NULL"), default=None
     )
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+# --- KOReader plugin setup (migration 0011) ---------------------------------------------------
+
+
+class DeviceBootstrap(Base):
+    """One-time setup secret carried by a device's ``lectern.koplugin`` zip.
+
+    Minted each time the device's user downloads the zip (only the SHA-256 is kept, so the
+    zip cannot be downloaded again with the same secret), valid for 7 days, exchanged once for
+    the device's long-lived credentials (``lectern.koplugin``), and revocable. Downloading a new
+    zip or revoking the device revokes every unused one.
+    """
+
+    __tablename__ = "device_bootstraps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    sync_key_id: Mapped[int] = mapped_column(
+        ForeignKey("sync_keys.id", ondelete="CASCADE"), index=True
+    )
+    secret_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # The address baked into the zip, e.g. http://100.101.102.103:8080 (the Tailscale IP).
+    server_url: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    used_ip: Mapped[str | None] = mapped_column(String(64), default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+class DevicePairingCode(Base):
+    """A 6-digit code shown in the web app to (re-)pair a device's plugin.
+
+    Valid for 5 minutes, single use, 5 attempts: every wrong code entered for the user counts
+    against their one active code, and the fifth wrong one burns it (``revoked_at``). The code
+    is stored as SHA-256 with a per-row salt; a code alone is only 20 bits, which is why the
+    attempt limit and the rate limits, not the hash, are what protect it.
+    """
+
+    __tablename__ = "device_pairing_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    sync_key_id: Mapped[int] = mapped_column(
+        ForeignKey("sync_keys.id", ondelete="CASCADE"), index=True
+    )
+    salt: Mapped[str] = mapped_column(String(32))
+    code_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)

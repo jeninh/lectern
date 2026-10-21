@@ -82,6 +82,20 @@ function describe(e: ActivityEvent, self: string | undefined): { icon: JSX.Eleme
       return { icon: <Alert />, cls: "warn", text: <>{who} signed in from a new device <strong>{e.target}</strong></> };
     case "device.first_use":
       return { icon: <Devices />, cls: "ok", text: <><strong>{e.target}</strong> connected for the first time</> };
+    case "koplugin.download":
+      return { icon: <Download />, cls: "", text: <>{who} downloaded the KOReader plugin for <strong>{e.target}</strong></> };
+    case "koplugin.bootstrap":
+      return { icon: <Devices />, cls: "ok", text: <>KOReader plugin on <strong>{e.target}</strong> set itself up</> };
+    case "koplugin.bootstrap_failed":
+      return { icon: <Alert />, cls: "warn", text: <>A KOReader plugin setup link was refused{e.target ? <> for <strong>{e.target}</strong></> : null} <span>({e.detail})</span></> };
+    case "koplugin.pairing_code":
+      return { icon: <Devices />, cls: "", text: <>{who} showed a pairing code for <strong>{e.target}</strong></> };
+    case "koplugin.paired":
+      return { icon: <Devices />, cls: "ok", text: <><strong>{e.target}</strong> paired with a code</> };
+    case "koplugin.pair_failed":
+      return { icon: <Alert />, cls: "warn", text: <>Wrong pairing code for {who} <span>({e.detail})</span></> };
+    case "koplugin.revoke":
+      return { icon: <Devices />, cls: "warn", text: <>{who} revoked the plugin setup link for <strong>{e.target}</strong></> };
     case "device.forget":
       return { icon: <Devices />, cls: "", text: <>{who} forgot browser <strong>{e.target}</strong></> };
     case "device.download_cap":
