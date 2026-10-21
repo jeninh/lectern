@@ -10,6 +10,7 @@ import { bytes, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { clock, usePlayer } from "../lib/player";
 import { useStore } from "../lib/store";
+import { bookFiles, readerPath } from "../lib/formats";
 import type { TracksResponse, Work } from "../lib/types";
 
 export function ListeningPage() {
@@ -93,7 +94,7 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
   const lowReady = !!info?.tracks.length && info.tracks.every((t) => t.variants.low);
   const lowSize = info?.tracks.reduce((s, t) => s + (t.variants.low?.size ?? 0), 0) ?? 0;
   const origSize = info?.tracks.reduce((s, t) => s + t.size, 0) ?? 0;
-  const ebook = w.files.some((f) => f.kind === "ebook");
+  const ebook = bookFiles(w).length > 0;
 
   const transcode = async () => {
     try {
@@ -137,7 +138,7 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
               </button>
               <span id="saver-l">Data saver</span>
             </span>
-            {ebook && <Link className="btn sm ghost" to={`/app/reader/${w.id}`}><Reader /> Read</Link>}
+            {ebook && <Link className="btn sm ghost" to={readerPath(w)}><Reader /> Read</Link>}
           </div>
           <p className="hint" id="saver-d">
             {p.dataSaver

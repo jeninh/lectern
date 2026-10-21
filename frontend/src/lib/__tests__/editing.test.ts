@@ -35,8 +35,8 @@ function state(over: Partial<EditorState> = {}): EditorState {
       generated: { url: null, style: null, seed: 0, effective_style: "classic", styles: ["classic", "modern", "minimal"] },
     },
     files: [
-      { id: 10, kind: "ebook", rel_path: "a.epub", size: 1, sha256: "x", partial_md5: null, added_at: null, primary: true },
-      { id: 11, kind: "ebook", rel_path: "b.epub", size: 1, sha256: "y", partial_md5: null, added_at: null, primary: false },
+      { id: 10, kind: "ebook", rel_path: "a.epub", size: 1, sha256: "x", partial_md5: null, media_type: "application/epub+zip", format: "EPUB", added_at: null, primary: true },
+      { id: 11, kind: "ebook", rel_path: "b.epub", size: 1, sha256: "y", partial_md5: null, media_type: "application/epub+zip", format: "EPUB", added_at: null, primary: false },
     ],
     tracks: [
       { id: 1, position: 0, title: "Part 1", rel_path: "01.mp3", duration_s: 60, size: 1, codec: "mp3", sha256: "a", chapters: [{ title: "One", start_s: 0 }] },

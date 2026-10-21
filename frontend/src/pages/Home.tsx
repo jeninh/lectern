@@ -38,7 +38,7 @@ export function HomePage() {
     : undefined;
 
   const uploadAction = canUpload ? (
-    <button className="btn primary" onClick={pickBooks}><Upload /> Upload EPUBs</button>
+    <button className="btn primary" onClick={pickBooks}><Upload /> Upload books</button>
   ) : undefined;
 
   return (
@@ -57,7 +57,7 @@ export function HomePage() {
             ) : items.length === 0 ? (
               worksLoaded && works.length === 0 ? (
                 <EmptyState icon={<Book />} title="Your shelves are empty" action={uploadAction}>
-                  Upload EPUBs here or drop them into <code>{me?.inbox_path ?? "the inbox"}</code>. Lectern reads their metadata, files them by author, and they show up within seconds.
+                  Upload EPUBs, PDFs, or CBZ comics here or drop them into <code>{me?.inbox_path ?? "the inbox"}</code>. Lectern reads their metadata, files them by author, and they show up within seconds.
                 </EmptyState>
               ) : !hasDevices ? (
                 <EmptyState

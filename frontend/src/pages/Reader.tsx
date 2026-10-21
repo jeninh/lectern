@@ -4,7 +4,7 @@
 // silent jumps.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Chevron, TextSize, Toc } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { ApiError, get, put } from "../lib/api";
@@ -14,6 +14,7 @@ import { useLocalStorage } from "../lib/hooks";
 import { useStore } from "../lib/store";
 import { offsetOf, rangeAt } from "../lib/textpos";
 import type { HandoffCandidate, Work, WorkProgressResponse } from "../lib/types";
+import { PageReader } from "./PageReader";
 
 type ReaderTheme = "auto" | "light" | "sepia" | "dark";
 type Font = "publisher" | "serif" | "sans";
@@ -106,7 +107,16 @@ function writeMark(id: number, m: ReadMark) {
   }
 }
 
+/** `/app/reader/:id` opens the EPUB reader; `?file=<id>` opens a PDF or comic in the page viewer. */
 export function ReaderPage() {
+  const { id: idParam } = useParams();
+  const [search] = useSearchParams();
+  const fileId = Number(search.get("file"));
+  if (Number.isFinite(fileId) && fileId > 0) return <PageReader workId={Number(idParam)} fileId={fileId} />;
+  return <EpubReader />;
+}
+
+function EpubReader() {
   const { id: idParam } = useParams();
   const id = Number(idParam);
   const nav = useNavigate();

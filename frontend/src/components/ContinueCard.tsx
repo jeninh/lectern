@@ -5,14 +5,12 @@ import { absoluteTime, bytes, percent, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { Work } from "../lib/types";
 import { Cover, tintStyle } from "./Cover";
+import { bookFiles, formatName, isPaged, positionLabel, readerPath } from "../lib/formats";
 import { ReadAloudFormats } from "./ReadAloudFormats";
 import { Book, Chevron, Download, Headphones, Reader, Sync } from "./Icons";
 
-/** KOReader positions look like "/body/DocFragment[12]/body/p[3]/text().0"; show the chapter. */
-function position(p: string): string {
-  const m = /DocFragment\[(\d+)\]/.exec(p);
-  return m ? `Section ${m[1]}` : p.length > 24 ? `${p.slice(0, 24)}…` : p;
-}
+/** KOReader positions: "/body/DocFragment[12]/…" (EPUB, show the section) or a page number. */
+const position = positionLabel;
 
 export function ContinueCard({ work }: { work: Work }) {
   const { me } = useStore(); // also re-renders on the shared clock tick so relative times stay fresh
@@ -33,7 +31,7 @@ export function ContinueCard({ work }: { work: Work }) {
   const devices = synced.length ? synced : p && file ? [{ file, progress: p }] : [];
   const pct = Math.round((canonical ? pos!.fraction ?? 0 : p!.percentage) * 100);
   const where = canonical ? (pos!.source === "audio" && pos!.audio_s != null ? `Listening · ${clock(pos!.audio_s)}` : "Web reader") : position(p!.progress);
-  const ebooks = work.files.filter((f) => f.kind === "ebook");
+  const ebooks = bookFiles(work);
 
   return (
     <article className="ccard" style={tintStyle(work)} data-open={open || undefined}>
@@ -68,10 +66,10 @@ export function ContinueCard({ work }: { work: Work }) {
               {ebooks.map((f) => (
                 <li key={f.id} className="slot">
                   <Book />
-                  <span><strong>EPUB</strong> <span className="hint">{bytes(f.size)}</span></span>
+                  <span><strong>{formatName(f)}</strong> <span className="hint">{bytes(f.size)}</span></span>
                   <span className="row" style={{ gap: 4 }}>
-                    <button className="btn sm" onClick={() => nav(`/app/reader/${work.id}`)} aria-label={`Read ${work.title}`}><Reader /> Read</button>
-                    <a className="btn sm ghost" href={f.download_url} aria-label={`Download EPUB of ${work.title}`}><Download /></a>
+                    <button className="btn sm" onClick={() => nav(readerPath(work, f))} aria-label={`Read ${work.title}${isPaged(f) ? ` (${formatName(f)})` : ""}`}><Reader /> Read</button>
+                    <a className="btn sm ghost" href={f.download_url} aria-label={`Download ${formatName(f)} of ${work.title}`}><Download /></a>
                   </span>
                 </li>
               ))}

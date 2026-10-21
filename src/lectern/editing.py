@@ -323,19 +323,30 @@ def staged_cover_path(settings: Settings, user_id: int, token: str) -> Path:
 
 
 def _embedded_cover(db: Session, settings: Settings, work: Work, dest: Path) -> bool:
+    from lectern.ingest import formats
     from lectern.ingest.audio import AudioError, _save_cover, probe
     from lectern.ingest.epub import EpubError, extract_cover, read_epub_metadata
+    from lectern.ingest.library import save_first_page_cover
     from lectern.ingest.sentences import primary_epub
 
     work_dir = settings.library_dir / work.dir_path
-    epubs = [primary_epub(db, work.id)] + [f for f in work.files if f.kind == FileKind.EBOOK]
-    for book in [b for b in epubs if b is not None]:
+    books = [primary_epub(db, work.id)] + [f for f in work.files if f.kind == FileKind.EBOOK]
+    books = [b for b in books if b is not None]
+    for book in [b for b in books if b.media_type == formats.EPUB]:
         path = work_dir / book.rel_path
         try:
             meta = read_epub_metadata(path)
             if meta.cover_href and extract_cover(path, meta.cover_href, dest):
                 return True
         except (EpubError, OSError, KeyError):
+            continue
+    for book in [b for b in books if b.media_type in formats.PAGED]:  # first page as cover
+        try:
+            if save_first_page_cover(
+                formats.probe(work_dir / book.rel_path, book.media_type).cover, dest
+            ):
+                return True
+        except (formats.FormatError, OSError):
             continue
     for t in ordered_tracks(db, work.id)[:3]:
         try:
@@ -349,8 +360,11 @@ def _embedded_cover(db: Session, settings: Settings, work: Work, dest: Path) -> 
 
 def embedded_cover_available(db: Session, settings: Settings, work: Work) -> bool:
     from lectern.ingest.epub import EpubError, read_epub_metadata
+    from lectern.ingest.formats import PAGED
 
     work_dir = settings.library_dir / work.dir_path
+    if any(f.media_type in PAGED for f in work.files):
+        return True  # a PDF's or comic's first page
     for f in work.files:
         if f.kind == FileKind.EBOOK:
             try:
@@ -521,7 +535,12 @@ def save(
     if "primary_file_id" in sent:
         if patch.primary_file_id is not None:
             book = db.get(BookFile, patch.primary_file_id)
-            if book is None or book.work_id != work.id or book.kind != FileKind.EBOOK:
+            if (
+                book is None
+                or book.work_id != work.id
+                or book.kind != FileKind.EBOOK
+                or book.media_type != "application/epub+zip"
+            ):
                 raise EditError(422, "primary_not_an_epub_of_this_book")
         work.primary_file_id = patch.primary_file_id
     if old_primary != work.primary_file_id:

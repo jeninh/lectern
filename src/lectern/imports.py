@@ -41,11 +41,17 @@ from sqlalchemy.orm import Session
 from lectern.config import Settings
 from lectern.covergen import cover_fields, tint_of
 from lectern.fsops import STAGING_DIR, checked, move_file, unique_name
+from lectern.ingest import formats
 from lectern.ingest.audio import AudioError, _natural, _save_cover, probe
 from lectern.ingest.cover import dominant_tint
-from lectern.ingest.epub import EpubError, extract_cover, read_epub_metadata
+from lectern.ingest.epub import extract_cover
 from lectern.ingest.hashing import partial_md5
-from lectern.ingest.library import EPUB_MEDIA_TYPE, new_work, safe_component
+from lectern.ingest.library import (
+    book_file_name,
+    new_work,
+    safe_component,
+    save_first_page_cover,
+)
 from lectern.ingest.matching import clean_title, rank_candidates, sort_title
 from lectern.models import (
     AudioTrack,
@@ -165,9 +171,14 @@ def _touch(imp: Import) -> None:
 # --- staging ---------------------------------------------------------------------------------
 
 
-def _probe_epub(path: Path) -> dict:
-    meta = read_epub_metadata(path)
+def _probe_book(path: Path, media_type: str) -> tuple[dict, bytes | None]:
+    """EPUB, PDF, or CBZ: the metadata to detect from, and a first-page cover for formats
+    without an embedded one."""
+    probed = formats.probe(path, media_type)
+    meta = probed.meta
     return {
+        "format": formats.label_of(media_type),
+        "pages": probed.pages,
         "title": meta.title if meta.title != path.stem else None,
         "authors": meta.authors,
         "language": meta.language,
@@ -180,7 +191,7 @@ def _probe_epub(path: Path) -> dict:
         "narrators": meta.narrators,
         "tags": meta.tags,
         "cover_href": meta.cover_href,
-    }
+    }, probed.cover
 
 
 def _probe_audio(path: Path, ffprobe: str) -> tuple[dict, bytes | None]:
@@ -245,7 +256,8 @@ def stage_upload(
         return existing
     if len(imp.files) >= MAX_FILES:
         raise ImportError_(413, "too_many_files")
-    kind = FileKind.EBOOK if upload.media_type == EPUB_MEDIA_TYPE else FileKind.AUDIO
+    book = formats.is_document(upload.media_type)
+    kind = FileKind.EBOOK if book else FileKind.AUDIO
     folder = staging_dir(settings, imp)
     folder.mkdir(parents=True, exist_ok=True)
     stem = safe_component(Path(upload.filename).stem, "file")[:80]
@@ -255,15 +267,19 @@ def stage_upload(
     move_file(part, dest)
     cover = None
     try:
-        if kind == FileKind.EBOOK:
-            meta = _probe_epub(dest)
-            pmd5 = partial_md5(dest)
+        if book:
+            meta, cover = _probe_book(dest, upload.media_type)
+            pmd5 = partial_md5(dest)  # KOReader's document id, for progress sync
         else:
             meta, cover = _probe_audio(dest, settings.ffprobe_path)
             pmd5 = None
-    except (EpubError, AudioError, OSError) as exc:
+    except formats.FormatError as exc:
         dest.unlink(missing_ok=True)
-        raise ImportError_(422, "not_epub" if kind == FileKind.EBOOK else "not_audio") from exc
+        raise ImportError_(422, exc.code) from exc
+    except (AudioError, OSError) as exc:
+        dest.unlink(missing_ok=True)
+        code = formats.wrong_format_code(upload.media_type) if book else "not_audio"
+        raise ImportError_(422, code) from exc
     dup = _duplicate_of(db, upload.sha256)
     row = ImportFile(
         import_id=imp.id,
@@ -287,15 +303,19 @@ def stage_upload(
 
 
 def _stage_cover(folder: Path, path: Path, kind: FileKind, meta: dict, cover: bytes | None) -> None:
-    """The first EPUB's cover wins over audio art; the first one found otherwise."""
+    """The first EPUB's cover wins; then the first page of a PDF or comic; then audio art."""
     target = folder / "cover.jpg"
     marker = folder / ".cover-from-epub"
+    page_marker = folder / ".cover-from-page"
     if kind == FileKind.EBOOK and meta.get("cover_href") and not marker.exists():
         try:
             if extract_cover(path, meta["cover_href"], target):
                 marker.touch()
         except (OSError, KeyError):
             pass
+    elif kind == FileKind.EBOOK and cover and not marker.exists() and not page_marker.exists():
+        if save_first_page_cover(cover, target):
+            page_marker.touch()
     elif kind == FileKind.AUDIO and cover and not target.exists():
         _save_cover(cover, target)
 
@@ -311,7 +331,11 @@ def _common(values) -> str | None:
 def detect(imp: Import) -> dict:
     """One metadata proposal from all fileable files: an EPUB's OPF wins over audio tags."""
     ok = [f for f in imp.files if f.status == "ok"] or list(imp.files)
-    epubs = [f.probe or {} for f in ok if f.kind == FileKind.EBOOK]
+    # An EPUB's OPF is the richest source, then a PDF's Info/XMP or a comic's ComicInfo.
+    epubs = sorted(
+        (f.probe or {} for f in ok if f.kind == FileKind.EBOOK),
+        key=lambda p: p.get("format", "EPUB") != "EPUB",
+    )
     audio = [f.probe or {} for f in ok if f.kind == FileKind.AUDIO]
     e = epubs[0] if epubs else {}
     album = _common(clean_title(a.get("album") or "") for a in audio)
@@ -387,6 +411,7 @@ def _work_summary(w: Work, db: Session) -> dict:
         "cover_url": cover_fields(w)["cover_url"],
         "cover_tint": tint_of(w),
         "has_ebook": any(f.kind == FileKind.EBOOK for f in w.files),
+        "formats": sorted({formats.label_of(f.media_type) for f in w.files}),
         "has_audio": has_audio,
     }
 
@@ -588,7 +613,7 @@ def file(
     ok = [f for f in imp.files if f.status == "ok"]
     if not ok:
         raise ImportError_(409, "nothing_to_file")
-    epubs = [f for f in ok if f.kind == FileKind.EBOOK]
+    books = [f for f in ok if f.kind == FileKind.EBOOK]
     audio = sorted(
         (f for f in ok if f.kind == FileKind.AUDIO),
         key=lambda f: (
@@ -614,25 +639,23 @@ def file(
     work_dir = library / work.dir_path
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    has_ebook = any(f.kind == FileKind.EBOOK for f in work.files)
-    for f in epubs:
-        name = "book.epub" if not has_ebook else f"book-{f.sha256[:8]}.epub"
-        name = unique_name(work_dir, name)
+    filed: list[BookFile] = list(work.files)
+    for f in books:
+        name = unique_name(work_dir, book_file_name(filed, f.media_type, f.sha256))
         src, dst = checked(folder, f.rel_path), checked(work_dir, name)
         move_file(src, dst, sha256=f.sha256)
         journal.moved_file(src, dst)
-        has_ebook = True
-        db.add(
-            BookFile(
-                work_id=work.id,
-                kind=FileKind.EBOOK,
-                rel_path=name,
-                media_type=EPUB_MEDIA_TYPE,
-                size=f.size,
-                sha256=f.sha256,
-                partial_md5=f.partial_md5,
-            )
+        row = BookFile(
+            work_id=work.id,
+            kind=FileKind.EBOOK,
+            rel_path=name,
+            media_type=f.media_type,
+            size=f.size,
+            sha256=f.sha256,
+            partial_md5=f.partial_md5,
         )
+        filed.append(row)
+        db.add(row)
     if audio:
         existing = db.scalars(select(AudioTrack).where(AudioTrack.work_id == work.id)).all()
         discs = [int(m.group(1)) for t in existing if (m := re.match(r"audio/D(\d+)-", t.rel_path))]
@@ -845,6 +868,7 @@ def import_json(db: Session, settings: Settings, imp: Import, *, refresh: bool =
                 "track_no": (f.probe or {}).get("track_no"),
                 "disc_no": (f.probe or {}).get("disc_no"),
                 "chapters": len((f.probe or {}).get("chapters") or []),
+                "pages": (f.probe or {}).get("pages"),
             }
             for f in imp.files
         ],

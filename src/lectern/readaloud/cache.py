@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from lectern.config import Settings
 from lectern.ingest.hashing import sha256_file
+from lectern.ingest.sentences import primary_epub
 from lectern.models import (
     Alignment,
     AlignmentStatus,
@@ -61,6 +62,8 @@ class Unavailable(Exception):
         "alignment_stale": "The EPUB or audio changed since the alignment; it needs re-aligning.",
         "no_audio": "This book has no audiobook tracks.",
         "no_ebook": "This book has no EPUB.",
+        # PDFs and comics have pages, not text: nothing to align or highlight.
+        "needs_epub": "Read-along needs an EPUB edition.",
         "missing_file": "A file of this book is missing from the library folder.",
     }
 
@@ -129,6 +132,8 @@ def _inside(root: Path, rel: str) -> Path:
 
 def gather_inputs(db: Session, settings: Settings, work: Work) -> Inputs:
     """Everything a build needs, read in one go; raises :class:`Unavailable`."""
+    if primary_epub(db, work.id) is None:
+        raise Unavailable("needs_epub")
     alignment = db.scalar(select(Alignment).where(Alignment.work_id == work.id))
     if alignment is None or alignment.status not in (
         AlignmentStatus.SUCCEEDED,

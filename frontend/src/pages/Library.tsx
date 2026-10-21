@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
-import { ReadAloudFormats } from "../components/ReadAloudFormats";
+import { NeedsEpub, ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
 import { OverflowMenu } from "../components/Menu";
@@ -16,6 +16,7 @@ import { PageTitle } from "../components/Shell";
 import { absoluteTime, bytes, percent, relativeTime } from "../lib/format";
 import { useLocalStorage } from "../lib/hooks";
 import { useStore } from "../lib/store";
+import { bookFiles, formatName, formatOf, hasEpub, isPaged, readerPath } from "../lib/formats";
 import type { Work } from "../lib/types";
 
 type Sort = "title" | "author" | "added";
@@ -167,7 +168,7 @@ export function LibraryPage() {
                   className="btn primary split-more"
                   trigger={<Down />}
                   actions={[
-                    { label: "Choose files (EPUB, M4B, MP3)…", onSelect: pickBooks },
+                    { label: "Choose files (EPUB, PDF, CBZ, M4B, MP3)…", onSelect: pickBooks },
                     { label: "Choose a folder (one audiobook)…", onSelect: pickFolder },
                     ...(readyImports ? [{ label: `Review ${readyImports} waiting`, onSelect: () => setReviewOpen(true) }] : []),
                   ]}
@@ -374,7 +375,9 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
   const player = usePlayer();
   const nav = useNavigate();
   const showTech = !!me?.preferences.show_technical_details;
-  const ebook = work.files.find((f) => f.kind === "ebook");
+  const books = bookFiles(work);
+  const ebook = books[0];
+  const epub = hasEpub(work);
   const pos = work.position;
   const editable = shelves.filter((sh) => sh.permission !== "view" && !sh.smart);
   const [member, setMember] = useState<Set<number> | null>(null);
@@ -428,7 +431,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
             </div>
           )}
           <div className="row">
-            {ebook && <button className="btn primary" onClick={() => nav(`/app/reader/${work.id}`)}><Reader /> {pos?.source === "web" || p ? "Continue reading" : "Read"}</button>}
+            {ebook && <button className="btn primary" onClick={() => nav(readerPath(work))}><Reader /> {pos?.source === "web" || p ? "Continue reading" : "Read"}</button>}
             {work.audio && (
               <button className={`btn ${ebook ? "" : "primary"}`} onClick={() => { player.open(work, { autoplay: true }); }}>
                 <Headphones /> {pos?.audio_s ? `Listen from ${clock(pos.audio_s)}` : "Listen"}
@@ -454,7 +457,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
             <div>
               {!pos && <div className="progress-bar"><span style={{ width: `${Math.round(p.percentage * 100)}%` }} /></div>}
               <div className="hint" style={{ marginTop: 6 }}>
-                KOReader: <strong style={{ color: "var(--tint)" }}>{percent(p.percentage)}</strong> · {p.device || p.sync_key_label || "device"} · {relativeTime(p.updated_at, now)}
+                {/^\d+$/.test(p.progress) ? `Page ${p.progress}` : "KOReader"}: <strong style={{ color: "var(--tint)" }}>{percent(p.percentage)}</strong> · {p.device || p.sync_key_label || "device"} · {relativeTime(p.updated_at, now)}
               </div>
             </div>
           ) : (
@@ -467,16 +470,19 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
         <h3 className="detail-h">Files</h3>
         <table className="list">
           <tbody>
-            {ebook && [ebook, ...work.files.filter((f) => f.kind === "ebook" && f !== ebook)].map((f) => (
+            {books.map((f) => (
               <tr key={f.id}>
                 <td>
-                  <strong>EPUB</strong>
+                  <strong>{formatName(f)}</strong>
                   <div className="hint">{bytes(f.size)} · added {relativeTime(f.added_at)}</div>
                   {showTech && f.partial_md5 && <div className="hint mono">Document id {f.partial_md5}</div>}
                   {f.progress && <div className="hint">{percent(f.progress.percentage)} synced {absoluteTime(f.progress.updated_at)}</div>}
                 </td>
                 <td style={{ textAlign: "right" }}>
-                  <a className="btn sm" href={f.download_url}><Download /> Download</a>
+                  <span className="row" style={{ gap: 4, justifyContent: "flex-end" }}>
+                    {isPaged(f) && <Link className="btn sm ghost" to={readerPath(work, f)} aria-label={`Read the ${formatOf(f)} of ${work.title}`}><Reader /> Read</Link>}
+                    <a className="btn sm" href={f.download_url}><Download /> Download</a>
+                  </span>
                 </td>
               </tr>
             ))}
@@ -497,7 +503,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
       <div>
         <h3 style={{ margin: "0 0 8px", fontSize: 14, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Read-along</h3>
         <ul className="slots">
-          <ReadAloudFormats work={work} active />
+          {epub ? <ReadAloudFormats work={work} active /> : <NeedsEpub />}
         </ul>
       </div>
       {editable.length > 0 && (
@@ -579,7 +585,7 @@ function SuggestionReview({ items, onResolved }: { items: MatchSuggestion[]; onR
       toast((e as Error).message, "error");
     }
   };
-  const label = (w: Work) => [w.files.some((f) => f.kind === "ebook") ? "EPUB" : null, w.audio ? `audio ${clock(w.audio.duration_s)}` : null].filter(Boolean).join(" + ");
+  const label = (w: Work) => [[...new Set(bookFiles(w).map(formatOf))].join(", ") || null, w.audio ? `audio ${clock(w.audio.duration_s)}` : null].filter(Boolean).join(" + ");
   return (
     <ul className="review-list">
       {items.map((s) => (

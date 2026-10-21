@@ -1,4 +1,5 @@
-"""Inbox watcher: polls the inbox folder and ingests EPUBs and audio once they stop changing.
+"""Inbox watcher: polls the inbox folder and ingests books (EPUB, PDF, CBZ) and audio once they
+stop changing.
 
 Files may sit directly in the inbox or in sub-folders (an audiobook folder of MP3s, copied in
 one go). Every supported file is ingested on its own once its size and mtime have been stable
@@ -17,10 +18,10 @@ from pathlib import Path
 from sqlalchemy.orm import sessionmaker
 
 from lectern.fsops import LIBRARY_LOCK
+from lectern.ingest import formats
 from lectern.ingest.audio import AudioError, ingest_audio, is_audio, probe
-from lectern.ingest.epub import EpubError, read_epub_metadata
 from lectern.ingest.hashing import partial_md5, sha256_file
-from lectern.ingest.library import ingest_epub
+from lectern.ingest.library import ingest_book
 from lectern.ingest.sentences import ensure_text_sentences
 from lectern.workmeta import write_book_json
 
@@ -87,7 +88,7 @@ class InboxWatcher:
         with self.session_factory() as db:
             ids = db.scalars(
                 select(BookFile.work_id)
-                .where(BookFile.kind == FileKind.EBOOK)
+                .where(BookFile.kind == FileKind.EBOOK, BookFile.media_type == formats.EPUB)
                 .where(~BookFile.work_id.in_(select(Sentence.work_id)))
                 .distinct()
             ).all()
@@ -131,7 +132,7 @@ class InboxWatcher:
                     continue
                 if path.is_dir():
                     stack.append(path)
-                elif path.is_file() and (path.suffix.lower() == ".epub" or is_audio(path)):
+                elif path.is_file() and (formats.media_type_for(path) or is_audio(path)):
                     out.append(path)
         return sorted(out)
 
@@ -171,17 +172,20 @@ class InboxWatcher:
     def ingest_file(self, path: Path) -> bool:
         if is_audio(path):
             return self._ingest_audio(path)
+        media_type = formats.media_type_for(path)
         try:
-            meta = read_epub_metadata(path)
-        except EpubError as exc:
-            log.warning("rejecting %s: %s", path.name, exc)
+            probed = formats.probe(path, media_type)
+        except formats.FormatError as exc:
+            log.warning("rejecting %s: %s (%s)", path.name, exc.code, exc)
             self._reject(path)
             return False
         sha = sha256_file(path)
         pmd5 = partial_md5(path)
         with LIBRARY_LOCK, self.session_factory() as db:
             try:
-                work, book, created = ingest_epub(db, self.library, path, meta, sha, pmd5)
+                work, book, created = ingest_book(
+                    db, self.library, path, probed, media_type, sha, pmd5
+                )
                 db.flush()
                 ensure_text_sentences(db, self.library, work.id)
                 write_book_json(db, self.library, work)

@@ -66,6 +66,8 @@ export interface Store {
 
 const MEDIA: Record<string, string> = {
   epub: "application/epub+zip",
+  pdf: "application/pdf",
+  cbz: "application/vnd.comicbook+zip",
   mp3: "audio/mpeg",
   m4b: "audio/mp4",
   m4a: "audio/mp4",
@@ -75,7 +77,7 @@ const MEDIA: Record<string, string> = {
   opus: "audio/ogg",
   flac: "audio/flac",
 };
-export const ACCEPT = ".epub,.m4b,.m4a,.mp3,.ogg,.opus,.oga,.flac,application/epub+zip,audio/mpeg,audio/mp4,audio/ogg,audio/flac";
+export const ACCEPT = ".epub,.pdf,.cbz,.m4b,.m4a,.mp3,.ogg,.opus,.oga,.flac,application/epub+zip,application/pdf,application/vnd.comicbook+zip,audio/mpeg,audio/mp4,audio/ogg,audio/flac";
 
 export function mediaTypeOf(name: string): string | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -135,7 +137,8 @@ function dirOf(f: PathedFile): string[] {
 }
 
 /**
- * Which files are one book. Each EPUB and each single-file audiobook (M4B) is its own book.
+ * Which files are one book. Each EPUB, PDF, comic (CBZ), and single-file audiobook (M4B) is its
+ * own book.
  * Audio tracks that share a folder are one audiobook, with that folder's EPUB if it has exactly
  * one; loose MP3/OGG/FLAC tracks dropped together are one audiobook. The review step can still
  * split or combine anything this gets wrong.
@@ -460,8 +463,15 @@ class ResyncError extends Error {}
 /** What went wrong, in words that say what to do next. */
 export function plainError(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.code === "unsupported_media_type") return "Wrong format. Lectern takes EPUB books and M4B, MP3, OGG/Opus, or FLAC audiobooks.";
+    if (e.code === "unsupported_media_type") return "Wrong format. Lectern takes EPUB, PDF, and CBZ comics, and M4B, MP3, OGG/Opus, or FLAC audiobooks. Convert CBR comics to CBZ first.";
     if (e.code === "not_epub") return "Wrong format: this is not a readable EPUB. It may be damaged or DRM-protected.";
+    if (e.code === "not_pdf") return "Wrong format: this is not a readable PDF.";
+    if (e.code === "pdf_encrypted") return "This PDF is password-protected. Remove the password and upload it again.";
+    if (e.code === "pdf_too_complex") return "This PDF is too large or complex to open safely.";
+    if (e.code === "not_comic") return "Wrong format: this is not a CBZ comic (a zip of page images).";
+    if (e.code === "comic_encrypted") return "This comic archive is password-protected.";
+    if (e.code === "archive_too_large") return "This comic archive is too large or unpacks to too much data.";
+    if (e.code === "too_many_pages") return "This book has more pages than Lectern accepts.";
     if (e.code === "not_audio") return "Wrong format: Lectern could not read this as audio.";
     if (e.status === 413 || e.code === "too_large") return "Too large for this server. Ask the owner to raise the upload limit.";
   }

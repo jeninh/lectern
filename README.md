@@ -1,6 +1,6 @@
 # Lectern
 
-Self-hosted reading server for one household: a library of works (EPUBs and their
+Self-hosted reading server for one household: a library of works (EPUBs, PDFs, and CBZ comics, and their
 audiobooks), a web reader and audiobook player, an authenticated OPDS catalogue with a
 per-device "send to device" queue, KOReader progress sync between devices, household
 accounts with shared shelves, text–audio alignment of audiobooks, and read-along for books
@@ -50,11 +50,11 @@ Cmd/Ctrl+K palette, or drop files or whole folders anywhere on the page. Or copy
 
 ![Add books](docs/screenshots/books-library-add.png)
 
-- **Upload.** EPUB, M4B/M4A, MP3, OGG/Opus, and FLAC go up through the resumable upload API in
+- **Upload.** EPUB, PDF, CBZ comics, M4B/M4A, MP3, OGG/Opus, and FLAC go up through the resumable upload API in
   ≤ 50 MiB chunks, each with its own SHA-256. The tray shows live progress per file with pause,
   resume, cancel, and retry, grouped by book. Wrong formats, files over the server limit, and
   exact duplicates are reported in plain words before anything is filed.
-- **Grouping.** Each EPUB and M4B is its own book. Audio tracks in one folder are one
+- **Grouping.** Each EPUB, PDF, comic, and M4B is its own book. Audio tracks in one folder are one
   audiobook (with that folder's EPUB, if it has exactly one); `CD 1`/`Disc 2` subfolders are
   merged. Loose MP3s dropped together are one audiobook. You can combine or split during review.
 - **Review before filing.** Uploads wait in **Review before filing** with what Lectern detected:
@@ -101,6 +101,19 @@ author.
 
 ![Library with generated covers](docs/screenshots/covers-after-light.png)
 ![The three styles](docs/screenshots/covers-styles.png)
+
+## PDFs and comics
+
+PDFs and CBZ comics are filed like EPUBs, and a work can hold an EPUB and a PDF of the same
+book. Lectern checks magic bytes before parsing, reads PDFs in a resource-limited child process
+with no JavaScript, and refuses zip bombs. It reads PDF Info/XMP metadata and comic
+`ComicInfo.xml`, and uses the first page as the cover. PDFs and comics open in a page viewer
+(pdf.js for PDFs) with fit width, fit page, zoom, and two-page spreads, are served over OPDS
+with their own media types, can be sent to devices, and sync pages with KOReader. **CBR is not
+supported**; convert it to CBZ. Read-along, alignment, and the read-aloud export need an EPUB
+edition. Details: [`docs/pdf-comics.md`](docs/pdf-comics.md).
+
+![A comic as a two-page spread](docs/screenshots/formats-comic-spread.png)
 
 ## Editing books
 

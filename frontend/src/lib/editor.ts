@@ -75,7 +75,7 @@ export function changes(s: EditorState, d: Draft): string[] {
   if (!same(kept.map((t) => t.id), baseKept.map((t) => t.id))) out.push("track order");
   if (kept.some((t) => base.tracks.find((b) => b.id === t.id)?.title !== t.title)) out.push("track titles");
   if (kept.some((t) => !same(base.tracks.find((b) => b.id === t.id)?.chapters, t.chapters))) out.push("chapter titles");
-  if (d.remove_file_ids.length) out.push(`${d.remove_file_ids.length} EPUB${d.remove_file_ids.length > 1 ? "s" : ""} to trash`);
+  if (d.remove_file_ids.length) out.push(`${d.remove_file_ids.length} book file${d.remove_file_ids.length > 1 ? "s" : ""} to trash`);
   if (d.remove_track_ids.length) out.push(`${d.remove_track_ids.length} track${d.remove_track_ids.length > 1 ? "s" : ""} to trash`);
   if (d.cover) out.push("cover");
   return out;

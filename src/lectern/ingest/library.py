@@ -11,14 +11,15 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lectern.ingest.cover import dominant_tint
+from lectern.ingest.cover import EMBEDDED_FORMATS, CoverRejected, dominant_tint, save_cover_jpeg
 from lectern.ingest.epub import EpubMetadata, extract_cover
+from lectern.ingest.formats import EPUB, Probe, suffix_of
 from lectern.ingest.matching import match_work, sort_author, sort_title
 from lectern.models import BookFile, FileKind, MatchSuggestion, Work
 
 log = logging.getLogger("lectern.ingest")
 
-EPUB_MEDIA_TYPE = "application/epub+zip"
+EPUB_MEDIA_TYPE = EPUB
 _UNSAFE = re.compile(r"[^A-Za-z0-9 ._()\-',&]+")
 
 
@@ -77,6 +78,25 @@ def new_work(
     return work
 
 
+def book_file_name(files, media_type: str, sha256: str) -> str:
+    """``book.epub``, ``book.pdf``, ``book.cbz`` for a work's first file of that format (so one
+    work holds an EPUB and a PDF of the same book side by side), ``book-<sha>.<ext>`` after."""
+    ext = suffix_of(media_type)
+    taken = any(f.kind == FileKind.EBOOK and f.rel_path.lower().endswith(ext) for f in files)
+    return f"book-{sha256[:8]}{ext}" if taken else f"book{ext}"
+
+
+def save_first_page_cover(data: bytes | None, dest: Path) -> bool:
+    """A PDF's rendered first page or a comic's cover page, through the bounded decoder."""
+    if not data:
+        return False
+    try:
+        save_cover_jpeg(data, dest, formats=EMBEDDED_FORMATS, quality=85)
+        return True
+    except (CoverRejected, OSError):
+        return False
+
+
 def ingest_epub(
     db: Session,
     library: Path,
@@ -85,11 +105,24 @@ def ingest_epub(
     sha256: str,
     pmd5: str,
 ) -> tuple[Work, BookFile, bool]:
-    """Move source into the library. Returns (work, file, created_new_work).
+    return ingest_book(db, library, source, Probe(meta), EPUB, sha256, pmd5)
+
+
+def ingest_book(
+    db: Session,
+    library: Path,
+    source: Path,
+    probe: Probe,
+    media_type: str,
+    sha256: str,
+    pmd5: str,
+) -> tuple[Work, BookFile, bool]:
+    """Move an EPUB, PDF, or CBZ into the library. Returns (work, file, created_new_work).
 
     An uncertain match creates a new work and a ``match_suggestions`` row for a person to
     confirm or dismiss in the web app.
     """
+    meta = probe.meta
     if db.scalar(select(BookFile).where(BookFile.sha256 == sha256)) is not None:
         raise FileExistsError("identical file already in library")
 
@@ -130,21 +163,24 @@ def ingest_epub(
 
     work_dir = library / work.dir_path
     work_dir.mkdir(parents=True, exist_ok=True)
-    existing_ebook = next((f for f in work.files if f.kind == FileKind.EBOOK), None)
-    rel_name = "book.epub" if existing_ebook is None else f"book-{sha256[:8]}.epub"
+    rel_name = book_file_name(work.files, media_type, sha256)
     dest = work_dir / rel_name
     shutil.move(str(source), str(dest))
 
-    if not work.has_cover and meta.cover_href:
-        if extract_cover(dest, meta.cover_href, work_dir / "cover.jpg"):
+    if not work.has_cover:
+        cover = work_dir / "cover.jpg"
+        if (meta.cover_href and extract_cover(dest, meta.cover_href, cover)) or (
+            save_first_page_cover(probe.cover, cover)
+        ):
             work.has_cover = True
-            work.cover_tint = dominant_tint(work_dir / "cover.jpg")
+            work.cover_source = "embedded"
+            work.cover_tint = dominant_tint(cover)
 
     book = BookFile(
         work_id=work.id,
         kind=FileKind.EBOOK,
         rel_path=rel_name,
-        media_type=EPUB_MEDIA_TYPE,
+        media_type=media_type,
         size=dest.stat().st_size,
         sha256=sha256,
         partial_md5=pmd5,

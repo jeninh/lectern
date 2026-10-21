@@ -130,7 +130,8 @@ def download_response(
     work = db.get(Work, book.work_id)
     audit.record(db, "download", actor_user_id=user.id, target=f"file:{book.id}", ip=ip, detail=via)
     db.commit()
-    filename = f"{work.author} - {work.title}.epub".replace("/", "-")[:200]
+    ext = Path(book.rel_path).suffix.lower() or ".epub"
+    filename = f"{work.author} - {work.title}"[:190].replace("/", "-") + ext
     quoted = quote(filename)
     disposition = (
         f"attachment; filename*=utf-8''{quoted}"
@@ -195,6 +196,12 @@ def reader_copy(
     if book is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no_ebook")
     book, path = resolve_file(db, settings, book.id, auth.user)
+    return _reader_response(request, auth, db, settings, book, path)
+
+
+def _reader_response(request: Request, auth, db, settings, book: BookFile, path: Path):
+    """A book file for an in-browser reader: cached (ETag = sha256), so reopening is a 304 and
+    only the first transfer counts as a download."""
     etag = f'"{book.sha256}"'
     inm = request.headers.get("if-none-match")
     if inm and etag in [t.strip() for t in inm.split(",")]:
@@ -207,10 +214,19 @@ def reader_copy(
         db, "download", actor_user_id=auth.user.id, target=f"file:{book.id}", ip=ip, detail="reader"
     )
     db.commit()
-    resp = FileResponse(path, media_type=book.media_type)
+    resp = FileResponse(path, media_type=book.media_type, content_disposition_type="inline")
     resp.headers["ETag"] = etag
     resp.headers["Cache-Control"] = "private, no-cache"
     return resp
+
+
+@router.get("/library/files/{file_id}/view", include_in_schema=False)
+def view_pdf(request: Request, auth: LibraryUser, db: DbDep, settings: SettingsDep, file_id: int):
+    """The PDF the web viewer (pdf.js) opens; the same caching and caps as ``book.epub``."""
+    book, path = resolve_file(db, settings, file_id, auth.user)
+    if book.media_type != "application/pdf":
+        raise _not_found()
+    return _reader_response(request, auth, db, settings, book, path)
 
 
 @router.get("/library/tracks/{track_id}/stream", include_in_schema=False)

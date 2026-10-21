@@ -53,12 +53,15 @@ your phone have separate queues, and nobody else's catalogue ever shows yours.
   it again brings them back.
 - A revoked device's catalogue closes (401) and nothing more can be sent to it; its queue can
   still be viewed and tidied.
-- Only works with an EPUB can be queued (`no_ebook`).
+- Only works with a book file (EPUB, PDF, or CBZ comic) can be queued (`no_ebook`); an
+  audiobook alone cannot. The feed offers every book file of the work with its own media type
+  (`application/epub+zip`, `application/pdf`, `application/vnd.comicbook+zip`), and the item
+  is delivered when the device has received any one of them in full.
 
 ## Delivery: when a queued book counts as downloaded
 
 An item becomes **delivered** when *that exact device* (the app password that signed the
-request) has been sent **every byte of an EPUB of that work in one response**:
+request) has been sent **every byte of a book file (EPUB, PDF, or CBZ) of that work in one response**:
 
 | Request from the queued device | Delivers? |
 | --- | --- |

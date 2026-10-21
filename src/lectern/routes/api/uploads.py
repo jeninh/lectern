@@ -18,8 +18,8 @@ from sqlalchemy import func, select
 
 from lectern import imports
 from lectern.fsops import LIBRARY_LOCK
+from lectern.ingest import formats
 from lectern.ingest.audio import AudioError, probe
-from lectern.ingest.epub import EpubError, read_epub_metadata
 from lectern.ingest.hashing import sha256_file
 from lectern.models import (
     UPLOAD_CHUNK_MAX_BYTES,
@@ -43,7 +43,6 @@ Uploader = Annotated[AuthContext, Depends(require_role(Role.OWNER, Role.MEMBER))
 
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_ZIP_MAGIC = b"PK\x03\x04"
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
@@ -339,13 +338,15 @@ def _fail(db, request, auth, settings, row: UploadSession, code: int, detail: st
 
 
 def _title(path: Path, media_type: str, settings) -> str | None:
+    """The title for Activity, read for plain inbox uploads only: an upload into an import is
+    read once, when it is staged."""
     try:
-        if media_type == "application/epub+zip":
-            title = read_epub_metadata(path).title.strip()[:200]
+        if formats.is_document(media_type):
+            title = formats.probe(path, media_type).meta.title.strip()[:200]
             return None if title == path.stem else title
         info = probe(path, settings.ffprobe_path)
         return (info.book_title or info.title or "")[:200] or None
-    except (EpubError, AudioError, OSError):
+    except (formats.FormatError, AudioError, OSError):
         return None
 
 
@@ -383,18 +384,28 @@ def finalize(
     part = part_path(settings, public_id)
     if not part.is_file() or sha256_file(part) != expected:
         raise _fail(db, request, auth, settings, row, 422, "checksum_mismatch")
-    with part.open("rb") as fh:
-        head = fh.read(4)
-    if row.media_type == "application/epub+zip" and not head.startswith(_ZIP_MAGIC):
-        raise _fail(db, request, auth, settings, row, 422, "not_epub")
-    title = _title(part, row.media_type, settings)
-    if row.media_type != "application/epub+zip" and title is None:
-        try:
-            probe(part, settings.ffprobe_path)
-        except AudioError:
-            raise _fail(db, request, auth, settings, row, 422, "not_audio") from None
+    document = formats.is_document(row.media_type)
+    # The declared type picks the parser; the first bytes must agree before any parser runs.
+    if document and not formats.magic_ok(row.media_type, formats.read_head(part)):
+        raise _fail(
+            db, request, auth, settings, row, 422, formats.wrong_format_code(row.media_type)
+        )
     if row.import_id is not None:
-        return _finalize_into_import(db, request, auth, settings, row, part, expected, title)
+        return _finalize_into_import(db, request, auth, settings, row, part, expected, None)
+    title = None
+    if document:
+        try:
+            meta = formats.probe(part, row.media_type).meta
+            title = None if meta.title == part.stem else meta.title.strip()[:200] or None
+        except formats.FormatError as exc:
+            raise _fail(db, request, auth, settings, row, 422, exc.code) from None
+    else:
+        title = _title(part, row.media_type, settings)
+        if title is None:
+            try:
+                probe(part, settings.ffprobe_path)
+            except AudioError:
+                raise _fail(db, request, auth, settings, row, 422, "not_audio") from None
     name = inbox_name_for(row.filename, row.media_type)
     move_into_inbox(settings, part, name)
     row.sha256 = expected
@@ -432,6 +443,8 @@ def _finalize_into_import(db, request, auth, settings, row, part, expected, titl
         db.rollback()
         row = db.get(UploadSession, row.id)
         raise _fail(db, request, auth, settings, row, 500, "staging_failed") from None
+    probed = staged.probe or {}
+    title = title or (probed.get("title") or probed.get("album") or "")[:200] or None
     name = f"import:{imp.public_id}/{staged.rel_path}"
     row.status = UploadStatus.COMPLETED
     row.inbox_name = name[:256]
