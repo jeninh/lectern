@@ -975,12 +975,17 @@ tr.revoked td:first-child {
 .slot .hint {
   font-size: 12px;
 }
-.slot[aria-disabled="true"] {
+.slot .progress-bar {
+  margin-top: 6px;
+}
+.slot[aria-disabled="true"],
+.slot[data-unavailable] {
   background: transparent;
   border-style: dashed;
   color: var(--muted);
 }
-.slot[aria-disabled="true"] > svg {
+.slot[aria-disabled="true"] > svg,
+.slot[data-unavailable] > svg {
   color: var(--muted);
 }
 .slot .soon {

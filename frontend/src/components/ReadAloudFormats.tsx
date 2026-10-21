@@ -97,8 +97,10 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
       st.reason === "alignment_stale" ? "Audio and text changed; waiting for re-alignment" :
       "Needs an audiobook aligned to this EPUB";
     const showAlign = align && hint === align.text;
+    const canRetry = Boolean(showAlign && align.retry && canUpload);
     return (
-      <li className="slot" aria-disabled="true">
+      // aria-disabled would also disable the Retry button for assistive technology
+      <li className="slot" data-unavailable="" aria-disabled={canRetry ? undefined : "true"}>
         <Sync />
         <span>
           <strong>Read-along</strong>{" "}
@@ -113,7 +115,7 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
             </span>
           )}
         </span>
-        {showAlign && align.retry && canUpload ? (
+        {canRetry ? (
           <button className="btn sm ghost" onClick={retry} aria-label={`Retry aligning ${work.title}`}>Retry</button>
         ) : <span />}
       </li>
