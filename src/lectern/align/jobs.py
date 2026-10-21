@@ -349,7 +349,8 @@ def reclaim_expired(
 
 def _reclaim_one(db: Session, job: Job, error: str, now: datetime) -> bool:
     """Requeue (with backoff) or fail one lease, but only if it is still exactly the lease
-    that was looked at: the same job, still ``leased``, with the same token hash. A worker
+    that was looked at: the same job, still ``leased``, with the same token hash and last
+    heartbeat. A worker
     that succeeded, failed, or was cancelled in the meantime (and a fresh claim of a requeued
     job, which has a new token) is left alone; requeueing a cancelled job next to its
     replacement would also break the one-active-job-per-work index and roll everything back.
@@ -376,6 +377,10 @@ def _reclaim_one(db: Session, job: Job, error: str, now: datetime) -> bool:
             Job.id == job.id,
             Job.status == JobStatus.LEASED,
             Job.lease_token_hash == job.lease_token_hash,
+            # a heartbeat (with progress) that landed after the read keeps the lease
+            Job.heartbeat_at.is_(None)
+            if job.heartbeat_at is None
+            else Job.heartbeat_at == job.heartbeat_at,
         )
         .values(**values)
         .execution_options(synchronize_session=False)

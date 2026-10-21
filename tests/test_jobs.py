@@ -1322,7 +1322,9 @@ def test_claims_reclaim_stalled_runs_after_the_configured_stall_time(
     assert job.error == "no progress for 20 min"
 
 
-@pytest.mark.parametrize("race", ["succeeded", "cancelled_and_requeued", "claimed_again"])
+@pytest.mark.parametrize(
+    "race", ["succeeded", "cancelled_and_requeued", "claimed_again", "heartbeat"]
+)
 def test_reclaim_leaves_a_lease_that_changed_while_it_looked_alone(
     client, owner, work_id, wc, settings, monkeypatch, race
 ):
@@ -1331,7 +1333,11 @@ def test_reclaim_leaves_a_lease_that_changed_while_it_looked_alone(
     overwrite any of that (nor, for the replacement, trip the one-active-job index)."""
     job_id = request_align(client, owner, work_id).json()["id"]
     lease(claim(wc))
-    set_job(job_id, lease_expires_at=utcnow() - timedelta(seconds=1))
+    if race == "heartbeat":  # stalled for two hours, its lease still current
+        stuck = (utcnow() - timedelta(hours=2)).isoformat()
+        set_job(job_id, result={**db_job(job_id).result, "progress_at": stuck})
+    else:
+        set_job(job_id, lease_expires_at=utcnow() - timedelta(seconds=1))
     new_hash = "f" * 64
     replacement: list[int] = []
     real_backoff = jobs.backoff_s
@@ -1352,6 +1358,8 @@ def test_reclaim_leaves_a_lease_that_changed_while_it_looked_alone(
                 new, _ = jobs.enqueue_align(other, settings.library_dir, other.get(Work, work_id))
                 other.flush()
                 replacement.append(new.id)
+            elif race == "heartbeat":  # the stalled run reports progress after all
+                jobs.heartbeat(other, job, progress=0.6, message="transcribing")
             else:  # requeued by its worker and leased again by another
                 job.lease_token_hash = new_hash
                 job.lease_expires_at = utcnow() + timedelta(minutes=10)
@@ -1372,6 +1380,9 @@ def test_reclaim_leaves_a_lease_that_changed_while_it_looked_alone(
         assert job.status == JobStatus.CANCELLED
         assert db_job(replacement[0]).status == JobStatus.QUEUED
         assert al.status == AlignmentStatus.PENDING
+    elif race == "heartbeat":
+        assert job.status == JobStatus.LEASED and job.attempts == 1
+        assert job.result["progress"] == 0.6 and al.status == AlignmentStatus.RUNNING
     else:
         assert job.status == JobStatus.LEASED and job.lease_token_hash == new_hash
         assert al.status == AlignmentStatus.RUNNING
