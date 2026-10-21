@@ -7,13 +7,15 @@ like the rest of ``/api``; the worker-facing half of the protocol is ``routes/ap
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lectern import queue
 from lectern.align import jobs
 from lectern.align.transcribe import MODELS
 from lectern.models import (
@@ -22,6 +24,7 @@ from lectern.models import (
     JobStatus,
     Role,
     WorkerCredential,
+    WorkerEnrollment,
     utcnow,
 )
 from lectern.routes.api.readalong import visible_work
@@ -266,31 +269,208 @@ def _worker_names(db: Session) -> dict[int, str]:
 # --- worker credentials (owner only) ------------------------------------------------------------
 
 
+def _allowlist(v: list[str] | None) -> list[str] | None:
+    return None if v is None else queue.valid_capabilities(v)
+
+
 class CredentialIn(BaseModel):
     label: str = Field(min_length=1, max_length=128)
+    # Capabilities this key may claim; null or absent = any that may leave the server.
+    capabilities: list[str] | None = Field(default=None, max_length=32)
+
+    _caps = field_validator("capabilities")(_allowlist)
 
 
-def _credential_json(c: WorkerCredential) -> dict:
+class CredentialPatch(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=128)
+    capabilities: list[str] | None = Field(default=None, max_length=32)
+
+    _caps = field_validator("capabilities")(_allowlist)
+
+
+def _presence(c: WorkerCredential, now) -> str:
+    """offline unless it called in within the "worker seen" window; else what it reported."""
+    if c.revoked_at is not None:
+        return "revoked"
+    seen = c.status_at or c.last_used_at
+    if seen is None or now - seen > timedelta(seconds=queue.WORKER_SEEN_S):
+        return "offline"
+    return c.state or "ready"
+
+
+def _credential_json(c: WorkerCredential, running: list[dict] | None = None, now=None) -> dict:
+    advertised = c.advertised if c.advertised is not None else []
     return {
         "id": c.id,
         "label": c.label,
         "created_at": iso(c.created_at),
         "last_used_at": iso(c.last_used_at),
         "revoked_at": iso(c.revoked_at),
+        "capabilities": c.capabilities,
+        "advertised": advertised,
+        "claimable": queue.claimable(advertised, c),
+        "state": _presence(c, now or utcnow()),
+        "status_at": iso(c.status_at),
+        "info": c.info or {},
+        "jobs": running or [],
     }
+
+
+def _running_jobs(db: Session) -> dict[int, list[dict]]:
+    out: dict[int, list[dict]] = {}
+    for j in db.scalars(
+        select(Job).where(Job.status == JobStatus.LEASED, Job.leased_by_id.is_not(None))
+    ):
+        r = j.result or {}
+        out.setdefault(j.leased_by_id, []).append(
+            {
+                "id": j.id,
+                "kind": j.kind,
+                "capability": j.capability,
+                "work_id": j.work_id,
+                "progress": r.get("progress"),
+                "message": r.get("message"),
+            }
+        )
+    return out
 
 
 @router.get("/worker-credentials")
 def list_credentials(auth: OwnerOnly, db: DbDep) -> dict:
     rows = db.scalars(select(WorkerCredential).order_by(WorkerCredential.id)).all()
-    return {"credentials": [_credential_json(c) for c in rows]}
+    running = _running_jobs(db)
+    now = utcnow()
+    return {
+        "credentials": [_credential_json(c, running.get(c.id), now) for c in rows],
+        "known_capabilities": list(queue.KNOWN_CAPABILITIES),
+        "server_only": sorted(queue.SERVER_ONLY),
+    }
+
+
+@router.patch("/worker-credentials/{credential_id}")
+def update_credential(
+    request: Request, auth: OwnerOnly, db: DbDep, credential_id: int, body: CredentialPatch
+) -> dict:
+    """Rename a credential or set its capability allowlist (``capabilities: null`` = any)."""
+    row = db.get(WorkerCredential, credential_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    changed = []
+    if body.label is not None:
+        row.label = body.label.strip()
+        changed.append("label")
+    if "capabilities" in body.model_fields_set:
+        row.capabilities = body.capabilities
+        changed.append("capabilities")
+    if changed:
+        audit.record(
+            db,
+            "worker_credential.update",
+            actor_user_id=auth.user.id,
+            target=f"worker_credential:{row.id}",
+            ip=client_ip(request),
+            detail=f"{', '.join(changed)}: {row.label}; {row.capabilities}",
+        )
+        db.commit()
+    return _credential_json(row, _running_jobs(db).get(row.id))
+
+
+# --- enrollment codes for the one-command installer (owner only) --------------------------------
+
+ENROLL_PREFIX = "lwe_"
+
+
+def _enrollment_json(e: WorkerEnrollment, now) -> dict:
+    state = (
+        "used"
+        if e.used_at
+        else "revoked"
+        if e.revoked_at
+        else "expired"
+        if e.expires_at <= now
+        else "pending"
+    )
+    return {
+        "id": e.id,
+        "label": e.label,
+        "capabilities": e.capabilities,
+        "created_at": iso(e.created_at),
+        "expires_at": iso(e.expires_at),
+        "used_at": iso(e.used_at),
+        "credential_id": e.credential_id,
+        "state": state,
+    }
+
+
+@router.post("/worker-enrollments", status_code=status.HTTP_201_CREATED)
+def create_enrollment(
+    request: Request, auth: OwnerOnly, db: DbDep, settings: SettingsDep, body: CredentialIn
+) -> dict:
+    """A single-use code for ``curl …/worker/install.sh | sh -s -- --code …``. The code is
+    shown once and stored hashed; it expires after ``LECTERN_WORKER_ENROLLMENT_TTL_SECONDS``."""
+    code = ENROLL_PREFIX + new_secret()
+    now = utcnow()
+    row = WorkerEnrollment(
+        code_hash=sha256_hex(code),
+        label=body.label.strip(),
+        capabilities=body.capabilities,
+        created_by=auth.user.id,
+        created_at=now,
+        expires_at=now + timedelta(seconds=settings.worker_enrollment_ttl_seconds),
+    )
+    db.add(row)
+    db.flush()
+    audit.record(
+        db,
+        "worker_enrollment.create",
+        actor_user_id=auth.user.id,
+        target=f"worker_enrollment:{row.id}",
+        ip=client_ip(request),
+        detail=row.label,
+    )
+    db.commit()
+    base = settings.base_url
+    return {
+        **_enrollment_json(row, now),
+        "code": code,
+        "command": f"curl -fsSL {base}/worker/install.sh | sh -s -- --code {code}",
+    }
+
+
+@router.get("/worker-enrollments")
+def list_enrollments(auth: OwnerOnly, db: DbDep) -> dict:
+    now = utcnow()
+    rows = db.scalars(select(WorkerEnrollment).order_by(WorkerEnrollment.id.desc()).limit(50)).all()
+    return {"enrollments": [_enrollment_json(e, now) for e in rows]}
+
+
+@router.delete("/worker-enrollments/{enrollment_id}")
+def revoke_enrollment(request: Request, auth: OwnerOnly, db: DbDep, enrollment_id: int) -> dict:
+    row = db.get(WorkerEnrollment, enrollment_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if row.revoked_at is None and row.used_at is None:
+        row.revoked_at = utcnow()
+        audit.record(
+            db,
+            "worker_enrollment.revoke",
+            actor_user_id=auth.user.id,
+            target=f"worker_enrollment:{row.id}",
+            ip=client_ip(request),
+            detail=row.label,
+        )
+        db.commit()
+    return _enrollment_json(row, utcnow())
 
 
 @router.post("/worker-credentials", status_code=status.HTTP_201_CREATED)
 def create_credential(request: Request, auth: OwnerOnly, db: DbDep, body: CredentialIn) -> dict:
     secret = WORKER_KEY_PREFIX + new_secret()
     row = WorkerCredential(
-        label=body.label.strip(), key_hash=sha256_hex(secret), created_by=auth.user.id
+        label=body.label.strip(),
+        key_hash=sha256_hex(secret),
+        created_by=auth.user.id,
+        capabilities=body.capabilities,
     )
     db.add(row)
     db.flush()

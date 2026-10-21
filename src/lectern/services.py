@@ -15,6 +15,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+from lectern import queue
 from lectern.align import jobs
 from lectern.align.worker import LocalWorker
 from lectern.config import Settings
@@ -78,6 +79,7 @@ class Housekeeping:
                 try:
                     with self.session_factory() as db:
                         n = jobs.reclaim_expired(db, stall_s=self.settings.align_stall_seconds)
+                        queue.sweep_artifacts(db, self.settings.data_dir)
                     if n:
                         log.warning("reclaimed %d expired lease(s)", n)
                 except Exception:  # noqa: BLE001
@@ -146,6 +148,7 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
                 isolated=True,
                 memory_limit_mb=settings.align_memory_limit_mb,
                 stall_s=settings.align_stall_seconds,
+                defer_s=settings.local_defer_seconds,
             )
         )
         log.info(

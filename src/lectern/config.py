@@ -122,6 +122,18 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = 10.0
     job_sweep_seconds: float = 30.0
     track_rescan_seconds: float = 60.0
+    # External workers (docs/mac-worker.md). While a worker that advertises a capability is
+    # online and not paused, the server's own runners leave that capability's jobs to it for
+    # this long after they were queued, then run them anyway (0 = never defer).
+    local_defer_seconds: float = Field(default=600.0, ge=0.0)
+    # Largest single artifact (a chapter of a generated audiobook, a rendition) a worker may
+    # upload to PUT /api/worker/jobs/{id}/artifacts/{name}.
+    worker_artifact_max_bytes: int = Field(default=2 * 1024**3, ge=1024)
+    # Where /worker/install.sh installs the worker from (a pip requirement URL). A private
+    # repository needs git access on the Mac (docs/mac-worker.md, "Installing").
+    worker_install_source: str = "git+https://github.com/jeninh/lectern"
+    # How long a worker enrollment code (the one-command installer) stays valid.
+    worker_enrollment_ttl_seconds: int = Field(default=3600, ge=60, le=7 * 24 * 3600)
 
     # Backups (docs/backups.md). Off until the owner turns them on in Admin; the target is
     # deployment configuration only: the compose files mount LECTERN_BACKUP_PATH (host) here.

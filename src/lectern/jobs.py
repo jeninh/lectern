@@ -8,7 +8,14 @@ sha256) simply has no rendition until the next job. One job per work, not per tr
 lists the tracks: ``{"codec", "bitrate_kbps", "tracks": [{"track_id", "sha256"}]}``.
 
 The runner claims jobs with the same single-statement ``UPDATE … WHERE status='QUEUED'`` as
-external workers will (docs/contracts.md); ``leased_by_id`` stays NULL for the local runner.
+external workers (docs/contracts.md); ``leased_by_id`` stays NULL for the local runner.
+
+External workers that advertise the ``transcode`` capability may run these jobs too
+(``lectern worker`` with ffmpeg on its PATH): the kind is registered in :mod:`lectern.queue`,
+each track is an input named ``track-<track_id>``, the worker uploads every rendition as an
+artifact and then a result naming them, and the server publishes them exactly as the local
+runner does. While such a worker is online the local runner leaves new jobs to it for
+``LECTERN_LOCAL_DEFER_SECONDS``, then runs them itself (the Raspberry Pi fallback).
 """
 
 from __future__ import annotations
@@ -21,9 +28,11 @@ import threading
 from datetime import timedelta
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from lectern import queue
 from lectern.config import Settings
 from lectern.models import JOB_ACTIVE_STATUSES, AudioTrack, Job, JobStatus, Work, utcnow
 from lectern.security.tokens import new_secret, sha256_hex
@@ -94,7 +103,9 @@ def enqueue_transcode(
         work_id=work.id,
         status=JobStatus.QUEUED,
         priority=10,
-        max_attempts=1,
+        # The local runner fails a job on its first error; attempts matter for leases held
+        # by external workers (an expired lease is retried, like any remote job).
+        max_attempts=3,
         payload={
             "codec": settings.audio_low_codec,
             "bitrate_kbps": settings.audio_low_bitrate_kbps,
@@ -137,13 +148,19 @@ def transcode_track(settings: Settings, src: Path, dest: Path, codec: str, kbps:
         tmp.unlink(missing_ok=True)
 
 
-def claim(db: Session, kinds: tuple[str, ...] = (TRANSCODE,)) -> tuple[Job, str] | None:
-    """Atomically lease the next runnable job of ``kinds`` to the in-process runner."""
+def claim(
+    db: Session, kinds: tuple[str, ...] = (TRANSCODE,), *, defer_s: float = 0.0
+) -> tuple[Job, str] | None:
+    """Atomically lease the next runnable job of ``kinds`` to the in-process runner. While an
+    external worker that can transcode is online, only jobs queued at least ``defer_s`` ago."""
     now = utcnow()
+    waiting = Job.status == JobStatus.QUEUED
+    if defer_s > 0 and queue.capability_online(db, queue.TRANSCODE, now):
+        waiting = waiting & (Job.created_at <= now - timedelta(seconds=defer_s))
     for _ in range(3):
         candidate = db.scalar(
             select(Job.id)
-            .where(Job.status == JobStatus.QUEUED, Job.kind.in_(kinds), Job.run_after <= now)
+            .where(waiting, Job.kind.in_(kinds), Job.run_after <= now)
             .order_by(Job.priority, Job.created_at)
             .limit(1)
         )
@@ -235,11 +252,100 @@ def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
     n = 0
     while True:
         with session_factory() as db:
-            claimed = claim(db)
+            claimed = claim(db, defer_s=settings.local_defer_seconds)
             if claimed is None:
                 return n
             run_transcode(db, settings, claimed[0])
             n += 1
+
+
+# --- external workers -------------------------------------------------------------------------
+
+
+class Rendition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track_id: int
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # the original track's
+    artifact: str = Field(pattern=queue.ARTIFACT_NAME_RE.pattern)
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TranscodeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    renditions: list[Rendition] = Field(max_length=5000)
+
+
+def _remote_inputs(db: Session, settings: Settings, job: Job) -> dict[str, queue.InputFile]:
+    """``track-<id>`` for every payload track that is still the same file."""
+    work = db.get(Work, job.work_id) if job.work_id is not None else None
+    if work is None or work.trashed_at is not None:
+        return None
+    out = {}
+    for item in (job.payload or {}).get("tracks", []):
+        track = db.get(AudioTrack, item.get("track_id"))
+        if track is None or track.work_id != work.id or track.sha256 != item.get("sha256"):
+            continue
+        out[f"track-{track.id}"] = queue.InputFile(
+            settings.library_dir / work.dir_path / track.rel_path, track.media_type, track.sha256
+        )
+    return out
+
+
+def _remote_result(db: Session, settings: Settings, job: Job, body: bytes, artifacts: Path) -> dict:
+    from lectern.align.jobs import ResultError
+    from lectern.ingest.hashing import sha256_file
+
+    total = len((job.payload or {}).get("tracks", []))
+    if job.status == JobStatus.SUCCEEDED:
+        return {"job_id": job.id, "status": "succeeded", **(job.result or {})}
+    try:
+        parsed = TranscodeResult.model_validate_json(body)
+    except (ValidationError, ValueError) as exc:
+        raise ResultError(400, "invalid_result", [str(exc)[:500]]) from exc
+    expected = {t["track_id"]: t["sha256"] for t in (job.payload or {}).get("tracks", [])}
+    work = db.get(Work, job.work_id)
+    codec = (job.payload or {}).get("codec", settings.audio_low_codec)
+    checked = []
+    for r in parsed.renditions:
+        if expected.get(r.track_id) != r.sha256:
+            raise ResultError(422, "input_mismatch", [f"track {r.track_id} is not in the job"])
+        path = artifacts / r.artifact
+        if not path.is_file() or sha256_file(path) != r.artifact_sha256:
+            raise ResultError(422, "missing_artifact", [r.artifact])
+        checked.append((r, path))
+    done = 0
+    for r, path in checked:
+        track = db.get(AudioTrack, r.track_id)
+        if work is None or track is None or track.sha256 != r.sha256:
+            continue  # replaced since enqueue, as in run_transcode
+        if find_variant(settings.library_dir, work, r.sha256) is None:
+            _publish_variant(db, settings, job, work, r.sha256, codec, path)
+        done += 1
+    db.refresh(job)
+    if job.status != JobStatus.LEASED:
+        from lectern.align.jobs import LeaseLost
+
+        raise LeaseLost()
+    job.status = JobStatus.SUCCEEDED
+    job.result = {"done": done, "total": total}
+    job.finished_at = utcnow()
+    job.error = None
+    job.lease_expires_at = None
+    db.commit()
+    log.info("transcode job %s: %d renditions from an external worker", job.id, done)
+    return {"job_id": job.id, "status": "succeeded", **job.result}
+
+
+queue.register(
+    queue.KindHandler(
+        kind=TRANSCODE,
+        capability=lambda _payload: queue.TRANSCODE,
+        inputs=_remote_inputs,
+        apply_result=_remote_result,
+    )
+)
 
 
 def recover_local_leases(db: Session) -> int:

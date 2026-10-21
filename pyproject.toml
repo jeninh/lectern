@@ -46,6 +46,19 @@ align = [
     "httpx>=0.27",
 ]
 
+# The Mac worker (docs/mac-worker.md): MLX alignment on the Apple GPU, Kokoro TTS, the
+# menu bar. Everything Mac-only is behind markers, so the extra installs anywhere and the
+# CPU engine (faster-whisper) is the fallback.
+mac = [
+    "av>=11,<19",
+    "faster-whisper>=1.1",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "kokoro>=0.9; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "rumps>=0.4; sys_platform == 'darwin'",
+]
+
 [project.scripts]
 lectern = "lectern.cli:main"
 

@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import sessionmaker
 
 from lectern.align import isolate, jobs
-from lectern.align.pipeline import AlignOutput, TrackInput, TranscribeFn, align_work
+from lectern.align.pipeline import TrackInput, TranscribeFn, align_work
 from lectern.align.tracks import work_epub, work_tracks
 from lectern.align.transcribe import Transcriber, TranscriptionUnavailable, transcribe_tracks
 from lectern.models import Job, Work
@@ -58,7 +58,7 @@ class _Heartbeat:
         self,
         send: Callable[[float, str], bool],
         interval: float,
-        stopping: threading.Event | None = None,
+        stopping: threading.Event | Callable[[], bool] | None = None,
     ) -> None:
         self._send = send
         self._stopping = stopping
@@ -90,7 +90,10 @@ class _Heartbeat:
     def on_progress(self, frac: float, message: str) -> None:
         if self.lost.is_set():
             raise JobAbandoned()
-        if self._stopping is not None and self._stopping.is_set():
+        stopping = self._stopping
+        if stopping is not None and (
+            stopping.is_set() if isinstance(stopping, threading.Event) else stopping()
+        ):
             raise WorkerStopping()
         self.progress, self.message = frac, message
 
@@ -137,9 +140,12 @@ class LocalWorker:
         transcript: Path | None = None,
         child_command: list[str] | None = None,
         stall_s: float = jobs.STALL_S,
+        defer_s: float = 0.0,
     ) -> None:
         self.session_factory = session_factory
         self.stall_s = stall_s
+        # Leave jobs to an online external align worker this long (the Pi fallback).
+        self.defer_s = defer_s
         self.data_dir = data_dir
         self.library = library
         self.transcriber = transcriber
@@ -196,10 +202,12 @@ class LocalWorker:
             claimed = jobs.claim(
                 db,
                 kinds=[jobs.KIND_ALIGN],
+                capabilities=[jobs.KIND_ALIGN],
                 worker=self.name,
                 lease_s=self.lease_s,
                 credential_id=None,
                 stall_s=self.stall_s,
+                defer_s=self.defer_s,
             )
             if claimed is None:
                 return False
@@ -415,8 +423,234 @@ class LeaseLostError(Exception):
     pass
 
 
+class PermanentJobError(Exception):
+    """The job cannot succeed on this worker (bad input, missing engine): fail, no retry."""
+
+
+class JobContext:
+    """What a runner gets for one leased job: progress, inputs, artifacts, and the result.
+
+    Every call carries the worker key and the lease token. A ``409`` from the server means the
+    lease is gone (:class:`LeaseLostError`); :meth:`progress` and :meth:`check` raise
+    ``WorkerStopping`` when the worker is stopping or paused, so the job is handed back."""
+
+    def __init__(self, worker: RemoteWorker, claimed: dict, hb: _Heartbeat, tmp: Path) -> None:
+        self.worker = worker
+        self.client = worker.client
+        self.claimed = claimed
+        self.job = claimed["job"]
+        self.id = self.job["id"]
+        self.payload = self.job.get("payload") or {}
+        self.headers = {"X-Lease-Token": claimed["lease"]["token"]}
+        self.tmp = tmp
+        self.hb = hb
+
+    def progress(self, frac: float, message: str) -> None:
+        self.hb.on_progress(frac, message)
+
+    def check(self) -> None:
+        self.hb.on_progress(self.hb.progress, self.hb.message)
+
+    def download(self, url: str, dest: Path, expected_sha256: str) -> Path:
+        """Authenticated streaming download verified against the expected hash."""
+        digest = hashlib.sha256()
+        with self.client.stream("GET", url, headers=self.headers) as r:
+            if r.status_code == 409:
+                raise LeaseLostError()
+            r.raise_for_status()
+            declared = r.headers.get("X-Content-SHA256")
+            if declared and declared.lower() != expected_sha256:
+                raise ValueError(
+                    f"server offers {declared[:12]}…, job expects {expected_sha256[:12]}…"
+                )
+            with dest.open("wb") as fh:
+                for chunk in r.iter_bytes(1 << 20):
+                    self.check()
+                    digest.update(chunk)
+                    fh.write(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError(
+                f"downloaded {dest.name} does not match sha256 {expected_sha256[:12]}…"
+            )
+        return dest
+
+    def input(self, name: str, dest: Path | None = None) -> Path:
+        """A named input of a non-align job (``inputs[name] = {url, sha256, …}``)."""
+        spec = (self.claimed.get("inputs") or {}).get(name)
+        if not isinstance(spec, dict):
+            raise PermanentJobError(f"the job has no input {name!r}")
+        return self.download(spec["url"], dest or self.tmp / name, spec["sha256"])
+
+    def artifacts(self) -> dict[str, dict]:
+        """What this job's earlier attempts uploaded: ``{name: {size, sha256}}``."""
+        r = self.client.get(self.claimed["artifacts_url"], headers=self.headers)
+        if r.status_code == 409:
+            raise LeaseLostError()
+        r.raise_for_status()
+        return {a["name"]: a for a in r.json().get("artifacts", [])}
+
+    def fetch_artifact(self, name: str, sha256: str, dest: Path | None = None) -> Path:
+        return self.download(
+            f"{self.claimed['artifacts_url']}/{name}", dest or self.tmp / name, sha256
+        )
+
+    def upload_artifact(self, name: str, path: Path) -> str:
+        """Upload one output file; returns its SHA-256. Retried on 5xx and transport errors."""
+        from lectern.ingest.hashing import sha256_file
+
+        digest = sha256_file(path)
+        for attempt in range(3):
+            self.check()
+            try:
+                with path.open("rb") as fh:
+                    r = self.client.put(
+                        f"{self.claimed['artifacts_url']}/{name}",
+                        content=fh,
+                        headers={
+                            **self.headers,
+                            "X-Content-SHA256": digest,
+                            "Content-Type": "application/octet-stream",
+                            "Content-Length": str(path.stat().st_size),
+                        },
+                    )
+            except Exception:  # noqa: BLE001 - a dropped connection is worth a retry
+                if attempt == 2:
+                    raise
+                log.warning("job %d: uploading %s failed, retrying", self.id, name, exc_info=True)
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            if r.status_code == 409:
+                raise LeaseLostError()
+            if r.status_code < 500:
+                r.raise_for_status()
+                return digest
+            log.warning("job %d: artifact %s got %d, retrying", self.id, name, r.status_code)
+            time.sleep(2.0 * (attempt + 1))
+        raise RuntimeError(f"uploading {name} failed repeatedly")
+
+    def stats(self, stats: dict) -> None:
+        """Statistics ride on a heartbeat so the server records them with the result."""
+        r = self.client.post(
+            f"/api/worker/jobs/{self.id}/heartbeat",
+            json={"progress": 1.0, "message": "uploading", "stats": stats},
+            headers=self.headers,
+        )
+        if r.status_code == 409:
+            raise LeaseLostError()
+
+    def submit(self, body: bytes) -> dict | None:
+        """``PUT`` the result. A rejected result fails the job (no retry); a lost lease
+        discards it; other errors are retried, then reported as a retryable failure."""
+        for attempt in range(3):
+            r = self.client.put(
+                self.claimed["result_url"],
+                content=body,
+                headers={**self.headers, "Content-Type": "application/json"},
+            )
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code == 409:
+                log.warning("job %d: lease lost, result discarded", self.id)
+                return None
+            if r.status_code in (400, 413, 422):
+                detail = (
+                    r.json()
+                    if r.headers.get("content-type", "").startswith("application/json")
+                    else {}
+                )
+                errors = "; ".join(str(e) for e in detail.get("errors", []))[:1500]
+                self.worker._fail(
+                    self.id,
+                    self.headers,
+                    f"{detail.get('detail', r.status_code)}: {errors}",
+                    retryable=False,
+                )
+                return None
+            log.warning("job %d: upload got %d, retrying", self.id, r.status_code)
+            time.sleep(2.0 * (attempt + 1))
+        self.worker._fail(self.id, self.headers, "result upload failed repeatedly", retryable=True)
+        return None
+
+
+class AlignRunner:
+    """``align`` jobs: download the EPUB and tracks, transcribe, match, upload the map."""
+
+    kind = jobs.KIND_ALIGN
+    capabilities = ("align",)
+
+    def __init__(
+        self,
+        transcriber: Transcriber | None = None,
+        transcribe: TranscribeFn | None = None,
+        model_label: str | None = None,
+    ) -> None:
+        self.transcriber = transcriber
+        self._transcribe = transcribe
+        self._model_label = model_label
+
+    def _transcribe_for(self, model: str) -> tuple[TranscribeFn, str]:
+        if self._transcribe is not None:
+            return self._transcribe, self._model_label or f"recorded-{model}"
+        tr = (self.transcriber or Transcriber()).with_model(model)
+        tr.load()  # before reading the label: MLX may fall back to the CPU here
+        return transcriber_fn(tr), tr.label
+
+    def run(self, ctx: JobContext) -> None:
+        job, payload, claimed = ctx.job, ctx.payload, ctx.claimed
+        ctx.progress(0.0, "downloading inputs")
+        epub = ctx.download(
+            claimed["inputs"]["epub"], ctx.tmp / "book.epub", payload["epub_sha256"]
+        )
+        tracks = []
+        offset = 0.0
+        for url, t in zip(claimed["inputs"]["tracks"], payload["tracks"], strict=True):
+            path = ctx.download(url, ctx.tmp / f"track-{t['position']}", t["sha256"])
+            tracks.append(
+                TrackInput(
+                    t["position"],
+                    path,
+                    t["sha256"],
+                    float(t["duration_s"]),
+                    float(t.get("offset_s", offset)),
+                )
+            )
+            offset += float(t["duration_s"])
+        transcribe, label = self._transcribe_for(payload.get("model") or "small")
+        try:
+            out = align_work(
+                work_id=job["work_id"],
+                epub_path=epub,
+                epub_sha256=payload["epub_sha256"],
+                tracks=tracks,
+                model_label=label,
+                transcribe=transcribe,
+                language=payload.get("language"),
+                on_progress=ctx.progress,
+            )
+        except TranscriptionUnavailable as exc:
+            raise PermanentJobError(_error_text(exc)) from exc
+        ctx.hb.stop()
+        ctx.stats(out.stats)
+        res = ctx.submit(out.sentence_map.model_dump_json().encode())
+        if res is not None:
+            log.info(
+                "job %d: %s sentences, coverage %s, %.1fs (%.2fx realtime)",
+                ctx.id,
+                res.get("sentence_count"),
+                res.get("coverage"),
+                out.stats["elapsed_s"],
+                out.stats.get("speed") or 0.0,
+            )
+
+
 class RemoteWorker:
-    """One worker process talking to ``/api/worker/*`` over HTTPS with a worker credential."""
+    """One worker process talking to ``/api/worker/*`` over HTTPS with a worker credential.
+
+    It runs every kind it has a runner for (``AlignRunner`` by default; the Mac worker adds
+    Kokoro TTS and transcode) and advertises the runners' capabilities on each claim.
+    ``pause()`` returns a reason (on battery, not on Wi-Fi, switched off) while the worker
+    must not run jobs; a job in progress is then handed back without spending an attempt.
+    """
 
     def __init__(
         self,
@@ -432,6 +666,11 @@ class RemoteWorker:
         workdir: Path | None = None,
         client=None,
         stop: threading.Event | None = None,
+        runners: list | None = None,
+        pause: Callable[[], str | None] | None = None,
+        info: dict | None = None,
+        proxy: str | None = None,
+        verify=True,
     ) -> None:
         import httpx
 
@@ -448,21 +687,57 @@ class RemoteWorker:
             poll_s = MAX_POLL_S
         self.poll_s = poll_s
         self.workdir = workdir
-        self.transcriber = transcriber
-        self._transcribe = transcribe
-        self._model_label = model_label
+        self.runners = (
+            runners if runners is not None else [AlignRunner(transcriber, transcribe, model_label)]
+        )
+        self._pause = pause or (lambda: None)
+        self.info = info or {}
         self._stop = stop or threading.Event()
+        self._running: tuple[dict, _Heartbeat] | None = None
         self.client = client or httpx.Client(
             base_url=self.server,
             headers={"Authorization": f"Bearer {key}", "User-Agent": "lectern-worker"},
             timeout=httpx.Timeout(60.0, read=600.0),
             follow_redirects=False,
+            proxy=proxy,
+            verify=verify,
         )
+
+    @property
+    def current(self) -> dict | None:
+        """The running job with its latest progress, for the menu bar; ``None`` when idle."""
+        running = self._running
+        if running is None:
+            return None
+        about, hb = running
+        return {**about, "progress": hb.progress, "message": hb.message}
+
+    @property
+    def kinds(self) -> list[str]:
+        return list(dict.fromkeys(r.kind for r in self.runners))
+
+    @property
+    def capabilities(self) -> list[str]:
+        return list(dict.fromkeys(c for r in self.runners for c in r.capabilities))
+
+    def paused(self) -> str | None:
+        return "stopping" if self._stop.is_set() else self._pause()
 
     def run_forever(self) -> None:
         stop = self._stop
-        log.info("worker %s polling %s every %.0fs", self.name, self.server, self.poll_s)
+        log.info(
+            "worker %s polling %s every %.0fs for %s",
+            self.name,
+            self.server,
+            self.poll_s,
+            ", ".join(self.capabilities),
+        )
         while not stop.is_set():
+            reason = self._pause()
+            if reason:
+                self.report("paused", reason)
+                stop.wait(self.poll_s)
+                continue
             try:
                 ran = self.run_once()
             except PermissionError:
@@ -473,12 +748,37 @@ class RemoteWorker:
             if not ran:
                 stop.wait(self.poll_s)
 
+    def report(self, state: str, reason: str | None = None) -> bool:
+        """Presence while not running a job (``POST /api/worker/status``)."""
+        try:
+            r = self.client.post(
+                "/api/worker/status",
+                json={
+                    "worker": self.name,
+                    "state": state,
+                    "capabilities": self.capabilities,
+                    "info": {**self.info, "reason": reason} if reason else self.info,
+                },
+            )
+        except Exception:  # noqa: BLE001 - presence is best effort
+            log.debug("status report failed", exc_info=True)
+            return False
+        if r.status_code == 401:
+            raise PermissionError("the server rejected the worker credential")
+        return r.status_code == 200
+
     # -- protocol steps ----------------------------------------------------------------------
 
     def run_once(self) -> bool:
         r = self.client.post(
             "/api/worker/jobs/claim",
-            json={"kinds": [jobs.KIND_ALIGN], "worker": self.name, "lease_s": self.lease_s},
+            json={
+                "kinds": self.kinds,
+                "capabilities": self.capabilities,
+                "worker": self.name,
+                "lease_s": self.lease_s,
+                "info": self.info,
+            },
         )
         if r.status_code == 204:
             return False
@@ -489,8 +789,12 @@ class RemoteWorker:
         job, token = claimed["job"], claimed["lease"]["token"]
         headers = {"X-Lease-Token": token}
         job_id = job["id"]
-        payload = job["payload"]
         lease_s = int(claimed["lease"].get("lease_s") or self.lease_s)
+        runner = next((x for x in self.runners if x.kind == job["kind"]), None)
+        if runner is None:  # the server sent a kind we did not ask for
+            self._release(job_id, headers)
+            return True
+        claimed.setdefault("artifacts_url", f"/api/worker/jobs/{job_id}/artifacts")
 
         def send(progress: float, message: str) -> bool:
             hr = self.client.post(
@@ -503,129 +807,47 @@ class RemoteWorker:
             hr.raise_for_status()
             return True
 
-        hb = _Heartbeat(send, min(lease_s / 3, MAX_HEARTBEAT_S), self._stop)
-        hb.start()
+        hb = _Heartbeat(send, min(lease_s / 3, MAX_HEARTBEAT_S), lambda: bool(self.paused()))
         tmp = Path(tempfile.mkdtemp(prefix=f"lectern-job-{job_id}-", dir=self.workdir))
-        log.info("job %d: claimed (work %s, model %s)", job_id, job["work_id"], payload["model"])
+        ctx = JobContext(self, claimed, hb, tmp)
+        about = {
+            "id": job_id,
+            "kind": job["kind"],
+            "capability": job.get("capability") or job["kind"],
+            "work_id": job.get("work_id"),
+        }
+        self._running = (about, hb)
+        log.info("job %d: claimed (%s, work %s)", job_id, about["capability"], job["work_id"])
+        hb.start()
         try:
-            hb.on_progress(0.0, "downloading inputs")
-            epub = self._download(
-                claimed["inputs"]["epub"], tmp / "book.epub", headers, payload["epub_sha256"]
-            )
-            tracks = []
-            offset = 0.0
-            for url, t in zip(claimed["inputs"]["tracks"], payload["tracks"], strict=True):
-                path = self._download(url, tmp / f"track-{t['position']}", headers, t["sha256"])
-                tracks.append(
-                    TrackInput(
-                        t["position"],
-                        path,
-                        t["sha256"],
-                        float(t["duration_s"]),
-                        float(t.get("offset_s", offset)),
-                    )
-                )
-                offset += float(t["duration_s"])
-            transcribe, label = self._transcribe_for(payload.get("model") or "small")
-            out = align_work(
-                work_id=job["work_id"],
-                epub_path=epub,
-                epub_sha256=payload["epub_sha256"],
-                tracks=tracks,
-                model_label=label,
-                transcribe=transcribe,
-                language=payload.get("language"),
-                on_progress=hb.on_progress,
-            )
+            runner.run(ctx)
         except (JobAbandoned, LeaseLostError):
             log.warning("job %d: lease lost, abandoning", job_id)
-            return True
         except WorkerStopping:
-            # The protocol has no "release"; a retryable failure requeues it with backoff.
-            self._fail(job_id, headers, "worker stopped", retryable=True)
-            return True
+            log.info("job %d: %s, handing the job back", job_id, self.paused() or "stopping")
+            self._release(job_id, headers)
+        except PermanentJobError as exc:
+            self._fail(job_id, headers, str(exc)[:2000], retryable=False)
         except TranscriptionUnavailable as exc:
             self._fail(job_id, headers, _error_text(exc), retryable=False)
-            return True
         except Exception as exc:  # noqa: BLE001
             log.exception("job %d failed", job_id)
             self._fail(job_id, headers, _error_text(exc), retryable=True)
-            return True
         finally:
             hb.stop()
+            self._running = None
             shutil.rmtree(tmp, ignore_errors=True)
-        self._upload(job_id, claimed["result_url"], headers, out)
         return True
 
-    def _transcribe_for(self, model: str) -> tuple[TranscribeFn, str]:
-        if self._transcribe is not None:
-            return self._transcribe, self._model_label or f"recorded-{model}"
-        tr = (self.transcriber or Transcriber()).with_model(model)
-        return transcriber_fn(tr), tr.label
-
-    def _download(self, url: str, dest: Path, headers: dict, expected_sha256: str) -> Path:
-        """Authenticated streaming download verified against the job's input snapshot."""
-        digest = hashlib.sha256()
-        with self.client.stream("GET", url, headers=headers) as r:
-            if r.status_code == 409:
-                raise LeaseLostError()
-            r.raise_for_status()
-            declared = r.headers.get("X-Content-SHA256")
-            if declared and declared.lower() != expected_sha256:
-                raise ValueError(
-                    f"server offers {declared[:12]}…, job expects {expected_sha256[:12]}…"
-                )
-            with dest.open("wb") as fh:
-                for chunk in r.iter_bytes(1 << 20):
-                    digest.update(chunk)
-                    fh.write(chunk)
-        if digest.hexdigest() != expected_sha256:
-            raise ValueError(
-                f"downloaded {dest.name} does not match sha256 {expected_sha256[:12]}…"
-            )
-        return dest
-
-    def _upload(self, job_id: int, url: str, headers: dict, out: AlignOutput) -> None:
-        # Stats ride on a heartbeat so the server records them with the result.
-        hr = self.client.post(
-            f"/api/worker/jobs/{job_id}/heartbeat",
-            json={"progress": 1.0, "message": "uploading", "stats": out.stats},
-            headers=headers,
-        )
-        if hr.status_code == 409:
-            log.warning("job %d: lease lost before upload", job_id)
-            return
-        body = out.sentence_map.model_dump_json().encode()
-        for attempt in range(3):
-            r = self.client.put(
-                url, content=body, headers={**headers, "Content-Type": "application/json"}
-            )
-            if r.status_code == 200:
-                res = r.json()
-                log.info(
-                    "job %d: %s sentences, coverage %s, %.1fs (%.2fx realtime)",
-                    job_id,
-                    res.get("sentence_count"),
-                    res.get("coverage"),
-                    out.stats["elapsed_s"],
-                    out.stats.get("speed") or 0.0,
-                )
-                return
-            if r.status_code == 409:
-                log.warning("job %d: lease lost, result discarded", job_id)
-                return
-            if r.status_code in (400, 413, 422):
-                detail = (
-                    r.json()
-                    if r.headers.get("content-type", "").startswith("application/json")
-                    else {}
-                )
-                error = f"{detail.get('detail', r.status_code)}: {'; '.join(detail.get('errors', []))[:1500]}"
-                self._fail(job_id, headers, error, retryable=False)
-                return
-            log.warning("job %d: upload got %d, retrying", job_id, r.status_code)
-            time.sleep(2.0 * (attempt + 1))
-        self._fail(job_id, headers, "result upload failed repeatedly", retryable=True)
+    def _release(self, job_id: int, headers: dict) -> None:
+        """Give the job back without spending an attempt; a server from before
+        ``/release`` existed gets a retryable failure instead."""
+        try:
+            r = self.client.post(f"/api/worker/jobs/{job_id}/release", headers=headers)
+            if r.status_code in (404, 405):
+                self._fail(job_id, headers, "worker stopped", retryable=True)
+        except Exception:  # noqa: BLE001 - the lease will expire and the server reclaims it
+            log.warning("job %d: could not hand the job back", job_id, exc_info=True)
 
     def _fail(self, job_id: int, headers: dict, error: str, *, retryable: bool) -> None:
         try:

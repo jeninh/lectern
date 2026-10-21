@@ -4,6 +4,7 @@ import { Copy, Link2, Plus, Users as UsersIcon } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
 import { BackupsCard } from "../components/Maintenance";
 import { Sheet } from "../components/Sheet";
+import { WorkersCard } from "../components/WorkersCard";
 import { PageTitle } from "../components/Shell";
 import { del, get, post, put } from "../lib/api";
 import { absoluteTime, relativeTime } from "../lib/format";
@@ -118,6 +119,7 @@ export function AdminPage() {
         )}
       </section>
       <InvitesCard />
+      <WorkersCard />
       <LibrarySettingsCard />
       <BackupsCard />
       <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for @${capFor.username}` : ""} variant="dialog" labelledBy="ucap-title">

@@ -797,6 +797,142 @@ When a work's EPUB or audio changes (re-ingest, track added or removed), the ser
 `failed` and `cancelled` jobs are never retried automatically; `POST /api/works/{id}/align`
 creates a new one. History is kept: finished jobs are not deleted with their leases.
 
+## Capabilities and routing
+
+Implemented in `lectern.queue` (migration `0012_worker_capabilities`). This extends the worker
+protocol above without changing it for an old worker: a claim with only `kinds: ["align"]`
+behaves as before.
+
+### Capabilities
+
+A capability is a token `^[a-z][a-z0-9-]{0,47}$`. Known ones: `align`, `transcode`,
+`tts-kokoro`, `tts-piper`, `tts-elevenlabs`, `ocr` (reserved). The vocabulary is open: a
+well-formed unknown token is accepted and simply matches no job.
+
+Every job has `jobs.capability` (NOT NULL, indexed), set when it is inserted from its kind and
+payload by `queue.capability_for(kind, payload)`: a registered kind decides; `tts` is
+`"tts-" + payload.engine` (lower-cased); anything else is its kind. Migration `0012`
+backfills `capability = kind`. `GET /api/jobs` and the claim response include it.
+
+**Server-only** capabilities (`queue.SERVER_ONLY` = `tts-elevenlabs`) are never leased to an
+external worker, whatever it advertises: the job needs a secret only the server holds.
+
+### Claim
+
+`POST /api/worker/jobs/claim` body:
+
+```json
+{"capabilities": ["align", "tts-kokoro", "transcode"], "kinds": ["align", "tts", "transcode"],
+ "worker": "Jen's MacBook", "lease_s": 600,
+ "info": {"version": "0.1.0", "platform": "darwin-arm64",
+          "engines": {"align": "mlx-whisper-small", "tts-kokoro": "kokoro-82m"}}}
+```
+
+- `capabilities` omitted: they are the `kinds` (an old worker). `kinds` omitted with
+  `capabilities` given: every kind registered for external workers (`queue.remote_kinds()`).
+  Neither: `["align"]`.
+- A job is leased only if `kind ∈ kinds ∩ remote kinds` and `capability ∈ advertised ∩
+  credential allowlist`, minus server-only ones; then the usual oldest-first order by
+  `(priority, created_at, id)`.
+- `info` is shown to the owner and never used for routing.
+- The response adds `job.capability` and `artifacts_url`. For `align`, `inputs` keeps its
+  shape (`{"epub", "tracks": [...]}`); for every other kind `inputs` is
+  `{name: {"url", "sha256", "media_type", "size"}}`.
+
+### Credentials: allowlist, presence, enrollment
+
+- `worker_credentials.capabilities` (JSON list or `NULL` = any): the owner's allowlist.
+  `POST /api/worker-credentials {label, capabilities?}`, `PATCH /api/worker-credentials/{id}
+  {label?, capabilities?}` (owner, CSRF, audited `worker_credential.update`).
+- `GET /api/worker-credentials` adds per credential `advertised`, `claimable` (what it may
+  actually take), `state` (`ready`, `busy`, `paused`, `off`, `offline` when silent for 5
+  minutes, `revoked`), `status_at`, `info`, and `jobs` (its leased jobs with progress and
+  message), plus `known_capabilities` and `server_only`.
+- `POST /api/worker/status {worker, state: ready|paused|busy|off, capabilities?, info?}`
+  (worker key): presence while the worker has no job. A claim records `ready` and the
+  advertised list; a successful claim `busy`; `/release` `paused`.
+- **Enrollment** (the one-command installer): `POST /api/worker-enrollments {label,
+  capabilities?}` (owner) → `201 {id, label, code: "lwe_…", command, expires_at, …}`; the code
+  is shown once, stored as SHA-256, valid `LECTERN_WORKER_ENROLLMENT_TTL_SECONDS` (default
+  3600), single use. `GET /api/worker-enrollments`, `DELETE /api/worker-enrollments/{id}`.
+  `POST /api/worker/enroll {code, name}` (no auth; failures share the per-address limit of bad
+  worker keys) → `201 {credential_id, label, secret: "lw_…", capabilities, server}`; the code
+  is claimed with one conditional `UPDATE`, so it yields at most one credential. Audited
+  `worker_credential.enroll`. `GET /worker/install.sh` serves the installer with this
+  server's `LECTERN_BASE_URL` filled in; it holds no secret.
+
+### Kind handlers
+
+A kind external workers may run registers `queue.KindHandler(kind, capability(payload),
+remote=True, inputs(db, settings, job) -> {name: InputFile(path, media_type, sha256)} | None,
+apply_result(db, settings, job, body, artifacts_dir) -> dict, on_fail(db, job, terminal),
+stats(raw) -> dict | None)`. `inputs` returning `None` means the work changed (`409
+lease_lost`). `apply_result` raises `lectern.align.jobs.ResultError` (status, code, errors)
+for a bad result and `LeaseLost` for a stale one, and returns the same body when called again
+for a job it already finished (idempotent replay). Registered today: `align` (its own routes
+and result path) and `transcode`. Lease rules (claim, heartbeat, backoff, reclaim, revocation)
+are the same for every kind; the `alignments` side effects apply to `align` only.
+
+### Inputs, artifacts, release
+
+All with `Authorization: Bearer lw_…` and `X-Lease-Token`:
+
+| Route | |
+| --- | --- |
+| `GET /api/worker/jobs/{id}/inputs/{name}` | A named input from the kind's `inputs` (Range, `ETag`, `X-Content-SHA256`). |
+| `PUT /api/worker/jobs/{id}/artifacts/{name}` | Raw streamed body with `X-Content-SHA256` (required; `422 checksum_mismatch`). `name` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, at most `LECTERN_WORKER_ARTIFACT_MAX_BYTES` (default 2 GiB, `413`), 5000 per job. Written to a temporary file, then renamed into `<data>/jobs/<id>/artifacts/`; re-uploading a name replaces it. `201 {name, size, sha256}`. |
+| `GET /api/worker/jobs/{id}/artifacts` | `{artifacts: [{name, size, sha256}]}`: what this or an earlier attempt uploaded. |
+| `GET /api/worker/jobs/{id}/artifacts/{name}` | Download one back (resume). |
+| `POST /api/worker/jobs/{id}/release` | Give the job back without spending an attempt (worker paused or switched off): `queued` at once. `{status: "queued"}`. |
+| `PUT /api/worker/jobs/{id}/result` | Dispatched to the kind's `apply_result` (align unchanged). `409 kind_not_supported` if the kind has none. |
+
+Artifacts survive retries and releases, so a later attempt resumes; they are deleted by the
+lease sweep once the job is finished or gone. Heartbeat `stats` are validated by the kind's
+`stats` (align: `AlignStats`); a kind without one has them dropped.
+
+### Local runners and the Pi fallback
+
+In-process runners claim through the same rules with `credential_id = NULL` and their own
+capabilities. While `queue.capability_online(db, cap)` (an unrevoked credential that called in
+within 5 minutes, is not `paused`/`off`, and may claim `cap`; a credential that never
+advertised counts as `align` only), the local runner takes that capability's jobs only once
+they were queued at least `LECTERN_LOCAL_DEFER_SECONDS` ago (default 600; `0` = never defer).
+The "alignment cannot run" notice uses the same test.
+
+### `transcode` on external workers
+
+Inputs `track-<track_id>` for each payload track that is still the same file. Each rendition
+is uploaded as an artifact (`<original sha256>.<m4a|opus>`), then the result
+`{"renditions": [{"track_id", "sha256", "artifact", "artifact_sha256"}]}`; the server checks
+every artifact's hash and publishes it under `derived/audio/` exactly as the local runner does.
+`max_attempts` is now 3 (an expired remote lease is retried).
+
+### Generated audiobooks: the `tts` kind
+
+Agreed with the generated-audiobooks work, which owns the server side (enqueue, the script
+input, `apply_result`, the edition and sentence map, Piper and ElevenLabs runners). The Mac
+worker implements the Kokoro client (`lectern.worker.runners.KokoroRunner`).
+
+- kind `tts`, capability `tts-<engine>`; `tts-elevenlabs` is server-only.
+- payload: `{"engine": "kokoro", "model": "kokoro-82m", "voice": "af_heart", "speed": 1.0,
+  "lang": "en-us", "audio": {"codec": "aac" | "flac", "bitrate_kbps": 64, "sample_rate":
+  24000}, "script_sha256": "…", "chapters": N, "sentences": M}`.
+- input `script` (JSON): `{"version": 1, "chapters": [{"index": 0, "title": "Chapter 1",
+  "sentences": [{"n": 0, "text": "…", "pause_s": 0.3}]}]}`; `n` is the global sentence number
+  of the work's sentence list; `pause_s` (default 0.3) is silence after the sentence that
+  belongs to no sentence.
+- artifacts, uploaded as each chapter finishes: `chapter-0000.m4a` (or `.flac`) and
+  `chapter-0000.json` (that chapter's entry below), so a retried attempt skips finished chapters.
+- result: `{"version": 1, "engine", "model", "voice", "speed", "sample_rate", "codec",
+  "chapters": [{"index", "title", "artifact", "sha256", "duration_s", "sentences": [{"n",
+  "start_s", "end_s"}]}]}`, times relative to the chapter file's start, from sentence-by-sentence
+  synthesis (exact). The server validates artifact hashes, every script `n` exactly once,
+  monotone times within the duration.
+- heartbeat `progress` = sentences done / total.
+
+Migrations: this branch adds `0012_worker_capabilities` (down `0011`); the TTS branch adds its
+own `0012_*` from `main`, and whichever merges second points its `down_revision` at the other.
+
 ## Client addresses behind a proxy (implemented)
 
 Lectern is meant to sit behind a TLS-terminating reverse proxy, in the documented deployment
