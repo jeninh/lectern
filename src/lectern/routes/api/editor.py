@@ -36,6 +36,8 @@ from lectern.models import (
     WorkRevision,
     utcnow,
 )
+from lectern.routes.api.selection import Selection
+from lectern.routes.api.selection import resolve as resolve_selection
 from lectern.routes.api.serializers import iso, work_json
 from lectern.security import audit
 from lectern.security.deps import (
@@ -593,7 +595,8 @@ def purge_file(
 class BulkIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    work_ids: list[int] = Field(min_length=1, max_length=500)
+    work_ids: list[int] = Field(default_factory=list, max_length=500)
+    selection: Selection | None = None
     action: Literal[
         "set_authors",
         "set_series",
@@ -671,9 +674,10 @@ def bulk_edit(
     replay = idempotency.lookup(db, auth.user.id, scope, key, payload)
     if replay is not None:
         return replay
+    ids = resolve_selection(db, auth.user, body.work_ids, body.selection)
     batch_id = secrets.token_hex(8)
     results = []
-    for wid in dict.fromkeys(body.work_ids):
+    for wid in ids:
         with LIBRARY_LOCK:
             journal = Journal()
             try:

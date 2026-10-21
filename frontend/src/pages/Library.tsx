@@ -6,7 +6,7 @@ import { NeedsEpub, ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
 import { OverflowMenu } from "../components/Menu";
-import { BulkBar } from "../components/BulkBar";
+import { BulkBar, type BulkTarget } from "../components/BulkBar";
 import { del, get, patch, post, put } from "../lib/api";
 import { clock, usePlayer } from "../lib/player";
 import type { MatchSuggestion, Shelf, ShelfGrant, User } from "../lib/types";
@@ -14,7 +14,9 @@ import { fold } from "../lib/fuzzy";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
 import { absoluteTime, bytes, percent, relativeTime } from "../lib/format";
-import { useLocalStorage } from "../lib/hooks";
+import { MOD, useLocalStorage } from "../lib/hooks";
+import { useSelection, type CellProps } from "../lib/useSelection";
+import { useGridColumns, useWindowRows } from "../lib/virtual";
 import { useStore } from "../lib/store";
 import { bookFiles, formatName, formatOf, hasEpub, isPaged, readerPath } from "../lib/formats";
 import type { Work } from "../lib/types";
@@ -63,19 +65,7 @@ const SORT_LABEL: Record<Sort, string> = { title: "Title", author: "Author", add
 
 export function LibraryPage() {
   const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen } = useStore();
-  const [selecting, setSelecting] = useState(false);
-  const [picked, setPicked] = useState<Set<number>>(new Set());
   const [sendingMany, setSendingMany] = useState(false);
-  const togglePick = (w: Work) => setPicked((p) => {
-    const n = new Set(p);
-    if (n.has(w.id)) n.delete(w.id);
-    else n.add(w.id);
-    return n;
-  });
-  const endSelect = () => {
-    setSelecting(false);
-    setPicked(new Set());
-  };
   const readyImports = imports.filter((i) => i.status === "ready").length;
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
@@ -144,9 +134,51 @@ export function LibraryPage() {
     else next.delete(k);
     setParams(next, { replace: true });
   };
-  const open = (w: Work) => (selecting ? togglePick(w) : nav(`/app/library/${w.id}${loc.search}`));
+  const open = (w: Work) => nav(`/app/library/${w.id}${loc.search}`);
   const filtering = !!q || status !== "all" || !!shelfId;
   const reader = me?.user.role === "reader";
+
+  // Multi-select over the filtered view (lib/useSelection). The collection is windowed: only
+  // rows near the viewport are rendered, and Cmd/Ctrl+A selects the whole view on the server.
+  const [scope, setScope] = useState<HTMLDivElement | null>(null);
+  const grid = view === "grid";
+  const keys = useMemo(() => filtered.map((w) => w.id), [filtered]);
+  const { columns, width } = useGridColumns(scope, 136, 20, grid);
+  const rowGap = grid ? 26 : 2;
+  const win = useWindowRows(scope, { count: keys.length, columns, gap: rowGap, estimate: grid ? 280 : 58, width });
+  const viewFilter = useMemo(() => ({ q: q.trim(), status, shelf: shelfId ? Number(shelfId) : null }), [q, status, shelfId]);
+  const [viewTotal, setViewTotal] = useState<number | null>(null);
+  const s = useSelection<number>({
+    scope,
+    keys,
+    columns,
+    total: viewTotal ?? keys.length,
+    onOpen: (id) => nav(`/app/library/${id}${loc.search}`),
+    reveal: win.reveal,
+    resetOn: JSON.stringify(viewFilter),
+    global: true,
+    marquee: true,
+  });
+  // "All N selected" counts the view on the server: it may hold more than the client loaded.
+  useEffect(() => {
+    if (!s.sel.all) return setViewTotal(null);
+    const p = new URLSearchParams({ q: viewFilter.q, status: viewFilter.status });
+    if (viewFilter.shelf !== null) p.set("shelf", String(viewFilter.shelf));
+    let stale = false;
+    get<{ total: number }>(`/api/library/count?${p}`).then((d) => !stale && setViewTotal(d.total)).catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [s.sel.all, viewFilter, works]);
+  const target = (): BulkTarget => {
+    const explicit = s.selectedKeys();
+    // Over the send limit, or everything: let the server resolve the view.
+    if (!s.sel.all && explicit.length <= 200) return { work_ids: explicit };
+    const exclude = s.sel.all ? [...s.sel.set] : keys.filter((k) => !s.isSelected(k));
+    return { selection: { filter: viewFilter, exclude_ids: exclude, expected_count: s.count } };
+  };
+  const pickedTitles = useMemo(() => filtered.filter((w) => s.isSelected(w.id)).map((w) => w.title), [filtered, s]);
+  const rowsShown = Array.from({ length: win.end - win.start }, (_, i) => win.start + i);
 
   return (
     <>
@@ -156,8 +188,8 @@ export function LibraryPage() {
           <>
             {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
             {works.length > 0 && (
-              <button className="btn ghost" aria-pressed={selecting} onClick={() => (selecting ? endSelect() : setSelecting(true))}>
-                <Select /> {selecting ? "Done" : "Select"}
+              <button className="btn ghost" aria-pressed={s.selecting} onClick={() => (s.selecting ? s.exit() : s.setSelecting(true))} title={`Click to select, ${MOD}-click to add, Shift-click for a range, ${MOD} A for all`}>
+                <Select /> {s.selecting ? "Done" : "Select"}
               </button>
             )}
             {canUpload && (
@@ -279,68 +311,55 @@ export function LibraryPage() {
         >
           {q ? "Try a shorter word, an author’s surname, or another status." : shelfId ? "This shelf has nothing in this view yet." : "Books move here as KOReader reports progress."}
         </EmptyState>
-      ) : view === "grid" ? (
-        <ul className="book-grid" aria-label="Books">
-          {filtered.map((w) => (
-            <li key={w.id}>
-              <button className="book" style={tintStyle(w)} onClick={() => open(w)} aria-pressed={selecting ? picked.has(w.id) : undefined} data-selecting={selecting || undefined} aria-label={`${w.title} by ${w.author}${w.progress ? `, ${percent(w.progress.percentage)} read` : ""}`}>
-                {selecting && <span className="pick" aria-hidden="true">{picked.has(w.id) ? "✓" : ""}</span>}
-                <span className="cover-wrap">
-                  <Cover work={w} />
-                  {w.progress && <ProgressRing value={w.progress.percentage} />}
-                  {w.cover_generated && w.audio && <span className="audio-badge"><Headphones aria-label="Has audiobook" /></span>}
-                </span>
-                {/* A generated cover already shows the title and author; a caption would repeat them.
-                    The button's aria-label still names the book. */}
-                {!w.cover_generated && (
-                  <>
-                    <strong><Highlight text={w.title} q={q} /></strong>
-                    <span><Highlight text={w.author} q={q} />{w.audio && <Headphones className="has-audio" aria-label="Has audiobook" />}</span>
-                  </>
-                )}
-              </button>
-            </li>
-          ))}
-        </ul>
       ) : (
-        <ul className="book-list" aria-label="Books">
-          {filtered.map((w) => (
-            <li key={w.id}>
-              <button className="book" style={tintStyle(w)} onClick={() => open(w)} aria-pressed={selecting ? picked.has(w.id) : undefined} data-selecting={selecting || undefined}>
-                {selecting && <span className="pick" aria-hidden="true">{picked.has(w.id) ? "✓" : ""}</span>}
-                <Cover work={w} />
-                <span className="titles">
-                  <strong><Highlight text={w.title} q={q} /></strong>
-                  <span><Highlight text={w.author} q={q} /></span>
-                </span>
-                <span className="when">{w.progress ? `${percent(w.progress.percentage)} · ${relativeTime(w.progress.updated_at)}` : `added ${relativeTime(w.created_at)}`}</span>
-                {w.progress ? <ProgressRing value={w.progress.percentage} size={30} /> : <span />}
-              </button>
-            </li>
+        <div
+          ref={setScope}
+          className={grid ? "book-grid" : "book-list"}
+          role="grid"
+          aria-label={shelfId ? `Books on ${shelves.find((x) => String(x.id) === shelfId)?.name ?? "this shelf"}` : q ? `Books matching ${q}` : "Books"}
+          aria-multiselectable="true"
+          aria-rowcount={win.rows}
+          aria-colcount={columns}
+          data-has-selection={s.count > 0 || s.selecting || undefined}
+          style={{ paddingTop: win.padTop, paddingBottom: win.padBottom }}
+          {...s.scopeProps}
+        >
+          {rowsShown.map((r) => (
+            <div key={r} role="row" aria-rowindex={r + 1} data-vrow className="vrow" style={{ gridTemplateColumns: grid ? `repeat(${columns}, minmax(0, 1fr))` : undefined, height: win.stride - rowGap, marginBottom: rowGap }}>
+              {filtered.slice(r * columns, (r + 1) * columns).map((w, c) => (
+                <BookCell key={w.id} work={w} q={q} grid={grid} cell={s.cellProps(w.id)} col={c + 1} />
+              ))}
+            </div>
           ))}
-        </ul>
+          {s.marquee && <div className="marquee" style={s.marquee} aria-hidden="true" />}
+        </div>
       )}
 
-      {selecting && (
+      {(s.count > 0 || s.selecting) && (
         <BulkBar
-          ids={[...picked]}
-          visible={filtered.map((w) => w.id)}
+          count={s.count}
+          all={s.allSelected}
+          total={viewTotal ?? keys.length}
+          target={target}
+          titles={pickedTitles}
           shelves={shelves.filter((sh) => sh.permission !== "view" && !sh.smart)}
-          onSelectAll={(all) => setPicked(new Set(all))}
+          onSelectAll={s.selectAll}
+          onClear={s.exit}
           onDone={async () => {
             await Promise.all([refreshLibrary(), loadShelves()]).catch(() => {});
           }}
-          onClose={endSelect}
           canEdit={canEdit}
+          canAlign={canEdit}
           onSend={() => setSendingMany(true)}
         />
       )}
       <SendToDevice
         open={sendingMany}
-        workIds={[...picked]}
-        title={`Send ${picked.size} ${picked.size === 1 ? "book" : "books"} to a device`}
+        target={target}
+        count={s.count}
+        title={`Send ${s.count} ${s.count === 1 ? "book" : "books"} to a device`}
         onClose={() => setSendingMany(false)}
-        onSent={endSelect}
+        onSent={s.exit}
       />
       <Sheet open={!!selected} onClose={() => nav(`/app/library${loc.search}`)} title={selected?.title ?? ""}>
         {selected && <WorkDetail work={selected} shelves={shelves} onShelvesChanged={() => loadShelves().catch(() => {})} />}
@@ -358,6 +377,46 @@ export function LibraryPage() {
         />
       </Sheet>
     </>
+  );
+}
+
+/** One book in the Library grid or list: a grid cell, selected with the pointer or keyboard
+ * (lib/useSelection), opened with Enter, a double-click, or a tap. */
+function BookCell({ work: w, q, grid, cell, col }: { work: Work; q: string; grid: boolean; cell: CellProps; col: number }) {
+  const label = `${w.title} by ${w.author}${w.progress ? `, ${percent(w.progress.percentage)} read` : ""}`;
+  const pick = (
+    <span className="pick" data-sel-toggle aria-hidden="true" title="Select">
+      {cell["aria-selected"] ? "✓" : ""}
+    </span>
+  );
+  return grid ? (
+    <div className="book" style={tintStyle(w)} aria-label={label} aria-colindex={col} {...cell}>
+      {pick}
+      <span className="cover-wrap">
+        <Cover work={w} />
+        {w.progress && <ProgressRing value={w.progress.percentage} />}
+        {w.cover_generated && w.audio && <span className="audio-badge"><Headphones aria-label="Has audiobook" /></span>}
+      </span>
+      {/* A generated cover already shows the title and author; a caption would repeat them.
+          The cell's aria-label still names the book. */}
+      {!w.cover_generated && (
+        <>
+          <strong><Highlight text={w.title} q={q} /></strong>
+          <span><Highlight text={w.author} q={q} />{w.audio && <Headphones className="has-audio" aria-label="Has audiobook" />}</span>
+        </>
+      )}
+    </div>
+  ) : (
+    <div className="book" style={tintStyle(w)} aria-label={label} aria-colindex={col} {...cell}>
+      {pick}
+      <Cover work={w} />
+      <span className="titles">
+        <strong><Highlight text={w.title} q={q} /></strong>
+        <span><Highlight text={w.author} q={q} /></span>
+      </span>
+      <span className="when">{w.progress ? `${percent(w.progress.percentage)} · ${relativeTime(w.progress.updated_at)}` : `added ${relativeTime(w.created_at)}`}</span>
+      {w.progress ? <ProgressRing value={w.progress.percentage} size={30} /> : <span />}
+    </div>
   );
 }
 

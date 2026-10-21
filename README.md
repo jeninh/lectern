@@ -150,8 +150,17 @@ read-aloud EPUB).
   verified copy when it crosses filesystems); renaming tracks renames files. Bytes, SHA-256,
   and KOReader document ids are unchanged, so device sync keeps working. Text or audio changes
   re-queue alignment with the same model.
-- **Bulk edit.** **Select** in the Library sets author or series, adds or removes tags and
-  shelves, or trashes many books at once, with one Undo for the batch.
+- **Selecting many.** The Library grid and list (any shelf or filter), Trash, and Review
+  before filing select like a desktop file manager: click selects one, `⌘` (Mac) or `Ctrl`
+  (elsewhere) + click adds or removes one, `Shift` + click selects a range (`⌘/Ctrl` + `Shift`
+  adds it), arrows move in two dimensions (`Shift` extends, `⌘/Ctrl` + arrow and `Home`/`End`
+  jump), `Space` toggles, `Enter` or a double-click opens, `Esc` clears, and dragging across
+  empty space draws a selection rectangle. `⌘/Ctrl A` selects the whole view, including books
+  the page has not drawn yet: the bar says **All N selected** and the server resolves that
+  view itself. On a touch screen, press and hold a book to start selecting, then tap to add.
+- **Bulk edit.** The selection bar sets author or series, adds or removes tags and shelves,
+  sends to a device, queues alignment, or trashes many books at once, with one Undo for the
+  batch.
 - **Trash.** Trashed books and removed files are hidden at once and stay restorable from
   **Trash** for 30 days; a background job then deletes them. Only the owner can delete early.
 - **Metadata suggestions (optional, off by default).** The owner can enable them in Admin.
@@ -394,3 +403,13 @@ the command above, cookies and the CSRF/same-origin checks behave as in producti
 
 Keyboard: `⌘/Ctrl K` search, `/` filter, `N` add device, `G` then `H`/`L`/`D`/`S`/`A`,
 `T` theme, `[` sidebar, `Esc` close, `?` all shortcuts. Screenshots: `docs/screenshots/`.
+
+End-to-end tests (Playwright, Chromium) start a freshly seeded server on `:8090`
+(`frontend/e2e/serve.sh`: 360 books, owner `owner` / `e2e correct horse battery`) against
+the built app:
+
+```sh
+npm --prefix frontend run build
+npx --prefix frontend playwright install chromium   # once
+(cd frontend && npx playwright test)
+```

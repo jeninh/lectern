@@ -25,6 +25,8 @@ from lectern.models import (
     utcnow,
 )
 from lectern.routes.api.readalong import visible_work
+from lectern.routes.api.selection import Selection
+from lectern.routes.api.selection import resolve as resolve_selection
 from lectern.routes.api.serializers import iso
 from lectern.security import audit
 from lectern.security.deps import (
@@ -146,6 +148,73 @@ def request_align(
     db.commit()
     response.status_code = status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
     return jobs.job_json(db, job, _worker_names(db))
+
+
+class AlignManyIn(BaseModel):
+    work_ids: list[int] = Field(default_factory=list, max_length=500)
+    selection: Selection | None = None
+    model: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/works/align")
+def request_align_many(
+    request: Request, auth: JobManager, db: DbDep, settings: SettingsDep, body: AlignManyIn
+) -> dict:
+    """Queue alignment for many works (the Library's selection bar). Never forces: a work
+    with an active job reports ``already_queued``. One result per work, in order:
+    ``queued``, ``already_queued``, ``no_inputs``, ``out_of_memory_choose_model``, or
+    ``not_found``."""
+    if body.model is not None and body.model not in MODELS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown_model")
+    results = []
+    for wid in resolve_selection(db, auth.user, body.work_ids, body.selection):
+        try:
+            work = visible_work(db, auth.user, wid)
+        except HTTPException:
+            results.append({"work_id": wid, "status": "not_found"})
+            continue
+        jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
+        db.commit()
+        # The same rules as POST /api/works/{id}/align: retry with the smaller model a
+        # failure chose, and never rerun an out-of-memory failure without a named model.
+        alignment = jobs.work_alignment(db, work.id)
+        retry = _retry_model(db, work.id)
+        if (
+            body.model is None
+            and retry is None
+            and jobs.active_job(db, work.id) is None
+            and alignment is not None
+            and alignment.status == AlignmentStatus.FAILED
+            and jobs.out_of_memory(alignment.error)
+        ):
+            results.append({"work_id": wid, "status": "out_of_memory_choose_model"})
+            continue
+        try:
+            job, created = jobs.enqueue_align(
+                db,
+                settings.library_dir,
+                work,
+                model=body.model or retry or settings.align_model,
+                created_by=auth.user.id,
+            )
+        except jobs.NoInputs:
+            db.rollback()
+            results.append({"work_id": wid, "status": "no_inputs"})
+            continue
+        if created:
+            audit.record(
+                db,
+                "align.request",
+                actor_user_id=auth.user.id,
+                target=f"work:{work.id}",
+                ip=client_ip(request),
+                detail=job.payload.get("model") if job.payload else None,
+            )
+        db.commit()
+        results.append(
+            {"work_id": wid, "status": "queued" if created else "already_queued", "job_id": job.id}
+        )
+    return {"results": results}
 
 
 @router.post("/jobs/{job_id}/cancel")

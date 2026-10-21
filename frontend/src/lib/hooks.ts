@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+/** The platform's command modifier as shown in shortcut hints. */
+export const MOD = isMac ? "⌘" : "Ctrl";
+
 export function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
   useEffect(() => {
@@ -49,7 +53,7 @@ export function useVisiblePolling(fn: () => void, ms: number) {
   }, [ms]);
 }
 
-function isEditable(el: Element | null): boolean {
+export function isEditable(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el as HTMLElement).isContentEditable;

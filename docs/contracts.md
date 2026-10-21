@@ -571,13 +571,40 @@ removed. Paths are checked against traversal. A move is deferred while a read-al
 running for the work. Changing the primary EPUB, removing a format, or reordering tracks rebuilds
 sentences and cancels or stales the alignment, which is re-queued with the same model.
 
-Bulk: `POST /api/works/bulk {work_ids[≤500], action: set_authors|set_series|add_tags|
+Bulk: `POST /api/works/bulk {work_ids[≤500] | selection, action: set_authors|set_series|add_tags|
 remove_tags|add_to_shelves|remove_from_shelves|trash, ...}` (+`Idempotency-Key`) → `{batch_id,
 results: [{work_id, ok, error?}]}`; each work is its own transaction and revision. A failing
 work (including a filesystem error, `io_error`) is rolled back alone and reported; the others
 stand. `POST /api/works/bulk/{batch_id}/undo` reverts the batch the same way, per work
 (`{batch_id, results: [{work_id, ok, error?}]}`), auditing each undone work as `work.undo` and
 the batch as `work.bulk_undo` with the failures named.
+
+### Selections — `GET /api/library/count`, `selection` on bulk requests
+
+`⌘/Ctrl A` in the Library selects the whole view without listing it. Bulk requests
+(`POST /api/works/bulk`, `POST /api/device-queues/{id}/items`, `POST /api/works/align`) take
+exactly one of `work_ids` or
+
+```json
+{"selection": {"filter": {"q": "tolkien", "status": "unread", "shelf": 3},
+               "exclude_ids": [12], "expected_count": 211}}
+```
+
+which the server resolves (`lectern.routes.api.selection`) to the works the caller sees in that
+view, in title order, minus `exclude_ids`. The filter is the Library's: `q` matches title,
+author, or ISBN after folding case and diacritics (NFKD, combining marks U+0300–U+036F
+dropped, lower case); `status` is `all|reading|unread|finished` from the caller's latest
+KOReader percentage (finished ≥ 98.5 %); `shelf` is shelf membership. A view whose size is no
+longer `expected_count` (what the bar showed as "All N selected") is `409 selection_changed`;
+an empty one `422 selection_empty`; more than 5000 works `422 selection_too_large`; both or
+neither of `work_ids` and `selection`, `422 work_ids_or_selection`.
+`GET /api/library/count?q=&status=&shelf=` → `{"total"}` counts a view the same way.
+
+`POST /api/works/align {work_ids | selection, model?}` (owner and member) queues alignment for
+each work and never forces: one result per work, `{work_id, status: queued|already_queued|
+no_inputs|out_of_memory_choose_model|not_found, job_id?}`. Like `POST /api/works/{id}/align`, a
+retry uses the smaller model a failure chose, and a work whose last run ran out of memory is
+not rerun without a named `model`.
 
 ### Trash — `/api/trash`
 

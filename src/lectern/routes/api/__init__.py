@@ -18,6 +18,7 @@ from lectern.routes.api import (
     queues,
     readalong,
     security,
+    selection,
     shelves,
     uploads,
     worker,
@@ -25,6 +26,7 @@ from lectern.routes.api import (
 )
 
 router = APIRouter(prefix="/api")
+router.include_router(selection.router)
 router.include_router(core.router)
 router.include_router(devices.router)
 router.include_router(ai_keys.router)

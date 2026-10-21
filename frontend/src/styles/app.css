@@ -1159,14 +1159,24 @@ tr.revoked td:first-child {
   grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
   gap: 26px 20px;
 }
-.book-grid > li {
-  animation: rise var(--dur-spring) var(--spring) both;
+/* The Library's windowed grid (role=grid): rows are laid out by lib/virtual. */
+.book-grid[role="grid"],
+.book-list[role="grid"] {
+  display: block;
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
-.book-grid > li:nth-child(2) { animation-delay: 20ms; }
-.book-grid > li:nth-child(3) { animation-delay: 40ms; }
-.book-grid > li:nth-child(4) { animation-delay: 60ms; }
-.book-grid > li:nth-child(5) { animation-delay: 80ms; }
-.book-grid > li:nth-child(n + 6) { animation-delay: 100ms; }
+.book-grid .vrow {
+  display: grid;
+  column-gap: 20px;
+  align-items: start;
+}
+.book-list .vrow {
+  display: grid;
+  align-items: start;
+}
 .book {
   --tint: var(--accent);
   display: grid;
@@ -1184,6 +1194,14 @@ tr.revoked td:first-child {
 .book:focus-visible {
   outline-offset: 4px;
 }
+.book[role="gridcell"]:focus {
+  outline: none;
+}
+.book[role="gridcell"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  box-shadow: 0 0 0 6px var(--accent-ring);
+}
 .cover-wrap {
   position: relative;
   display: block;
@@ -1194,7 +1212,8 @@ tr.revoked td:first-child {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 10px 22px -14px color-mix(in srgb, var(--tint) 80%, black);
 }
 .book:hover .cover,
-.book:focus-visible .cover {
+.book:focus-visible .cover,
+.book[data-focused]:focus .cover {
   transform: translateY(-5px) rotate(-0.4deg);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12), 0 22px 36px -16px color-mix(in srgb, var(--tint) 85%, black);
 }
@@ -3841,7 +3860,25 @@ fieldset.match > legend {
 .book {
   position: relative;
 }
-.book .pick {
+.import-card[role="gridcell"] {
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.import-card[role="gridcell"] :is(input, textarea, select) {
+  user-select: text;
+  -webkit-user-select: text;
+}
+.import-card .pick {
+  left: auto !important;
+  right: 14px;
+  top: 14px !important;
+  display: grid !important;
+}
+.book .pick,
+.import-card .pick {
+  display: none;
+  cursor: pointer;
   position: absolute;
   top: 8px;
   left: 8px;
@@ -3859,14 +3896,43 @@ fieldset.match > legend {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
   transition: transform var(--dur-spring) var(--spring), background var(--dur);
 }
-.book[aria-pressed="true"] .pick {
+[data-has-selection] .book .pick,
+.book[aria-selected="true"] .pick {
+  display: grid;
+}
+@media (hover: hover) {
+  .book[role="gridcell"]:hover .pick {
+    display: grid;
+  }
+}
+.book[aria-selected="true"] .pick,
+.import-card[aria-selected="true"] .pick {
   background: var(--accent);
   border-color: var(--accent);
   transform: scale(1.08);
 }
-.book[aria-pressed="true"] .cover {
+.book-grid .book[aria-selected="true"] .cover {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
+}
+.book-list .book[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+.marquee {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+}
+@media (forced-colors: active) {
+  .book[aria-selected="true"] {
+    outline: 3px solid Highlight;
+  }
+  .book[role="gridcell"]:focus-visible {
+    outline: 3px dashed CanvasText;
+  }
 }
 .book-list .book .pick {
   top: 50%;
@@ -4283,16 +4349,34 @@ table.compare th {
   padding: 0;
   display: grid;
 }
-.trash-list li {
+.trash-item {
+  position: relative;
   display: grid;
   grid-template-columns: 36px 1fr auto;
   gap: 12px;
   align-items: center;
-  padding: 12px 0;
+  padding: 12px 8px;
+  margin: 0 -8px;
   border-top: 1px solid var(--line);
+  border-radius: 10px;
+  user-select: none;
+  -webkit-user-select: none;
 }
-.trash-list li:first-child {
-  border-top: none;
+.trash-list > [role="row"]:first-child .trash-item {
+  border-top-color: transparent;
+}
+.trash-item[aria-selected="true"],
+.import-card[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+.trash-item:focus {
+  outline: none;
+}
+.trash-item:focus-visible,
+.import-card[role="gridcell"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px var(--accent-ring);
 }
 .trash-list .titles {
   display: grid;
@@ -4313,10 +4397,10 @@ table.compare th {
   height: 18px;
 }
 @media (max-width: 560px) {
-  .trash-list li {
+  .trash-item {
     grid-template-columns: 36px 1fr;
   }
-  .trash-list li > .row {
+  .trash-item > .row {
     grid-column: 2;
   }
 }
@@ -4754,4 +4838,7 @@ table.compare td:first-child {
 }
 .plugin-cta {
   justify-self: start;
+}
+.import-card[aria-selected] .import-head {
+  padding-right: 34px;
 }

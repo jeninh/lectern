@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { post } from "../lib/api";
 import { bulkSummary } from "../lib/editor";
+import { MOD } from "../lib/hooks";
 import { useStore } from "../lib/store";
 import type { BulkResult, Shelf } from "../lib/types";
 import { Close, Send, Trash } from "./Icons";
@@ -10,18 +11,38 @@ import { Sheet } from "./Sheet";
 type Action = "author" | "series" | "tags" | "shelves";
 const uuid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-/** Sticky bar for the Library's selection mode: one change to many books, with Undo. */
-export function BulkBar({ ids, visible, shelves, onSelectAll, onDone, onClose, canEdit = true, onSend }: { ids: number[]; visible: number[]; shelves: Shelf[]; onSelectAll: (ids: number[]) => void; onDone: () => Promise<void>; onClose: () => void; canEdit?: boolean; onSend?: () => void }) {
-  const { toast, works } = useStore();
+/** What a bulk request targets: explicit ids, or the server-resolved view minus exclusions
+ * (Cmd/Ctrl+A over items that may not be loaded; lectern.routes.api.selection). */
+export type BulkTarget = { work_ids: number[] } | { selection: { filter: { q: string; status: string; shelf: number | null }; exclude_ids: number[]; expected_count: number } };
+
+/** The sticky bar shared by every multi-select view: the count, select all, and clear. */
+export function SelectionBar({ count, all, total, onSelectAll, onClear, children, label = "Selection" }: { count: number; all: boolean; total: number; onSelectAll: () => void; onClear: () => void; children?: ReactNode; label?: string }) {
+  return (
+    <div className="bulk-bar" role="toolbar" aria-label={label} data-testid="selection-bar">
+      <strong aria-live="polite" data-testid="selection-count">{all ? `All ${count} selected` : count ? `${count} selected` : "Select items"}</strong>
+      {!all && total > count && (
+        <button className="btn sm ghost" onClick={onSelectAll} title={`Select all (${MOD} A)`}>Select all {total}</button>
+      )}
+      <span className="spacer" />
+      {children}
+      <button className="icon-btn ghost sm" onClick={onClear} aria-label="Clear selection" title="Clear selection (Esc)"><Close /></button>
+    </div>
+  );
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** The Library's selection bar: one change to many books, with Undo. */
+export function BulkBar({ count, all, total, target, titles, shelves, onSelectAll, onClear, onDone, canEdit = true, canAlign = false, onSend }: { count: number; all: boolean; total: number; target: () => BulkTarget; titles: string[]; shelves: Shelf[]; onSelectAll: () => void; onClear: () => void; onDone: () => Promise<void>; canEdit?: boolean; canAlign?: boolean; onSend?: () => void }) {
+  const { toast } = useStore();
   const [dialog, setDialog] = useState<Action | null>(null);
   const [busy, setBusy] = useState(false);
-  const n = ids.length;
-  const allPicked = visible.length > 0 && visible.every((id) => ids.includes(id));
+  const n = count;
 
   const run = async (body: Record<string, unknown>, verb: string) => {
     setBusy(true);
     try {
-      const r = await post<BulkResult>("/api/works/bulk", { work_ids: ids, ...body }, { "idempotency-key": uuid() });
+      const r = await post<BulkResult>("/api/works/bulk", { ...target(), ...body }, { "idempotency-key": uuid() });
       const { text, ok, failed } = bulkSummary(verb, r.results);
       toast(
         text,
@@ -43,8 +64,8 @@ export function BulkBar({ ids, visible, shelves, onSelectAll, onDone, onClose, c
           : undefined,
       );
       setDialog(null);
+      if (body.action === "trash") onClear();
       await onDone();
-      if (body.action === "trash") onClose();
     } catch (e) {
       toast((e as Error).message, "error");
     } finally {
@@ -52,39 +73,57 @@ export function BulkBar({ ids, visible, shelves, onSelectAll, onDone, onClose, c
     }
   };
 
-  const titles = works.filter((w) => ids.includes(w.id)).map((w) => w.title);
+  const align = async () => {
+    setBusy(true);
+    try {
+      const r = await post<{ results: { work_id: number; status: string }[] }>("/api/works/align", target());
+      const by = (st: string) => r.results.filter((x) => x.status === st).length;
+      const parts = [
+        by("queued") && `Queued alignment for ${plural(by("queued"), "book")}`,
+        by("already_queued") && `${by("already_queued")} already queued`,
+        by("no_inputs") && `${plural(by("no_inputs"), "book")} without both an EPUB and audio`,
+        by("out_of_memory_choose_model") && `${plural(by("out_of_memory_choose_model"), "book")} ran out of memory last time (re-run from the editor with a smaller model)`,
+        by("not_found") && `${by("not_found")} not found`,
+      ].filter(Boolean);
+      toast(parts.join(" · ") || "Nothing to align", by("queued") || by("already_queued") ? "info" : "error");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
-      <div className="bulk-bar" role="toolbar" aria-label={`${n} selected`}>
-        <strong aria-live="polite">{n ? `${n} selected` : "Select books"}</strong>
-        <button className="btn sm ghost" onClick={() => onSelectAll(allPicked ? [] : visible)}>{allPicked ? "Select none" : `Select all ${visible.length}`}</button>
-        <span className="spacer" />
-        {onSend && <button className="btn sm" disabled={!n} onClick={onSend}><Send /> Send to device</button>}
+      <SelectionBar count={n} all={all} total={total} onSelectAll={onSelectAll} onClear={onClear} label={`${n} selected`}>
+        {onSend && <button className="btn sm" disabled={!n} onClick={onSend}><Send /> Send</button>}
         {canEdit && (
           <>
             <button className="btn sm" disabled={!n} onClick={() => setDialog("author")}>Author</button>
             <button className="btn sm" disabled={!n} onClick={() => setDialog("series")}>Series</button>
             <button className="btn sm" disabled={!n} onClick={() => setDialog("tags")}>Tags</button>
             {shelves.length > 0 && <button className="btn sm" disabled={!n} onClick={() => setDialog("shelves")}>Shelves</button>}
-            <button
-              className="btn sm danger"
-              disabled={!n || busy}
-              onClick={() => window.confirm(`Move ${n} ${n === 1 ? "book" : "books"} to the trash? You can restore them for 30 days.`) && run({ action: "trash" }, "Moved to trash:")}
-            >
-              <Trash /> Trash
-            </button>
           </>
         )}
-        <button className="icon-btn ghost sm" onClick={onClose} aria-label="Leave selection mode"><Close /></button>
-      </div>
-      <Sheet open={dialog !== null} onClose={() => setDialog(null)} title={dialog ? `${dialog === "author" ? "Set author" : dialog === "series" ? "Set series" : dialog === "tags" ? "Tags" : "Shelves"} for ${n} ${n === 1 ? "book" : "books"}` : ""} variant="dialog" labelledBy="bulk-title">
-        {dialog && <BulkForm action={dialog} shelves={shelves} busy={busy} titles={titles} onSubmit={run} />}
+        {canAlign && <button className="btn sm" disabled={!n || busy} onClick={align}>Align</button>}
+        {canEdit && (
+          <button
+            className="btn sm danger"
+            disabled={!n || busy}
+            onClick={() => window.confirm(`Move ${plural(n, "book")} to the trash? You can restore them for 30 days.`) && run({ action: "trash" }, "Moved to trash:")}
+          >
+            <Trash /> Trash
+          </button>
+        )}
+      </SelectionBar>
+      <Sheet open={dialog !== null} onClose={() => setDialog(null)} title={dialog ? `${dialog === "author" ? "Set author" : dialog === "series" ? "Set series" : dialog === "tags" ? "Tags" : "Shelves"} for ${plural(n, "book")}` : ""} variant="dialog" labelledBy="bulk-title">
+        {dialog && <BulkForm action={dialog} shelves={shelves} busy={busy} titles={titles} count={n} onSubmit={run} />}
       </Sheet>
     </>
   );
 }
 
-function BulkForm({ action, shelves, busy, titles, onSubmit }: { action: Action; shelves: Shelf[]; busy: boolean; titles: string[]; onSubmit: (body: Record<string, unknown>, verb: string) => void }) {
+function BulkForm({ action, shelves, busy, titles, count, onSubmit }: { action: Action; shelves: Shelf[]; busy: boolean; titles: string[]; count: number; onSubmit: (body: Record<string, unknown>, verb: string) => void }) {
   const [author, setAuthor] = useState("");
   const [series, setSeries] = useState("");
   const [index, setIndex] = useState("");
@@ -93,7 +132,7 @@ function BulkForm({ action, shelves, busy, titles, onSubmit }: { action: Action;
   const mode = useRef<"add" | "remove">("add");
   const preview = (
     <p className="hint" style={{ margin: 0 }}>
-      {titles.slice(0, 3).join(", ")}{titles.length > 3 ? ` and ${titles.length - 3} more` : ""}. Each book is saved on its own; Undo reverts them all.
+      {titles.slice(0, 3).join(", ")}{count > Math.min(3, titles.length) ? ` and ${count - Math.min(3, titles.length)} more` : ""}. Each book is saved on its own; Undo reverts them all.
     </p>
   );
   if (action === "author")
@@ -110,7 +149,7 @@ function BulkForm({ action, shelves, busy, titles, onSubmit }: { action: Action;
       <form className="stack" onSubmit={(e) => { e.preventDefault(); onSubmit({ action: "set_series", series: series.trim() || null, series_index: index === "" ? null : Number(index) }, series.trim() ? "Set the series of" : "Cleared the series of"); }}>
         <div className="field-pair">
           <label className="field"><span>Series (empty to clear)</span><input className="input" value={series} onChange={(e) => setSeries(e.target.value)} maxLength={256} data-autofocus /></label>
-          <label className="field index"><span>Number</span><input className="input" type="number" step="any" min={0} value={index} onChange={(e) => setIndex(e.target.value)} disabled={!series.trim() || titles.length > 1} title={titles.length > 1 ? "Set numbers one book at a time" : undefined} /></label>
+          <label className="field index"><span>Number</span><input className="input" type="number" step="any" min={0} value={index} onChange={(e) => setIndex(e.target.value)} disabled={!series.trim() || count > 1} title={count > 1 ? "Set numbers one book at a time" : undefined} /></label>
         </div>
         {preview}
         <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn primary" disabled={busy}>{series.trim() ? "Set series" : "Clear series"}</button></div>

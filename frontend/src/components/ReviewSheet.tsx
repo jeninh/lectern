@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSelection, type CellProps } from "../lib/useSelection";
+import { SelectionBar } from "./BulkBar";
 import { ApiError, del, post } from "../lib/api";
 import { bytes } from "../lib/format";
 import { clean, validate } from "../lib/metadata";
@@ -20,11 +22,47 @@ const uuid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.ra
 
 /** Every uploaded book waiting to be filed; opened from the tray, a toast, the Library, or Cmd+K. */
 export function ReviewSheet() {
-  const { reviewOpen, setReviewOpen, imports, refreshImports, me, setPreference } = useStore();
+  const { reviewOpen, setReviewOpen, imports, refreshImports, refreshLibrary, me, setPreference, toast } = useStore();
   const open = imports.filter((i) => i.status === "ready" || i.status === "uploading" || i.status === "failed");
   useEffect(() => {
     if (reviewOpen) refreshImports().catch(() => {});
   }, [reviewOpen, refreshImports]);
+  // Ready uploads can be selected together and filed or discarded at once.
+  const [scope, setScope] = useState<HTMLDivElement | null>(null);
+  const ready = useMemo(() => open.filter((i) => i.status === "ready"), [open]);
+  const keys = useMemo(() => ready.map((i) => i.id), [ready]);
+  const s = useSelection<string>({ scope, keys, global: true });
+  const [busy, setBusy] = useState(false);
+
+  const bulk = async (verb: "file" | "discard") => {
+    const picked = ready.filter((i) => s.isSelected(i.id));
+    if (verb === "discard" && !window.confirm(`Discard ${picked.length} ${picked.length === 1 ? "upload" : "uploads"}? Their uploaded files are deleted.`)) return;
+    setBusy(true);
+    let ok = 0;
+    const failed: string[] = [];
+    for (const imp of picked) {
+      const name = imp.metadata?.title || imp.detected?.title || imp.label;
+      try {
+        if (verb === "discard") await del(`/api/imports/${imp.id}`);
+        else {
+          // Filed as shown: the detected details and the proposed match. Unsaved edits on a
+          // card stay with that card; file it on its own to keep them.
+          if (!imp.metadata || Object.keys(validate(imp.metadata)).length) throw new Error("needs details");
+          await post(`/api/imports/${imp.id}/file`, { version: imp.version, metadata: clean(imp.metadata), target: proposedTarget(imp), use_cover: imp.use_cover ?? true, audio: "refuse" }, { "idempotency-key": uuid() });
+        }
+        ok += 1;
+      } catch {
+        failed.push(name);
+      }
+    }
+    setBusy(false);
+    toast(
+      `${verb === "file" ? "Filed" : "Discarded"} ${ok} ${ok === 1 ? "book" : "books"}${failed.length ? ` · ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? ` and ${failed.length - 3} more` : ""} need${failed.length === 1 ? "s" : ""} a look` : ""}.`,
+      failed.length && !ok ? "error" : "info",
+    );
+    s.exit();
+    await Promise.all([refreshImports(), refreshLibrary()]).catch(() => {});
+  };
   return (
     <Sheet open={reviewOpen} onClose={() => setReviewOpen(false)} title="Review before filing" labelledBy="import-review-title" wide>
       <div className="stack">
@@ -54,11 +92,19 @@ export function ReviewSheet() {
             <span className="hint">Add books from the Library, or drop files anywhere on the page.</span>
           </div>
         ) : (
-          <ul className="import-list">
-            {open.map((imp) => (
-              <ImportCard key={imp.id} imp={imp} siblings={open.filter((o) => o.id !== imp.id && o.status === "ready")} />
+          <div className="import-list" role="grid" aria-label="Uploads waiting" aria-multiselectable="true" aria-rowcount={open.length} ref={setScope} {...s.scopeProps}>
+            {open.map((imp, i) => (
+              <div role="row" key={imp.id} aria-rowindex={i + 1}>
+                <ImportCard imp={imp} siblings={open.filter((o) => o.id !== imp.id && o.status === "ready")} cell={imp.status === "ready" ? s.cellProps(imp.id) : undefined} />
+              </div>
             ))}
-          </ul>
+          </div>
+        )}
+        {(s.count > 0 || s.selecting) && (
+          <SelectionBar count={s.count} all={s.allSelected} total={keys.length} onSelectAll={s.selectAll} onClear={s.exit} label="Selected uploads">
+            <button className="btn sm ghost" disabled={busy || !s.count} onClick={() => bulk("discard")}><Close /> Discard</button>
+            <button className="btn sm primary" disabled={busy || !s.count} onClick={() => bulk("file")}>File {s.count}</button>
+          </SelectionBar>
         )}
       </div>
     </Sheet>
@@ -67,12 +113,16 @@ export function ReviewSheet() {
 
 type Choice = { action: "new" } | { action: "join"; work_id: number };
 
-function ImportCard({ imp, siblings }: { imp: ImportInfo; siblings: ImportInfo[] }) {
+/** Where an upload goes unless the person picks otherwise: its saved target, else the proposal. */
+function proposedTarget(imp: ImportInfo): Choice {
+  const proposal = imp.proposal;
+  return imp.target?.action === "join" && imp.target.work_id ? { action: "join", work_id: imp.target.work_id } : proposal?.action === "join" && proposal.work_id ? { action: "join", work_id: proposal.work_id } : { action: "new" };
+}
+
+function ImportCard({ imp, siblings, cell }: { imp: ImportInfo; siblings: ImportInfo[]; cell?: CellProps }) {
   const { works, toast, refreshImports, refreshLibrary, openEditor, setReviewOpen } = useStore();
   const proposal = imp.proposal;
-  const initialChoice = (): Choice =>
-    imp.target?.action === "join" && imp.target.work_id ? { action: "join", work_id: imp.target.work_id } : proposal?.action === "join" && proposal.work_id ? { action: "join", work_id: proposal.work_id } : { action: "new" };
-  const [choice, setChoice] = useState<Choice>(initialChoice);
+  const [choice, setChoice] = useState<Choice>(() => proposedTarget(imp));
   const [editing, setEditing] = useState(false);
   const [meta, setMeta] = useState<Metadata | null>(imp.metadata);
   const [useCover, setUseCover] = useState(imp.use_cover ?? true);
@@ -152,19 +202,19 @@ function ImportCard({ imp, siblings }: { imp: ImportInfo; siblings: ImportInfo[]
 
   if (imp.status === "uploading") {
     return (
-      <li className="card import-card" aria-busy="true">
+      <div className="card import-card" role="gridcell" aria-busy="true">
         <strong>{imp.label}</strong>
         <span className="hint">{imp.uploads_active ? `Uploading ${imp.uploads_active} more ${imp.uploads_active === 1 ? "file" : "files"}…` : "Waiting for files…"}</span>
         <div className="row" style={{ justifyContent: "flex-end" }}>
           <button className="btn sm ghost" onClick={discard}>Discard</button>
         </div>
-      </li>
+      </div>
     );
   }
   if (imp.status === "failed") {
     const dup = imp.files.find((f) => f.duplicate_of)?.duplicate_of;
     return (
-      <li className="card import-card">
+      <div className="card import-card" role="gridcell">
         <strong className="import-title">{imp.detected?.title || imp.label}</strong>
         <div className={`alert ${imp.error === "all_duplicates" ? "warn" : "error"}`}>
           {imp.error === "all_duplicates"
@@ -174,12 +224,13 @@ function ImportCard({ imp, siblings }: { imp: ImportInfo; siblings: ImportInfo[]
         <div className="row" style={{ justifyContent: "flex-end" }}>
           <button className="btn sm" onClick={async () => { await del(`/api/imports/${imp.id}`).catch(() => {}); await refreshImports(); }}>Dismiss</button>
         </div>
-      </li>
+      </div>
     );
   }
 
   return (
-    <li className="card import-card">
+    <div className="card import-card" aria-label={shown?.title || imp.label} {...cell} role="gridcell">
+      {cell && <span className="pick" data-sel-toggle aria-hidden="true" title="Select">{cell["aria-selected"] ? "✓" : ""}</span>}
       <div className="import-head">
         {imp.cover_url && useCover ? (
           <div className="cover"><img src={imp.cover_url} alt="" /></div>
@@ -310,6 +361,6 @@ function ImportCard({ imp, siblings }: { imp: ImportInfo; siblings: ImportInfo[]
           {busy ? "Filing…" : choice.action === "join" ? "Add to book" : "File as new book"}
         </button>
       </div>
-    </li>
+    </div>
   );
 }
