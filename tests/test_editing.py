@@ -434,7 +434,9 @@ def test_cover_embedded_remove_and_bad_images(client, owner, settings):
     work_dir = settings.library_dir / editor(client, wid)["work"]["dir_path"]
     assert not (work_dir / "cover.jpg").exists()
     got = client.get(f"/library/works/{wid}/cover.jpg")
-    assert got.status_code == 200 and got.content == (work_dir / "derived/cover.jpg").read_bytes()
+    assert got.status_code == 200 and [got.content] == [
+        p.read_bytes() for p in work_dir.glob("derived/cover-*.jpg")
+    ]
     v = r.json()["editor"]["version"]
     r = patch(client, csrf, wid, {"version": v, "cover": {"action": "embedded"}})
     assert r.json()["editor"]["cover"]["source"] == "embedded"

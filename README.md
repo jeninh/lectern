@@ -86,7 +86,7 @@ Titles are auto-fitted and balanced in the app's serif, the author is set in sma
 spine shadow runs down the left edge. Every text colour meets WCAG AA contrast.
 
 The server draws the cover (SVG rasterised by resvg) and caches it as
-`<work>/derived/cover.jpg`, so the web app, OPDS, KOReader, and Kindle all get the same image
+`<work>/derived/cover-<key>.jpg`, so the web app, OPDS, KOReader, and Kindle all get the same image
 from `/library/works/<id>/cover.jpg`. It is redrawn when the title, author, style, or palette
 changes. Uploaded or embedded art always wins: a generated cover never touches `cover.jpg`.
 Coptic, Greek, Cyrillic, Arabic, Hebrew, and Devanagari use Noto fonts bundled in

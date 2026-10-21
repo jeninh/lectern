@@ -169,6 +169,74 @@ def test_absurd_titles_are_cut_with_an_ellipsis_not_overflowed():
     assert all(cg.measure(ln, chain, b.size) <= 540 for ln in b.lines)
 
 
+# --- the cache in derived/ --------------------------------------------------------------------
+
+
+def test_a_folder_moved_during_rendering_is_not_recreated(tmp_path, monkeypatch):
+    # A title edit or trash moves the work folder while the cover is being drawn.
+    old, new = tmp_path / "Old Author" / "Old Title", tmp_path / "New Author" / "New Title"
+    old.mkdir(parents=True)
+    d = cg.design_for("Old Title", "Old Author")
+    real = cg.render_jpeg
+
+    def render_while_moving(design, **kw):
+        new.parent.mkdir(parents=True, exist_ok=True)
+        old.rename(new)
+        old.parent.rmdir()
+        return real(design, **kw)
+
+    monkeypatch.setattr(cg, "render_jpeg", render_while_moving)
+    data = cg.cached_cover(old, d)
+    assert data[:3] == b"\xff\xd8\xff"  # still served
+    assert not (tmp_path / "Old Author").exists()  # no orphan folder
+    assert not (new / "derived").exists()  # nothing written into the moved folder either
+    monkeypatch.setattr(cg, "render_jpeg", real)
+    assert cg.cached_cover(new, d) == data and cg.cache_path(new, d).is_file()
+
+
+def test_concurrent_misses_never_serve_another_designs_image(tmp_path, monkeypatch):
+    # Request A (old title) misses and renders slowly; request B (new title) misses, renders,
+    # and stores while A is still drawing; then A stores. B's design must still get B's image.
+    a, b = cg.design_for("Persuasion", "Jane Austen"), cg.design_for("Emma", "Jane Austen")
+    real = cg.render_jpeg
+    want_a, want_b = real(a), real(b)
+    done = []
+
+    def render(design, **kw):
+        if design == a and not done:
+            done.append(1)
+            assert cg.cached_cover(tmp_path, b) == want_b  # B completes inside A's render
+        return real(design, **kw)
+
+    monkeypatch.setattr(cg, "render_jpeg", render)
+    assert cg.cached_cover(tmp_path, a) == want_a
+    assert cg.cached_cover(tmp_path, b) == want_b
+    assert cg.cached_cover(tmp_path, a) == want_a
+    assert len(list((tmp_path / "derived").glob("cover-*.jpg"))) == 1
+
+
+def test_cjk_font_file_and_content_are_part_of_the_key(tmp_path, monkeypatch):
+    font = tmp_path / "NotoSerifCJK-Regular.ttc"
+    jp, en = cg.design_for("吾輩は猫である", "夏目漱石"), cg.design_for("Dune", "Frank Herbert")
+
+    def keys(files):
+        monkeypatch.setattr(cg, "_cjk_font_files", lambda: files)
+        cg._cjk_fonts_digest.cache_clear()
+        return jp.key, en.key
+
+    font.write_bytes(b"serif v1")
+    v1 = keys((font,))
+    font.write_bytes(b"serif v2")
+    v2 = keys((font,))
+    sans = tmp_path / "NotoSansCJK-Regular.ttc"
+    sans.write_bytes(b"serif v2")
+    v3 = keys((sans,))
+    none = keys(())
+    cg._cjk_fonts_digest.cache_clear()
+    assert len({v1[0], v2[0], v3[0], none[0]}) == 4  # content, file, and absence all count
+    assert v1[1] == v2[1] == v3[1] == none[1]  # Latin covers do not depend on the CJK font
+
+
 # --- serving, caching, precedence ----------------------------------------------------------------
 
 
@@ -187,7 +255,8 @@ def test_generated_cover_is_served_cached_and_redrawn_when_the_title_changes(
     assert ed["work"]["cover_generated"] is True and ed["work"]["cover_url"]
     assert ed["work"]["cover_tint"] in {p.ground for p in cg.PALETTES}
     first = _jpeg(client.get(ed["work"]["cover_url"]))
-    cached = settings.library_dir / ed["work"]["dir_path"] / "derived" / "cover.jpg"
+    derived = settings.library_dir / ed["work"]["dir_path"] / "derived"
+    [cached] = derived.glob("cover-*.jpg")
     assert cached.read_bytes() == first
     stamp = cached.stat().st_mtime_ns
     assert _jpeg(client.get(f"/library/works/{wid}/cover.jpg")) == first
@@ -202,9 +271,9 @@ def test_generated_cover_is_served_cached_and_redrawn_when_the_title_changes(
     work = r.json()["editor"]["work"]
     redrawn = _jpeg(client.get(work["cover_url"]))
     assert redrawn != first
-    assert (
-        settings.library_dir / work["dir_path"] / "derived" / "cover.jpg"
-    ).read_bytes() == redrawn
+    # Only the current design's file remains: earlier titles' covers are cleaned up.
+    [now] = (settings.library_dir / work["dir_path"] / "derived").glob("cover-*.jpg")
+    assert now.read_bytes() == redrawn
     # Same for the author.
     ed = editor(client, wid)
     meta = {**ed["metadata"], "authors": [{"name": "Someone Else"}]}
@@ -220,7 +289,7 @@ def test_cover_art_wins_and_generate_is_undoable(client, owner, settings):
     art = (work_dir / "cover.jpg").read_bytes()
     assert ed["work"]["cover_generated"] is False
     assert _jpeg(client.get(ed["work"]["cover_url"])) == art
-    assert not (work_dir / "derived" / "cover.jpg").exists()  # nothing generated for it
+    assert not list(work_dir.glob("derived/cover-*.jpg"))  # nothing generated for it
     # Choosing a generated cover in the editor sets its look and drops the art (to history).
     body = {
         "version": ed["version"],
@@ -233,7 +302,7 @@ def test_cover_art_wins_and_generate_is_undoable(client, owner, settings):
     got = _jpeg(client.get(f"/library/works/{wid}/cover.jpg"))
     assert got != art and not (work_dir / "cover.jpg").exists()
     want = cg.design_for("Orlando", "Virginia Woolf", style="minimal", seed=3, lang="en")
-    assert got == cg.cached_cover(work_dir, want).read_bytes()
+    assert got == cg.cached_cover(work_dir, want)
     # Undo brings the art and the previous (hashed) style back.
     r = api_post(client, f"/api/works/{wid}/undo", csrf, {"revision_id": r.json()["revision_id"]})
     assert r.status_code == 200, r.text
@@ -265,7 +334,7 @@ def test_editor_preview_draws_the_draft_without_storing(client, owner, settings)
     assert r.headers["x-cover-style"] == "modern"
     want = cg.design_for("الكتاب المقدس", "", style="modern", seed=2)
     assert r.headers["x-cover-palette"] == want.palette.name
-    assert not (work_dir / "derived" / "cover.jpg").exists()
+    assert not list(work_dir.glob("derived/cover-*.jpg"))
     assert client.get(url, params={"title": "x" * 600}).status_code == 422
     assert client.get(url, params={"style": "baroque"}).status_code == 422
     assert client.get(f"/api/works/{wid + 99}/cover/generated.jpg").status_code == 404

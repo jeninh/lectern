@@ -7,8 +7,8 @@ rasterised by resvg to JPEG on the server, so the web app, OPDS clients, KOReade
 Kindle all receive the same image from ``/library/works/<id>/cover.jpg``.
 
 Precedence: ``Work.has_cover`` (uploaded or embedded art in ``cover.jpg``) always wins. A
-generated cover is never written to ``cover.jpg``; it lives in ``<work>/derived/cover.jpg``
-with a sidecar holding the inputs it was drawn from, and is redrawn on the next request when
+generated cover is never written to ``cover.jpg``; it lives in ``<work>/derived/cover-<key>.jpg``,
+the key hashing everything it was drawn from (fonts included), and is redrawn on the next request when
 the title, author, style, palette seed, or this renderer changes. ``Work.cover_style`` (None
 = chosen by the hash) and ``Work.cover_seed`` (the editor's shuffle) are the only stored
 choices.
@@ -39,15 +39,17 @@ from xml.sax.saxutils import escape, quoteattr
 
 log = logging.getLogger(__name__)
 
-# Bump when the drawing changes, so every cached generated cover is redrawn.
+# Bump when the drawing changes, so every cached generated cover is redrawn. (Font changes
+# need no bump: the cache key includes the bundled fonts' and the CJK font's content.)
 RENDERER_VERSION = 2
 WIDTH, HEIGHT = 800, 1200
 STYLES = ("classic", "modern", "minimal")
 PATTERNS = ("stripes", "arcs", "grid", "dots")
 MAX_TEXT = 512  # characters of title or author considered (bounds render cost)
 DERIVED_DIR = "derived"
-CACHE_NAME = "cover.jpg"
-SIDECAR_NAME = "cover.json"
+# derived/cover-<key>.jpg: the key is in the name, so an image can never be served under
+# another design's key, even when two requests render different designs at the same time.
+CACHE_PREFIX = "cover-"
 
 FONT_DIR = Path(__file__).parent / "fonts"
 
@@ -138,7 +140,7 @@ class Design:
 
     @property
     def key(self) -> str:
-        """Everything the image depends on (cache key for ``derived/cover.jpg``)."""
+        """Everything the image depends on, fonts included (names ``derived/cover-<key>.jpg``)."""
         raw = json.dumps(
             [
                 RENDERER_VERSION,
@@ -149,7 +151,9 @@ class Design:
                 self.pattern,
                 self.ornament,
                 _cjk_variant(self.lang),
-                bool(_cjk_font_files()),
+                _bundled_fonts_digest(),
+                # Only CJK text is drawn with the system CJK font: its file and content.
+                _cjk_fonts_digest() if any(_is_cjk(c) for c in self.title + self.author) else "",
             ],
             ensure_ascii=False,
         )
@@ -253,6 +257,30 @@ CJK_FILES = (
     "NotoSansCJK-Medium.ttc",
 )
 _CJK_FAMILY = {"jp": "JP", "sc": "SC", "tc": "TC", "kr": "KR"}
+
+
+def _digest(paths) -> str:
+    h = hashlib.sha256()
+    for p in paths:
+        h.update(p.name.encode() + b"\0")
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    return h.hexdigest()[:16]
+
+
+@functools.cache
+def _bundled_fonts_digest() -> str:
+    return _digest(sorted(FONT_DIR.glob("*.ttf")))
+
+
+@functools.cache
+def _cjk_fonts_digest() -> str:
+    """Which CJK font file is used and what is in it (hashed once per process)."""
+    try:
+        return _digest(_cjk_font_files()) if _cjk_font_files() else "none"
+    except OSError:
+        return "unreadable"
 
 
 @functools.cache
@@ -884,36 +912,40 @@ def render_jpeg(design: Design, *, width: int = WIDTH, quality: int = 88) -> byt
 # --- the cache in derived/ ---------------------------------------------------------------------
 
 
-def cached_cover(work_dir: Path, design: Design) -> Path | bytes:
-    """``<work>/derived/cover.jpg``, redrawn when the design's key changed. Returns the image
-    bytes instead when the library cannot be written (read-only mount, full disk)."""
-    derived = work_dir / DERIVED_DIR
-    path, sidecar = derived / CACHE_NAME, derived / SIDECAR_NAME
-    key = design.key
+def cache_path(work_dir: Path, design: Design) -> Path:
+    return work_dir / DERIVED_DIR / f"{CACHE_PREFIX}{design.key}.jpg"
+
+
+def cached_cover(work_dir: Path, design: Design) -> bytes:
+    """The generated cover's JPEG, from ``<work>/derived/cover-<key>.jpg`` or drawn and stored
+    there. Returns the bytes (not the path) so a concurrent cleanup cannot pull the file out
+    from under the response.
+
+    Never creates the work folder: a title edit or trash can move it while the cover renders,
+    and recreating the old path would leave an orphan folder (and make undo pick a different
+    name). Only ``derived/`` is created, inside a folder that still exists; if the folder moved,
+    the image is served without being cached and the next request caches it in the new place.
+    """
+    path = cache_path(work_dir, design)
     try:
-        if path.is_file() and json.loads(sidecar.read_text()).get("key") == key:
-            return path
-    except (OSError, ValueError):
+        return path.read_bytes()
+    except OSError:
         pass
     data = render_jpeg(design)
-    tmp = derived / f".{CACHE_NAME}.{secrets.token_hex(6)}.tmp"
+    derived = path.parent
+    tmp = derived / f".{path.name}.{secrets.token_hex(6)}.tmp"
     try:
-        derived.mkdir(parents=True, exist_ok=True)
+        if not work_dir.is_dir():
+            return data
+        derived.mkdir(exist_ok=True)  # no parents=True: never recreate a moved work folder
         tmp.write_bytes(data)
-        os.replace(tmp, path)  # readers holding the old file keep its inode
-        meta = {
-            "key": key,
-            "renderer": RENDERER_VERSION,
-            "style": design.style,
-            "palette": design.palette.name,
-            "title": design.title,
-            "author": design.author,
-        }
-        side_tmp = derived / f".{SIDECAR_NAME}.{secrets.token_hex(6)}.tmp"
-        side_tmp.write_text(json.dumps(meta, ensure_ascii=False))
-        os.replace(side_tmp, sidecar)
+        os.replace(tmp, path)  # atomic; the key is in the name, so no sidecar can disagree
     except OSError:
         log.warning("could not cache the generated cover in %s", derived)
         tmp.unlink(missing_ok=True)
         return data
-    return path
+    # Best effort: drop covers drawn for earlier titles, authors, or styles.
+    for old in derived.glob(f"{CACHE_PREFIX}*.jpg"):
+        if old.name != path.name:
+            old.unlink(missing_ok=True)
+    return data
