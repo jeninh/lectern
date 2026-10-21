@@ -110,12 +110,24 @@ def request_align(
         # A worker is spending CPU-hours on it; force would throw that away on every click.
         # Cancelling is still possible, explicitly, with POST /api/jobs/{id}/cancel.
         raise HTTPException(status.HTTP_409_CONFLICT, "job_running")
+    alignment = jobs.work_alignment(db, work.id)
+    retry = _retry_model(db, work.id)
+    if (
+        body.model is None
+        and retry is None
+        and alignment is not None
+        and alignment.status == AlignmentStatus.FAILED
+        and jobs.out_of_memory(alignment.error)
+    ):
+        # Out of memory with the smallest model: never quietly rerun something as big or
+        # bigger. A rerun names its model (the editor's Re-run alignment always does).
+        raise HTTPException(status.HTTP_409_CONFLICT, "out_of_memory_choose_model")
     try:
         job, created = jobs.enqueue_align(
             db,
             settings.library_dir,
             work,
-            model=body.model or _retry_model(db, work.id) or settings.align_model,
+            model=body.model or retry or settings.align_model,
             created_by=auth.user.id,
             force=body.force,
         )
@@ -154,12 +166,9 @@ def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
 
 
 def _retry_model(db: Session, work_id: int) -> str | None:
-    """Retrying a failed alignment without naming a model reruns the model that failed."""
-    alignment = jobs.work_alignment(db, work_id)
-    if alignment is None or alignment.status != AlignmentStatus.FAILED:
-        return None
-    model = jobs._model_name(alignment.model)
-    return model if model in MODELS else None
+    """A Retry (no model named) of a failed alignment: the model that failed, or a smaller
+    one after running out of memory (``lectern.align.jobs.retry_model``)."""
+    return jobs.retry_model(jobs.work_alignment(db, work_id))
 
 
 def _worker_names(db: Session) -> dict[int, str]:

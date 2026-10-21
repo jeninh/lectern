@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from lectern.align.text import spine_lengths
 from lectern.align.tracks import fingerprint_of, sync_tracks, work_epub, work_tracks
-from lectern.align.transcribe import DEFAULT_MODEL, larger_model
+from lectern.align.transcribe import DEFAULT_MODEL, MODELS, larger_model
 from lectern.ingest.sentences import replace_sentences
 from lectern.models import (
     JOB_ACTIVE_STATUSES,
@@ -903,7 +903,9 @@ def job_json(db: Session, job: Job, workers: dict[int, str] | None = None) -> di
     }
 
 
-def alignment_json(db: Session, alignment: Alignment | None) -> dict | None:
+def alignment_json(
+    db: Session, alignment: Alignment | None, *, detailed: bool = True
+) -> dict | None:
     """Alignment state for the API, with the matcher's diagnosis of a low coverage.
 
     Below 85 % coverage the alignment warns ``low_coverage``. A larger model is suggested
@@ -936,7 +938,7 @@ def alignment_json(db: Session, alignment: Alignment | None) -> dict | None:
         "span_coverage": stats.get("span_coverage"),
         "diagnosis": diagnosis,
         "sentence_count": alignment.sentence_count,
-        "error": alignment.error,
+        "error": alignment.error if detailed else None,  # paths and logs: not for readers
         "completed_at": _iso(alignment.completed_at),
         "warnings": warnings,
         "suggested_model": suggestion,
@@ -987,9 +989,43 @@ def engine_unavailable(db: Session, settings, now: datetime | None = None) -> di
     }
 
 
-def alignment_activity(db: Session, work_id: int, settings) -> dict:
+# Retry steps down this ladder after running out of memory (turbo/distil count as large).
+_SMALLER = {
+    "base": "tiny",
+    "small": "base",
+    "medium": "small",
+    "large-v3": "medium",
+    "large-v3-turbo": "medium",
+    "distil-large-v3": "medium",
+}
+
+
+def out_of_memory(error: str | None) -> bool:
+    """The failure was the memory cap, a MemoryError, or the OOM killer (lectern.align.isolate),
+    or a worker reporting that it ran out of memory."""
+    text = (error or "").lower()
+    return "out of memory" in text or "out-of-memory" in text or "memoryerror" in text
+
+
+def retry_model(alignment: Alignment | None) -> str | None:
+    """The model a plain Retry of a failed alignment runs, or ``None`` when there is no safe
+    automatic choice. After running out of memory it is the next smaller model, never the
+    one that failed; at ``tiny`` there is none, and a rerun has to be asked for deliberately
+    (with other settings or an external worker) from the editor."""
+    if alignment is None or alignment.status != AlignmentStatus.FAILED:
+        return None
+    model = _model_name(alignment.model)
+    if out_of_memory(alignment.error):
+        return _SMALLER.get(model)
+    return model if model in MODELS else None
+
+
+def alignment_activity(db: Session, work_id: int, settings, *, detailed: bool = True) -> dict:
     """What the work's alignment is doing right now, for the UI: the latest job's heartbeat
-    progress, ETA, attempts and error, and whether any engine can run a queued job."""
+    progress, ETA, attempts and error, whether any engine can run a queued job, and the model
+    a Retry would run. Without ``detailed`` (readers) the error text is left out: it can hold
+    file paths and the alignment process's log."""
+    retry = retry_model(work_alignment(db, work_id)) if detailed else None
     job = db.scalar(
         select(Job)
         .where(Job.work_id == work_id, Job.kind == KIND_ALIGN)
@@ -997,7 +1033,7 @@ def alignment_activity(db: Session, work_id: int, settings) -> dict:
         .limit(1)
     )
     if job is None:
-        return {"job": None, "unavailable": None}
+        return {"job": None, "unavailable": None, "retry_model": retry}
     result = job.result or {}
     leased = job.status == JobStatus.LEASED
     estimate = eta(db, job)
@@ -1012,8 +1048,9 @@ def alignment_activity(db: Session, work_id: int, settings) -> dict:
             "heartbeat_at": _iso(job.heartbeat_at),
             "run_after": _iso(job.run_after) if job.status == JobStatus.QUEUED else None,
             "eta_s": estimate["seconds"] if estimate else None,
-            "error": job.error,
+            "error": job.error if detailed else None,
         },
+        "retry_model": retry,
         "unavailable": (
             engine_unavailable(db, settings) if job.status == JobStatus.QUEUED else None
         ),

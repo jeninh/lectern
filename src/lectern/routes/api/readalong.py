@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 
-from lectern.access import can_see_work
+from lectern.access import can_edit_library, can_see_work
 from lectern.align.jobs import alignment_activity
 from lectern.ingest.epub import EpubError, read_spine
 from lectern.ingest.sentences import primary_epub
@@ -43,10 +43,15 @@ def visible_work(db, user: User, work_id: int) -> Work:
     return work
 
 
-def alignment_json(a: Alignment | None) -> dict | None:
+def alignment_json(a: Alignment | None, *, detailed: bool = True) -> dict | None:
     if a is None:
         return None
-    return {"status": a.status.value, "model": a.model, "coverage": a.coverage, "error": a.error}
+    return {
+        "status": a.status.value,
+        "model": a.model,
+        "coverage": a.coverage,
+        "error": a.error if detailed else None,  # paths and logs: owners and members only
+    }
 
 
 def current_alignment(db, work_id: int) -> Alignment | None:
@@ -131,8 +136,11 @@ def builder(request: Request) -> ReadAloudBuilder:
     return request.app.state.readaloud
 
 
-def read_aloud_status(db, settings, work: Work, build: ReadAloudBuilder) -> dict:
-    """Formats-card state: unavailable, not_generated, generating, ready, or failed."""
+def read_aloud_status(
+    db, settings, work: Work, build: ReadAloudBuilder, *, detailed: bool = True
+) -> dict:
+    """Formats-card state: unavailable, not_generated, generating, ready, or failed.
+    ``detailed`` (owners and members) includes alignment error text and the Retry model."""
     alignment = current_alignment(db, work.id)
     out: dict = {
         "work_id": work.id,
@@ -143,7 +151,7 @@ def read_aloud_status(db, settings, work: Work, build: ReadAloudBuilder) -> dict
             alignment and alignment.status == AlignmentStatus.SUCCEEDED and work.readalong_enabled
         ),
         "readalong_enabled": work.readalong_enabled,
-        "alignment": alignment_json(alignment),
+        "alignment": alignment_json(alignment, detailed=detailed),
         "download_url": None,
         "size": None,
         "generated_at": None,
@@ -151,7 +159,7 @@ def read_aloud_status(db, settings, work: Work, build: ReadAloudBuilder) -> dict
     }
     if alignment is not None:
         # live progress, ETA, error, and whether anything can run it (the Formats card)
-        out["alignment"].update(alignment_activity(db, work.id, settings))
+        out["alignment"].update(alignment_activity(db, work.id, settings, detailed=detailed))
     try:
         inputs = gather_inputs(db, settings, work)
     except Unavailable as exc:
@@ -176,7 +184,9 @@ def read_aloud(
     request: Request, auth: Auth, db: DbDep, settings: SettingsDep, work_id: int
 ) -> dict:
     work = visible_work(db, auth.user, work_id)
-    return read_aloud_status(db, settings, work, builder(request))
+    return read_aloud_status(
+        db, settings, work, builder(request), detailed=can_edit_library(auth.user)
+    )
 
 
 @router.post("/works/{work_id}/read-aloud", status_code=status.HTTP_202_ACCEPTED)
@@ -208,4 +218,6 @@ def build_read_aloud(
         )
         db.commit()
     builder(request).start(inputs)
-    return read_aloud_status(db, settings, work, builder(request))
+    return read_aloud_status(
+        db, settings, work, builder(request), detailed=can_edit_library(auth.user)
+    )

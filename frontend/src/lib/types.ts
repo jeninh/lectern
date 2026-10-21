@@ -203,6 +203,8 @@ export interface AlignmentSummary {
   job?: AlignmentJob | null;
   /** Set while a job is queued and nothing (local engine or external worker) can run it. */
   unavailable?: { reason: string; message: string; docs_url: string } | null;
+  /** Model a Retry of a failed alignment runs (smaller after running out of memory); owners and members only. */
+  retry_model?: string | null;
 }
 
 export interface AlignmentJob {

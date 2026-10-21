@@ -12,7 +12,7 @@ const al = (over: Partial<AlignmentSummary> = {}): AlignmentSummary => ({ status
 describe("alignmentHint", () => {
   it("shows the heartbeat's progress and the ETA of a running job", () => {
     const h = alignmentHint(al({ status: "running", job: job({ status: "leased", attempts: 1, progress: 0.427, eta_s: 750 }) }), NOW);
-    expect(h).toMatchObject({ text: "Aligning text and audio · 42% · about 13 min left", progress: 0.427, retry: false });
+    expect(h).toMatchObject({ text: "Aligning text and audio · 42% · about 13 min left", progress: 0.427, retryModel: null });
   });
   it("names the attempt when a running job is a retry, and omits an unknown ETA", () => {
     const h = alignmentHint(al({ status: "running", job: job({ status: "leased", attempts: 2, progress: 0 }) }), NOW);
@@ -21,7 +21,7 @@ describe("alignmentHint", () => {
   it("says nothing can run a queued job, with the how-to link, instead of 'Aligning…'", () => {
     const unavailable = { reason: "not_installed", message: "No alignment engine.", docs_url: "https://x/docs#turning-it-on" };
     const h = alignmentHint(al({ job: job(), unavailable }), NOW);
-    expect(h).toMatchObject({ text: "No alignment engine.", docsUrl: "https://x/docs#turning-it-on", progress: null, retry: false });
+    expect(h).toMatchObject({ text: "No alignment engine.", docsUrl: "https://x/docs#turning-it-on", progress: null, retryModel: null });
   });
   it("shows a failed attempt waiting out its backoff with the first line of the error", () => {
     const run_after = new Date(NOW + 125_000).toISOString();
@@ -29,9 +29,18 @@ describe("alignmentHint", () => {
     expect(h?.text).toBe("Attempt 1 of 3 failed: lease expired · retrying in 2 min");
     expect(h?.detail).toBe("lease expired\nmore detail");
   });
-  it("offers Retry once attempts are exhausted", () => {
-    const h = alignmentHint(al({ status: "failed", error: "killed by the out-of-memory killer", job: job({ status: "failed", attempts: 3, error: "killed by the out-of-memory killer" }) }), NOW);
-    expect(h).toMatchObject({ text: "Alignment failed: killed by the out-of-memory killer", retry: true });
+  it("offers Retry with the same model once attempts are exhausted", () => {
+    const h = alignmentHint(al({ status: "failed", model: "faster-whisper-small-int8", error: "lease expired", retry_model: "small", job: job({ status: "failed", attempts: 3, error: "lease expired" }) }), NOW);
+    expect(h).toMatchObject({ text: "Alignment failed: lease expired", retryModel: "small", retryLabel: "Retry" });
+  });
+  it("names the smaller model a Retry runs after running out of memory", () => {
+    const error = "out of memory: the alignment was killed (SIGKILL)";
+    const h = alignmentHint(al({ status: "failed", model: "faster-whisper-small-int8", error, retry_model: "base" }), NOW);
+    expect(h).toMatchObject({ retryModel: "base", retryLabel: "Retry with base" });
+  });
+  it("offers no Retry when the server has no safe model, and shows readers no error text", () => {
+    expect(alignmentHint(al({ status: "failed", model: "tiny", error: "out of memory", retry_model: null }), NOW)).toMatchObject({ retryModel: null, retryLabel: null });
+    expect(alignmentHint(al({ status: "failed", error: null }), NOW)).toMatchObject({ text: "Alignment failed", retryModel: null });
   });
   it("has nothing to say about a finished alignment", () => {
     expect(alignmentHint(al({ status: "succeeded", job: job({ status: "succeeded" }) }), NOW)).toBeNull();

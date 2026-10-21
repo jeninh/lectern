@@ -62,7 +62,8 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
 
   const retry = async () => {
     try {
-      await retryAlignment(work.id);
+      const model = alignmentHint(st?.alignment)?.retryModel;
+      if (model) await retryAlignment(work.id, model);
       await refresh();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not retry the alignment");
@@ -97,7 +98,7 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
       st.reason === "alignment_stale" ? "Audio and text changed; waiting for re-alignment" :
       "Needs an audiobook aligned to this EPUB";
     const showAlign = align && hint === align.text;
-    const canRetry = Boolean(showAlign && align.retry && canUpload);
+    const canRetry = Boolean(showAlign && align.retryModel && canUpload);
     return (
       // aria-disabled would also disable the Retry button for assistive technology
       <li className="slot" data-unavailable="" aria-disabled={canRetry ? undefined : "true"}>
@@ -115,8 +116,8 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
             </span>
           )}
         </span>
-        {canRetry ? (
-          <button className="btn sm ghost" onClick={retry} aria-label={`Retry aligning ${work.title}`}>Retry</button>
+        {canRetry && align ? (
+          <button className="btn sm ghost" onClick={retry} aria-label={`${align.retryLabel} aligning ${work.title}`}>{align.retryLabel}</button>
         ) : <span />}
       </li>
     );

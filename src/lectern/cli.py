@@ -293,7 +293,9 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--key-file", type=Path, help="file holding the lw_… credential")
     w.add_argument("--name", default=platform.node() or "worker", help="shown in the job list")
     w.add_argument("--lease", type=int, default=600, help="lease seconds (60-3600)")
-    w.add_argument("--poll", type=float, default=15.0, help="seconds between empty claims")
+    w.add_argument(
+        "--poll", type=float, default=15.0, help="seconds between empty claims (at most 240)"
+    )
     w.add_argument("--workdir", type=Path, default=None, help="scratch space for inputs")
     w.add_argument("--once", action="store_true", help="run at most one job and exit")
     w.add_argument("--allow-http", action="store_true", help="permit http:// (trusted LAN only)")

@@ -18,7 +18,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from tests.conftest import ORIGIN, api_post, login, make_app_password, make_sync_key
+from tests.conftest import (
+    ORIGIN,
+    api_post,
+    login,
+    make_app_password,
+    make_sync_key,
+    make_user,
+)
 
 from lectern.align import jobs
 from lectern.align.pipeline import TrackInput, align_work
@@ -1276,25 +1283,90 @@ def test_running_alignment_reports_heartbeat_progress_and_an_eta(client, owner, 
     assert client.get(f"/api/jobs/{job_id}").json()["eta"]["basis"] == "this run's progress so far"
 
 
-def test_retry_reruns_a_failed_alignment_with_the_model_that_failed(
-    client, owner, work_id, wc, settings
-):
-    job_id = request_align(client, owner, work_id, model="medium").json()["id"]
-    headers = lease(claim(wc))
-    wc.post(
+def _fail_alignment(client, owner, work_id, wc, model, error):
+    job_id = request_align(client, owner, work_id, model=model).json()["id"]
+    r = wc.post(
         f"/api/worker/jobs/{job_id}/fail",
-        json={"error": "killed by the out-of-memory killer", "retryable": False},
-        headers=headers,
+        json={"error": error, "retryable": False},
+        headers=lease(claim(wc)),
     )
-    al = read_aloud_alignment(client, work_id)
-    assert al["status"] == "failed" and al["job"]["error"] == "killed by the out-of-memory killer"
+    assert r.status_code == 200, r.text
+    return job_id
 
-    r = request_align(client, owner, work_id)  # the Formats card's Retry button
+
+@pytest.mark.parametrize(
+    ("model", "error", "retry"),
+    [
+        # an ordinary failure: Retry reruns the model that failed
+        ("medium", "lease expired", "medium"),
+        # out of memory: never the same model again, one size smaller
+        ("medium", "out of memory: the alignment used more than 900 MiB.", "small"),
+        ("small", "alignment process killed by the out-of-memory killer", "base"),
+        ("large-v3-turbo", "CUDA out of memory", "medium"),
+    ],
+)
+def test_retry_of_a_failed_alignment_avoids_the_model_that_ran_out_of_memory(
+    client, owner, work_id, wc, model, error, retry
+):
+    job_id = _fail_alignment(client, owner, work_id, wc, model, error)
+    al = read_aloud_alignment(client, work_id)
+    assert al["status"] == "failed" and al["job"]["error"] == error
+    assert al["retry_model"] == retry  # what the Formats card's Retry button runs
+
+    r = request_align(client, owner, work_id)  # Retry without naming a model
     assert r.status_code == 202, r.text
-    assert r.json()["id"] != job_id and r.json()["model"] == "medium"
+    assert r.json()["id"] != job_id and r.json()["model"] == retry
     al = read_aloud_alignment(client, work_id)
     assert al["status"] == "pending" and al["job"]["status"] == "queued"
-    assert al["job"]["error"] is None
+    assert al["job"]["error"] is None and al["retry_model"] is None
+
+
+def test_out_of_memory_on_the_smallest_model_needs_a_deliberate_rerun(client, owner, work_id, wc):
+    _fail_alignment(client, owner, work_id, wc, "tiny", "out of memory: MemoryError")
+    assert read_aloud_alignment(client, work_id)["retry_model"] is None  # no Retry button
+    # not the server's default (larger) model either
+    r = request_align(client, owner, work_id)
+    assert r.status_code == 409 and r.json()["detail"] == "out_of_memory_choose_model"
+    r = request_align(client, owner, work_id, model="tiny")  # the editor names one
+    assert r.status_code == 202 and r.json()["model"] == "tiny"
+
+
+def test_readers_see_that_alignment_failed_but_not_its_error_text(
+    client, owner, work_id, wc, settings
+):
+    error = "out of memory: see /data/logs/align/job-1-attempt-1.log"
+    _fail_alignment(client, owner, work_id, wc, "small", error)
+    assert read_aloud_alignment(client, work_id)["error"] == error  # the owner does
+    rex = make_user(client, owner["csrf"], "rex", "reader")
+    with session_factory()() as db:  # the book is on a shelf shared with rex
+        from lectern.models import Shelf, ShelfGrant, ShelfItem, ShelfPermission, User
+
+        owner_id = db.scalar(select(User.id).where(User.username == "owner"))
+        shelf = Shelf(owner_id=owner_id, name="Shared")
+        db.add(shelf)
+        db.flush()
+        db.add(ShelfItem(shelf_id=shelf.id, work_id=work_id))
+        db.add(ShelfGrant(shelf_id=shelf.id, user_id=rex["id"], permission=ShelfPermission.VIEW))
+        db.commit()
+    login(client, "rex", rex["password"])
+    st = client.get(f"/api/works/{work_id}/read-aloud")
+    assert st.status_code == 200, st.text
+    al = st.json()["alignment"]
+    assert al["status"] == "failed" and al["error"] is None
+    assert al["job"]["status"] == "failed" and al["job"]["error"] is None
+    assert al["retry_model"] is None
+    assert client.get(f"/api/works/{work_id}/tracks").json()["alignment"]["error"] is None
+    assert "/data/logs" not in st.text
+
+
+def test_remote_worker_polls_inside_the_servers_worker_seen_window(worker_key, caplog):
+    from lectern.align.worker import MAX_POLL_S
+
+    assert MAX_POLL_S < jobs.WORKER_SEEN_S
+    slow = RemoteWorker("https://lectern.example", worker_key, poll_s=900, client=object())
+    assert slow.poll_s == MAX_POLL_S
+    assert "polling every" in caplog.text
+    assert RemoteWorker("https://x", worker_key, poll_s=30, client=object()).poll_s == 30
 
 
 def test_claims_reclaim_stalled_runs_after_the_configured_stall_time(

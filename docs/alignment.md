@@ -84,7 +84,9 @@ vCPUs with 1.4 GB peak memory** on a 13-minute recording (see [Benchmark](#bench
    ```
 
    Options: `--model`, `--device`, `--compute-type`, `--threads`, `--models-dir`,
-   `--lease` (seconds, 60–3600, default 600), `--poll` (default 15 s), `--workdir` (scratch
+   `--lease` (seconds, 60–3600, default 600), `--poll` (default 15 s, at most 240 s: the
+   server treats a worker silent for 5 minutes as gone, so a longer value is lowered with a
+   warning), `--workdir` (scratch
    space for the downloaded EPUB and audio, deleted after each job), `--once`. Models are
    downloaded from Hugging Face on first use. `http://` URLs are refused unless you pass
    `--allow-http` (a trusted LAN only: the credential travels in every request).
@@ -233,8 +235,19 @@ that is at least 5 % done is extrapolated from its own progress so far (`eta.spe
 
 The book's Formats card (`GET /api/works/{id}/read-aloud`, `alignment.job`) shows the running
 job's heartbeat progress and ETA, a failed attempt waiting out its backoff, and, once attempts
-are exhausted, the error with a **Retry** button for owners and members. Retry is
-`POST /api/works/{id}/align {}`; without a `model` it reruns the model that failed.
+are exhausted, the error with a **Retry** button for owners and members.
+
+- Retry reruns the model that failed, except after running out of memory (the memory cap,
+  a `MemoryError`, the OOM killer, or a worker reporting out of memory). Then it steps one
+  size down (`medium` → `small` → `base` → `tiny`; turbo and distil count as large) and the
+  button says so ("Retry with base"). It never repeats the model that ran out of memory.
+- After running out of memory on `tiny` there is no Retry button, and
+  `POST /api/works/{id}/align {}` answers `409 out_of_memory_choose_model`: rerun it
+  deliberately from the editor (naming a model) after changing the memory limit or window,
+  or with an external worker.
+- Readers see that alignment failed, not why: the error text (which can quote file paths
+  and the alignment process's log) is `null` for them in the read-aloud status, the
+  tracks and sentences responses, and the AI tools.
 
 ## Cross-format sync
 

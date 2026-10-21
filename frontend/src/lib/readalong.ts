@@ -66,8 +66,8 @@ export function buildReadAloud(workId: number): Promise<ReadAloudStatus> {
   return post<ReadAloudStatus>(`/api/works/${workId}/read-aloud`);
 }
 
-export function retryAlignment(workId: number): Promise<unknown> {
-  return post(`/api/works/${workId}/align`, {});
+export function retryAlignment(workId: number, model: string): Promise<unknown> {
+  return post(`/api/works/${workId}/align`, { model });
 }
 
 // --- alignment state for the Formats card ---------------------------------------------------
@@ -79,7 +79,15 @@ export interface AlignmentHint {
   /** Heartbeat progress 0–1 of a running job, else null. */
   progress: number | null;
   docsUrl: string | null;
-  retry: boolean;
+  /** Model the Retry button runs; null = no Retry offered. */
+  retryModel: string | null;
+  /** Button label: "Retry", or "Retry with base" when it steps down after running out of memory. */
+  retryLabel: string | null;
+}
+
+/** `faster-whisper-small-int8` → `small` (the server's model labels). */
+function modelName(label: string): string {
+  return label.replace(/^faster-whisper-/, "").replace(/-(int8_float16|int8_float32|int8|float16|float32)$/, "");
 }
 
 /** "about 12 min", "about 2 h 5 min", "under a minute". */
@@ -104,7 +112,7 @@ function shortError(error: string): string {
 export function alignmentHint(a: AlignmentSummary | null | undefined, now = Date.now()): AlignmentHint | null {
   if (!a) return null;
   const job = a.job ?? null;
-  const base = { detail: null, progress: null, docsUrl: null, retry: false };
+  const base = { detail: null, progress: null, docsUrl: null, retryModel: null, retryLabel: null };
   if (job?.status === "leased") {
     const parts = ["Aligning text and audio"];
     if (job.progress != null) parts.push(`${Math.floor(job.progress * 100)}%`);
@@ -127,7 +135,14 @@ export function alignmentHint(a: AlignmentSummary | null | undefined, now = Date
   }
   if (a.status === "failed") {
     const error = job?.error || a.error;
-    return { ...base, text: error ? `Alignment failed: ${shortError(error)}` : "Alignment failed", detail: error ?? null, retry: true };
+    const m = a.retry_model ?? null;
+    return {
+      ...base,
+      text: error ? `Alignment failed: ${shortError(error)}` : "Alignment failed",
+      detail: error ?? null,
+      retryModel: m,
+      retryLabel: m == null ? null : m === modelName(a.model) ? "Retry" : `Retry with ${m}`,
+    };
   }
   if (a.status === "pending" || a.status === "running") return { ...base, text: "Aligning text and audio…" };
   return null;
