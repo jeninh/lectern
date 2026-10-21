@@ -14,6 +14,8 @@ export function csrf(): string {
 /** Friendlier text for the machine-readable error codes the API returns. */
 const MESSAGES: Record<string, string> = {
   download_cap: "Download limit reached for this hour.",
+  restic_unavailable: "restic is not installed on the server. It ships in the Docker image; rebuild it.",
+  backup_running: "A backup is already running.",
   too_large: "That file is larger than this server accepts.",
   upload_quota: "You have too much uploading at once. Finish or cancel an upload first.",
   too_many_uploads: "Five uploads are already in progress. Finish or cancel one first.",

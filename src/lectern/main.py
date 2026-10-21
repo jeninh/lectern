@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 
-from lectern import __version__, mcp_server
+from lectern import __version__, backups, mcp_server
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
@@ -85,6 +85,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # `lectern restore` refuses while any server holds this (shared) lock.
+        with backups.server_lock(settings):
+            async with _serve(app):
+                yield
+
+    @asynccontextmanager
+    async def _serve(app: FastAPI):
         engine = init_engine(settings)
         upgrade_to_head(engine)
         settings.resolve_secret_key()

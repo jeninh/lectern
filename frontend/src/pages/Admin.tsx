@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Copy, Link2, Plus, Users as UsersIcon } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
+import { BackupsCard } from "../components/Maintenance";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
 import { del, get, post, put } from "../lib/api";
@@ -118,6 +119,7 @@ export function AdminPage() {
       </section>
       <InvitesCard />
       <LibrarySettingsCard />
+      <BackupsCard />
       <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for @${capFor.username}` : ""} variant="dialog" labelledBy="ucap-title">
         {capFor && (
           <CapForm

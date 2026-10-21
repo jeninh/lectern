@@ -120,6 +120,16 @@ class Settings(BaseSettings):
     job_sweep_seconds: float = 30.0
     track_rescan_seconds: float = 60.0
 
+    # Backups (docs/backups.md). Off until the owner turns them on in Admin; the target is
+    # deployment configuration only: the compose files mount LECTERN_BACKUP_PATH (host) here.
+    backup_dir: Path = Field(default=Path("/backups"))
+    # restic repository password; default <data>/backup-restic-password, created on first use.
+    backup_restic_password_file: Path | None = None
+    restic_path: str = "restic"
+
+    # Seconds between checks whether the nightly backup is due.
+    maintenance_poll_seconds: float = 60.0
+
     log_level: str = "INFO"
 
     @field_validator("base_url")
