@@ -77,7 +77,7 @@ class Housekeeping:
                 next_sweep = now + self.settings.job_sweep_seconds
                 try:
                     with self.session_factory() as db:
-                        n = jobs.reclaim_expired(db)
+                        n = jobs.reclaim_expired(db, stall_s=self.settings.align_stall_seconds)
                     if n:
                         log.warning("reclaimed %d expired lease(s)", n)
                 except Exception:  # noqa: BLE001
@@ -87,41 +87,48 @@ class Housekeeping:
 
 def start_services(session_factory: sessionmaker, settings: Settings) -> list:
     """Housekeeping always; the in-process worker only when faster-whisper is importable."""
-    from lectern.align.transcribe import Transcriber, transcription_available
+    from lectern.align.transcribe import Transcriber
 
+    with session_factory() as db:
+        # The in-process worker of the previous server process is gone (a restart, a crash,
+        # the OOM killer): its lease would otherwise hold the job for up to the lease length.
+        if n := jobs.reclaim_expired(db, orphaned_local=True):
+            log.warning("requeued %d alignment job(s) interrupted by a restart", n)
     started: list = [Housekeeping(session_factory, settings)]
-    if settings.align_local_worker:
-        if transcription_available():
-            started.append(
-                LocalWorker(
-                    session_factory,
-                    data_dir=settings.data_dir,
-                    library=settings.library_dir,
-                    transcriber=Transcriber(
-                        settings.align_model,
-                        device=settings.align_device,
-                        compute_type=settings.align_compute_type,
-                        threads=settings.align_threads,
-                        download_root=settings.data_dir / "models",
-                        window_s=settings.align_window_seconds,
-                        overlap_s=settings.align_overlap_seconds,
-                    ),
-                    poll_s=settings.worker_poll_seconds,
-                    isolated=True,
-                    memory_limit_mb=settings.align_memory_limit_mb,
-                )
+    missing = jobs.local_engine_missing(settings)
+    if missing is None:
+        started.append(
+            LocalWorker(
+                session_factory,
+                data_dir=settings.data_dir,
+                library=settings.library_dir,
+                transcriber=Transcriber(
+                    settings.align_model,
+                    device=settings.align_device,
+                    compute_type=settings.align_compute_type,
+                    threads=settings.align_threads,
+                    download_root=settings.data_dir / "models",
+                    window_s=settings.align_window_seconds,
+                    overlap_s=settings.align_overlap_seconds,
+                ),
+                poll_s=settings.worker_poll_seconds,
+                isolated=True,
+                memory_limit_mb=settings.align_memory_limit_mb,
             )
-            log.info(
-                "local alignment worker enabled (model %s, %g s windows, memory cap %s)",
-                settings.align_model,
-                settings.align_window_seconds,
-                f"{started[-1].memory_limit_mb} MiB" if started[-1].memory_limit_mb else "none",
-            )
-        else:
-            log.info(
-                "faster-whisper is not installed: alignment jobs wait for an external worker "
-                "(lectern worker --server …) or `pip install lectern[align]`"
-            )
+        )
+        log.info(
+            "local alignment worker enabled (model %s, %g s windows, memory cap %s)",
+            settings.align_model,
+            settings.align_window_seconds,
+            f"{started[-1].memory_limit_mb} MiB" if started[-1].memory_limit_mb else "none",
+        )
+    else:
+        log.warning(
+            "no local alignment engine (%s): alignment jobs wait for an external worker "
+            "(lectern worker --server …) and show as unavailable until one connects. See %s",
+            missing,
+            jobs.DOCS_URL,
+        )
     for s in started:
         s.start()
     return started

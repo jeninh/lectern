@@ -50,6 +50,13 @@ RESULT_MAX_BYTES = 32 * 1024 * 1024
 LOW_COVERAGE = 0.85
 TRACK_TOLERANCE_S = 0.05
 SPEED_SAMPLE_JOBS = 5
+# A leased job whose progress has not moved for this long is treated like an expired lease,
+# even while its worker still heartbeats (a hung decoder, a wedged GPU). Model downloads on
+# a slow link report no progress, hence the generous default (LECTERN_ALIGN_STALL_SECONDS).
+STALL_S = 3600.0
+# An external worker that polled within this window counts as an alignment engine.
+WORKER_SEEN_S = 300
+DOCS_URL = "https://github.com/jeninh/lectern/blob/main/docs/alignment.md#turning-it-on"
 
 
 class LeaseLost(Exception):
@@ -300,23 +307,55 @@ def refresh_work(
 # --- claim, lease, heartbeat ---------------------------------------------------------------
 
 
-def reclaim_expired(db: Session, now: datetime | None = None) -> int:
-    """Leases past their expiry (or held by a revoked credential) go back to the queue with
-    backoff, or fail when attempts are exhausted. Returns the number reclaimed."""
+def reclaim_expired(
+    db: Session,
+    now: datetime | None = None,
+    *,
+    stall_s: float = STALL_S,
+    orphaned_local: bool = False,
+) -> int:
+    """Leases past their expiry (or held by a revoked credential), runs whose progress has
+    not moved for ``stall_s``, and, with ``orphaned_local``, leases of the in-process worker
+    (only true at startup: that worker died with the previous server process) go back to the
+    queue with backoff, or fail when attempts are exhausted. Returns the number reclaimed."""
     now = now or utcnow()
     revoked = select(WorkerCredential.id).where(WorkerCredential.revoked_at.is_not(None))
-    rows = db.scalars(
+    leased = db.scalars(
         select(Job).where(
             Job.kind == KIND_ALIGN,  # transcode jobs belong to lectern.jobs.JobRunner
             Job.status == JobStatus.LEASED,
-            (Job.lease_expires_at < now) | Job.leased_by_id.in_(revoked),
         )
     ).all()
-    for job in rows:
-        _retry_or_fail(db, job, "lease expired", retryable=True, now=now)
-    if rows:
+    revoked_ids = set(db.scalars(revoked))
+    reclaimed = 0
+    for job in leased:
+        if job.lease_expires_at is None or job.lease_expires_at < now:
+            error = "lease expired"
+        elif job.leased_by_id is not None and job.leased_by_id in revoked_ids:
+            error = "lease expired"
+        elif orphaned_local and job.leased_by_id is None:
+            error = "the server restarted during alignment (it may have run out of memory)"
+        elif (stalled := _since(job, "progress_at", now)) is not None and stalled > stall_s:
+            error = f"no progress for {round(stalled / 60)} min"
+        else:
+            continue
+        _retry_or_fail(db, job, error, retryable=True, now=now)
+        reclaimed += 1
+    if reclaimed:
         db.commit()
-    return len(rows)
+    return reclaimed
+
+
+def _since(job: Job, key: str, now: datetime) -> float | None:
+    """Seconds since the ISO time stored in ``job.result[key]`` (claim/heartbeat bookkeeping)."""
+    value = (job.result or {}).get(key)
+    if not isinstance(value, str):
+        return None
+    try:
+        at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (now - at).total_seconds()
 
 
 def claim(
@@ -356,7 +395,13 @@ def claim(
                 started_at=func.coalesce(Job.started_at, now),
                 updated_at=now,
                 # heartbeat/progress bookkeeping lives in ``result`` while the job runs
-                result={"worker": worker[:128], "lease_s": lease_s, "progress": 0.0},
+                result={
+                    "worker": worker[:128],
+                    "lease_s": lease_s,
+                    "progress": 0.0,
+                    "claimed_at": _iso(now),
+                    "progress_at": _iso(now),
+                },
             )
             .returning(Job.id)
         )
@@ -424,7 +469,10 @@ def heartbeat(
     job.lease_expires_at = now + timedelta(seconds=lease_s)
     result = dict(job.result or {})
     if progress is not None:
-        result["progress"] = max(0.0, min(1.0, float(progress)))
+        progress = max(0.0, min(1.0, float(progress)))
+        if progress > float(result.get("progress") or 0.0):
+            result["progress_at"] = _iso(now)
+        result["progress"] = progress
     if message is not None:
         result["message"] = message[:200]
     if stats is not None:
@@ -707,7 +755,7 @@ def eta(db: Session, job: Job, now: datetime | None = None) -> dict | None:
         return None
     measured = measured_speed(db, (job.payload or {}).get("model"))
     if measured is None:
-        return None
+        return _eta_from_this_run(job, now or utcnow())
     speed, samples = measured
     remaining = _payload_duration(job) / speed
     progress = float((job.result or {}).get("progress") or 0.0)
@@ -730,6 +778,20 @@ def eta(db: Session, job: Job, now: datetime | None = None) -> dict | None:
         "seconds": round(remaining),
         "speed": round(speed, 3),
         "basis": f"median of {samples} measured run{'s' if samples != 1 else ''}",
+    }
+
+
+def _eta_from_this_run(job: Job, now: datetime) -> dict | None:
+    """Before any run has finished on this server (a first alignment on a new Pi), extrapolate
+    a running job from its own measured progress, once there is enough of it to go on."""
+    progress = float((job.result or {}).get("progress") or 0.0)
+    elapsed = _since(job, "claimed_at", now)
+    if job.status != JobStatus.LEASED or progress < 0.05 or not elapsed or elapsed <= 0:
+        return None
+    return {
+        "seconds": round(elapsed * (1.0 - progress) / progress),
+        "speed": None,
+        "basis": "this run's progress so far",
     }
 
 
@@ -816,6 +878,83 @@ def alignment_json(db: Session, alignment: Alignment | None) -> dict | None:
         "completed_at": _iso(alignment.completed_at),
         "warnings": warnings,
         "suggested_model": suggestion,
+    }
+
+
+def local_engine_missing(settings) -> str | None:
+    """Why this server will not run align jobs itself, or ``None`` when it will
+    (the same decision :func:`lectern.services.start_services` makes)."""
+    from lectern.align.transcribe import transcription_available
+
+    if not settings.background_jobs:
+        return "background_jobs_off"
+    if not settings.align_local_worker:
+        return "local_worker_off"
+    if not transcription_available():
+        return "not_installed"
+    return None
+
+
+_MISSING = {
+    "not_installed": "This server was built without the alignment engine (LECTERN_EXTRAS=align)",
+    "local_worker_off": "The local alignment worker is turned off (LECTERN_ALIGN_LOCAL_WORKER=0)",
+    "background_jobs_off": "Background jobs are turned off (LECTERN_BACKGROUND_JOBS=0)",
+}
+
+
+def engine_unavailable(db: Session, settings, now: datetime | None = None) -> dict | None:
+    """``None`` when something can run align jobs: the local worker, or an external worker
+    that polled in the last ``WORKER_SEEN_S``. Otherwise why not, and where to read how to
+    turn alignment on. Queued jobs are left queued: they run as soon as an engine appears."""
+    reason = local_engine_missing(settings)
+    if reason is None:
+        return None
+    cutoff = (now or utcnow()) - timedelta(seconds=WORKER_SEEN_S)
+    seen = db.scalar(
+        select(WorkerCredential.id)
+        .where(WorkerCredential.revoked_at.is_(None), WorkerCredential.last_used_at >= cutoff)
+        .limit(1)
+    )
+    if seen is not None:
+        return None
+    return {
+        "reason": reason,
+        "message": f"{_MISSING[reason]} and no external worker (lectern worker) has "
+        f"connected in the last {WORKER_SEEN_S // 60} minutes, so alignment cannot run.",
+        "docs_url": DOCS_URL,
+    }
+
+
+def alignment_activity(db: Session, work_id: int, settings) -> dict:
+    """What the work's alignment is doing right now, for the UI: the latest job's heartbeat
+    progress, ETA, attempts and error, and whether any engine can run a queued job."""
+    job = db.scalar(
+        select(Job)
+        .where(Job.work_id == work_id, Job.kind == KIND_ALIGN)
+        .order_by(Job.id.desc())
+        .limit(1)
+    )
+    if job is None:
+        return {"job": None, "unavailable": None}
+    result = job.result or {}
+    leased = job.status == JobStatus.LEASED
+    estimate = eta(db, job)
+    return {
+        "job": {
+            "id": job.id,
+            "status": job.status.value,
+            "attempts": job.attempts,
+            "max_attempts": job.max_attempts,
+            "progress": result.get("progress") if leased else None,
+            "message": result.get("message") if leased else None,
+            "heartbeat_at": _iso(job.heartbeat_at),
+            "run_after": _iso(job.run_after) if job.status == JobStatus.QUEUED else None,
+            "eta_s": estimate["seconds"] if estimate else None,
+            "error": job.error,
+        },
+        "unavailable": (
+            engine_unavailable(db, settings) if job.status == JobStatus.QUEUED else None
+        ),
     }
 
 

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from lectern.align import jobs
 from lectern.align.transcribe import MODELS
 from lectern.models import (
+    AlignmentStatus,
     Job,
     JobStatus,
     Role,
@@ -114,7 +115,7 @@ def request_align(
             db,
             settings.library_dir,
             work,
-            model=body.model or settings.align_model,
+            model=body.model or _retry_model(db, work.id) or settings.align_model,
             created_by=auth.user.id,
             force=body.force,
         )
@@ -150,6 +151,15 @@ def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
         )
         db.commit()
     return jobs.job_json(db, job, _worker_names(db))
+
+
+def _retry_model(db: Session, work_id: int) -> str | None:
+    """Retrying a failed alignment without naming a model reruns the model that failed."""
+    alignment = jobs.work_alignment(db, work_id)
+    if alignment is None or alignment.status != AlignmentStatus.FAILED:
+        return None
+    model = jobs._model_name(alignment.model)
+    return model if model in MODELS else None
 
 
 def _worker_names(db: Session) -> dict[int, str]:

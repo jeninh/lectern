@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 
 from lectern.access import can_see_work
+from lectern.align.jobs import alignment_activity
 from lectern.ingest.epub import EpubError, read_spine
 from lectern.ingest.sentences import primary_epub
 from lectern.models import (
@@ -45,7 +46,7 @@ def visible_work(db, user: User, work_id: int) -> Work:
 def alignment_json(a: Alignment | None) -> dict | None:
     if a is None:
         return None
-    return {"status": a.status.value, "model": a.model, "coverage": a.coverage}
+    return {"status": a.status.value, "model": a.model, "coverage": a.coverage, "error": a.error}
 
 
 def current_alignment(db, work_id: int) -> Alignment | None:
@@ -148,6 +149,9 @@ def read_aloud_status(db, settings, work: Work, build: ReadAloudBuilder) -> dict
         "generated_at": None,
         "duration_s": None,
     }
+    if alignment is not None:
+        # live progress, ETA, error, and whether anything can run it (the Formats card)
+        out["alignment"].update(alignment_activity(db, work.id, settings))
     try:
         inputs = gather_inputs(db, settings, work)
     except Unavailable as exc:

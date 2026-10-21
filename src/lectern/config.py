@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     # (it is killed and the job failed above it). Unset: 75 % of the memory available to the
     # server (physical RAM or its cgroup limit, whichever is lower); 0: no cap of our own.
     align_memory_limit_mb: int | None = Field(default=None, ge=0)
+    # A running alignment whose progress has not moved for this long is reclaimed (retried
+    # with backoff, then failed), even if its worker still heartbeats.
+    align_stall_seconds: float = Field(default=3600.0, ge=60.0)
     # Lease sweeps, audio rescans, and the local worker. Off = the server only serves.
     background_jobs: bool = True
     worker_poll_seconds: float = 10.0

@@ -4,6 +4,7 @@
 
 import { get, post, put } from "./api";
 import type {
+  AlignmentSummary,
   ReadAloudStatus,
   SentenceInfo,
   SentencesResponse,
@@ -63,6 +64,73 @@ export function readAloudStatus(workId: number): Promise<ReadAloudStatus> {
 
 export function buildReadAloud(workId: number): Promise<ReadAloudStatus> {
   return post<ReadAloudStatus>(`/api/works/${workId}/read-aloud`);
+}
+
+export function retryAlignment(workId: number): Promise<unknown> {
+  return post(`/api/works/${workId}/align`, {});
+}
+
+// --- alignment state for the Formats card ---------------------------------------------------
+
+export interface AlignmentHint {
+  text: string;
+  /** Full error text when `text` shows a shortened one. */
+  detail: string | null;
+  /** Heartbeat progress 0–1 of a running job, else null. */
+  progress: number | null;
+  docsUrl: string | null;
+  retry: boolean;
+}
+
+/** "about 12 min", "about 2 h 5 min", "under a minute". */
+export function aboutDuration(seconds: number): string {
+  if (seconds < 60) return "under a minute";
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `about ${m} min`;
+  const h = Math.floor(m / 60);
+  return `about ${h} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
+function shortError(error: string): string {
+  const line = error.split("\n")[0].trim();
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line;
+}
+
+/**
+ * What the alignment of a work not yet readable along is doing, from the read-aloud status:
+ * real heartbeat progress and ETA, a retry waiting out its backoff, no engine to run it, or
+ * a failure (with Retry). `null` when there is nothing to say about the alignment.
+ */
+export function alignmentHint(a: AlignmentSummary | null | undefined, now = Date.now()): AlignmentHint | null {
+  if (!a) return null;
+  const job = a.job ?? null;
+  const base = { detail: null, progress: null, docsUrl: null, retry: false };
+  if (job?.status === "leased") {
+    const parts = ["Aligning text and audio"];
+    if (job.progress != null) parts.push(`${Math.floor(job.progress * 100)}%`);
+    if (job.eta_s != null) parts.push(`${aboutDuration(job.eta_s)} left`);
+    if (job.attempts > 1) parts.push(`attempt ${job.attempts} of ${job.max_attempts}`);
+    return { ...base, text: parts.join(" · "), progress: job.progress ?? 0 };
+  }
+  if (job?.status === "queued") {
+    if (a.unavailable) return { ...base, text: a.unavailable.message, docsUrl: a.unavailable.docs_url };
+    const wait = job.run_after ? (new Date(job.run_after).getTime() - now) / 1000 : 0;
+    if (job.error && job.attempts > 0) {
+      const when = wait > 0 ? `retrying in ${aboutDuration(wait).replace(/^about /, "")}` : "retrying shortly";
+      return {
+        ...base,
+        text: `Attempt ${job.attempts} of ${job.max_attempts} failed: ${shortError(job.error)} · ${when}`,
+        detail: job.error,
+      };
+    }
+    return { ...base, text: `Waiting for the alignment worker${job.eta_s != null ? ` · done in ${aboutDuration(job.eta_s)}` : "…"}` };
+  }
+  if (a.status === "failed") {
+    const error = job?.error || a.error;
+    return { ...base, text: error ? `Alignment failed: ${shortError(error)}` : "Alignment failed", detail: error ?? null, retry: true };
+  }
+  if (a.status === "pending" || a.status === "running") return { ...base, text: "Aligning text and audio…" };
+  return null;
 }
 
 // --- timeline helpers -------------------------------------------------------------------

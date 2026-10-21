@@ -3,11 +3,13 @@ import { Link } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { bytes } from "../lib/format";
 import { READALONG_NEEDS_EPUB, hasEpub } from "../lib/formats";
-import { buildReadAloud, readAloudStatus } from "../lib/readalong";
+import { alignmentHint, buildReadAloud, readAloudStatus, retryAlignment } from "../lib/readalong";
+import { useStore } from "../lib/store";
 import type { ReadAloudStatus, Work } from "../lib/types";
 import { Book, Download, Headphones, Sync } from "./Icons";
 
 const POLL_MS = 1500;
+const ALIGN_POLL_MS = 5000;
 
 /** Read-along, alignment, and the narrated EPUB are built on text; PDFs and comics have none. */
 export function NeedsEpub() {
@@ -34,6 +36,7 @@ export function ReadAloudFormats({ work, active }: { work: Work; active: boolean
 }
 
 function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
+  const { canUpload } = useStore();
   const [st, setSt] = useState<ReadAloudStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,11 +53,21 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
     if (active) refresh();
   }, [active, refresh]);
 
+  const aligning = st?.alignment?.job?.status === "queued" || st?.alignment?.job?.status === "leased";
   useEffect(() => {
-    if (!active || st?.status !== "generating") return;
-    const id = window.setTimeout(refresh, POLL_MS);
+    if (!active || (st?.status !== "generating" && !aligning)) return;
+    const id = window.setTimeout(refresh, st?.status === "generating" ? POLL_MS : ALIGN_POLL_MS);
     return () => window.clearTimeout(id);
-  }, [active, st, refresh]);
+  }, [active, st, aligning, refresh]);
+
+  const retry = async () => {
+    try {
+      await retryAlignment(work.id);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not retry the alignment");
+    }
+  };
 
   const build = async () => {
     try {
@@ -75,19 +88,34 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
   }
 
   if (st.status === "unavailable") {
+    const align = alignmentHint(st.alignment);
     const hint =
       st.reason === "needs_epub" ? READALONG_NEEDS_EPUB :
       st.reason === "no_audio" ? "Needs a linked audiobook" :
-      st.reason === "alignment_stale" ? "Audio and text changed; waiting for re-alignment" :
       st.reason === "missing_file" ? "A file is missing from the library folder" :
-      st.alignment?.status === "pending" || st.alignment?.status === "running" ? "Aligning text and audio…" :
-      st.alignment?.status === "failed" ? "Alignment failed" :
+      align ? align.text :
+      st.reason === "alignment_stale" ? "Audio and text changed; waiting for re-alignment" :
       "Needs an audiobook aligned to this EPUB";
+    const showAlign = align && hint === align.text;
     return (
       <li className="slot" aria-disabled="true">
         <Sync />
-        <span><strong>Read-along</strong> <span className="hint">{hint}</span></span>
-        <span />
+        <span>
+          <strong>Read-along</strong>{" "}
+          <span className="hint" aria-live="polite" title={showAlign ? align.detail ?? undefined : undefined}>
+            {hint}
+            {showAlign && align.docsUrl && <> · <a href={align.docsUrl} target="_blank" rel="noreferrer">How to turn on alignment</a></>}
+            {error && ` · ${error}`}
+          </span>
+          {showAlign && align.progress != null && (
+            <span className="progress-bar" role="progressbar" aria-label="Alignment progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(align.progress * 100)}>
+              <span style={{ width: `${align.progress * 100}%` }} />
+            </span>
+          )}
+        </span>
+        {showAlign && align.retry && canUpload ? (
+          <button className="btn sm ghost" onClick={retry} aria-label={`Retry aligning ${work.title}`}>Retry</button>
+        ) : <span />}
       </li>
     );
   }

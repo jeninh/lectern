@@ -198,6 +198,24 @@ export interface AlignmentSummary {
   status: "pending" | "running" | "succeeded" | "failed" | "stale";
   model: string;
   coverage: number | null;
+  error?: string | null;
+  /** The latest align job, from its worker's heartbeats (read-aloud status only). */
+  job?: AlignmentJob | null;
+  /** Set while a job is queued and nothing (local engine or external worker) can run it. */
+  unavailable?: { reason: string; message: string; docs_url: string } | null;
+}
+
+export interface AlignmentJob {
+  id: number;
+  status: "queued" | "leased" | "succeeded" | "failed" | "cancelled";
+  attempts: number;
+  max_attempts: number;
+  progress: number | null;
+  message: string | null;
+  heartbeat_at: string | null;
+  run_after: string | null;
+  eta_s: number | null;
+  error: string | null;
 }
 
 /** Canonical position summary (web reader / audio player) on list items. */
