@@ -166,6 +166,30 @@ class AppPassword(Base):
         return self.revoked_at is None
 
 
+class AIKey(Base):
+    """Bearer credential for an AI app (MCP client). key_hash = SHA-256(secret).
+
+    Created by its user in Devices, shown once, revocable. It acts as that user, limited to
+    its ``scopes`` (``upload``, ``read``, ``organize``), and authenticates only ``/mcp``:
+    sessions, OPDS, and downloads never accept it (lectern.mcp).
+    """
+
+    __tablename__ = "ai_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(128))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # First characters of the secret, shown so a person can tell keys apart.
+    prefix: Mapped[str] = mapped_column(String(16))
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    last_ip: Mapped[str | None] = mapped_column(String(64), default=None)
+    last_client: Mapped[str | None] = mapped_column(String(128), default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
 class SetupState(Base):
     """Single-row table tracking first-run setup. token_hash = SHA-256(token)."""
 

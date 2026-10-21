@@ -210,6 +210,20 @@ owner-issued worker key. Setup, settings, memory and benchmark numbers, failure 
 how matching handles intros and missing or abridged chapters are in
 [`docs/alignment.md`](docs/alignment.md).
 
+## AI apps (MCP)
+
+AI apps on your tailnet, such as Claude Desktop and Claude Code, can add books, search and
+organize the library, send books to an e-reader, start alignment, and fix metadata through
+the MCP endpoint at `/mcp` (Streamable HTTP). **Devices → AI tools → Connect an AI app** creates
+a key and shows the exact configuration for each app, then confirms the first connection.
+Each key acts as you, limited to the scopes you choose (`upload` by default, `read`,
+`organize`). It is accepted nowhere but `/mcp`, so it can never download books or audio or
+manage accounts, keys, or settings. Every call is rate limited and audited. A key's first use
+and bursts of calls raise alerts. Keep it private: no Funnel, no public exposure. Details in
+[`docs/mcp.md`](docs/mcp.md).
+
+![AI tools](docs/screenshots/mcp-ai-tools.png)
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -237,6 +251,8 @@ how matching handles intros and missing or abridged chapters are in
 | `LECTERN_AUDIO_LOW_CODEC` | `aac` | Data-saver codec: `aac` (plays everywhere, iOS included) or `opus` |
 | `LECTERN_AUDIO_LOW_BITRATE_KBPS` | 64 | Data-saver bitrate |
 | `LECTERN_AUDIO_LOW_AUTO` | false | Make a data-saver copy after every audiobook import |
+| `LECTERN_MCP_REQUESTS_PER_MINUTE` | 240 | MCP requests per minute per AI key (upload chunks included) |
+| `LECTERN_MCP_BURST_COUNT` / `_WINDOW_SECONDS` | 200 / 600 | This many AI tool calls by one key within the window alerts the user and the owner (0 = off) |
 | `LECTERN_WORKER_REQUESTS_PER_MINUTE` | 1200 | Requests per minute per valid worker key (failed worker logins use the per-IP limit) |
 | `LECTERN_ALIGN_MODEL` | `small` | faster-whisper model for alignment ([more settings](docs/alignment.md#transcription)) |
 | `LECTERN_ALIGN_LOCAL_WORKER` | `1` | Align in the server when faster-whisper is installed; `0` leaves jobs to `lectern worker` |
@@ -262,6 +278,9 @@ how matching handles intros and missing or abridged chapters are in
   answers 404, OPDS and KOReader progress projection included).
 - Alerts for new sign-ins, new devices, and download bursts; hourly download caps per account
   and per device (see above).
+- AI apps authenticate at `/mcp` with a per-user `lak_…` key (stored hashed, revocable,
+  scoped to `upload`/`read`/`organize`) that acts only with its user's permissions and opens
+  nothing else; no MCP tool returns book files or audio ([docs/mcp.md](docs/mcp.md)).
 - External alignment workers authenticate with an owner-issued `lw_…` key (stored hashed,
   revocable) that opens only `/api/worker/*`, and only the inputs of jobs they hold a lease on.
 - Per-IP rate limits, per-account lockout, and an audit log of logins, credential
