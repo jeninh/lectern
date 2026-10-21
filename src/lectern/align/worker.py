@@ -37,6 +37,9 @@ DEFAULT_LEASE_S = 600
 DEFAULT_POLL_S = 10.0
 # Heartbeat at least every lease_s / 3 (the contract), and often enough that progress shows.
 MAX_HEARTBEAT_S = 30.0
+# An idle remote worker must poll well inside the server's "worker seen" window, or books
+# show "alignment cannot run" between its polls.
+MAX_POLL_S = jobs.WORKER_SEEN_S - 60
 
 
 class JobAbandoned(Exception):
@@ -133,8 +136,10 @@ class LocalWorker:
         memory_limit_mb: int | None = None,
         transcript: Path | None = None,
         child_command: list[str] | None = None,
+        stall_s: float = jobs.STALL_S,
     ) -> None:
         self.session_factory = session_factory
+        self.stall_s = stall_s
         self.data_dir = data_dir
         self.library = library
         self.transcriber = transcriber
@@ -194,6 +199,7 @@ class LocalWorker:
                 worker=self.name,
                 lease_s=self.lease_s,
                 credential_id=None,
+                stall_s=self.stall_s,
             )
             if claimed is None:
                 return False
@@ -432,6 +438,14 @@ class RemoteWorker:
         self.server = server.rstrip("/")
         self.name = name
         self.lease_s = lease_s
+        if poll_s > MAX_POLL_S:
+            log.warning(
+                "--poll %.0f s is longer than the server waits before it reports no worker; "
+                "polling every %d s instead",
+                poll_s,
+                MAX_POLL_S,
+            )
+            poll_s = MAX_POLL_S
         self.poll_s = poll_s
         self.workdir = workdir
         self.transcriber = transcriber

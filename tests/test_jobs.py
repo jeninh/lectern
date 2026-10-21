@@ -18,7 +18,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from tests.conftest import ORIGIN, api_post, login, make_app_password, make_sync_key
+from tests.conftest import (
+    ORIGIN,
+    api_post,
+    login,
+    make_app_password,
+    make_sync_key,
+    make_user,
+)
 
 from lectern.align import jobs
 from lectern.align.pipeline import TrackInput, align_work
@@ -1125,3 +1132,329 @@ def test_the_supervisor_kills_the_child_if_it_fails_itself(tmp_path, monkeypatch
             command=child(SLOW_CHILD),
         )
     assert not _alive(int(pidfile.read_text()))
+
+
+# --- stuck alignments: no engine, restarts, stalls, retry -------------------------------------
+
+
+def read_aloud_alignment(client, work_id) -> dict:
+    r = client.get(f"/api/works/{work_id}/read-aloud")
+    assert r.status_code == 200, r.text
+    return r.json()["alignment"]
+
+
+@pytest.fixture
+def no_local_engine(monkeypatch):
+    """The default (slim) image: faster-whisper is not installed."""
+    monkeypatch.setattr("lectern.align.transcribe.transcription_available", lambda: False)
+
+
+def test_a_queued_alignment_without_any_engine_says_so_until_a_worker_connects(
+    client, owner, work_id, wc, monkeypatch, no_local_engine
+):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    al = read_aloud_alignment(client, work_id)
+    assert al["status"] == "pending" and al["job"]["status"] == "queued"
+    assert al["unavailable"]["reason"] == "not_installed"
+    assert "LECTERN_EXTRAS=align" in al["unavailable"]["message"]
+    assert al["unavailable"]["docs_url"].endswith("docs/alignment.md#turning-it-on")
+    # the job stays queued, so it runs as soon as an engine appears
+    assert db_job(job_id).status == JobStatus.QUEUED
+
+    # an external worker that polls (even with nothing runnable yet) is an engine
+    set_job(job_id, run_after=utcnow() + timedelta(hours=1))
+    assert claim(wc).status_code == 204
+    assert read_aloud_alignment(client, work_id)["unavailable"] is None
+    # ... until it has been gone for a while
+    with session_factory()() as db:
+        from lectern.models import WorkerCredential
+
+        db.scalar(select(WorkerCredential)).last_used_at = utcnow() - timedelta(minutes=10)
+        db.commit()
+    assert read_aloud_alignment(client, work_id)["unavailable"]["reason"] == "not_installed"
+    # a server that aligns itself is never "unavailable"
+    monkeypatch.setattr("lectern.align.transcribe.transcription_available", lambda: True)
+    assert read_aloud_alignment(client, work_id)["unavailable"] is None
+
+
+def _restart(settings) -> None:
+    """What the app lifespan does at startup (and at shutdown)."""
+    from lectern.services import start_services
+
+    settings.track_rescan_seconds = 3600
+    for service in start_services(session_factory(), settings):
+        service.stop()
+
+
+def _claim_locally(settings) -> None:
+    with session_factory()() as db:
+        assert jobs.claim(db, kinds=["align"], worker="local", lease_s=600, credential_id=None)
+
+
+def test_a_restart_requeues_the_dead_local_workers_job_then_fails_it_visibly(
+    client, owner, work_id, wc, settings, no_local_engine
+):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    # an external worker's lease survives a server restart: that worker is still running
+    lease(claim(wc))
+    _restart(settings)
+    assert db_job(job_id).status == JobStatus.LEASED
+    # the in-process worker's lease does not (the server crashed or was OOM-killed): it is
+    # reclaimed at once, not when its 10-minute lease runs out
+    set_job(job_id, leased_by_id=None)
+    for attempt in (1, 2, 3):
+        if attempt > 1:
+            set_job(job_id, run_after=utcnow())
+            _claim_locally(settings)
+        assert db_job(job_id).status == JobStatus.LEASED
+        _restart(settings)
+        job = db_job(job_id)
+        assert job.attempts == attempt and "server restarted" in job.error
+        if attempt < 3:
+            assert job.status == JobStatus.QUEUED and job.run_after > utcnow()
+            al = read_aloud_alignment(client, work_id)
+            assert al["job"]["status"] == "queued" and al["job"]["error"] == job.error
+    assert job.status == JobStatus.FAILED
+    al = read_aloud_alignment(client, work_id)
+    assert al["status"] == "failed" and "server restarted" in al["error"]
+
+
+@pytest.mark.parametrize("how", ["lease_expired", "no_progress"])
+def test_the_sweep_reclaims_dead_and_stalled_runs_without_another_claim(
+    client, owner, work_id, wc, settings, how
+):
+    from lectern.services import Housekeeping
+
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+
+    def heartbeat(progress):
+        return wc.post(
+            f"/api/worker/jobs/{job_id}/heartbeat",
+            json={"progress": progress, "message": "transcribing"},
+            headers=headers,
+        )
+
+    def sweep_once():
+        settings.job_sweep_seconds, settings.track_rescan_seconds = 0.05, 3600
+        hk = Housekeeping(session_factory(), settings)
+        hk.start()
+        _wait_for(lambda: db_job(job_id).status != JobStatus.LEASED, timeout=1.0)
+        hk.stop()
+
+    assert heartbeat(0.3).status_code == 200
+    long_ago = (utcnow() - timedelta(hours=2)).isoformat()
+    # a long run that keeps making progress is left alone, however long ago it was claimed
+    set_job(job_id, result={**db_job(job_id).result, "claimed_at": long_ago})
+    sweep_once()
+    assert db_job(job_id).status == JobStatus.LEASED
+    if how == "lease_expired":  # the worker was killed: no heartbeats
+        set_job(job_id, lease_expires_at=utcnow() - timedelta(seconds=1))
+        expected = "lease expired"
+    else:  # the worker still heartbeats, but its progress has not moved in two hours
+        set_job(job_id, result={**db_job(job_id).result, "progress_at": long_ago})
+        assert heartbeat(0.3).status_code == 200  # the same progress is not progress
+        expected = "no progress for 120 min"
+    sweep_once()
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.error == expected and job.attempts == 1
+    assert heartbeat(0.4).status_code == 409  # the worker's lease is gone
+
+
+def test_running_alignment_reports_heartbeat_progress_and_an_eta(client, owner, work_id, wc):
+    job_id = request_align(client, owner, work_id).json()["id"]
+    headers = lease(claim(wc))
+    al = read_aloud_alignment(client, work_id)
+    assert al["status"] == "running" and al["job"]["status"] == "leased"
+    assert al["job"]["progress"] == 0.0 and al["job"]["eta_s"] is None  # nothing to go on
+    # 100 s into the run, a quarter done: about 300 s left (no finished run to measure yet)
+    claimed = (utcnow() - timedelta(seconds=100)).isoformat()
+    set_job(job_id, result={**db_job(job_id).result, "claimed_at": claimed})
+    r = wc.post(
+        f"/api/worker/jobs/{job_id}/heartbeat",
+        json={"progress": 0.25, "message": "transcribing"},
+        headers=headers,
+    )
+    assert r.status_code == 200
+    job = read_aloud_alignment(client, work_id)["job"]
+    assert job["progress"] == 0.25 and job["message"] == "transcribing"
+    assert 295 <= job["eta_s"] <= 305
+    assert job["heartbeat_at"] and job["attempts"] == 1 and job["max_attempts"] == 3
+    assert client.get(f"/api/jobs/{job_id}").json()["eta"]["basis"] == "this run's progress so far"
+
+
+def _fail_alignment(client, owner, work_id, wc, model, error):
+    job_id = request_align(client, owner, work_id, model=model).json()["id"]
+    r = wc.post(
+        f"/api/worker/jobs/{job_id}/fail",
+        json={"error": error, "retryable": False},
+        headers=lease(claim(wc)),
+    )
+    assert r.status_code == 200, r.text
+    return job_id
+
+
+@pytest.mark.parametrize(
+    ("model", "error", "retry"),
+    [
+        # an ordinary failure: Retry reruns the model that failed
+        ("medium", "lease expired", "medium"),
+        # out of memory: never the same model again, one size smaller
+        ("medium", "out of memory: the alignment used more than 900 MiB.", "small"),
+        ("small", "alignment process killed by the out-of-memory killer", "base"),
+        ("large-v3-turbo", "CUDA out of memory", "medium"),
+    ],
+)
+def test_retry_of_a_failed_alignment_avoids_the_model_that_ran_out_of_memory(
+    client, owner, work_id, wc, model, error, retry
+):
+    job_id = _fail_alignment(client, owner, work_id, wc, model, error)
+    al = read_aloud_alignment(client, work_id)
+    assert al["status"] == "failed" and al["job"]["error"] == error
+    assert al["retry_model"] == retry  # what the Formats card's Retry button runs
+
+    r = request_align(client, owner, work_id)  # Retry without naming a model
+    assert r.status_code == 202, r.text
+    assert r.json()["id"] != job_id and r.json()["model"] == retry
+    al = read_aloud_alignment(client, work_id)
+    assert al["status"] == "pending" and al["job"]["status"] == "queued"
+    assert al["job"]["error"] is None and al["retry_model"] is None
+
+
+def test_out_of_memory_on_the_smallest_model_needs_a_deliberate_rerun(client, owner, work_id, wc):
+    _fail_alignment(client, owner, work_id, wc, "tiny", "out of memory: MemoryError")
+    assert read_aloud_alignment(client, work_id)["retry_model"] is None  # no Retry button
+    # not the server's default (larger) model either
+    r = request_align(client, owner, work_id)
+    assert r.status_code == 409 and r.json()["detail"] == "out_of_memory_choose_model"
+    r = request_align(client, owner, work_id, model="tiny")  # the editor names one
+    assert r.status_code == 202 and r.json()["model"] == "tiny"
+
+
+def test_readers_see_that_alignment_failed_but_not_its_error_text(
+    client, owner, work_id, wc, settings
+):
+    error = "out of memory: see /data/logs/align/job-1-attempt-1.log"
+    _fail_alignment(client, owner, work_id, wc, "small", error)
+    assert read_aloud_alignment(client, work_id)["error"] == error  # the owner does
+    rex = make_user(client, owner["csrf"], "rex", "reader")
+    with session_factory()() as db:  # the book is on a shelf shared with rex
+        from lectern.models import Shelf, ShelfGrant, ShelfItem, ShelfPermission, User
+
+        owner_id = db.scalar(select(User.id).where(User.username == "owner"))
+        shelf = Shelf(owner_id=owner_id, name="Shared")
+        db.add(shelf)
+        db.flush()
+        db.add(ShelfItem(shelf_id=shelf.id, work_id=work_id))
+        db.add(ShelfGrant(shelf_id=shelf.id, user_id=rex["id"], permission=ShelfPermission.VIEW))
+        db.commit()
+    login(client, "rex", rex["password"])
+    st = client.get(f"/api/works/{work_id}/read-aloud")
+    assert st.status_code == 200, st.text
+    al = st.json()["alignment"]
+    assert al["status"] == "failed" and al["error"] is None
+    assert al["job"]["status"] == "failed" and al["job"]["error"] is None
+    assert al["retry_model"] is None
+    assert client.get(f"/api/works/{work_id}/tracks").json()["alignment"]["error"] is None
+    assert "/data/logs" not in st.text
+
+
+def test_remote_worker_polls_inside_the_servers_worker_seen_window(worker_key, caplog):
+    from lectern.align.worker import MAX_POLL_S
+
+    assert MAX_POLL_S < jobs.WORKER_SEEN_S
+    slow = RemoteWorker("https://lectern.example", worker_key, poll_s=900, client=object())
+    assert slow.poll_s == MAX_POLL_S
+    assert "polling every" in caplog.text
+    assert RemoteWorker("https://x", worker_key, poll_s=30, client=object()).poll_s == 30
+
+
+def test_claims_reclaim_stalled_runs_after_the_configured_stall_time(
+    client, owner, work_id, wc, settings, tmp_path
+):
+    """LECTERN_ALIGN_STALL_SECONDS applies to the reclaim before every claim, not only to
+    the sweep: here 10 min, so a run stuck for 20 min (under the 1 h default) is reclaimed."""
+    settings.align_stall_seconds = 600
+    stuck = (utcnow() - timedelta(minutes=20)).isoformat()
+    job_id = request_align(client, owner, work_id).json()["id"]
+    lease(claim(wc))
+    set_job(job_id, result={**db_job(job_id).result, "progress_at": stuck})
+    assert claim(wc).status_code == 204  # the external worker's claim reclaims it
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.error == "no progress for 20 min"
+
+    # the same through the in-process worker's claim
+    set_job(job_id, run_after=utcnow())
+    lease(claim(wc))
+    set_job(job_id, result={**db_job(job_id).result, "progress_at": stuck})
+    worker = isolated_worker(settings, tmp_path, stall_s=settings.align_stall_seconds)
+    assert not worker.run_once()  # reclaimed, then waiting out its backoff
+    job = db_job(job_id)
+    assert job.status == JobStatus.QUEUED and job.attempts == 2
+    assert job.error == "no progress for 20 min"
+
+
+@pytest.mark.parametrize(
+    "race", ["succeeded", "cancelled_and_requeued", "claimed_again", "heartbeat"]
+)
+def test_reclaim_leaves_a_lease_that_changed_while_it_looked_alone(
+    client, owner, work_id, wc, settings, monkeypatch, race
+):
+    """Between reading the expired lease and requeueing it, the job finishes, is cancelled
+    and replaced, or is requeued and claimed again with a new token. The reclaim must not
+    overwrite any of that (nor, for the replacement, trip the one-active-job index)."""
+    job_id = request_align(client, owner, work_id).json()["id"]
+    lease(claim(wc))
+    if race == "heartbeat":  # stalled for two hours, its lease still current
+        stuck = (utcnow() - timedelta(hours=2)).isoformat()
+        set_job(job_id, result={**db_job(job_id).result, "progress_at": stuck})
+    else:
+        set_job(job_id, lease_expires_at=utcnow() - timedelta(seconds=1))
+    new_hash = "f" * 64
+    replacement: list[int] = []
+    real_backoff = jobs.backoff_s
+
+    def concurrently(attempts, rng=None):
+        monkeypatch.setattr(jobs, "backoff_s", real_backoff)  # once
+        with session_factory()() as other:
+            job = other.get(Job, job_id)
+            if race == "succeeded":
+                job.status, job.finished_at, job.lease_expires_at = (
+                    JobStatus.SUCCEEDED,
+                    utcnow(),
+                    None,
+                )
+                other.scalar(select(Alignment)).status = AlignmentStatus.SUCCEEDED
+            elif race == "cancelled_and_requeued":
+                jobs.cancel_job(other, job)
+                new, _ = jobs.enqueue_align(other, settings.library_dir, other.get(Work, work_id))
+                other.flush()
+                replacement.append(new.id)
+            elif race == "heartbeat":  # the stalled run reports progress after all
+                jobs.heartbeat(other, job, progress=0.6, message="transcribing")
+            else:  # requeued by its worker and leased again by another
+                job.lease_token_hash = new_hash
+                job.lease_expires_at = utcnow() + timedelta(minutes=10)
+                job.attempts = 2
+            other.commit()
+        return real_backoff(attempts, rng)
+
+    monkeypatch.setattr(jobs, "backoff_s", concurrently)
+    with session_factory()() as db:
+        assert jobs.reclaim_expired(db) == 0
+    job = db_job(job_id)
+    assert job.error is None
+    with session_factory()() as db:
+        al = db.scalar(select(Alignment))
+    if race == "succeeded":
+        assert job.status == JobStatus.SUCCEEDED and al.status == AlignmentStatus.SUCCEEDED
+    elif race == "cancelled_and_requeued":
+        assert job.status == JobStatus.CANCELLED
+        assert db_job(replacement[0]).status == JobStatus.QUEUED
+        assert al.status == AlignmentStatus.PENDING
+    elif race == "heartbeat":
+        assert job.status == JobStatus.LEASED and job.attempts == 1
+        assert job.result["progress"] == 0.6 and al.status == AlignmentStatus.RUNNING
+    else:
+        assert job.status == JobStatus.LEASED and job.lease_token_hash == new_hash
+        assert al.status == AlignmentStatus.RUNNING
