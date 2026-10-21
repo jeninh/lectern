@@ -222,11 +222,23 @@ def _reader_response(request: Request, auth, db, settings, book: BookFile, path:
 
 @router.get("/library/files/{file_id}/view", include_in_schema=False)
 def view_pdf(request: Request, auth: LibraryUser, db: DbDep, settings: SettingsDep, file_id: int):
-    """The PDF the web viewer (pdf.js) opens; the same caching and caps as ``book.epub``."""
+    """The PDF the web viewer (pdf.js) opens. pdf.js fetches it in many Range requests, so
+    opening it counts as one download per device per hour (``admit_once``), not one per range;
+    reopening is a 304 (ETag = sha256)."""
     book, path = resolve_file(db, settings, file_id, auth.user)
     if book.media_type != "application/pdf":
         raise _not_found()
-    return _reader_response(request, auth, db, settings, book, path)
+    etag = f'"{book.sha256}"'
+    cache = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    inm = request.headers.get("if-none-match")
+    if inm and etag in [t.strip() for t in inm.split(",")]:
+        return Response(status_code=304, headers=cache)
+    downloads.admit_once(
+        db, settings, auth.user, auth.device, f"file:{book.id}", client_ip(request), "pdf reader"
+    )
+    return FileResponse(
+        path, media_type=book.media_type, content_disposition_type="inline", headers=cache
+    )
 
 
 @router.get("/library/tracks/{track_id}/stream", include_in_schema=False)

@@ -73,6 +73,7 @@ async function openPdf(url: string): Promise<PdfTask> {
     cMapPacked: true,
     standardFontDataUrl: `${assets}standard_fonts/`,
     wasmUrl: `${assets}wasm/`,
+    enableXfa: false,
   });
   return task as unknown as PdfTask;
 }

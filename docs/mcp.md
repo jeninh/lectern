@@ -85,15 +85,16 @@ or id. Errors come back as tool errors the AI app can read, for example
 `not_found (not found, or not visible to this person)` or
 `forbidden: this AI key does not have the 'organize' scope`.
 
-- `upload_book`: put an EPUB or audiobook file (`.epub`, `.mp3`, `.m4b`/`.m4a`, `.ogg`/`.opus`,
-  `.flac`) into **Review before filing**. Files up to 2 MiB go in one call as base64. Larger
+- `upload_book`: put a book or audiobook file (`.epub`, `.pdf`, `.cbz`, `.mp3`, `.m4b`/`.m4a`,
+  `.ogg`/`.opus`, `.flac`) into **Review before filing**. CBR is not supported; convert it to
+  CBZ ([pdf-comics.md](pdf-comics.md)). The file's first bytes must match its extension. Files up to 2 MiB go in one call as base64. Larger
   files are sent in 2 MiB chunks: the first call gives `total_size` and the whole file's
   `sha256` and returns an `upload_id`; each later call gives `upload_id`, `offset`, and the
   chunk. A call with only `upload_id` reports how far the upload got (resume). This is the
   same resumable upload session as the web app's, with the same size limits, quota, checksum,
   and format checks. When the file is complete, the result has the detected metadata and the
   proposed match (join an existing book, with its confidence and reason, or a new book).
-  Several files of one book (an EPUB and its tracks) share an `import_id`; pass `finish=false`
+  Several files of one book (an EPUB, PDF, or CBZ and its tracks) share an `import_id`; pass `finish=false`
   until the last one.
 - `list_pending_imports`: your uploads waiting for review.
 - `confirm_import`: file one: `accept` the proposal, `new`, or `join` a `work_id`, optionally
@@ -102,13 +103,15 @@ or id. Errors come back as tool errors the AI app can read, for example
 - `cancel_import`: discard it and its files.
 - `search_library`, `list_recent` (`added`, or what you `read` most recently), `get_book`
   (metadata, formats, audiobook length, alignment status and job, shelves, your progress).
+  Formats are labelled `EPUB`, `PDF`, `CBZ`, or `audiobook`.
 - `add_to_shelf`, `remove_from_shelf`: shelves you may edit, with the shelf rules of the web
   app (for example, a reader with an edit grant cannot widen another reader's library).
 - `send_to_device`, `list_device_queue`: the per-device queues from
   [device-queues.md](device-queues.md). Your own e-readers; the owner can also send to
   household devices, but only books that device's person can see.
 - `start_alignment`, `job_status`: queue text–audio alignment for a book with an EPUB and an
-  audiobook and follow its progress and ETA ([alignment.md](alignment.md)).
+  audiobook and follow its progress and ETA ([alignment.md](alignment.md)). PDF and CBZ have
+  no text, so a book without an EPUB cannot be aligned.
 - `edit_metadata`: change fields with the editor's validation (lengths, language tag, dates,
   and no control characters). `expected_version` from `get_book` refuses the edit if the book
   changed since. Each edit is a revision you can undo in the web editor.

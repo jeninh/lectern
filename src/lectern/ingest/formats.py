@@ -58,6 +58,13 @@ class FormatError(ValueError):
         self.code = code
 
 
+class ProbeBusy(Exception):
+    """Every PDF parser slot stayed taken while we waited (``lectern.ingest.pdf``). The file is
+    not at fault: callers keep it and ask to retry (HTTP 503 ``pdf_busy``) instead of refusing it."""
+
+    code = "pdf_busy"
+
+
 def is_document(media_type: str | None) -> bool:
     return media_type in DOCUMENTS
 

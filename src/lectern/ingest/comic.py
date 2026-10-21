@@ -6,10 +6,12 @@ Every archive is checked before any page is read (:func:`open_comic`):
 - no entry larger than :data:`MAX_ENTRY_BYTES` uncompressed, no more than
   :data:`MAX_TOTAL_BYTES` in total, and no entry over 1 MiB that claims to expand more than
   :data:`MAX_RATIO` times (the shape of a zip bomb; real page images barely compress);
-- no encrypted entries; overlapping entries are refused by :mod:`zipfile` itself.
+- no encrypted entries. (:mod:`zipfile` only warns about overlapping entries; the size caps
+  above are what bound the work they could cause.)
 
 Nothing is ever extracted to disk: pages are read into memory one at a time, at most one byte
-more than the size the archive declares (so a lying header is caught), and an image is
+more than the size the archive declares, so a header that understates the size cannot make the
+read grow (zipfile's CRC check is what refuses the damaged entry), and an image is
 served only if its first bytes are JPEG, PNG, GIF, or WebP. Covers go through the bounded
 decoder in :mod:`lectern.ingest.cover`.
 """

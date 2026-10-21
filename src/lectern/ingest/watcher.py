@@ -175,6 +175,10 @@ class InboxWatcher:
         media_type = formats.media_type_for(path)
         try:
             probed = formats.probe(path, media_type)
+        except formats.ProbeBusy:
+            # The PDF parser slots are all taken; the file is fine. Leave it for a later poll.
+            log.info("deferring %s: PDF parser busy", path.name)
+            return False
         except formats.FormatError as exc:
             log.warning("rejecting %s: %s (%s)", path.name, exc.code, exc)
             self._reject(path)

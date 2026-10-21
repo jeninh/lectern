@@ -24,6 +24,7 @@ const MESSAGES: Record<string, string> = {
   not_pdf: "That is not a readable PDF.",
   pdf_encrypted: "That PDF is password-protected. Remove the password first.",
   pdf_too_complex: "That PDF is too large or complex to open safely.",
+  pdf_busy: "The server is busy reading other PDFs. Try again in a moment.",
   not_comic: "That is not a CBZ comic (a zip of page images).",
   comic_encrypted: "That comic archive is password-protected.",
   archive_too_large: "That comic archive is too large or unpacks to too much data.",

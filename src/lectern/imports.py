@@ -273,6 +273,10 @@ def stage_upload(
         else:
             meta, cover = _probe_audio(dest, settings.ffprobe_path)
             pmd5 = None
+    except formats.ProbeBusy as exc:
+        # Not the file's fault: put the bytes back so the same upload can be finalized again.
+        move_file(dest, part)
+        raise ImportError_(503, exc.code) from exc
     except formats.FormatError as exc:
         dest.unlink(missing_ok=True)
         raise ImportError_(422, exc.code) from exc

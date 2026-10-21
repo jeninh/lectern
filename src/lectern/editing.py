@@ -346,7 +346,7 @@ def _embedded_cover(db: Session, settings: Settings, work: Work, dest: Path) -> 
                 formats.probe(work_dir / book.rel_path, book.media_type).cover, dest
             ):
                 return True
-        except (formats.FormatError, OSError):
+        except (formats.FormatError, formats.ProbeBusy, OSError):
             continue
     for t in ordered_tracks(db, work.id)[:3]:
         try:

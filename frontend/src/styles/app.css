@@ -4588,6 +4588,8 @@ table.compare td:first-child {
   top: 8px;
   right: 8px;
   background: var(--surface);
+}
+
 /* --- Page viewer (PDF, CBZ) ----------------------------------------------------------------- */
 .pages-bar {
   grid-template-columns: auto 1fr auto;

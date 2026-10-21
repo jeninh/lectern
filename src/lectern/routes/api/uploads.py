@@ -346,7 +346,7 @@ def _title(path: Path, media_type: str, settings) -> str | None:
             return None if title == path.stem else title
         info = probe(path, settings.ffprobe_path)
         return (info.book_title or info.title or "")[:200] or None
-    except (formats.FormatError, AudioError, OSError):
+    except (formats.FormatError, formats.ProbeBusy, AudioError, OSError):
         return None
 
 
@@ -359,7 +359,17 @@ def finalize(
     settings: SettingsDep,
     body: FinalizeIn | None = None,
 ) -> dict:
+    # One finalize per upload at a time (and none while a chunk is written): a retried or
+    # doubled finalize waits, then sees the first one's result instead of probing again.
+    with _locks_guard:
+        lock = _locks.setdefault(public_id, threading.Lock())
+    with lock:
+        return _finalize(public_id, request, auth, db, settings, body)
+
+
+def _finalize(public_id, request, auth, db, settings, body) -> dict:
     row = _own(db, auth, public_id)
+    db.refresh(row)  # another request may have finished it while this one waited
     if row.status == UploadStatus.COMPLETED:
         if row.import_id is not None:
             imp = db.get(Import, row.import_id)
@@ -397,6 +407,9 @@ def finalize(
         try:
             meta = formats.probe(part, row.media_type).meta
             title = None if meta.title == part.stem else meta.title.strip()[:200] or None
+        except formats.ProbeBusy:
+            # The file is fine; keep the session and its bytes so finalize can be retried.
+            raise _err(status.HTTP_503_SERVICE_UNAVAILABLE, "pdf_busy") from None
         except formats.FormatError as exc:
             raise _fail(db, request, auth, settings, row, 422, exc.code) from None
     else:
@@ -434,9 +447,11 @@ def _finalize_into_import(db, request, auth, settings, row, part, expected, titl
         with LIBRARY_LOCK:
             staged = imports.stage_upload(db, settings, imp, row, part)
     except imports.ImportError_ as exc:
-        # Every staging refusal is final for this upload (unreadable, import closed or full):
-        # fail the session and drop its bytes rather than leave it active with a stuck part.
         db.rollback()
+        if exc.code == "pdf_busy":  # retryable: the session and its .part stay as they were
+            raise _err(exc.status, exc.code) from None
+        # Every other staging refusal is final (unreadable, import closed or full): fail the
+        # session and drop its bytes rather than leave it active with a stuck part.
         row = db.get(UploadSession, row.id)
         raise _fail(db, request, auth, settings, row, exc.status, exc.code) from None
     except OSError:

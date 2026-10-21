@@ -467,6 +467,7 @@ export function plainError(e: unknown): string {
     if (e.code === "not_epub") return "Wrong format: this is not a readable EPUB. It may be damaged or DRM-protected.";
     if (e.code === "not_pdf") return "Wrong format: this is not a readable PDF.";
     if (e.code === "pdf_encrypted") return "This PDF is password-protected. Remove the password and upload it again.";
+    if (e.code === "pdf_busy") return "The server is busy reading other PDFs. Retry in a moment.";
     if (e.code === "pdf_too_complex") return "This PDF is too large or complex to open safely.";
     if (e.code === "not_comic") return "Wrong format: this is not a CBZ comic (a zip of page images).";
     if (e.code === "comic_encrypted") return "This comic archive is password-protected.";

@@ -100,11 +100,11 @@ def comic_page(
         return Response(status_code=304, headers={"ETag": etag})
     try:
         comic = ComicCache.get(path, book.sha256)
-        if not 1 <= n <= len(comic.pages):
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such page")
-        data, media_type = read_page(path, comic.pages[n - 1])
     except formats.FormatError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code) from None
+    if not 1 <= n <= len(comic.pages):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such page")
+    # Charge (or refuse) before decompressing, so a capped browser cannot make the server unpack.
     downloads.admit_once(
         db,
         settings,
@@ -114,6 +114,10 @@ def comic_page(
         client_ip(request),
         "comic reader",
     )
+    try:
+        data, media_type = read_page(path, comic.pages[n - 1])
+    except formats.FormatError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.code) from None
     return Response(
         data,
         media_type=media_type,

@@ -11,8 +11,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import threading
+import time
 import warnings
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -32,9 +35,10 @@ from tests.conftest import (
 
 from lectern.db import session_factory
 from lectern.ingest import formats
+from lectern.ingest import pdf as pdf_ingest
 from lectern.ingest.comic import MAX_ENTRY_BYTES, open_comic
 from lectern.ingest.hashing import partial_md5
-from lectern.models import BookFile, ReadingProgress, Work
+from lectern.models import AuditLog, BookFile, DownloadEvent, ReadingProgress, UploadSession, Work
 
 PDF = "application/pdf"
 CBZ = "application/vnd.comicbook+zip"
@@ -113,6 +117,12 @@ def sha(b: bytes) -> str:
 
 
 def upload(client, csrf, path: Path, media_type: str, import_id: str | None = None):
+    uid, digest = send(client, csrf, path, media_type, import_id)
+    return api_post(client, f"/api/uploads/{uid}/finalize", csrf, {"sha256": digest})
+
+
+def send(client, csrf, path: Path, media_type: str, import_id: str | None = None):
+    """Open an upload session and send every chunk; returns (upload id, sha256) unfinalized."""
     data = path.read_bytes()
     body = {"filename": path.name, "size": len(data), "media_type": media_type}
     if import_id:
@@ -129,7 +139,7 @@ def upload(client, csrf, path: Path, media_type: str, import_id: str | None = No
                      "x-chunk-sha256": sha(part), "content-type": "application/octet-stream"},
         )  # fmt: skip
         assert r.status_code == 204, r.text
-    return api_post(client, f"/api/uploads/{uid}/finalize", csrf, {"sha256": sha(data)})
+    return uid, sha(data)
 
 
 def new_import(client, csrf) -> str:
@@ -476,3 +486,117 @@ def test_read_along_is_unavailable_without_an_epub(client, owner, settings):
         from lectern.models import Sentence
 
         assert db.query(Sentence).filter_by(work_id=w["id"]).count() == 0
+
+
+# --- metering and concurrency -------------------------------------------------------------------
+
+
+def test_pdf_viewer_range_requests_count_as_one_download(client, owner, settings):
+    """pdf.js reads a PDF in many Range requests; together they are one download, so a cap of 3
+    still lets the viewer fetch eight ranges."""
+    f = _pdf_work(settings, client)["files"][0]
+    settings.download_cap_per_hour = 3
+    size = None
+    for i in range(8):
+        r = client.get(f"/library/files/{f['id']}/view", headers={"range": f"bytes={i}-{i + 9}"})
+        assert r.status_code == 206, (i, r.status_code, r.text)
+        size = size or r.headers["content-range"].rsplit("/", 1)[1]
+        assert r.headers["content-range"] == f"bytes {i}-{i + 9}/{size}" and len(r.content) == 10
+    with session_factory()() as db:
+        target = f"file:{f['id']}"
+        assert db.query(DownloadEvent).filter_by(target=target, blocked=False).count() == 1
+        assert db.query(DownloadEvent).filter_by(target=target, blocked=True).count() == 0
+        assert db.query(AuditLog).filter_by(action="download", target=target).count() == 1
+
+
+class _Gate:
+    """Stands in for the PDF parser child: records how many run at once."""
+
+    def __init__(self, real, hold: float = 0.0):
+        self.real, self.hold, self.now, self.peak, self.calls = real, hold, 0, 0, 0
+        self.lock, self.release = threading.Lock(), threading.Event()
+        if hold:
+            self.release.set()
+
+    def __call__(self, path):
+        with self.lock:
+            self.now += 1
+            self.calls += 1
+            self.peak = max(self.peak, self.now)
+        try:
+            time.sleep(self.hold)
+            self.release.wait(10)
+            return self.real(path)
+        finally:
+            with self.lock:
+                self.now -= 1
+
+
+@pytest.mark.parametrize("into_import", [False, True])
+def test_concurrent_finalizes_of_one_upload_parse_it_once(
+    client, owner, settings, tmp_path, monkeypatch, into_import
+):
+    csrf = owner["csrf"]
+    gate = _Gate(pdf_ingest._probe_pdf, hold=0.2)
+    monkeypatch.setattr(pdf_ingest, "_probe_pdf", gate)
+    iid = new_import(client, csrf) if into_import else None
+    uid, digest = send(client, csrf, make_pdf(tmp_path / "rivers.pdf"), PDF, iid)
+
+    def fin(_):
+        return api_post(client, f"/api/uploads/{uid}/finalize", csrf, {"sha256": digest})
+
+    with ThreadPoolExecutor(6) as pool:
+        results = list(pool.map(fin, range(6)))
+    assert [r.status_code for r in results] == [200] * 6, [r.text for r in results]
+    assert gate.calls == 1 and gate.peak == 1
+    assert {r.json()["status"] for r in results} == {"completed"}
+    with session_factory()() as db:
+        assert db.query(AuditLog).filter_by(action="upload.complete").count() == 1
+    if into_import:
+        assert len(client.get(f"/api/imports/{iid}").json()["files"]) == 1
+    else:
+        assert len(list(settings.inbox_path.glob("*.pdf"))) == 1
+
+
+def test_pdf_parsers_are_bounded_and_a_busy_finalize_can_be_retried(
+    client, owner, settings, tmp_path, monkeypatch
+):
+    csrf = owner["csrf"]
+    path = make_pdf(tmp_path / "rivers.pdf")
+    # Six parses at once: never more than MAX_CONCURRENT children.
+    gate = _Gate(pdf_ingest._probe_pdf, hold=0.1)
+    monkeypatch.setattr(pdf_ingest, "_probe_pdf", gate)
+    with ThreadPoolExecutor(6) as pool:
+        probes = list(pool.map(lambda _: formats.probe(path, PDF), range(6)))
+    assert gate.peak == pdf_ingest.MAX_CONCURRENT == 2 and len(probes) == 6
+
+    # Both slots held: a finalize waits BUSY_WAIT_S, then says 503 pdf_busy and keeps the upload.
+    held = _Gate(pdf_ingest._probe_pdf)
+    monkeypatch.setattr(pdf_ingest, "_probe_pdf", held)
+    monkeypatch.setattr(pdf_ingest, "BUSY_WAIT_S", 0.05)
+    iid = new_import(client, csrf)
+    plain = send(client, csrf, path, PDF)
+    staged = send(client, csrf, path, PDF, iid)
+    with ThreadPoolExecutor(2) as pool:
+        holders = [pool.submit(formats.probe, path, PDF) for _ in range(2)]
+        while held.now < 2:
+            time.sleep(0.01)
+        with pytest.raises(formats.ProbeBusy):
+            formats.probe(path, PDF)
+        for uid, digest in (plain, staged):
+            r = api_post(client, f"/api/uploads/{uid}/finalize", csrf, {"sha256": digest})
+            assert (r.status_code, r.json()["detail"]) == (503, "pdf_busy"), r.text
+        held.release.set()
+        for h in holders:
+            h.result()
+    with session_factory()() as db:
+        for uid, _ in (plain, staged):
+            assert db.query(UploadSession).filter_by(public_id=uid).one().status.value == "active"
+    assert client.get(f"/api/imports/{iid}").json()["files"] == []
+
+    # Once a slot is free the same uploads finish.
+    for uid, digest in (plain, staged):
+        r = api_post(client, f"/api/uploads/{uid}/finalize", csrf, {"sha256": digest})
+        assert r.status_code == 200, r.text
+    assert len(client.get(f"/api/imports/{iid}").json()["files"]) == 1
+    assert len(list(settings.inbox_path.glob("*.pdf"))) == 1
