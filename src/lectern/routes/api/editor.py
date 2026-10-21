@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import editing, idempotency, instance, lookup, trash
+from lectern import covergen, editing, idempotency, instance, lookup, trash
 from lectern.access import can_see_work
 from lectern.align import jobs as align_jobs
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS
@@ -131,6 +131,13 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
             else None,
             "source": work.cover_source,
             "embedded_available": editing.embedded_cover_available(db, settings, work),
+            "generated": {
+                "url": covergen.cover_url(work) if not work.has_cover else None,
+                "style": work.cover_style,
+                "seed": work.cover_seed or 0,
+                "effective_style": covergen.design_of(work).style,
+                "styles": list(covergen.STYLES),
+            },
         },
         "files": [
             {
@@ -325,6 +332,42 @@ async def upload_cover(
     except EditError as exc:
         raise _edit_error(exc) from None
     return {"token": token, "preview_url": f"/api/staged-covers/{token}.jpg"}
+
+
+@router.get("/works/{work_id}/cover/generated.jpg", include_in_schema=False)
+async def generated_cover_preview(
+    auth: EditorRead,
+    db: DbDep,
+    work_id: int,
+    title: Annotated[str | None, Query(max_length=covergen.MAX_TEXT)] = None,
+    author: Annotated[str | None, Query(max_length=covergen.MAX_TEXT)] = None,
+    style: Literal["classic", "modern", "minimal"] | None = None,
+    seed: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+):
+    """The editor's live preview: the generated cover for the draft title, author, style, and
+    shuffle, drawn but not stored. Headers name the style and palette it resolved to."""
+    work = db.get(Work, work_id)
+    if work is None or work.trashed_at is not None or not can_see_work(db, auth.user, work_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    design = covergen.design_for(
+        work.title if title is None else title,
+        covergen.design_of(work).author if author is None else author,
+        style=style,
+        seed=seed,
+        lang=work.language,
+    )
+    from fastapi.concurrency import run_in_threadpool
+
+    data = await run_in_threadpool(covergen.render_jpeg, design, width=480, quality=86)
+    return Response(
+        data,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "private, max-age=600",
+            "X-Cover-Style": design.style,
+            "X-Cover-Palette": design.palette.name,
+        },
+    )
 
 
 @router.get("/staged-covers/{token}.jpg", include_in_schema=False)

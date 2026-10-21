@@ -1170,6 +1170,24 @@ tr.revoked td:first-child {
   transform: translateY(-5px) rotate(-0.4deg);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12), 0 22px 36px -16px color-mix(in srgb, var(--tint) 85%, black);
 }
+.audio-badge {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.audio-badge svg {
+  width: 15px;
+  height: 15px;
+}
 .book strong {
   font-family: var(--font-display);
   font-weight: 500;
@@ -4123,6 +4141,23 @@ table.compare th {
 }
 .cover-tab .stack > .btn {
   justify-self: start;
+}
+.gen-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.gen-controls .seg {
+  margin-left: 0;
+}
+.gen-controls .seg button {
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 13px;
+}
+.palette-name {
+  text-transform: capitalize;
 }
 @media (max-width: 560px) {
   .cover-tab {

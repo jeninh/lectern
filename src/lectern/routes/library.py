@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from lectern import device_queue
+from lectern import covergen, device_queue
 from lectern.access import can_see_work, visible_works
 from lectern.http_range import etag_matches, file_response
 from lectern.ingest.library import safe_component
@@ -70,15 +70,26 @@ def resolve_file(db: Session, settings, file_id: int, user: User) -> tuple[BookF
     return book, path
 
 
-def resolve_cover(db: Session, settings, work_id: int, user: User) -> Path:
+def resolve_cover(db: Session, settings, work_id: int, user: User) -> Path | bytes:
+    """The work's cover art, or (when it has none) its generated cover, cached under
+    ``derived/``. Cover art always wins: a generated cover never replaces ``cover.jpg``."""
     work = db.get(Work, work_id)
-    if work is None or not work.has_cover or not can_see_work(db, user, work_id):
+    if work is None or not can_see_work(db, user, work_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No cover")
     root = settings.library_dir.resolve()
-    path = (root / work.dir_path / "cover.jpg").resolve()
-    if not _inside(root, path):
+    work_dir = (root / work.dir_path).resolve()
+    if root not in work_dir.parents:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No cover")
-    return path
+    path = (work_dir / "cover.jpg").resolve()
+    if work.has_cover and _inside(root, path) and path.is_file():
+        return path
+    return covergen.cached_cover(work_dir, covergen.design_of(work))
+
+
+def cover_response(found: Path | bytes) -> Response:
+    if isinstance(found, bytes):
+        return Response(found, media_type="image/jpeg")
+    return FileResponse(found, media_type="image/jpeg")
 
 
 def resolve_track(
@@ -156,7 +167,7 @@ def download_response(
 
 @router.get("/library/works/{work_id}/cover.jpg", include_in_schema=False)
 def work_cover(auth: LibraryUser, db: DbDep, settings: SettingsDep, work_id: int):
-    resp = FileResponse(resolve_cover(db, settings, work_id, auth.user), media_type="image/jpeg")
+    resp = cover_response(resolve_cover(db, settings, work_id, auth.user))
     resp.headers["Cache-Control"] = "private, max-age=3600"
     return resp
 

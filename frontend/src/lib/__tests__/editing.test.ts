@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPatch, changes, initialDraft, rebase } from "../editor";
+import { buildPatch, changes, coverAuthor, initialDraft, rebase } from "../editor";
 import { applyFields, clean, normalizeIsbn, sortName, suggestionDiff, validate } from "../metadata";
 import type { EditorState, Metadata } from "../types";
 
@@ -27,7 +27,13 @@ function state(over: Partial<EditorState> = {}): EditorState {
     playback_default: null,
     readalong_enabled: true,
     primary_file_id: 10,
-    cover: { has_cover: true, url: "/c.jpg", source: "embedded", embedded_available: true },
+    cover: {
+      has_cover: true,
+      url: "/c.jpg",
+      source: "embedded",
+      embedded_available: true,
+      generated: { url: null, style: null, seed: 0, effective_style: "classic", styles: ["classic", "modern", "minimal"] },
+    },
     files: [
       { id: 10, kind: "ebook", rel_path: "a.epub", size: 1, sha256: "x", partial_md5: null, added_at: null, primary: true },
       { id: 11, kind: "ebook", rel_path: "b.epub", size: 1, sha256: "y", partial_md5: null, added_at: null, primary: false },
@@ -121,6 +127,20 @@ describe("editor draft", () => {
     expect(buildPatch(s, d).tracks).toEqual([{ id: 2, title: "Second half" }, { id: 1, chapters: ["Opening"] }]);
     const removing = { ...base, remove_track_ids: [2] };
     expect(buildPatch(s, removing)).toEqual({ version: 3, remove_track_ids: [2] });
+  });
+
+  it("sends a generated cover's style and shuffle, and an unset style as null (the hashed one)", () => {
+    const s = state();
+    const d = { ...initialDraft(s), cover: { action: "generate" as const, style: "minimal" as const, seed: 2 } };
+    expect(buildPatch(s, d)).toEqual({ version: 3, cover: { action: "generate", style: "minimal", seed: 2 } });
+    expect(changes(s, d)).toEqual(["cover"]);
+    const auto = { ...initialDraft(s), cover: { action: "generate" as const } };
+    expect(buildPatch(s, auto).cover).toEqual({ action: "generate", style: null, seed: 0 });
+  });
+
+  it("previews the author line the server will draw", () => {
+    expect(coverAuthor([{ name: " Ursula K. Le Guin " }, { name: "" }, { name: "Charles Vess" }])).toBe("Ursula K. Le Guin & Charles Vess");
+    expect(coverAuthor([])).toBe("");
   });
 
   it("never asks to make a removed EPUB primary", () => {

@@ -287,9 +287,16 @@ export function LibraryPage() {
                 <span className="cover-wrap">
                   <Cover work={w} />
                   {w.progress && <ProgressRing value={w.progress.percentage} />}
+                  {w.cover_generated && w.audio && <span className="audio-badge"><Headphones aria-label="Has audiobook" /></span>}
                 </span>
-                <strong><Highlight text={w.title} q={q} /></strong>
-                <span><Highlight text={w.author} q={q} />{w.audio && <Headphones className="has-audio" aria-label="Has audiobook" />}</span>
+                {/* A generated cover already shows the title and author; a caption would repeat them.
+                    The button's aria-label still names the book. */}
+                {!w.cover_generated && (
+                  <>
+                    <strong><Highlight text={w.title} q={q} /></strong>
+                    <span><Highlight text={w.author} q={q} />{w.audio && <Headphones className="has-audio" aria-label="Has audiobook" />}</span>
+                  </>
+                )}
               </button>
             </li>
           ))}

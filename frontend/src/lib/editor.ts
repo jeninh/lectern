@@ -3,7 +3,7 @@
 
 import { errorText } from "./api";
 import { changedFields, clean } from "./metadata";
-import type { EditorState, Metadata, PlaybackDefault } from "./types";
+import type { CoverStyle, EditorState, Metadata, PlaybackDefault } from "./types";
 
 export interface TrackDraft {
   id: number;
@@ -12,9 +12,13 @@ export interface TrackDraft {
 }
 
 export interface CoverDraft {
-  action: "upload" | "embedded" | "remove";
+  action: "upload" | "embedded" | "remove" | "generate";
   token?: string;
   preview?: string;
+  /** "generate": null = the style the server picks from the title and author. */
+  style?: CoverStyle | null;
+  /** "generate": the palette shuffle. */
+  seed?: number;
 }
 
 export interface Draft {
@@ -53,7 +57,7 @@ export interface WorkPatchBody {
   tracks?: { id: number; title?: string; chapters?: string[] }[];
   remove_file_ids?: number[];
   remove_track_ids?: number[];
-  cover?: { action: CoverDraft["action"]; token?: string };
+  cover?: { action: CoverDraft["action"]; token?: string; style?: CoverStyle | null; seed?: number };
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -103,7 +107,10 @@ export function buildPatch(s: EditorState, d: Draft): WorkPatchBody {
   }
   if (d.remove_file_ids.length) body.remove_file_ids = d.remove_file_ids;
   if (d.remove_track_ids.length) body.remove_track_ids = d.remove_track_ids;
-  if (d.cover) body.cover = d.cover.action === "upload" ? { action: "upload", token: d.cover.token } : { action: d.cover.action };
+  if (d.cover) {
+    const c = d.cover;
+    body.cover = c.action === "upload" ? { action: "upload", token: c.token } : c.action === "generate" ? { action: "generate", style: c.style ?? null, seed: c.seed ?? 0 } : { action: c.action };
+  }
   return body;
 }
 
@@ -130,6 +137,12 @@ export function rebase(oldBase: EditorState, fresh: EditorState, d: Draft): Draf
     remove_track_ids: d.remove_track_ids.filter((id) => freshIds.has(id)),
     cover: d.cover,
   };
+}
+
+/** The author line a generated cover shows for these draft authors (the server's display_author,
+ * without its "Unknown Author" placeholder). */
+export function coverAuthor(authors: { name: string }[]): string {
+  return authors.map((a) => a.name.trim()).filter(Boolean).join(" & ");
 }
 
 /** One toast line for a bulk edit or bulk undo, which answer per book: how many went
