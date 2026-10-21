@@ -2,7 +2,7 @@
 
 AI apps can manage your library through Lectern's [Model Context Protocol](https://modelcontextprotocol.io)
 endpoint, `/mcp`. Examples are Claude Desktop and Claude Code, or any other MCP client that
-speaks Streamable HTTP. An AI app can add books (upload, review, file), search the library,
+speaks Streamable HTTP. An AI app can add books (upload, review, and, with the `file` scope, file them), search the library,
 put books on shelves, send them to an e-reader, start alignment, and fix metadata. It acts as
 one person and only within the permissions that person gave its key.
 
@@ -63,17 +63,31 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 
 | Scope | Lets the app | Tools |
 | --- | --- | --- |
-| `upload` (default) | add books; owners and members only | `upload_book`, `list_pending_imports`, `confirm_import`, `cancel_import` |
+| `upload` (default) | add books to Review before filing; owners and members only | `upload_book`, `list_pending_imports`, `cancel_import` |
+| `file` (default): “Can file books (confirm imports)” | file reviewed imports into the library; owners and members only | `confirm_import`, and auto-filing a certain match from `upload_book` |
 | `read` | search, book details, alignment status, your progress | `search_library`, `get_book`, `list_recent` |
 | `organize` | shelves, send to device, alignment, metadata | `add_to_shelf`, `remove_from_shelf`, `send_to_device`, `list_device_queue`, `start_alignment`, `job_status`, `edit_metadata` |
 
 - A key belongs to one person and acts **as them**: the same role and visibility checks as
   the web app. Readers only see books on shelves shared with them and cannot add books, so a
-  reader's key cannot hold `upload` (it defaults to `read`). Editing metadata and alignment
+  reader's key cannot hold `upload` or `file` (it defaults to `read`).
+- `file` is on by default for new keys; untick it and the app's uploads wait in **Review
+  before filing** for you. Without `file`, `upload_book` never files a book, even with your
+  “file certain matches automatically” preference on. Keys created before `file` existed kept
+  their ability to file: every key that had `upload` was given `file` too (migration `0012`). Editing metadata and alignment
   need an owner or member, as in the web app.
 - Keys are shown once and stored as SHA-256 hashes (prefix `lak_`, 256 bits of randomness).
   Devices lists each key with its first characters, its scopes, and when, from where, and by
   which app it was last used. Revoking takes effect on the next request.
+- **Editing a key.** Devices → AI tools → a key's menu → **Edit permissions** changes its
+  scopes. The key is not shown again and not rotated, so the app keeps working. Every tool call
+  reads the key's scopes from the database (nothing caches them), so the change applies to the
+  app's next request; an upload in progress is checked again when its last chunk is finalized,
+  and before it auto-files. Removing a scope is immediate. Adding one is a sensitive action:
+  confirm it with a passkey or your password, as when turning off two-factor codes. Activity
+  shows `ai_key.scopes_change` with the scopes before and after (and `ai_key.step_up_failed`
+  for a wrong confirmation). Only the person who owns a key can edit it, not even the household
+  owner.
 - A key is accepted **only** at `/mcp`. It cannot open `/api`, `/library`, or `/opds`, so it
   cannot download book files, audio, covers, or read-aloud EPUBs. No tool returns file
   contents or download links. No tool manages users, invites, keys, or server settings.
@@ -83,7 +97,8 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 Book ids are numbers (`search_library` returns them). Shelves and devices are given by name
 or id. Errors come back as tool errors the AI app can read, for example
 `not_found (not found, or not visible to this person)` or
-`forbidden: this AI key does not have the 'organize' scope`.
+`forbidden: needs file scope. This AI key does not have it; its owner can add it in Lectern
+under Devices → AI tools → Edit.`
 
 - `upload_book`: put a book or audiobook file (`.epub`, `.pdf`, `.cbz`, `.mp3`, `.m4b`/`.m4a`,
   `.ogg`/`.opus`, `.flac`) into **Review before filing**. CBR is not supported; convert it to
@@ -97,7 +112,7 @@ or id. Errors come back as tool errors the AI app can read, for example
   Several files of one book (an EPUB, PDF, or CBZ and its tracks) share an `import_id`; pass `finish=false`
   until the last one.
 - `list_pending_imports`: your uploads waiting for review.
-- `confirm_import`: file one: `accept` the proposal, `new`, or `join` a `work_id`, optionally
+- `confirm_import` (scope `file`): file one: `accept` the proposal, `new`, or `join` a `work_id`, optionally
   with metadata corrections. Joining only fills the book's empty fields, and adding audio to a
   book that already has an audiobook needs `add_audio_tracks`. Same as the review sheet.
 - `cancel_import`: discard it and its files.
@@ -123,9 +138,10 @@ or id. Errors come back as tool errors the AI app can read, for example
   per address against `LECTERN_RATE_LIMIT_PER_MINUTE`, and an address over that limit is
   refused before any key lookup, so keys cannot be guessed.
 - **Audit.** Every tool call writes an `mcp.call` row to Activity: the tool, the key, and the
-  outcome (`ok`, `denied (needs organize)`, or the error). The tools also write the same rows
+  outcome (`ok`, `denied (needs file scope)`, or the error). The tools also write the same rows
   as the web app (`upload.complete`, `import.file`, `queue.add`, `work.edit`, …). Creating,
-  revoking, and first use of a key are `ai_key.create`, `ai_key.revoke`, `ai_key.first_use`.
+  editing, revoking, and first use of a key are `ai_key.create`, `ai_key.scopes_change`,
+  `ai_key.revoke`, `ai_key.first_use`.
 - **Alerts.** A key's first request notifies its person ("Claude Desktop connected"). More
   than `LECTERN_MCP_BURST_COUNT` tool calls (default 200) within
   `LECTERN_MCP_BURST_WINDOW_SECONDS` (default 600) notify the person and the owners, at most
@@ -135,8 +151,8 @@ or id. Errors come back as tool errors the AI app can read, for example
 
 `lectern/mcp_server.py` mounts the official MCP Python SDK (`mcp` 2.x, `MCPServer`) in
 stateless Streamable HTTP mode with JSON responses. Lectern authenticates and rate limits the
-request before the SDK sees it. Each tool reloads its key (so a revoke between messages takes
-effect), checks the scope, then calls the same functions as the web app's routes:
+request before the SDK sees it. Each tool reloads its key (so a revoke or scope change between
+messages takes effect), checks the scope, then calls the same functions as the web app's routes:
 `routes/api/uploads.py` and `routes/api/imports.py`, `device_queue`, `routes/api/shelves.py`,
 `routes/api/align.py`, and `routes/api/editor.py`. Tests: `tests/test_mcp.py`, including an end
 to end run of the SDK's own client against a live server.

@@ -159,6 +159,11 @@ def complete_import(
 ) -> dict:
     """All files are uploaded: detect metadata and propose a match. With the uploader's
     ``auto_file_imports`` preference, a certain match is filed in the same call."""
+    return complete(request, auth, db, settings, import_id, auto_file=True)
+
+
+def complete(request, auth, db, settings, import_id: str, *, auto_file: bool) -> dict:
+    """``complete_import``; ``auto_file=False`` never files (an AI key without ``file``)."""
     imp = _owned(db, auth, import_id)
     try:
         imports.complete(db, settings, auth.user, imp)
@@ -166,7 +171,7 @@ def complete_import(
         db.rollback()
         _raise(exc)
     db.commit()
-    if imports.auto_file_eligible(db, auth.user, imp):
+    if auto_file and imports.auto_file_eligible(db, auth.user, imp):
         try:
             _file(request, auth, db, settings, imp, imports.Decision(), auto=True)
         except HTTPException:

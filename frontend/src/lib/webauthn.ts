@@ -54,3 +54,32 @@ export async function registerPasskey(label: string): Promise<void> {
   };
   await post("/api/security/passkeys/verify", body);
 }
+
+/**
+ * Sign a fresh passkey challenge from ``optionsPath`` (a step-up for a sensitive action).
+ * Returns the assertion for the action's request body; the server checks it against the
+ * challenge it set in a cookie, once.
+ */
+export async function passkeyAssertion(optionsPath: string): Promise<Record<string, unknown>> {
+  const { publicKey } = await post<{ publicKey: string }>(optionsPath);
+  const pk = JSON.parse(publicKey);
+  pk.challenge = b64uToBuf(pk.challenge);
+  if (pk.allowCredentials)
+    pk.allowCredentials = pk.allowCredentials.map((c: { id: string }) => ({ ...c, id: b64uToBuf(c.id) }));
+  const cred = (await navigator.credentials.get({ publicKey: pk })) as PublicKeyCredential | null;
+  if (!cred) throw new Error("No passkey was used");
+  const r = cred.response as AuthenticatorAssertionResponse;
+  return {
+    id: cred.id,
+    rawId: bufToB64u(cred.rawId),
+    type: cred.type,
+    authenticatorAttachment: (cred as PublicKeyCredential & { authenticatorAttachment?: string }).authenticatorAttachment,
+    clientExtensionResults: cred.getClientExtensionResults(),
+    response: {
+      clientDataJSON: bufToB64u(r.clientDataJSON),
+      authenticatorData: bufToB64u(r.authenticatorData),
+      signature: bufToB64u(r.signature),
+      ...(r.userHandle ? { userHandle: bufToB64u(r.userHandle) } : {}),
+    },
+  };
+}

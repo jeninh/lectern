@@ -37,7 +37,7 @@ HEADERS = {"accept": "application/json, text/event-stream", "content-type": "app
 TOOL_SCOPES = {
     "upload_book": "upload",
     "list_pending_imports": "upload",
-    "confirm_import": "upload",
+    "confirm_import": "file",
     "cancel_import": "upload",
     "search_library": "read",
     "get_book": "read",
@@ -173,7 +173,7 @@ def test_keys_are_shown_once_stored_hashed_least_privilege_and_revocable(app, ho
     assert r.status_code == 201
     created = r.json()
     secret = created["secret"]
-    assert secret.startswith("lak_") and created["key"]["scopes"] == ["upload"]  # default
+    assert secret.startswith("lak_") and created["key"]["scopes"] == ["upload", "file"]  # default
     assert created["endpoint"] == f"{ORIGIN}/mcp"
     listed = owner.http.get("/api/ai-keys").json()
     assert secret not in json.dumps(listed)
@@ -299,11 +299,11 @@ def test_no_tool_result_carries_a_download_link(app, home, settings):
 @pytest.mark.parametrize("tool", sorted(TOOL_SCOPES))
 def test_every_tool_requires_its_scope(app, home, tool):
     needed = TOOL_SCOPES[tool]
-    others = [s for s in ("upload", "read", "organize") if s != needed]
+    others = [s for s in ("upload", "file", "read", "organize") if s != needed]
     owner = home["owner"]
     without = MCP(app, owner.key(*others, label="without"))
     ok, err = without.call(tool, **ARGS.get(tool, {}))
-    assert not ok and f"does not have the '{needed}' scope" in err
+    assert not ok and f"forbidden: needs {needed} scope" in err
     with_only = MCP(app, owner.key(needed, label="with"))
     ok, out = with_only.call(tool, **ARGS.get(tool, {}))
     assert ok or "scope" not in out, out
@@ -311,7 +311,7 @@ def test_every_tool_requires_its_scope(app, home, tool):
         denied = db.scalars(
             select(AuditLog).where(AuditLog.action == "mcp.call", AuditLog.target == tool)
         ).all()
-    assert [a.detail.split(": ", 1)[1] for a in denied][0] == f"denied (needs {needed})"
+    assert [a.detail.split(": ", 1)[1] for a in denied][0] == f"denied (needs {needed} scope)"
     assert len(denied) == 2  # one audit row per call, denied or not
 
 
@@ -361,7 +361,7 @@ def test_readers_cannot_upload_even_with_a_tampered_key(app, home, settings):
 
 
 def test_upload_review_and_file_a_new_book(app, home, settings):
-    mcp = MCP(app, home["mia"].key("upload", "read"))
+    mcp = MCP(app, home["mia"].key("upload", "file", "read"))
     epub = make_epub(settings.data_dir / "Echo.epub", title="Echo", authors=["E. Writer"],
                      isbn="9780000000002")  # fmt: skip
     out = mcp.ok(
@@ -386,7 +386,7 @@ def test_upload_review_and_file_a_new_book(app, home, settings):
 def test_upload_and_file_a_pdf_and_a_comic(app, home, settings):
     from tests.test_pdf_comics import make_cbz, make_pdf
 
-    mcp = MCP(app, home["mia"].key("upload", "read"))
+    mcp = MCP(app, home["mia"].key("upload", "file", "read"))
     files = {
         "Atlas.pdf": make_pdf(settings.data_dir / "Atlas.pdf", title="Atlas", author="A. Maker"),
         "Strip.cbz": make_cbz(settings.data_dir / "Strip.cbz"),
@@ -407,7 +407,7 @@ def test_upload_and_file_a_pdf_and_a_comic(app, home, settings):
 
 
 def test_upload_proposes_joining_an_existing_book(app, home, settings):
-    mcp = MCP(app, home["owner"].key("upload"))
+    mcp = MCP(app, home["owner"].key("upload", "file"))
     epub = make_epub(settings.data_dir / "Alpha2.epub", title="Alpha", authors=["Author Alpha"],
                      padding=999)  # fmt: skip
     out = mcp.ok(
@@ -463,7 +463,7 @@ def test_unknown_or_foreign_import_ids_are_clear_tool_errors(app, home, settings
     theirs = mia.ok(
         "upload_book", filename="G.epub", content_base64=base64.b64encode(data).decode()
     )
-    owner = MCP(app, home["owner"].key("upload"))
+    owner = MCP(app, home["owner"].key("upload", "file"))
     for import_id in ("nope", theirs["import_id"]):
         for tool, args in (
             (
@@ -640,7 +640,9 @@ def live(app, setup_token, settings):
     csrf = web.get("/api/me").json()["csrf_token"]
     ingest(settings, "Alpha")
     h = {"x-csrf-token": csrf}
-    r = web.post("/api/ai-keys", json={"label": "SDK", "scopes": ["upload", "read"]}, headers=h)
+    r = web.post(
+        "/api/ai-keys", json={"label": "SDK", "scopes": ["upload", "file", "read"]}, headers=h
+    )
     assert r.status_code == 201, r.text
     try:
         yield {"url": f"{base}/mcp", "key": r.json()["secret"], "id": r.json()["key"]["id"],
@@ -687,7 +689,7 @@ def test_end_to_end_with_the_official_python_sdk_client(live, settings):
             got = await session.call_tool("get_book", {"book_id": book["id"]})
             assert json.loads(got.content[0].text)["metadata"]["title"] == "Foxtrot"
             denied = await session.call_tool("send_to_device", {"book_ids": [1], "device": "x"})
-            assert denied.is_error and "'organize' scope" in denied.content[0].text
+            assert denied.is_error and "needs organize scope" in denied.content[0].text
 
         await session_with(live["key"], flow)
 
@@ -703,3 +705,270 @@ def test_end_to_end_with_the_official_python_sdk_client(live, settings):
         await session_with(live["key"], rejected)
 
     anyio.run(main)
+
+
+# --- editing a key's scopes -----------------------------------------------------------------------
+
+
+def _edit(person: Person, key_id: int, scopes: list[str], **step_up):
+    return api_post(person.http, f"/api/ai-keys/{key_id}/scopes", person.csrf,
+                    {"scopes": scopes, **step_up})  # fmt: skip
+
+
+def _key_row(secret: str) -> AIKey:
+    with session_factory()() as db:
+        return db.scalar(select(AIKey).where(AIKey.prefix == secret[:12]))
+
+
+def test_narrowing_applies_on_the_next_request_without_revealing_or_rotating(app, home):
+    owner = home["owner"]
+    secret = owner.key("upload", "file", "read", "organize")
+    before = _key_row(secret)
+    mcp = MCP(app, secret)
+    assert mcp.call("search_library")[0]
+    r = _edit(owner, before.id, ["organize", "upload"])  # no step-up needed to remove
+    assert r.status_code == 200, r.text
+    assert r.json()["changed"] and r.json()["key"]["scopes"] == ["upload", "organize"]
+    assert secret not in r.text and "secret" not in r.json()
+    after = _key_row(secret)
+    assert (after.key_hash, after.prefix) == (before.key_hash, before.prefix)  # not rotated
+    # The same key, the very next message: no scope is cached anywhere.
+    ok, err = mcp.call("search_library")
+    assert not ok and "forbidden: needs read scope" in err
+    ok, err = mcp.call("confirm_import", import_id="nope")
+    assert not ok and "forbidden: needs file scope" in err
+    assert mcp.call("list_device_queue")[0]  # what it kept still works
+    [row] = audit_rows("ai_key.scopes_change")
+    assert row.target == "Claude" and row.actor_user_id is not None
+    assert row.detail == "before: upload,file,read,organize; after: upload,organize"
+    listed = owner.http.get("/api/ai-keys").json()
+    assert secret not in json.dumps(listed)
+
+
+def test_widening_needs_a_fresh_password(app, home):
+    owner = home["owner"]
+    secret = owner.key("read")
+    key_id = _key_row(secret).id
+    mcp = MCP(app, secret)
+    r = _edit(owner, key_id, ["read", "file"])
+    assert r.status_code == 403 and r.json()["detail"] == "step_up_required"
+    assert r.json()["methods"] == ["password"]  # no passkey on this http test server
+    r = _edit(owner, key_id, ["read", "file"], password="wrong password, sorry")
+    assert r.status_code == 403 and r.json()["detail"] == "step_up_failed"
+    assert _key_row(secret).scopes == ["read"]
+    ok, err = mcp.call("confirm_import", import_id="nope")
+    assert not ok and "needs file scope" in err
+    [failed] = audit_rows("ai_key.step_up_failed")
+    assert failed.detail == "adding file" and OWNER_PASSWORD not in failed.detail
+    # A swap adds a scope, so it is a widening too.
+    assert _edit(owner, key_id, ["organize"]).json()["detail"] == "step_up_required"
+    r = _edit(owner, key_id, ["read", "file"], password=OWNER_PASSWORD)
+    assert r.status_code == 200 and r.json()["key"]["scopes"] == ["file", "read"]
+    ok, err = mcp.call("confirm_import", import_id="nope")
+    assert not ok and "not_found" in err  # past the scope check now
+    [row] = audit_rows("ai_key.scopes_change")
+    assert row.detail == "before: read; after: file,read; confirmed with password"
+    # Unchanged scopes are a no-op: no audit row, no step-up.
+    assert _edit(owner, key_id, ["file", "read"]).json()["changed"] is False
+    assert len(audit_rows("ai_key.scopes_change")) == 1
+
+
+def test_only_the_keys_owner_can_edit_it_and_within_their_role(app, home):
+    owner, mia, rex = home["owner"], home["mia"], home["rex"]
+    key_id = _key_row(mia.key("read")).id
+    for other in (owner, rex):  # not even the household owner
+        assert _edit(other, key_id, ["organize"]).status_code == 404
+    r = mia.http.post(f"/api/ai-keys/{key_id}/scopes", json={"scopes": ["organize"]})
+    assert r.status_code == 403  # CSRF
+    rex_key = _key_row(rex.key("read"))
+    for scopes in (["read", "upload"], ["read", "file"]):
+        r = _edit(rex, rex_key.id, scopes, password="rex-correct horse")
+        assert r.status_code == 403 and r.json()["detail"] == "readers_cannot_upload"
+    assert _edit(mia, key_id, ["read", "nope"]).status_code == 422
+    assert _edit(mia, key_id, []).status_code == 422
+    api_post(mia.http, f"/api/ai-keys/{key_id}/revoke", mia.csrf)
+    assert _edit(mia, key_id, ["organize"]).status_code == 409
+    assert _key_row(rex_key.prefix).scopes == ["read"]
+
+
+def test_an_ai_key_cannot_edit_keys(app, home):
+    owner = home["owner"]
+    secret = owner.key("read")
+    key_id = _key_row(secret).id
+    anon = TestClient(app)
+    r = anon.post(f"/api/ai-keys/{key_id}/scopes", json={"scopes": ["read", "organize"]},
+                  headers={"authorization": f"Bearer {secret}", "origin": ORIGIN})  # fmt: skip
+    assert r.status_code in (401, 403)
+    assert _key_row(secret).scopes == ["read"]
+
+
+def test_widening_with_a_passkey_needs_this_persons_fresh_challenge(app, home, monkeypatch):
+    from lectern.models import Passkey
+    from lectern.routes.api import ai_keys as ai_keys_api
+
+    monkeypatch.setattr(Settings, "is_https", property(lambda self: True))
+    owner, mia = home["owner"], home["mia"]
+    with session_factory()() as db:
+        ids = {u: home[u].http.get("/api/me").json()["user"]["id"] for u in ("owner", "mia")}
+        for name, cred in (("owner", b"owner-cred"), ("mia", b"mia-cred")):
+            db.add(Passkey(user_id=ids[name], credential_id=cred, public_key=b"k", sign_count=0,
+                           label=name))  # fmt: skip
+        db.commit()
+    verified = []
+
+    class Result:
+        new_sign_count = 7
+
+    def fake_verify(settings, body, challenge, passkey):  # the signature check itself
+        verified.append(passkey.label)
+        if body.get("signature_ok") is False:
+            raise ValueError("bad signature")
+        return Result()
+
+    monkeypatch.setattr(ai_keys_api, "verify_authentication", fake_verify)
+    b64 = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")  # noqa: E731
+    secret = owner.key("read")
+    key_id = _key_row(secret).id
+    assert owner.http.get("/api/ai-keys").json()["step_up"] == ["passkey", "password"]
+
+    # No challenge issued: refused.
+    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    assert r.json()["detail"] == "step_up_failed" and verified == []
+    # Someone else's passkey, even with this person's challenge: refused.
+    assert api_post(owner.http, "/api/ai-keys/step-up/options", owner.csrf).status_code == 200
+    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"mia-cred")})
+    assert r.json()["detail"] == "step_up_failed" and verified == []
+    # A failing signature: refused.
+    api_post(owner.http, "/api/ai-keys/step-up/options", owner.csrf)
+    r = _edit(owner, key_id, ["read", "organize"],
+              passkey={"rawId": b64(b"owner-cred"), "signature_ok": False})  # fmt: skip
+    assert r.json()["detail"] == "step_up_failed" and verified == ["owner"]
+    # Mia's challenge cookie does not work in the owner's session.
+    api_post(mia.http, "/api/ai-keys/step-up/options", mia.csrf)
+    owner.http.cookies.set("lectern_wa_ai_key", mia.http.cookies.get("lectern_wa_ai_key"))
+    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    assert r.json()["detail"] == "step_up_failed"
+    # This person's fresh challenge and passkey: allowed, once.
+    owner.http.cookies.delete("lectern_wa_ai_key")
+    api_post(owner.http, "/api/ai-keys/step-up/options", owner.csrf)
+    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    assert r.status_code == 200 and r.json()["key"]["scopes"] == ["read", "organize"]
+    assert audit_rows("ai_key.scopes_change")[0].detail.endswith("confirmed with passkey")
+    r = _edit(owner, key_id, ["upload", "read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    assert r.json()["detail"] == "step_up_failed"  # the challenge was used up
+
+
+def _chunked(mcp: MCP, data: bytes, on_last_chunk, monkeypatch) -> tuple[bool, object]:
+    """Upload ``data`` in 4 KiB chunks; ``on_last_chunk`` runs after the last chunk is stored
+    and before the upload is finalized (the window an in-flight upload must re-check)."""
+    from lectern.routes.api import uploads as uploads_api
+
+    monkeypatch.setattr(mcp_server, "CHUNK_BYTES", 4096)
+    store = uploads_api._store_chunk
+
+    def store_then(db, auth, settings, upload_id, offset, sha, chunk):
+        out = store(db, auth, settings, upload_id, offset, sha, chunk)
+        if offset + len(chunk) == len(data):
+            on_last_chunk()
+        return out
+
+    monkeypatch.setattr(uploads_api, "_store_chunk", store_then)
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    first = mcp.ok("upload_book", filename="Late.epub", content_base64=b64(data[:4096]),
+                   total_size=len(data), sha256=hashlib.sha256(data).hexdigest())  # fmt: skip
+    offset, result = 4096, None
+    while offset < len(data):
+        result = mcp.call("upload_book", filename="Late.epub", upload_id=first["upload_id"],
+                          offset=offset, content_base64=b64(data[offset : offset + 4096]))  # fmt: skip
+        offset += 4096
+    return result
+
+
+def _set_scopes(secret: str, scopes: list[str]) -> None:
+    with session_factory()() as db:  # what POST /api/ai-keys/{id}/scopes commits
+        db.scalar(select(AIKey).where(AIKey.prefix == secret[:12])).scopes = scopes
+        db.commit()
+
+
+def test_an_in_flight_upload_rechecks_upload_at_finalization(app, home, settings, monkeypatch):
+    from lectern.models import UploadSession, UploadStatus
+
+    secret = home["owner"].key("upload", "file")
+    data = make_epub(settings.data_dir / "Late.epub", title="Late", padding=20000).read_bytes()
+    ok, err = _chunked(MCP(app, secret), data, lambda: _set_scopes(secret, ["file"]),
+                       monkeypatch)  # fmt: skip
+    assert not ok and "forbidden: needs upload scope" in err
+    with session_factory()() as db:
+        row = db.scalar(select(UploadSession))
+        assert row.status == UploadStatus.ACTIVE  # never finalized into the import
+    assert [i.status.value for i in open_imports()] == ["uploading"]
+
+
+@pytest.mark.parametrize("keep_file", [True, False])
+def test_an_in_flight_upload_rechecks_file_before_auto_filing(
+    app, home, settings, monkeypatch, keep_file
+):
+    owner = home["owner"]
+    assert api_post(owner.http, "/api/me/preferences", owner.csrf,
+                    {"auto_file_imports": True}).status_code == 200  # fmt: skip
+    secret = owner.key("upload", "file")
+    # A certain join: the existing book "Alpha" by "Author Alpha".
+    data = make_epub(settings.data_dir / "Late.epub", title="Alpha", authors=["Author Alpha"],
+                     padding=20000).read_bytes()  # fmt: skip
+    after = ["upload", "file"] if keep_file else ["upload"]
+    out = _chunked(MCP(app, secret), data, lambda: _set_scopes(secret, after), monkeypatch)
+    ok, result = out
+    assert ok, result
+    if keep_file:
+        assert result["status"] == "filed" and result["auto_filed"]
+    else:
+        assert result["status"] == "ready" and not result["auto_filed"]
+        assert result["proposal"]["action"] == "join"  # waits for the person's review
+
+
+def test_migration_0012_gives_existing_upload_keys_file(tmp_path):
+    import sqlalchemy as sa
+    from alembic import command
+
+    from lectern.db import make_engine
+    from lectern.migrate import alembic_config, upgrade_to_head
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'm12.db'}")
+    cfg = alembic_config(str(engine.url))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "0011")
+    old = {
+        "uploader": ["upload"],
+        "everything": ["upload", "read", "organize"],
+        "reader": ["read"],
+        "organizer": ["read", "organize"],
+    }
+    with engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        for i, (label, scopes) in enumerate(old.items()):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO ai_keys (user_id, label, key_hash, prefix, scopes, created_at)"
+                    " VALUES (1, :label, :hash, 'lak_x', :scopes, '2026-10-20')"
+                ),
+                {"label": label, "hash": f"{i:064d}", "scopes": json.dumps(scopes)},
+            )
+
+    def scopes() -> dict:
+        with engine.connect() as conn:
+            rows = conn.execute(sa.text("SELECT label, scopes, key_hash FROM ai_keys")).all()
+        assert [r[2] for r in rows] == [f"{i:064d}" for i in range(len(old))]  # untouched
+        return {r[0]: json.loads(r[1]) for r in rows}
+
+    upgrade_to_head(engine)
+    assert scopes() == {
+        "uploader": ["upload", "file"],
+        "everything": ["upload", "file", "read", "organize"],
+        "reader": ["read"],
+        "organizer": ["read", "organize"],
+    }
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.downgrade(cfg, "0011")
+    assert scopes() == old

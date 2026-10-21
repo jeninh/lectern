@@ -4,9 +4,15 @@ A key is created by its user in Devices → AI tools, shown once, and stored as 
 carries 256 bits of entropy, see ``security/tokens.py``). It acts as its user and only within
 its scopes:
 
-- ``upload``   add books: upload, review, file, or cancel imports (owners and members only).
+- ``upload``   add books: upload, review, or cancel imports (owners and members only).
+- ``file``     file reviewed imports into the library (``confirm_import``, and filing a
+               certain match automatically with the ``auto_file_imports`` preference).
 - ``read``     search the library, book details, alignment status, the user's progress.
 - ``organize`` shelves, send to device and its queues, start alignment and its jobs, metadata.
+
+Its owner can change a key's scopes later (``routes/api/ai_keys.py``) without seeing or
+rotating the secret. Every tool call reads the scopes from the database again, so a change
+applies to the key's next request; adding a scope needs a fresh password or passkey.
 
 A key never reaches anything else. Only ``/mcp`` accepts it, and no tool manages users,
 invites, keys, or server settings, or returns a book file or audio.
@@ -26,30 +32,37 @@ from lectern.security import audit
 from lectern.security.tokens import new_secret, sha256_hex
 
 PREFIX = "lak_"
-SCOPES = ("upload", "read", "organize")
+SCOPES = ("upload", "file", "read", "organize")
+# Scopes only people who can add books may hold.
+EDITOR_SCOPES = ("upload", "file")
 HOUR = timedelta(hours=1)
 
 
 def allowed_scopes(user: User) -> list[str]:
-    """Readers cannot add books, so they cannot hold ``upload``."""
-    return list(SCOPES) if can_edit_library(user) else ["read", "organize"]
+    """Readers cannot add books, so they cannot hold ``upload`` or ``file``."""
+    if can_edit_library(user):
+        return list(SCOPES)
+    return [s for s in SCOPES if s not in EDITOR_SCOPES]
 
 
 def default_scopes(user: User) -> list[str]:
-    """Least privilege: upload for people who can add books, read for readers."""
-    return ["upload"] if can_edit_library(user) else ["read"]
+    """Adding and filing books for people who can add them; read for readers."""
+    return ["upload", "file"] if can_edit_library(user) else ["read"]
+
+
+def ordered(scopes) -> list[str]:
+    return [s for s in SCOPES if s in scopes]
 
 
 def new_key(user: User, label: str, scopes: list[str]) -> tuple[AIKey, str]:
     secret = PREFIX + new_secret()
-    ordered = [s for s in SCOPES if s in scopes]
     return (
         AIKey(
             user_id=user.id,
             label=label,
             key_hash=sha256_hex(secret),
             prefix=secret[:12],
-            scopes=ordered,
+            scopes=ordered(scopes),
         ),
         secret,
     )

@@ -8,8 +8,8 @@ How a request travels (docs/mcp.md has the user-facing version)::
         rate limit per key (LECTERN_MCP_REQUESTS_PER_MINUTE) → 429
         stamp last use; the first use ever alerts the key's user
       ──▶ the MCP SDK's session manager (stateless, JSON responses)
-      ──▶ a tool: ``_call`` loads the key again (a revoke takes effect between messages),
-          checks its scope, runs the tool *as the key's user* through the same functions the
+      ──▶ a tool: ``_call`` loads the key again (a revoke or a scope change takes effect
+          on the next message; nothing caches scopes), checks its scope, runs the tool *as the key's user* through the same functions the
           web app's routes use (role, visibility, and validation included), writes one audit
           row per call, and counts the call toward the burst alert.
 
@@ -88,7 +88,8 @@ You act as one person, with only their permissions and only the scopes their AI 
 
 - Add a book: upload_book (small files in one call; larger ones in chunks), then look at the
   detected metadata and the proposed match, and confirm_import (accept, edit fields, join an
-  existing book, or file as new) or cancel_import. Ask the person when the match is not certain.
+  existing book, or file as new; needs the file scope) or cancel_import. Ask the person when
+  the match is not certain.
 - Find books with search_library / list_recent and inspect one with get_book. Book ids are
   numbers; use them for every other tool.
 - Organize: add_to_shelf / remove_from_shelf, send_to_device / list_device_queue,
@@ -200,6 +201,25 @@ class Call:
         if not can_edit_library(self.user):
             raise ToolError(f"forbidden: readers cannot {what}.")
 
+    def has_scope(self, scope: str) -> bool:
+        """Read the key's scopes from the database now (a long call, such as the last chunk
+        of an upload, may outlive a change its owner made since the call started)."""
+        row = self.db.execute(
+            select(AIKey.scopes, AIKey.revoked_at).where(AIKey.id == self.key.id)
+        ).one_or_none()
+        return row is not None and row.revoked_at is None and scope in (row.scopes or [])
+
+    def require_scope(self, scope: str) -> None:
+        if not self.has_scope(scope):
+            raise ToolError(_needs(scope))
+
+
+def _needs(scope: str) -> str:
+    return (
+        f"forbidden: needs {scope} scope. This AI key does not have it; its owner can add it "
+        "in Lectern under Devices → AI tools → Edit."
+    )
+
 
 def _http_error(exc: HTTPException) -> ToolError:
     detail = exc.detail
@@ -262,11 +282,8 @@ def _call(ctx: Context, tool: str, scope: str) -> Iterator[Call]:
             db.commit()
 
         if scope not in (key.scopes or []):
-            record(f"denied (needs {scope})")
-            raise ToolError(
-                f"forbidden: this AI key does not have the '{scope}' scope. Its owner can "
-                "create a key with that scope in Lectern under Devices → AI tools."
-            )
+            record(f"denied (needs {scope} scope)")
+            raise ToolError(_needs(scope))
         try:
             yield call
         except ToolError as exc:
@@ -438,7 +455,9 @@ def upload_book(
     .cbz; CBR is not supported, convert it to CBZ) or an audiobook (MP3, M4B/M4A, OGG/Opus,
     FLAC). The file's first bytes must match its extension. Nothing is filed yet: when the upload is complete this returns the detected
     metadata and the proposed match; confirm it with confirm_import. Resumable: calling with
-    upload_id and no content returns how many bytes the server has. Scope: upload."""
+    upload_id and no content returns how many bytes the server has. Scope: upload (a certain
+    match is filed straight away only if the person turned on auto-filing and the key also
+    has the file scope)."""
     from lectern.routes.api import imports as imports_api
     from lectern.routes.api import uploads as uploads_api
 
@@ -510,6 +529,8 @@ def upload_book(
                     "next_offset": row.received_bytes,
                     "chunk_size": row.chunk_size,
                 }
+            # The scopes may have changed since this upload started (or since this call did).
+            c.require_scope("upload")
             done = uploads_api.finalize(row.public_id, c.request, c.auth, c.db, c.settings, None)
             assert imp is not None  # MCP uploads always stage into an import
             if not finish:
@@ -519,7 +540,9 @@ def upload_book(
                     "status": "uploaded",
                     "next": "upload more files with this import_id",
                 }
-            result = imports_api.complete_import(c.request, c.auth, c.db, c.settings, imp.public_id)
+            result = imports_api.complete(
+                c.request, c.auth, c.db, c.settings, imp.public_id, auto_file=c.has_scope("file")
+            )
             return _import_summary(result)
         except Exception:
             if created:
@@ -568,14 +591,14 @@ def confirm_import(
         ),
     ] = False,
 ) -> dict:
-    """File a pending import into the library, as reviewed. Scope: upload."""
+    """File a pending import into the library, as reviewed. Scope: file."""
     from lectern.routes.api import imports as imports_api
 
-    with _call(ctx, "confirm_import", "upload") as c:
+    with _call(ctx, "confirm_import", "file") as c:
         c.require_editor("add books")
         imp = imports.get_owned(c.db, c.user, import_id)
         if imp.status == ImportStatus.UPLOADING:
-            imports_api.complete_import(c.request, c.auth, c.db, c.settings, import_id)
+            imports_api.complete(c.request, c.auth, c.db, c.settings, import_id, auto_file=False)
             c.db.refresh(imp)
         if action == "join" and (work_id is None or not can_see_work(c.db, c.user, work_id)):
             raise ToolError("invalid: action=join needs the work_id of a book you can see")

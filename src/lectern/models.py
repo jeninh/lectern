@@ -170,7 +170,7 @@ class AIKey(Base):
     """Bearer credential for an AI app (MCP client). key_hash = SHA-256(secret).
 
     Created by its user in Devices, shown once, revocable. It acts as that user, limited to
-    its ``scopes`` (``upload``, ``read``, ``organize``), and authenticates only ``/mcp``:
+    its ``scopes`` (``upload``, ``file``, ``read``, ``organize``), and authenticates only ``/mcp``:
     sessions, OPDS, and downloads never accept it (lectern.mcp).
     """
 
