@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     # restic repository password; default <data>/backup-restic-password, created on first use.
     backup_restic_password_file: Path | None = None
     restic_path: str = "restic"
+    # `lectern restore`: keep replaced library files in <data>/pre-restore-*/library/. Off
+    # deletes them once the restore succeeded (they are copied there when the library is on
+    # another volume; on a Pi that is the SD card). Data files are always kept.
+    restore_keep_replaced: bool = True
 
     # Seconds between checks whether the nightly backup is due.
     maintenance_poll_seconds: float = 60.0

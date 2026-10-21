@@ -165,7 +165,12 @@ def test_snapshot_includes_committed_rows_still_in_the_wal(bclient, bowner, bset
     copy = sqlite3.connect(tmp_path / "s" / "stage" / "db" / "lectern.db")
     assert copy.execute("SELECT v FROM probe").fetchall() == [("only-in-wal",)]
     copy.close()
-    assert manifest["schema_revision"] == "0010"
+    from alembic.script import ScriptDirectory
+
+    from lectern.migrate import alembic_config
+
+    head = ScriptDirectory.from_config(alembic_config("sqlite://")).get_current_head()
+    assert manifest["schema_revision"] == head
 
 
 def test_database_is_copied_under_the_library_lock(bclient, bowner, bsettings, tmp_path):
@@ -244,7 +249,7 @@ def test_backup_while_running_then_restore_with_the_cli(bclient, bowner, bsettin
 
 
 def test_library_files_round_trip_without_derived_inbox_or_symlinks(
-    bclient, bowner, bsettings, monkeypatch, tmp_path
+    bclient, bowner, bsettings, monkeypatch, tmp_path, caplog
 ):
     work = _add_book(bsettings, "Whole Library")
     (work / "derived").mkdir(exist_ok=True)
@@ -256,10 +261,26 @@ def test_library_files_round_trip_without_derived_inbox_or_symlinks(
     host_secret.parent.mkdir()
     host_secret.write_text("PRIVATE KEY")
     (work / "extra.txt").symlink_to(host_secret)
+    (work / "host-dir").symlink_to(host_secret.parent, target_is_directory=True)
+    (work / "same-book.epub").symlink_to(work / "book.epub")  # inside the library
+    (bsettings.data_dir / "align").mkdir(exist_ok=True)
+    (bsettings.data_dir / "align" / "9.json").symlink_to(host_secret)
     epub_bytes = (work / "book.epub").read_bytes()
 
-    status = _run(bsettings, include_library=True)
+    with caplog.at_level("INFO", logger="lectern.backups"):
+        status = _run(bsettings, include_library=True)
     assert status["last_result"] == "ok", status
+    # Never followed; the ones resolving outside the backed-up folders are named.
+    outside = {
+        str(work / "extra.txt"),
+        str(work / "host-dir"),
+        str(bsettings.data_dir / "align" / "9.json"),
+    }
+    assert set(status["last_skipped_links_outside"]) == outside
+    warned = {r.getMessage() for r in caplog.records if r.levelname == "WARNING"}
+    assert all(any(link in m and "outside" in m for m in warned) for link in outside)
+    assert any("same-book.epub" in r.getMessage() for r in caplog.records)
+    assert not any("same-book.epub" in m for m in warned)
 
     _stop(bclient)
     shutil.rmtree(work)
@@ -268,7 +289,11 @@ def test_library_files_round_trip_without_derived_inbox_or_symlinks(
     assert (work / "book.epub").read_bytes() == epub_bytes
     assert (work / "cover.jpg").is_file()
     assert not (work / "derived").exists()
-    assert not (work / "extra.txt").exists() and not (work / "extra.txt").is_symlink()
+    for name in ("extra.txt", "host-dir", "same-book.epub"):
+        assert not (work / name).exists() and not (work / name).is_symlink()
+    # Nothing was backed up under align/, so the live link is left as it was.
+    assert (bsettings.data_dir / "align" / "9.json").is_symlink()
+    assert not list(bsettings.library_dir.rglob("id_rsa"))
     assert not list(bsettings.library_dir.rglob("waiting.epub"))
 
     shutil.rmtree(work)
@@ -422,7 +447,7 @@ def test_restore_refuses_a_manifest_that_points_outside_the_backup(
 def test_restore_never_follows_links_inside_the_snapshot(
     bclient, bowner, bsettings, monkeypatch, tmp_path
 ):
-    """Re-review: symlinks planted in the stage must not copy host files into data/."""
+    """Symlinks planted in the snapshot: the restore refuses it and changes nothing."""
     host = tmp_path / "host-secret"
     host.write_text("HOST FILE")
 
@@ -434,14 +459,17 @@ def test_restore_never_follows_links_inside_the_snapshot(
         (stage / "data" / "align" / "8.json").write_text('{"map": 8}')
 
     _crafted_snapshot(bsettings, tmp_path, plant)
+    make_user(bclient, bowner["csrf"], "later", "member")
     _stop(bclient)
     secret_before = (bsettings.data_dir / "secret_key").read_text()
-    _restore(bsettings, monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        _restore(bsettings, monkeypatch)
+    assert "symlink" in str(exc.value)
     assert (bsettings.data_dir / "secret_key").read_text() == secret_before
+    assert "later" in _usernames(bsettings)
     assert not (bsettings.data_dir / "restored-lectern.env").exists()
-    align = bsettings.data_dir / "align"
-    assert sorted(p.name for p in align.iterdir()) == ["8.json"]
-    assert not any(p.is_symlink() for p in bsettings.data_dir.rglob("*"))
+    assert not (bsettings.data_dir / "align").exists()
+    assert not list(bsettings.data_dir.glob("pre-restore-*"))
     assert "HOST FILE" not in "".join(
         p.read_text(errors="ignore") for p in bsettings.data_dir.rglob("*") if p.is_file()
     )
@@ -527,3 +555,79 @@ def test_restore_on_a_fresh_machine_needs_the_saved_password(
     assert "password" in str(exc.value)
     _restore(bsettings, monkeypatch, "--restic-password-file", str(saved))
     assert _usernames(bsettings) == {"owner"}
+
+
+def test_restore_refuses_paths_that_escape_the_library(
+    bclient, bowner, bsettings, monkeypatch, tmp_path
+):
+    """A book folder that is now a link to elsewhere would make the restore write there."""
+    work = _add_book(bsettings, "Escape")
+    assert _run(bsettings)["last_result"] == "ok"
+    make_user(bclient, bowner["csrf"], "later", "member")
+    _stop(bclient)
+    elsewhere = tmp_path / "elsewhere"
+    shutil.move(work, elsewhere)
+    (elsewhere / "cover.jpg").unlink()
+    work.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(SystemExit) as exc:
+        _restore(bsettings, monkeypatch)
+    assert "outside the library" in str(exc.value)
+    assert not (elsewhere / "cover.jpg").exists()
+    assert "later" in _usernames(bsettings)
+    assert not list(bsettings.data_dir.glob("pre-restore-*"))
+    assert not list(bsettings.data_dir.glob(".*.restore-*"))
+
+
+def test_free_space_preflight_and_skipping_the_pre_restore_copy(
+    bclient, bowner, bsettings, monkeypatch
+):
+    """Library on another volume than data (a Pi: USB library, SD-card data): replaced
+    library files kept in pre-restore-*/ are copies on the data volume, so they must fit."""
+    work = _add_book(bsettings, "Big Sidecar")
+    assert _run(bsettings)["last_result"] == "ok"
+    make_user(bclient, bowner["csrf"], "later", "member")
+    _stop(bclient)
+    big = b"x" * (8 * 2**20)
+    (work / "book.json").write_bytes(big)  # replaced by the restore
+    data_free = bsettings.db_path.stat().st_size + 2 * 2**20
+    library = bsettings.library_dir.resolve()
+    real_volume = backups._volume
+
+    def volume(p):
+        _dev, at = real_volume(p)
+        return (1 if at.resolve().is_relative_to(library) else 2), at
+
+    monkeypatch.setattr(backups, "_volume", volume)
+    monkeypatch.setattr(
+        backups, "_free", lambda at: 10**12 if at.resolve().is_relative_to(library) else data_free
+    )
+    monkeypatch.setattr(backups, "RESTORE_RESERVE_BYTES", 0)
+
+    with pytest.raises(SystemExit) as exc:
+        _restore(bsettings, monkeypatch)
+    msg = str(exc.value)
+    assert "not enough free space" in msg and "nothing was changed" in msg
+    assert str(bsettings.data_dir) in msg and "pre-restore copies" in msg
+    assert "--no-pre-restore-copy" in msg
+    assert (work / "book.json").read_bytes() == big
+    assert "later" in _usernames(bsettings)
+    assert not list(bsettings.data_dir.glob("pre-restore-*"))
+
+    _restore(bsettings, monkeypatch, "--no-pre-restore-copy")
+    assert _usernames(bsettings) == {"owner"}
+    assert (work / "book.json").read_bytes() != big
+    aside = next(bsettings.data_dir.glob("pre-restore-*"))
+    assert (aside / "lectern.db").is_file()  # data files are always kept
+    assert not (aside / "library").exists()
+    assert not list(bsettings.library_dir.rglob(".*.replaced-*"))
+
+
+def test_keep_replaced_setting_turns_the_copy_off(bclient, bowner, bsettings, monkeypatch):
+    work = _add_book(bsettings, "Setting")
+    assert _run(bsettings)["last_result"] == "ok"
+    _stop(bclient)
+    (work / "book.json").write_text('{"edited": true}')
+    _restore(bsettings.model_copy(update={"restore_keep_replaced": False}), monkeypatch)
+    assert (work / "book.json").read_text() != '{"edited": true}'
+    assert not (next(bsettings.data_dir.glob("pre-restore-*")) / "library").exists()
+    assert not list(bsettings.library_dir.rglob(".*.replaced-*"))

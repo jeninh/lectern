@@ -21,11 +21,16 @@ night only changes are stored, which suits a large audiobook library.
 | Config | yes | the `LECTERN_*` settings the server ran with (`config/lectern.env`) and a JSON summary without the signing key |
 | Sentence maps and Undo cover backups | yes | `data/align/` (hours of transcription to redo) and `data/revisions/` |
 | Cover and book metadata | yes | each book's `book.json` and cover art |
-| Library files | optional | EPUBs, PDFs, comics, audiobooks. `_inbox/`, the regenerable `derived/` folders, and symlinks are left out. Read after the lock is released, so a long backup never blocks adding books; a book filed meanwhile is in the next one. |
+| Library files | optional | EPUBs, PDFs, comics, audiobooks. `_inbox/` and the regenerable `derived/` folders are left out. Read after the lock is released, so a long backup never blocks adding books; a book filed meanwhile is in the next one. |
 
 Not included: uploads in progress, scratch space, logs, downloaded models, the Tailscale node
 state (back that up as root; see [the Tailscale guide](deploy-tailscale.md#backups-and-restore)),
 and your host `.env` (keep it in your password manager; `config/lectern.env` helps rebuild it).
+
+**Symlinks are never followed or backed up**, in the library or the data folder. Each one is
+logged and skipped; one that points outside the backed-up folders is logged as a warning and
+named in the backup status (`last_skipped_links_outside`), because whatever it points at is
+not in your backups. Copy the real file in instead.
 
 **The repository password** is created on first use in
 `data/lectern/backup-restic-password` (or `LECTERN_BACKUP_RESTIC_PASSWORD_FILE`). **Copy it
@@ -103,24 +108,43 @@ directory and library. It:
 
 - **refuses while Lectern is running** on that data directory;
 - verifies the database copy and refuses a backup made by a newer Lectern (update first);
-- treats the backup's contents as untrusted: it never follows symlinks and refuses a manifest
-  that points outside the backup;
-- copies everything next to its destination first, then swaps it in. Every file it replaces,
-  library files included, is moved into `data/lectern/pre-restore-<time>/` (library files
-  under `library/`). Library files are never deleted;
+- treats the backup's contents as untrusted: it **refuses** a snapshot that contains any
+  symlink (Lectern never backs one up), a manifest that points outside the backup, and any
+  library file that would be written outside the library (for example through a book folder
+  that is now a link to elsewhere);
+- **checks free space first** and refuses, changing nothing, when a volume cannot take the
+  restore: every restored file is first copied next to its destination, and replaced library
+  files kept in `pre-restore-*/library/` are a second copy on the data volume when the library
+  lives on another one (a Pi with the library on USB and data on the SD card). The message
+  names the folder, what it needs, and what is free;
+- copies everything next to its destination first, then swaps it in. Replaced data files
+  always go to `data/lectern/pre-restore-<time>/`; replaced library files go to its `library/`
+  folder, unless you skip that copy (below). Library files are never otherwise deleted;
 - **rolls back** if anything fails part-way (a full disk, an I/O error): the server is left
-  exactly as it was, and the error says so.
+  exactly as it was, including folders the restore had created, and the error says so.
 
-**Free space.** The restored files are staged next to their destinations, so the data and
-library volumes each need room for what is being restored. Replaced library files are kept in
-`data/lectern/pre-restore-<time>/library/`, on the *data* volume: when that is a Pi's SD card,
-check `df -h` first, and expect the copy to take a while and add wear if many large library
-files differ from the backup. Use `--no-library` to restore the data side alone, and delete
-`pre-restore-*` once you are happy.
+**Skipping the pre-restore copy.** `--no-pre-restore-copy` (or
+`LECTERN_RESTORE_KEEP_REPLACED=0` in the server's environment) keeps each replaced library
+file next to itself during the swap, as a rename, and deletes it once the restore succeeded.
+Use it when the data volume is small and you have the backup anyway. The database, signing
+key, and sentence maps are always kept in `pre-restore-*/`.
 
-A crash or power loss in the middle of the swap is not recovered automatically: the files
-already swapped in stay, and the ones they replaced are in `pre-restore-<time>/`. Run the
-restore again.
+### If a restore is interrupted
+
+A crash, power loss, or `kill -9` **during the swap** (the last, short step) is not recovered
+automatically ([#16](https://github.com/jeninh/lectern/issues/16)): files already
+swapped in stay, and the ones they replaced are aside. Before that step nothing has changed.
+To recover by hand, with Lectern stopped:
+
+1. **Simplest:** run the same `lectern restore` again. It replaces whatever is there and
+   leaves the half-done state in a new `pre-restore-*` folder.
+2. **To go back to how it was instead:** move everything in the newest
+   `data/lectern/pre-restore-<time>/` back over `data/lectern/` (`lectern.db`, `secret_key`,
+   `align/`, `revisions/`, `lectern.db-wal` / `-shm` if present), and its `library/` folder
+   back over the library. With `--no-pre-restore-copy`, the originals of library files are
+   next to them as `.<name>.replaced-restore-<time>`: rename each back to `<name>`.
+3. Delete leftover staged copies, named `.<name>.restore-<time>`, in `data/lectern/` and the
+   library: `find data/lectern library -name '.*.restore-*'`.
 
 The server migrates the schema on its next start. With the Tailscale compose file
 (`lectern-compose` is the alias from the guide):
@@ -152,5 +176,6 @@ remove the old machine and use a fresh auth key.
 
 The restore path is tested in CI: `tests/test_backups.py` backs up a running server (with and
 without library files), changes and deletes things, runs `lectern restore`, and signs in to
-the restored server. It also covers a crafted manifest, symlinks, unreadable files, a busy
+the restored server. It also covers a crafted manifest, symlinks in the library and in a
+snapshot, paths that escape the library, the free-space check, unreadable files, a busy
 target, and a restore that fails half-way.

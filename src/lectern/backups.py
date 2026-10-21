@@ -68,6 +68,8 @@ DATA_SUBDIRS = ("align", "revisions")
 DATA_FILES = ("lectern.db", "lectern.db-wal", "lectern.db-shm", "secret_key")
 # config/lectern.env keeps these (restic encrypts the repository); the JSON summary does not.
 SECRET_SETTINGS = {"LECTERN_SECRET_KEY"}
+# Head room left on a volume after a restore stages its files there.
+RESTORE_RESERVE_BYTES = 32 * 2**20
 RESTIC_PARTIAL = 3  # "snapshot created, but some source files could not be read"
 
 
@@ -192,9 +194,16 @@ def _exclusive(path: Path, busy: BackupError) -> Iterator[None]:
 # --- snapshot ---------------------------------------------------------------------------------
 
 
-def _walk(root: Path, *, skip_inbox: bool = False) -> Iterator[Path]:
-    """Regular files under ``root``, never following or yielding symlinks. Skips the inbox
-    (optionally) and every work's regenerable ``derived/`` folder."""
+def _walk(
+    root: Path, *, skip_inbox: bool = False, links: list[Path] | None = None
+) -> Iterator[Path]:
+    """Regular files under ``root``, never following or yielding symlinks (each one met,
+    file or folder, is appended to ``links``). Skips the inbox (optionally) and every work's
+    regenerable ``derived/`` folder."""
+    if root.is_symlink():
+        if links is not None:
+            links.append(root)
+        return
     if not root.is_dir():
         return
     for here_s, dirs, files in os.walk(root, followlinks=False):
@@ -203,24 +212,46 @@ def _walk(root: Path, *, skip_inbox: bool = False) -> Iterator[Path]:
             dirs.remove("_inbox")
         if "derived" in dirs and (here / "book.json").is_file():
             dirs.remove("derived")
+        for name in [d for d in dirs if (here / d).is_symlink()]:
+            dirs.remove(name)
+            if links is not None:
+                links.append(here / name)
         dirs.sort()
         for name in sorted(files):
             p = here / name
-            if not p.is_symlink() and p.is_file():
+            if p.is_symlink():
+                if links is not None:
+                    links.append(p)
+            elif p.is_file():
                 yield p
 
 
-def library_files(library: Path) -> list[Path]:
+def _report_links(links: list[Path], roots: tuple[Path, ...]) -> list[str]:
+    """Log skipped symlinks; return those that resolve outside every backed-up root."""
+    outside = []
+    for link in dict.fromkeys(links):
+        target = link.resolve()
+        if not any(target.is_relative_to(r.resolve()) for r in roots):
+            outside.append(str(link))
+            log.warning(
+                "backup skipped %s: a symlink to %s, outside the backed-up folders", link, target
+            )
+        else:
+            log.info("backup skipped %s: symlinks are never backed up", link)
+    return outside
+
+
+def library_files(library: Path, links: list[Path] | None = None) -> list[Path]:
     """Every library file worth keeping: not the inbox, not ``<work>/derived/``, and not
-    symlinks (restore never recreates links)."""
-    return list(_walk(library, skip_inbox=True))
+    symlinks (never followed, never backed up; see ``links``)."""
+    return list(_walk(library, skip_inbox=True, links=links))
 
 
-def metadata_files(library: Path) -> list[Path]:
+def metadata_files(library: Path, links: list[Path] | None = None) -> list[Path]:
     """``book.json`` and cover art of every work: small, and painful to rebuild by hand."""
     return [
         p
-        for p in library_files(library)
+        for p in library_files(library, links)
         if p.name == "book.json"
         or (p.name.startswith("cover.") and (p.parent / "book.json").is_file())
     ]
@@ -274,8 +305,12 @@ def _private(path: Path) -> None:
         pass
 
 
-def build_snapshot(settings: Settings, stage: Path, include_library: bool) -> dict:
-    """Write the snapshot into ``stage`` (emptied first). Returns the manifest."""
+def build_snapshot(
+    settings: Settings, stage: Path, include_library: bool, links: list[Path] | None = None
+) -> dict:
+    """Write the snapshot into ``stage`` (emptied first). Returns the manifest. Symlinks met
+    on the way are skipped, not followed, and appended to ``links``."""
+    links = [] if links is None else links
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
@@ -290,11 +325,11 @@ def build_snapshot(settings: Settings, stage: Path, include_library: bool) -> di
     with LIBRARY_LOCK:
         _sqlite_copy(settings.db_path, db_copy)
         for sub in DATA_SUBDIRS:
-            for f in _walk(settings.data_dir / sub):
+            for f in _walk(settings.data_dir / sub, links=links):
                 dest = stage / "data" / sub / f.relative_to(settings.data_dir / sub)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, dest)
-        meta = metadata_files(settings.library_dir)
+        meta = metadata_files(settings.library_dir, links)
         for f in meta:
             dest = stage / "library-meta" / f.relative_to(settings.library_dir)
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -307,7 +342,9 @@ def build_snapshot(settings: Settings, stage: Path, include_library: bool) -> di
         ("secret_key", settings.data_dir / "secret_key"),
         ("restic-password", restic_password_file(settings)),
     ):
-        if path.is_file():
+        if path.is_symlink():
+            links.append(path)
+        elif path.is_file():
             shutil.copy2(path, secrets_dir / name)
             _private(secrets_dir / name)
             kept_secrets.append(name)
@@ -401,13 +438,13 @@ def _json_lines(text: str) -> list[dict]:
     return out
 
 
-def _restic_backup(settings: Settings, cfg: BackupConfig, stage: Path) -> dict:
+def _restic_backup(settings: Settings, cfg: BackupConfig, stage: Path, links: list[Path]) -> dict:
     repo = settings.backup_dir / "restic"
     if not (repo / "config").is_file():
         _restic(settings, "init", create_password=True)
     files = [stage]
     if cfg.include_library:
-        files += library_files(settings.library_dir)
+        files += library_files(settings.library_dir, links)
     proc = _restic(
         settings,
         "backup",
@@ -486,8 +523,12 @@ def run_backup(settings: Settings, cfg: BackupConfig) -> dict:
         # secrets on the target. We hold the target lock, so nothing else is using it.
         shutil.rmtree(staging, ignore_errors=True)
         try:
-            manifest = build_snapshot(settings, staging / STAGE_NAME, cfg.include_library)
-            result = _restic_backup(settings, cfg, staging / STAGE_NAME)
+            links: list[Path] = []
+            manifest = build_snapshot(settings, staging / STAGE_NAME, cfg.include_library, links)
+            result = _restic_backup(settings, cfg, staging / STAGE_NAME, links)
+            result["links_outside"] = _report_links(
+                links, (settings.data_dir, settings.library_dir)
+            )
         finally:
             shutil.rmtree(staging, ignore_errors=True)
     return {
@@ -558,6 +599,7 @@ def run_and_record(session_factory, settings: Settings, *, reason: str) -> dict:
                 last_size_bytes=result.get("size_bytes"),
                 last_skipped_files=result["skipped_files"],
                 last_skipped_examples=result["skipped_examples"],
+                last_skipped_links_outside=result["links_outside"][:5],
             )
             db.commit()
             return status
@@ -640,26 +682,24 @@ class _Swap:
     Each step is recorded only after it happened, so ``rollback`` reverses exactly what was
     done: a staged file moved in goes back out, and the original comes back from the aside."""
 
-    def __init__(self, aside: Path) -> None:
-        self.aside = aside
-        self.steps: list[tuple[Path, Path | None]] = []  # (destination, its original aside)
+    def __init__(self) -> None:
+        self.steps: list[tuple[Path, Path | None]] = []  # (destination, where its original went)
 
-    def put(self, staged: Path, dest: Path, aside_rel: Path) -> None:
+    def put(self, staged: Path, dest: Path, side: Path) -> None:
         saved = None
         if dest.exists() or dest.is_symlink():
-            saved = self.aside / aside_rel
+            saved = side
             saved.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(dest, saved)
         self.steps.append((dest, saved))
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staged, dest)
 
-    def remove(self, dest: Path, aside_rel: Path) -> None:
+    def remove(self, dest: Path, side: Path) -> None:
         """Move ``dest`` aside without replacing it (a WAL the restored DB must not see)."""
-        saved = self.aside / aside_rel
-        saved.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(dest, saved)
-        self.steps.append((dest, saved))
+        side.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(dest, side)
+        self.steps.append((dest, side))
 
     def rollback(self) -> None:
         for dest, saved in reversed(self.steps):
@@ -675,6 +715,14 @@ class _Swap:
 def _regular(p: Path) -> bool:
     """A real file, not a symlink: nothing in a snapshot may point us at a host file."""
     return p.is_file() and not p.is_symlink()
+
+
+def _links_in(root: Path) -> list[Path]:
+    """Every symlink (file or folder) under ``root``, without following any."""
+    out = []
+    for here, dirs, files in os.walk(root, followlinks=False):
+        out += [Path(here) / n for n in (*dirs, *files) if (Path(here) / n).is_symlink()]
+    return out
 
 
 def _mkparents(path: Path, created: list[Path]) -> None:
@@ -696,6 +744,19 @@ def _remove_created(created: list[Path]) -> None:
             pass
 
 
+def _discard(p: Path) -> None:
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=True)
+    else:
+        p.unlink(missing_ok=True)
+
+
+def _remove_empty_tree(root: Path) -> None:
+    """Delete ``root`` if it holds folders but no files (an aside nothing was moved into)."""
+    if root.is_dir() and not any(p.is_file() or p.is_symlink() for p in root.rglob("*")):
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _stage_copy(src: Path, dest: Path, tag: str, created: list[Path]) -> Path:
     """Copy ``src`` next to ``dest`` (same filesystem, so the swap is a rename). Folders are
     copied file by file through ``_walk``: regular files only, symlinks never followed."""
@@ -712,19 +773,84 @@ def _stage_copy(src: Path, dest: Path, tag: str, created: list[Path]) -> Path:
     return staged
 
 
+def _size(p: Path) -> int:
+    if p.is_symlink():
+        return 0
+    if p.is_dir():
+        return sum(f.stat().st_size for f in _walk(p))
+    return p.stat().st_size if p.is_file() else 0
+
+
+def _volume(p: Path) -> tuple[int, Path]:
+    """(device, nearest existing folder) of ``p``, which may not exist yet."""
+    while not p.exists():
+        p = p.parent
+    return p.stat().st_dev, p
+
+
+def _free(p: Path) -> int:
+    return shutil.disk_usage(p).free
+
+
+def _mib(n: int) -> str:
+    return f"{n / 2**20:.1f} MiB"
+
+
+def _check_space(items: list[tuple[Path, Path, Path, bool]]) -> None:
+    """Refuse before anything is touched when a volume cannot take the restore: every file is
+    staged next to its destination, and a replaced file kept in pre-restore-*/ on another
+    volume (library files, when the library is not on the data volume) is a copy there."""
+    need: dict[int, list] = {}
+
+    def add(dev_at: tuple[int, Path], n: int, what: str) -> None:
+        entry = need.setdefault(dev_at[0], [0, dev_at[1], set()])
+        entry[0] += n
+        entry[2].add(what)
+
+    for src, dest, side, _keep in items:
+        vol = _volume(dest.parent)
+        add(vol, _size(src), "restored files")
+        if dest.exists() and not dest.is_symlink():
+            side_vol = _volume(side.parent)
+            if side_vol[0] != vol[0]:
+                add(side_vol, _size(dest), "pre-restore copies of replaced library files")
+    short = []
+    for n, at, what in need.values():
+        free = _free(at)
+        if n + RESTORE_RESERVE_BYTES > free:
+            short.append(
+                f"{at} needs {_mib(n)} for {' and '.join(sorted(what))} plus "
+                f"{_mib(RESTORE_RESERVE_BYTES)} to spare, but has {_mib(free)} free"
+            )
+    if short:
+        raise BackupError(
+            "not enough free space; nothing was changed. "
+            + "; ".join(short)
+            + ". Free some space, restore the data side only (--no-library), or skip the "
+            "pre-restore copies of replaced library files (--no-pre-restore-copy, or "
+            "LECTERN_RESTORE_KEEP_REPLACED=0)."
+        )
+
+
 def restore(
     settings: Settings,
     source: str = "latest",
     *,
     restore_library: bool = True,
+    keep_replaced: bool | None = None,
     log_fn=print,
 ) -> dict:
     """Restore restic snapshot ``source`` (an id, ``latest``, or ``restic:<id>``).
 
-    Refuses while a server runs on this data directory. Every replaced file goes to
-    ``<data>/pre-restore-<time>/`` (library files under ``library/``); library files are added
-    or replaced, never deleted. A failure part-way through rolls everything back."""
+    Refuses while a server runs on this data directory, when the snapshot holds a symlink or a
+    path that would land outside the library, and when a volume lacks the free space.
+    Replaced data files go to ``<data>/pre-restore-<time>/``; replaced library files go to its
+    ``library/`` folder, or, with ``keep_replaced`` off (``LECTERN_RESTORE_KEEP_REPLACED``),
+    are deleted once the restore succeeded. Library files are never otherwise deleted. A
+    failure part-way through rolls everything back."""
     data, library = settings.data_dir, settings.library_dir
+    if keep_replaced is None:
+        keep_replaced = settings.restore_keep_replaced
     data.mkdir(parents=True, exist_ok=True)
     snap = source.removeprefix("restic:") or "latest"
     with _exclusive(
@@ -749,14 +875,21 @@ def restore(
                 "--target",
                 str(tmp_path),
             )
+            # Lectern never backs up a symlink, so one in the snapshot means it was tampered
+            # with (or made by something else). Refuse rather than guess what it should be.
+            links = _links_in(tmp_path)
+            if links:
+                raise BackupError(
+                    f"the backup contains {len(links)} symlink(s), e.g. "
+                    f"{links[0].relative_to(tmp_path)}; Lectern never backs up links, so it "
+                    "refuses to restore this snapshot"
+                )
             stage = _find_stage(tmp_path)
-            if not _regular(stage / "manifest.json"):
-                raise BackupError("this does not look like a Lectern backup (no manifest.json)")
             manifest = json.loads((stage / "manifest.json").read_text())
             if manifest.get("format") != MANIFEST_FORMAT:
                 raise BackupError(f"unknown backup format {manifest.get('format')!r}")
             db_copy = stage / "db" / "lectern.db"
-            if db_copy.is_symlink() or not db_copy.is_file():
+            if not _regular(db_copy):
                 raise BackupError("the backup has no database")
             con = sqlite3.connect(f"file:{db_copy}?mode=ro", uri=True)
             try:
@@ -787,87 +920,90 @@ def restore(
             tag = f"restore-{stamp}"
             aside = data / f"pre-restore-{stamp}"
 
-            # 1. Stage everything next to its destination. Nothing existing changes yet, so a
-            #    full disk or a read error here leaves the server exactly as it was.
-            plan: list[tuple[Path, Path, Path]] = []  # (staged, destination, aside path)
-            staged_all: list[Path] = []
-            created: list[Path] = []  # folders we made, removed again if the restore fails
-            try:
-                plan.append(
+            # 1. Plan: (source, destination, where the original goes, keep it afterwards).
+            items: list[tuple[Path, Path, Path, bool]] = [
+                (db_copy, data / "lectern.db", aside / "lectern.db", True)
+            ]
+            if _regular(stage / "secrets" / "secret_key"):
+                items.append(
                     (
-                        _stage_copy(db_copy, data / "lectern.db", tag, created),
-                        data / "lectern.db",
-                        Path("lectern.db"),
+                        stage / "secrets" / "secret_key",
+                        data / "secret_key",
+                        aside / "secret_key",
+                        True,
                     )
                 )
-                staged_all.append(plan[-1][0])
-                if _regular(stage / "secrets" / "secret_key"):
-                    s = _stage_copy(
-                        stage / "secrets" / "secret_key", data / "secret_key", tag, created
-                    )
-                    staged_all.append(s)
-                    plan.append((s, data / "secret_key", Path("secret_key")))
-                for sub in DATA_SUBDIRS:
-                    src = stage / "data" / sub
-                    if src.is_dir() and not src.is_symlink():
-                        s = _stage_copy(src, data / sub, tag, created)
-                        staged_all.append(s)
-                        plan.append((s, data / sub, Path(sub)))
-                library_files_n = 0
-                if restore_library:
-                    seen: set[Path] = set()
-                    for src_root in sources:
-                        for f in _walk(src_root):  # regular files only; links are never followed
-                            rel = f.relative_to(src_root)
-                            dest = library / rel
-                            if dest in seen or not _inside(dest.parent, library):
-                                continue
-                            seen.add(dest)
-                            if (
-                                dest.is_file()
-                                and not dest.is_symlink()
-                                and filecmp.cmp(f, dest, shallow=False)
-                            ):
-                                continue  # identical; nothing to replace
-                            s = _stage_copy(f, dest, tag, created)
-                            staged_all.append(s)
-                            plan.append((s, dest, Path("library") / rel))
-                            library_files_n += 1
+            for sub in DATA_SUBDIRS:
+                if (stage / "data" / sub).is_dir():
+                    items.append((stage / "data" / sub, data / sub, aside / sub, True))
+            library_files_n = 0
+            if restore_library:
+                seen: set[Path] = set()
+                for src_root in sources:
+                    for f in _walk(src_root):
+                        rel = f.relative_to(src_root)
+                        dest = library / rel
+                        # Resolving catches a library folder that is a link to elsewhere.
+                        if not _inside(dest, library):
+                            raise BackupError(
+                                f"refusing to restore {rel}: it would be written outside the "
+                                f"library, to {dest.resolve()}"
+                            )
+                        if dest in seen:
+                            continue
+                        seen.add(dest)
+                        if _regular(dest) and filecmp.cmp(f, dest, shallow=False):
+                            continue  # identical; nothing to replace
+                        side = (
+                            aside / "library" / rel
+                            if keep_replaced
+                            else dest.with_name(f".{dest.name}.replaced-{tag}")
+                        )
+                        items.append((f, dest, side, keep_replaced))
+                        library_files_n += 1
+            _check_space(items)
+
+            # 2. Stage everything next to its destination. Nothing existing changes yet, so a
+            #    full disk or a read error here leaves the server exactly as it was.
+            plan: list[tuple[Path, Path, Path, bool]] = []  # (staged, destination, side, keep)
+            created: list[Path] = []  # folders we made, removed again if the restore fails
+            try:
+                for src, dest, side, keep in items:
+                    plan.append((_stage_copy(src, dest, tag, created), dest, side, keep))
             except BaseException:
-                for s in staged_all:
-                    if s.is_dir():
-                        shutil.rmtree(s, ignore_errors=True)
-                    else:
-                        s.unlink(missing_ok=True)
+                for staged, *_ in plan:
+                    _discard(staged)
                 _remove_created(created)
                 raise
 
-            # 2. Swap: move originals aside and staged files in, rolling back on any failure.
-            swap = _Swap(aside)
+            # 3. Swap: move originals aside and staged files in, rolling back on any failure.
+            swap = _Swap()
             try:
                 for name in ("lectern.db-wal", "lectern.db-shm"):
                     if (data / name).exists():
-                        swap.remove(data / name, Path(name))
-                for staged, dest, aside_rel in plan:
-                    swap.put(staged, dest, aside_rel)
+                        swap.remove(data / name, aside / name)
+                for staged, dest, side, _keep in plan:
+                    swap.put(staged, dest, side)
             except BaseException as exc:
                 try:
                     swap.rollback()
                 except Exception as rb:  # noqa: BLE001
                     raise BackupError(
                         f"restore failed ({exc}) and could not be fully undone ({rb}); the "
-                        f"original files are in {aside}"
+                        f"original files are in {aside} (and next to library files as "
+                        f".<name>.replaced-{tag}); see docs/backups.md, 'If a restore is "
+                        "interrupted'"
                     ) from exc
                 finally:
-                    for s, _d, _a in plan:
-                        if s.is_dir():
-                            shutil.rmtree(s, ignore_errors=True)
-                        else:
-                            s.unlink(missing_ok=True)
+                    for staged, *_ in plan:
+                        _discard(staged)
                 _remove_created(created)
-                if aside.is_dir() and not any(p.is_file() for p in aside.rglob("*")):
-                    shutil.rmtree(aside, ignore_errors=True)
+                _remove_empty_tree(aside)
                 raise BackupError(f"restore failed and was undone; nothing changed: {exc}") from exc
+            for _staged, _dest, side, keep in plan:
+                if not keep:
+                    side.unlink(missing_ok=True)
+            _remove_empty_tree(aside)
             _private(data / "lectern.db")
             if (data / "secret_key").is_file():
                 _private(data / "secret_key")

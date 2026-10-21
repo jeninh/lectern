@@ -281,7 +281,12 @@ def restore(args: argparse.Namespace) -> None:
             update={"backup_restic_password_file": args.restic_password_file}
         )
     try:
-        backups.restore(settings, args.source, restore_library=not args.no_library)
+        backups.restore(
+            settings,
+            args.source,
+            restore_library=not args.no_library,
+            keep_replaced=False if args.no_pre_restore_copy else None,
+        )
     except backups.BackupError as exc:
         sys.exit(f"restore failed: {exc}")
     print("done. Start Lectern again; it migrates the database on start if needed.")
@@ -380,6 +385,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="snapshot id from `lectern backup --list`, or latest (the default)",
     )
     r.add_argument("--no-library", action="store_true", help="restore data only, not library files")
+    r.add_argument(
+        "--no-pre-restore-copy",
+        action="store_true",
+        help="delete replaced library files once the restore succeeded instead of keeping them "
+        "in <data>/pre-restore-*/library/ (LECTERN_RESTORE_KEEP_REPLACED=0)",
+    )
     r.add_argument("--restic-password-file", type=Path, help="the restic password you saved")
     return parser
 
