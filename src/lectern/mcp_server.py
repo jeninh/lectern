@@ -270,8 +270,12 @@ def _call(ctx: Context, tool: str, scope: str) -> Iterator[Call]:
             db.rollback()
             record(f"error {str(exc)[:200]}")
             raise
-        except HTTPException as exc:
+        except (HTTPException, imports.ImportError_) as exc:
             db.rollback()
+            if isinstance(exc, imports.ImportError_):
+                # lectern.imports raises its own error (not_found, too_many_imports, ...);
+                # map it the way routes/api/imports does.
+                exc = HTTPException(exc.status, {"detail": exc.code, **exc.extra})
             err = _http_error(exc)
             record(f"error {err}")
             raise err from None
@@ -452,10 +456,11 @@ def upload_book(
                 raise ToolError("invalid: a chunked upload needs sha256 of the whole file")
             whole = sha256 or hashlib.sha256(data).hexdigest()
             if import_id is None:
-                imp, _ = imports.create(c.db, c.user, Path(filename).stem[:256], None)
-                c.db.commit()
+                # Not committed here: start_session commits it together with the upload
+                # session, so a refused upload (too_large, quota, ...) leaves no import.
+                imp, created = imports.create(c.db, c.user, Path(filename).stem[:256], None)
             else:
-                imp = imports.get_owned(c.db, c.user, import_id)
+                imp, created = imports.get_owned(c.db, c.user, import_id), False
             row, _ = uploads_api.start_session(
                 c.db,
                 c.request,
@@ -471,30 +476,54 @@ def upload_book(
                 chunk_max=CHUNK_BYTES,
             )
             upload_id = row.public_id
-        uploads_api._open_session(c.db, c.auth, c.settings, upload_id)
-        if data:
-            uploads_api._store_chunk(
-                c.db, c.auth, c.settings, upload_id, offset, hashlib.sha256(data).hexdigest(), data
-            )
-        row = uploads_api._own(c.db, c.auth, upload_id)
-        imp = c.db.get(Import, row.import_id) if row.import_id else None
-        if row.received_bytes < row.size:
-            return {
-                "status": "uploading",
-                "upload_id": row.public_id,
-                "import_id": imp.public_id if imp else None,
-                "size": row.size,
-                "received_bytes": row.received_bytes,
-                "next_offset": row.received_bytes,
-                "chunk_size": row.chunk_size,
-            }
-        done = uploads_api.finalize(row.public_id, c.request, c.auth, c.db, c.settings, None)
-        assert imp is not None  # MCP uploads always stage into an import
-        if not finish:
-            out = _import_summary(done["import"])
-            return {**out, "status": "uploaded", "next": "upload more files with this import_id"}
-        result = imports_api.complete_import(c.request, c.auth, c.db, c.settings, imp.public_id)
-        return _import_summary(result)
+        else:
+            created = False
+        try:
+            uploads_api._open_session(c.db, c.auth, c.settings, upload_id)
+            if data:
+                uploads_api._store_chunk(
+                    c.db,
+                    c.auth,
+                    c.settings,
+                    upload_id,
+                    offset,
+                    hashlib.sha256(data).hexdigest(),
+                    data,
+                )
+            row = uploads_api._own(c.db, c.auth, upload_id)
+            imp = c.db.get(Import, row.import_id) if row.import_id else None
+            if row.received_bytes < row.size:
+                return {
+                    "status": "uploading",
+                    "upload_id": row.public_id,
+                    "import_id": imp.public_id if imp else None,
+                    "size": row.size,
+                    "received_bytes": row.received_bytes,
+                    "next_offset": row.received_bytes,
+                    "chunk_size": row.chunk_size,
+                }
+            done = uploads_api.finalize(row.public_id, c.request, c.auth, c.db, c.settings, None)
+            assert imp is not None  # MCP uploads always stage into an import
+            if not finish:
+                out = _import_summary(done["import"])
+                return {
+                    **out,
+                    "status": "uploaded",
+                    "next": "upload more files with this import_id",
+                }
+            result = imports_api.complete_import(c.request, c.auth, c.db, c.settings, imp.public_id)
+            return _import_summary(result)
+        except Exception:
+            if created:
+                # This call opened the import and the upload failed in it (for example a
+                # checksum or format error on a one-shot upload): nothing can resume it.
+                c.db.rollback()
+                imp = imports.get_owned(c.db, c.user, imp.public_id)
+                if imp.status in imports.OPEN:
+                    imports.discard(c.db, c.settings, imp)
+                    c.db.commit()
+                    imports.cleanup_staging(c.settings, imp)
+            raise
 
 
 def list_pending_imports(ctx: Context) -> dict:

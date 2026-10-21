@@ -24,11 +24,11 @@ from tests.conftest import (
     put_json,
 )
 
-from lectern import mcp_server
+from lectern import imports, mcp_server
 from lectern.config import Settings
 from lectern.db import session_factory
 from lectern.ingest.watcher import InboxWatcher
-from lectern.models import AIKey, AuditLog, Notification, Work
+from lectern.models import AIKey, AuditLog, Import, Notification, Work
 from lectern.security.ratelimit import SlidingWindowLimiter
 
 HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
@@ -428,6 +428,57 @@ def test_chunked_resumable_upload_and_cancel(app, home, settings, monkeypatch):
         assert db.scalar(select(Work).where(Work.title == "Big")) is None
 
 
+def open_imports() -> list[Import]:
+    with session_factory()() as db:
+        return list(db.scalars(select(Import).where(Import.status.in_(imports.OPEN))))
+
+
+def test_unknown_or_foreign_import_ids_are_clear_tool_errors(app, home, settings):
+    """Regression: lectern.imports errors used to surface as an opaque internal error."""
+    data = make_epub(settings.data_dir / "G.epub", title="G").read_bytes()
+    mia = MCP(app, home["mia"].key("upload"))
+    theirs = mia.ok(
+        "upload_book", filename="G.epub", content_base64=base64.b64encode(data).decode()
+    )
+    owner = MCP(app, home["owner"].key("upload"))
+    for import_id in ("nope", theirs["import_id"]):
+        for tool, args in (
+            (
+                "upload_book",
+                {"filename": "G.epub", "content_base64": "UEs=", "import_id": import_id},
+            ),
+            ("confirm_import", {"import_id": import_id}),
+            ("cancel_import", {"import_id": import_id}),
+        ):
+            ok, err = owner.call(tool, **args)
+            assert not ok and err.endswith(
+                "not_found (not found, or not visible to this person)"
+            ), (
+                tool,
+                err,
+            )
+    details = [a.detail for a in audit_rows("mcp.call") if a.actor_user_id != mia_id_of(home)]
+    assert not any("internal" in d for d in details)
+    assert sum("error not_found" in d for d in details) == 6
+    assert [i.public_id for i in open_imports()] == [theirs["import_id"]]  # mia's is untouched
+
+
+def mia_id_of(home) -> int:
+    return home["mia"].http.get("/api/me").json()["user"]["id"]
+
+
+def test_a_refused_first_upload_leaves_no_import(app, home, settings):
+    """Regression: the import was committed before the upload session was refused."""
+    mcp = MCP(app, home["owner"].key("upload"))
+    ok, err = mcp.call("upload_book", filename="Huge.m4b", content_base64="AAAA",
+                       total_size=10**15, sha256="0" * 64)  # fmt: skip
+    assert not ok and "too_large" in err
+    ok, err = mcp.call("upload_book", filename="X.epub",
+                       content_base64=base64.b64encode(b"x" * (mcp_server.CHUNK_BYTES + 1)).decode())  # fmt: skip
+    assert not ok and "chunk_too_large" in err
+    assert open_imports() == []
+
+
 def test_a_bad_whole_file_checksum_fails_the_upload(app, home, settings):
     mcp = MCP(app, home["owner"].key("upload"))
     data = make_epub(settings.data_dir / "C.epub", title="C").read_bytes()
@@ -436,6 +487,9 @@ def test_a_bad_whole_file_checksum_fails_the_upload(app, home, settings):
     assert not ok and "checksum_mismatch" in err
     ok, err = mcp.call("upload_book", filename="C.pdf", content_base64="AAAA")
     assert not ok and "unsupported_media_type" in err
+    ok, err = mcp.call("upload_book", filename="C.epub", content_base64="UEsDBA==")
+    assert not ok and "not_epub" in err
+    assert open_imports() == []  # neither failed one-shot upload left an import behind
 
 
 # --- organize -------------------------------------------------------------------------------------
