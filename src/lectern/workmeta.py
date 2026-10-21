@@ -256,6 +256,7 @@ def book_json(db: Session, work: Work) -> dict:
         "readalong_enabled": work.readalong_enabled,
         "primary_file_id": work.primary_file_id,
         "cover": "cover.jpg" if work.has_cover else None,
+        "generated_cover": {"style": work.cover_style, "seed": work.cover_seed or 0},
         "files": [
             {
                 "id": f.id,

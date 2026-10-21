@@ -171,6 +171,9 @@ export const Undo = (p: P) => (
 export const Sparkle = (p: P) => (
   <svg {...base} {...p}><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6" /></svg>
 );
+export const Shuffle = (p: P) => (
+  <svg {...base} {...p}><path d="M3 7h3.5c2 0 3.3 1 4.5 3l2 4c1.2 2 2.5 3 4.5 3H21" /><path d="M3 17h3.5c1.4 0 2.5-.5 3.4-1.5M14.1 8.5c.9-1 2-1.5 3.4-1.5H21" /><path d="m18 4 3 3-3 3M18 14l3 3-3 3" /></svg>
+);
 export const Up = (p: P) => (
   <svg {...base} {...p}><path d="m6 15 6-6 6 6" /></svg>
 );

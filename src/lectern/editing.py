@@ -130,8 +130,11 @@ class TrackEdit(BaseModel):
 class CoverChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["upload", "embedded", "remove"]
+    action: Literal["upload", "embedded", "remove", "generate"]
     token: str | None = Field(default=None, max_length=64)
+    # "generate": None = the style the title/author hash picks; seed = palette shuffle.
+    style: Literal["classic", "modern", "minimal"] | None = None
+    seed: int = Field(default=0, ge=0, le=1_000_000)
 
 
 class WorkPatch(BaseModel):
@@ -359,7 +362,13 @@ def embedded_cover_available(db: Session, settings: Settings, work: Work) -> boo
 
 
 def _cover_state(work: Work) -> dict:
-    return {"has_cover": work.has_cover, "source": work.cover_source, "tint": work.cover_tint}
+    return {
+        "has_cover": work.has_cover,
+        "source": work.cover_source,
+        "tint": work.cover_tint,
+        "style": work.cover_style,
+        "seed": work.cover_seed or 0,
+    }
 
 
 def apply_cover(
@@ -389,9 +398,12 @@ def apply_cover(
         elif change.action == "embedded":
             if not _embedded_cover(db, settings, work, new):
                 raise EditError(422, "no_embedded_cover")
-        if change.action == "remove":
+        if change.action in ("remove", "generate"):
+            # Without art the generated cover shows; "generate" also picks its look.
             cover.unlink(missing_ok=True)
             work.has_cover, work.cover_tint, work.cover_source = False, None, None
+            if change.action == "generate":
+                work.cover_style, work.cover_seed = change.style, change.seed
         else:
             new.replace(cover)
             work.has_cover, work.cover_source = True, change.action
@@ -411,6 +423,8 @@ def _restore_cover(settings: Settings, work: Work, state: dict) -> None:
     work.has_cover = bool(state.get("has_cover")) and cover.is_file()
     work.cover_source = state.get("source") if work.has_cover else None
     work.cover_tint = state.get("tint") if work.has_cover else None
+    if "style" in state:  # revisions saved before generated covers lack these
+        work.cover_style, work.cover_seed = state.get("style"), state.get("seed") or 0
 
 
 # --- text and audio invalidation ---------------------------------------------------------------

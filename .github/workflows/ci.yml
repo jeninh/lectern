@@ -19,8 +19,8 @@ jobs:
         working-directory: frontend
       - run: npm test
         working-directory: frontend
-      - name: Install ffmpeg (audio ingest, transcode, and range tests)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Install ffmpeg (audio ingest, transcode, and range tests) and Noto CJK (generated covers)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-cjk
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -40,6 +40,8 @@ jobs:
       - run: uv run pytest
         env:
           EPUBCHECK_REQUIRED: "1"
+          # tests/test_covergen.py checks Japanese glyphs; never skip it here.
+          CJK_FONTS_REQUIRED: "1"
           # tests/test_deploy_tailscale.py runs `docker compose config`; never skip it here.
           COMPOSE_REQUIRED: "1"
   docker:
@@ -54,6 +56,8 @@ jobs:
         run: |
           docker run --rm lectern:ci lectern worker --help
           docker run --rm lectern:ci python -c "from lectern.align.transcribe import transcription_available as t; print('faster-whisper:', t()); assert t() == ('${{ matrix.extras }}' == 'align')"
+      - name: Generated covers render in the image (bundled fonts + Noto CJK)
+        run: docker run --rm lectern:ci python -c "from lectern import covergen as c; assert c._cjk_font_files(); [c.render_jpeg(c.design_for(t, a)) for t, a in (('吾輩は猫である', '夏目漱石'), ('الكتاب المقدس', ''), ('ⲁⲓⲝⲟⲙ', ''))]"
   # The image a Raspberry Pi builds from deploy/tailscale/compose.yaml: default extras,
   # linux/arm64 under QEMU. Blocking like every other job; nothing is pushed.
   arm64:
@@ -94,6 +98,7 @@ jobs:
           test "$(docker run --rm lectern:arm64 uname -m)" = aarch64
           docker run --rm lectern:arm64 lectern worker --help > /dev/null
           docker run --rm lectern:arm64 python -c "from lectern.align.transcribe import transcription_available as t; assert not t()"
+          docker run --rm lectern:arm64 python -c "from lectern import covergen as c; assert c._cjk_font_files(); c.render_jpeg(c.design_for('吾輩は猫である', '夏目漱石'))"
           # Run it the way deploy/tailscale/compose.yaml does: non-default UID/GID owning
           # bind-mounted data and library, read-only root, no capabilities.
           mkdir -p "$RUNNER_TEMP/smoke/data" "$RUNNER_TEMP/smoke/library"

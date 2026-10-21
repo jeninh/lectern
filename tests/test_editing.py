@@ -430,7 +430,11 @@ def test_cover_embedded_remove_and_bad_images(client, owner, settings):
     assert ed["cover"]["embedded_available"] is True
     r = patch(client, csrf, wid, {"version": ed["version"], "cover": {"action": "remove"}})
     assert r.json()["editor"]["cover"]["has_cover"] is False
-    assert client.get(f"/library/works/{wid}/cover.jpg").status_code == 404
+    # Without art the same URL serves the generated cover (lectern.covergen).
+    work_dir = settings.library_dir / editor(client, wid)["work"]["dir_path"]
+    assert not (work_dir / "cover.jpg").exists()
+    got = client.get(f"/library/works/{wid}/cover.jpg")
+    assert got.status_code == 200 and got.content == (work_dir / "derived/cover.jpg").read_bytes()
     v = r.json()["editor"]["version"]
     r = patch(client, csrf, wid, {"version": v, "cover": {"action": "embedded"}})
     assert r.json()["editor"]["cover"]["source"] == "embedded"

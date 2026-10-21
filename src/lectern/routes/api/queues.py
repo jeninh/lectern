@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from lectern import device_queue
 from lectern.access import can_see_work
+from lectern.covergen import cover_fields
 from lectern.models import DeviceQueueItem, User, Work
 from lectern.routes.api.serializers import iso
 from lectern.security.deps import Auth, AuthCsrf, DbDep
@@ -63,9 +64,7 @@ def _item_json(item: DeviceQueueItem, work: Work, names: dict[int, str]) -> dict
             "id": work.id,
             "title": work.title,
             "author": work.author,
-            "has_cover": work.has_cover,
-            "cover_url": f"/library/works/{work.id}/cover.jpg" if work.has_cover else None,
-            "cover_tint": work.cover_tint,
+            **cover_fields(work),
         },
     }
 

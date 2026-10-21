@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from lectern.covergen import cover_fields
 from lectern.models import (
     AppPassword,
     BookFile,
@@ -76,10 +77,7 @@ def work_json(
         "readalong_enabled": w.readalong_enabled,
         "primary_file_id": w.primary_file_id,
         "version": w.version,
-        "has_cover": w.has_cover,
-        # ?v= changes with every edit, so a replaced cover is not served from the cache.
-        "cover_url": f"/library/works/{w.id}/cover.jpg?v={w.version}" if w.has_cover else None,
-        "cover_tint": w.cover_tint,
+        **cover_fields(w),
         "created_at": iso(w.created_at),
         "updated_at": iso(w.updated_at),
         "files": [file_json(f) for f in (files if files is not None else w.files)],
