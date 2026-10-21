@@ -29,6 +29,8 @@ ORPHAN_GRACE_S = 600  # .part files younger than this are never treated as orpha
 # media type -> (allowed extensions, default extension)
 MEDIA_TYPES: dict[str, tuple[tuple[str, ...], str]] = {
     "application/epub+zip": ((".epub",), ".epub"),
+    "application/pdf": ((".pdf",), ".pdf"),
+    "application/vnd.comicbook+zip": ((".cbz",), ".cbz"),
     "audio/mpeg": ((".mp3",), ".mp3"),
     "audio/mp4": ((".m4b", ".m4a", ".mp4"), ".m4b"),
     "audio/ogg": ((".ogg", ".opus", ".oga"), ".ogg"),

@@ -55,10 +55,10 @@ from lectern import __version__, ai_keys, device_queue, imports
 from lectern.access import can_edit_library, can_see_work, visible_works
 from lectern.config import Settings
 from lectern.db import session_factory
+from lectern.ingest import formats as book_formats
 from lectern.models import (
     AIKey,
     AudioTrack,
-    FileKind,
     Import,
     ImportStatus,
     Job,
@@ -83,8 +83,8 @@ CHUNK_BYTES = 2 * 1024 * 1024
 _EXTENSIONS = {ext: mt for mt, (exts, _) in MEDIA_TYPES.items() for ext in exts}
 
 INSTRUCTIONS = """\
-Lectern is a private household library of EPUB books and audiobooks. You act as one person,
-with only their permissions and only the scopes their AI key was given.
+Lectern is a private household library of books (EPUB, PDF, and CBZ comics) and audiobooks.
+You act as one person, with only their permissions and only the scopes their AI key was given.
 
 - Add a book: upload_book (small files in one call; larger ones in chunks), then look at the
   detected metadata and the proposed match, and confirm_import (accept, edit fields, join an
@@ -93,6 +93,8 @@ with only their permissions and only the scopes their AI key was given.
   numbers; use them for every other tool.
 - Organize: add_to_shelf / remove_from_shelf, send_to_device / list_device_queue,
   start_alignment / job_status, edit_metadata.
+- Only EPUB has text: alignment, read-along, and read-aloud need an EPUB. PDF and comics are
+  page-based and cannot be aligned. CBR is not supported; ask the person to convert it to CBZ.
 - There is no way to download book files or audio through these tools.
 """
 
@@ -211,6 +213,7 @@ def _http_error(exc: HTTPException) -> ToolError:
         403: "not allowed for this person",
         409: "conflict",
         429: "too many requests; wait a minute",
+        503: "the server is busy; try the same call again shortly",
     }.get(exc.status_code)
     msg = f"{code}" + (f" ({hint})" if hint and hint != code else "")
     if extra:
@@ -294,13 +297,16 @@ def _call(ctx: Context, tool: str, scope: str) -> Iterator[Call]:
 # --- shapes ---------------------------------------------------------------------------------------
 
 
+def _format_label(media_type: str) -> str:
+    doc = book_formats.DOCUMENTS.get(media_type)
+    return doc[1] if doc else "audiobook"
+
+
 def _formats(work: Work) -> list[str]:
-    kinds = {f.kind for f in work.files}
-    return [
-        name
-        for kind, name in ((FileKind.EBOOK, "ebook"), (FileKind.AUDIO, "audiobook"))
-        if kind in kinds
-    ]
+    """``EPUB``, ``PDF``, ``CBZ``, and/or ``audiobook``, in that order."""
+    have = {_format_label(f.media_type) for f in work.files}
+    order = [label for _ext, label, _code in book_formats.DOCUMENTS.values()] + ["audiobook"]
+    return [label for label in order if label in have]
 
 
 def _summary(work: Work) -> dict:
@@ -416,8 +422,8 @@ def upload_book(
         str | None,
         Field(
             max_length=32,
-            description="Add the file to this pending import (an EPUB and its "
-            "audiobook, or several audio tracks, become one book).",
+            description="Add the file to this pending import (an EPUB, PDF, or CBZ "
+            "and its audiobook, or several audio tracks, become one book).",
         ),
     ] = None,
     finish: Annotated[
@@ -428,8 +434,9 @@ def upload_book(
         ),
     ] = True,
 ) -> dict:
-    """Upload an EPUB or audiobook file (MP3, M4B/M4A, OGG/Opus, FLAC) into "Review before
-    filing". Nothing is filed yet: when the upload is complete this returns the detected
+    """Upload a book file into "Review before filing": EPUB, PDF, or CBZ comic (.epub, .pdf,
+    .cbz; CBR is not supported, convert it to CBZ) or an audiobook (MP3, M4B/M4A, OGG/Opus,
+    FLAC). The file's first bytes must match its extension. Nothing is filed yet: when the upload is complete this returns the detected
     metadata and the proposed match; confirm it with confirm_import. Resumable: calling with
     upload_id and no content returns how many bytes the server has. Scope: upload."""
     from lectern.routes.api import imports as imports_api
@@ -447,7 +454,8 @@ def upload_book(
             media_type = _EXTENSIONS.get(Path(filename).suffix.lower())
             if media_type is None:
                 raise ToolError(
-                    "unsupported_media_type: use .epub, .mp3, .m4b, .m4a, .ogg, .opus, or .flac"
+                    "unsupported_media_type: use .epub, .pdf, .cbz, .mp3, .m4b, .m4a, .ogg, "
+                    ".opus, or .flac (CBR is not supported: convert it to CBZ)"
                 )
             size = total_size or len(data)
             if not size:
@@ -656,7 +664,12 @@ def get_book(ctx: Context, book_id: int) -> dict:
             "version": work.version,
             "metadata": metadata_of(work),
             "formats": [
-                {"kind": f.kind.value, "media_type": f.media_type, "size": f.size}
+                {
+                    "kind": f.kind.value,
+                    "format": _format_label(f.media_type),
+                    "media_type": f.media_type,
+                    "size": f.size,
+                }
                 for f in work.files
             ],
             "audio": {"tracks": tracks[0], "duration_s": round(float(tracks[1] or 0), 1)}
@@ -850,7 +863,7 @@ def start_alignment(
     force: Annotated[bool, Field(description="Align again even if it is up to date.")] = False,
 ) -> dict:
     """Queue text–audio alignment for a book with both an EPUB and an audiobook (enables
-    read-along). Returns the job; follow it with job_status. Scope: organize."""
+    read-along). PDF and CBZ have no text and cannot be aligned. Returns the job; follow it with job_status. Scope: organize."""
     from lectern.routes.api import align
 
     with _call(ctx, "start_alignment", "organize") as c:

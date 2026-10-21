@@ -152,7 +152,7 @@ def read_aloud_status(db, settings, work: Work, build: ReadAloudBuilder) -> dict
         inputs = gather_inputs(db, settings, work)
     except Unavailable as exc:
         out.update(reason=exc.code, message=exc.message)
-        if exc.code in ("no_audio", "missing_file"):
+        if exc.code in ("no_audio", "missing_file", "needs_epub"):
             out["readalong"] = False
         return out
     state, sidecar, error = build.status(inputs)

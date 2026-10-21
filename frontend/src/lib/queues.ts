@@ -16,7 +16,7 @@ export function summarizeQueueResults(results: QueueResult[], device: Pick<Queue
   if (sent) parts.push(`Sent ${plural(sent, "book")} to ${where}`);
   if (already) parts.push(sent ? `${already} already waiting` : `${plural(already, "book")} already waiting on ${where}`);
   if (hidden) parts.push(`${plural(hidden, "book")} not shared with ${device.user.display_name || device.user.username}`);
-  if (noEbook) parts.push(`${plural(noEbook, "book")} without an EPUB`);
+  if (noEbook) parts.push(`${plural(noEbook, "book")} without an EPUB, PDF, or comic`);
   if (missing) parts.push(`${plural(missing, "book")} not found`);
   const failed = hidden + noEbook + missing;
   return { text: parts.join(" · ") || "Nothing to send", kind: failed && !sent && !already ? "error" : "info" };

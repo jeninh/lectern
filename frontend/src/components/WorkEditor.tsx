@@ -400,14 +400,14 @@ function CoverTab({ state, draft, set }: { state: EditorState; draft: Draft; set
       setBusy(false);
     }
   };
-  const source = state.cover.source === "upload" ? "uploaded" : state.cover.source === "embedded" ? "from the EPUB" : state.cover.source;
+  const source = state.cover.source === "upload" ? "uploaded" : state.cover.source === "embedded" ? "from the book file" : state.cover.source;
   return (
     <div className="cover-tab">
       <div className="cover big" data-generated={generated || undefined}>
         {src ? <img src={src} alt={generated ? `Generated cover preview, ${shownStyle} style` : "Cover preview"} /> : (
           <div className="fallback">
             <strong>{draft.metadata.title}</strong>
-            <span>{c?.action === "embedded" ? "The EPUB’s own cover" : coverAuthor(draft.metadata.authors)}</span>
+            <span>{c?.action === "embedded" ? "The book’s own cover" : coverAuthor(draft.metadata.authors)}</span>
           </div>
         )}
       </div>
@@ -416,13 +416,13 @@ function CoverTab({ state, draft, set }: { state: EditorState; draft: Draft; set
           {c?.action === "upload"
             ? "New image, applied when you save."
             : c?.action === "embedded"
-              ? "Uses the cover inside the EPUB when you save."
+              ? "Uses the cover inside the EPUB (or the first page of a PDF or comic) when you save."
               : generated && state.cover.has_cover
                 ? "The generated cover replaces the current image when you save; Undo in the history brings the image back."
                 : generated
-                  ? `Generated from the title and author${c ? ", applied when you save" : ""}. An uploaded image or the EPUB’s own cover always takes its place.`
+                  ? `Generated from the title and author${c ? ", applied when you save" : ""}. An uploaded image or the book’s own cover always takes its place.`
                   : `Current cover${source ? ` (${source})` : ""}.`}
-          {" "}The EPUB file itself is never changed.
+          {" "}The book file itself is never changed.
         </p>
         {generated ? (
           <div className="gen-controls">
@@ -441,7 +441,7 @@ function CoverTab({ state, draft, set }: { state: EditorState; draft: Draft; set
         )}
         <input ref={input} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) upload(f); }} />
         <button className="btn" onClick={() => input.current?.click()} disabled={busy} aria-busy={busy}><Upload /> {busy ? "Uploading…" : "Upload an image"}</button>
-        {state.cover.embedded_available && <button className="btn ghost" onClick={() => set("cover", { action: "embedded" })} aria-pressed={c?.action === "embedded"}>Use the EPUB’s cover</button>}
+        {state.cover.embedded_available && <button className="btn ghost" onClick={() => set("cover", { action: "embedded" })} aria-pressed={c?.action === "embedded"}>Use the book’s own cover</button>}
         {c && <button className="btn ghost" onClick={() => set("cover", null)}><Undo /> {state.cover.has_cover ? "Keep the current image" : "Reset"}</button>}
         <p className="hint" style={{ margin: 0 }}>JPEG, PNG, or WebP up to 10 MB.</p>
       </div>
@@ -469,18 +469,20 @@ function FilesTab({ state, draft, set, onTrash }: { state: EditorState; draft: D
   return (
     <div className="stack">
       <section aria-labelledby="ebooks-h">
-        <h3 id="ebooks-h" className="detail-h"><Book width={14} height={14} /> EPUB</h3>
-        {state.files.length === 0 ? <p className="hint">No EPUB. Add one from the Library to read along.</p> : (
+        <h3 id="ebooks-h" className="detail-h"><Book width={14} height={14} /> Books</h3>
+        {state.files.length === 0 ? <p className="hint">No EPUB, PDF, or comic. Add one from the Library.</p> : (
           <ul className="file-rows">
             {state.files.map((f) => {
               const removing = draft.remove_file_ids.includes(f.id);
+              const epub = f.format === "EPUB";
               return (
                 <li key={f.id} data-removing={removing || undefined}>
                   <label className="check">
-                    <input type="radio" name="primary-epub" checked={draft.primary_file_id === f.id} disabled={removing} onChange={() => set("primary_file_id", f.id)} />
+                    {/* Only an EPUB can be primary: the reader, read-along, and alignment need text. */}
+                    {epub ? <input type="radio" name="primary-epub" checked={draft.primary_file_id === f.id} disabled={removing} onChange={() => set("primary_file_id", f.id)} /> : <span className="badge" aria-hidden="true">{f.format}</span>}
                     <span>
                       <strong>{f.rel_path.split("/").pop()}</strong>
-                      <span className="hint"> {bytes(f.size)} · added {relativeTime(f.added_at)}{draft.primary_file_id === f.id ? " · primary" : ""}</span>
+                      <span className="hint"> {epub ? "" : `${f.format === "CBZ" ? "Comic" : "PDF"} · `}{bytes(f.size)} · added {relativeTime(f.added_at)}{epub && draft.primary_file_id === f.id ? " · primary" : ""}</span>
                       {showTech && <span className="hint mono"> sha256 {f.sha256.slice(0, 12)}…{f.partial_md5 ? ` · KOReader ${f.partial_md5}` : ""}</span>}
                     </span>
                   </label>
@@ -490,7 +492,8 @@ function FilesTab({ state, draft, set, onTrash }: { state: EditorState; draft: D
             })}
           </ul>
         )}
-        {state.files.length > 1 && <p className="hint">The primary EPUB is what the reader, read-along, and alignment use.</p>}
+        {state.files.filter((f) => f.format === "EPUB").length > 1 && <p className="hint">The primary EPUB is what the reader, read-along, and alignment use.</p>}
+        {state.files.some((f) => f.format !== "EPUB") && <p className="hint">PDFs and comics open in the page viewer and sync pages with KOReader. Read-along needs an EPUB edition.</p>}
       </section>
 
       <section aria-labelledby="tracks-h">
@@ -556,7 +559,8 @@ function PlaybackTab({ state, draft, set, onRefresh }: { state: EditorState; dra
   const { toast } = useStore();
   const [model, setModel] = useState(state.alignment?.model || state.align_default_model);
   const [busy, setBusy] = useState<"align" | "readaloud" | null>(null);
-  const hasBoth = state.files.length > 0 && state.tracks.length > 0;
+  const hasEpub = state.files.some((f) => f.format === "EPUB");
+  const hasBoth = hasEpub && state.tracks.length > 0;
   const reload = async () => onRefresh(await get<EditorState>(`/api/works/${state.work.id}/edit`));
   const realign = async () => {
     setBusy("align");
@@ -609,7 +613,7 @@ function PlaybackTab({ state, draft, set, onRefresh }: { state: EditorState; dra
       </div>
       <section className="card flat" aria-labelledby="align-h">
         <h3 id="align-h" className="detail-h" style={{ marginTop: 0 }}>Alignment</h3>
-        {!hasBoth ? <p className="hint">Needs both an EPUB and an audiobook.</p> : (
+        {!hasBoth ? <p className="hint">{hasEpub || !state.files.length ? "Needs both an EPUB and an audiobook." : "Read-along needs an EPUB edition. PDFs and comics have pages, not text, so they cannot be aligned."}</p> : (
           <>
             <p className="hint" style={{ marginTop: 0 }}>
               {state.alignment ? <>Status: <strong>{state.alignment.status}</strong>{state.alignment.model ? ` · ${state.alignment.model} model` : ""}{typeof state.alignment.coverage === "number" ? ` · ${Math.round(state.alignment.coverage * 100)}% of the text matched` : ""}.</> : "Not aligned yet."}

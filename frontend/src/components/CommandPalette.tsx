@@ -9,6 +9,7 @@ import { useStore } from "../lib/store";
 import type { Device, Work } from "../lib/types";
 import { Cover } from "./Cover";
 import { usePlayer } from "../lib/player";
+import { bookFiles, readerPath } from "../lib/formats";
 import { Devices, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
 type Group = "Actions" | "Pages" | "Books" | "Authors" | "Devices" | "Settings";
@@ -71,7 +72,7 @@ export function CommandPalette() {
       { id: "a-add", group: "Actions", label: "Add device", keywords: "new koreader kobo kindle opds connect", hint: "N", icon: <Plus />, run: () => go("/app/devices/new") },
       ...(canUpload
         ? [
-            { id: "a-upload", group: "Actions" as Group, label: "Add books or audiobooks", keywords: "upload epub m4b mp3 audio import add file", hint: "B", icon: <Upload />, run: () => { close(); pickBooks(); } },
+            { id: "a-upload", group: "Actions" as Group, label: "Add books or audiobooks", keywords: "upload epub pdf cbz comic m4b mp3 audio import add file", hint: "B", icon: <Upload />, run: () => { close(); pickBooks(); } },
             { id: "a-folder", group: "Actions" as Group, label: "Add an audiobook folder", keywords: "upload directory mp3 tracks multi-track import", icon: <Folder />, run: () => { close(); pickFolder(); } },
             ...(imports.some((i) => i.status === "ready")
               ? [{ id: "a-review", group: "Actions" as Group, label: `Review ${imports.filter((i) => i.status === "ready").length} uploaded before filing`, keywords: "imports pending match", icon: <Upload />, run: () => { close(); setReviewOpen(true); } }]
@@ -111,7 +112,7 @@ export function CommandPalette() {
       ...(isOwner ? [{ id: "s-users", group: "Settings" as Group, label: "Add a user", keywords: "member reader invite", icon: <Person />, run: () => go("/app/admin?new=1") }] : []),
 
       ...works.map<Item>((w) => ({ id: `w${w.id}`, group: "Books", label: w.title, detail: w.author, keywords: w.isbn ?? "", work: w, run: () => go(`/app/library/${w.id}`) })),
-      ...works.filter((w) => w.files.some((f) => f.kind === "ebook")).map<Item>((w) => ({ id: `r${w.id}`, group: "Actions", label: `Read ${w.title}`, keywords: `open ${w.author}`, icon: <Reader />, run: () => go(`/app/reader/${w.id}`) })),
+      ...works.filter((w) => bookFiles(w).length > 0).map<Item>((w) => ({ id: `r${w.id}`, group: "Actions", label: `Read ${w.title}`, keywords: `open ${w.author} pdf comic`, icon: <Reader />, run: () => go(readerPath(w)) })),
       ...(canEdit ? works.map<Item>((w) => ({ id: `e${w.id}`, group: "Actions", label: `Edit ${w.title}`, keywords: `metadata cover tracks ${w.author}`, icon: <Pencil />, run: () => { close(); openEditor(w.id); } })) : []),
       ...works.filter((w) => w.audio).map<Item>((w) => ({ id: `l${w.id}`, group: "Actions", label: `Listen to ${w.title}`, keywords: `play audiobook ${w.author}`, icon: <Headphones />, run: () => { close(); player.open(w, { autoplay: true }); } })),
       ...[...new Set(works.map((w) => w.author))].map<Item>((a) => {

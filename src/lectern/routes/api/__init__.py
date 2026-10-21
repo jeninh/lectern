@@ -14,6 +14,7 @@ from lectern.routes.api import (
     editor,
     imports,
     notifications,
+    pages,
     queues,
     readalong,
     security,
@@ -38,5 +39,6 @@ router.include_router(shelves.router)
 router.include_router(works.router)
 router.include_router(notifications.router)
 router.include_router(readalong.router)
+router.include_router(pages.router)
 router.include_router(align.router)
 router.include_router(worker.router)
