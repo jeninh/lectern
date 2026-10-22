@@ -61,7 +61,8 @@ def main() -> None:
         subprocess.run(  # noqa: S603 - a fixed ffmpeg command line
             [shutil.which("ffmpeg") or "ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "s16le",
              "-ar", str(KOKORO_SAMPLE_RATE), "-ac", "1", "-i", "-", "-c:a", "aac",
-             "-b:a", f"{KBPS}k", "-map_metadata", "-1", "-fflags", "+bitexact", "-movflags", "+faststart", str(dest)],
+             "-b:a", f"{KBPS}k", "-map_metadata", "-1", "-fflags", "+bitexact",
+             "-movflags", "+faststart", str(dest)],
             input=pcm, check=True,
         )  # fmt: skip
         manifest["voices"][voice] = {
