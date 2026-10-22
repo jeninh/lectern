@@ -491,7 +491,10 @@ def sweep(session_factory: sessionmaker, library: Path, *, limit: int = 20) -> i
                 work = db.get(Work, book.work_id) if book else None
                 if book is None or row is None or work is None or row.status != READY:
                     continue
+                # Commit the repair (it holds the write lock) before the projection, which
+                # parses the EPUB and matches the whole book: other writers must not wait.
                 ensure_pdf_sentences(db, library, work)
+                db.commit()
                 refresh_projection(db, library, work, book, row)
                 db.commit()
             except Exception:  # noqa: BLE001

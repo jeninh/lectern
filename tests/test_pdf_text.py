@@ -735,3 +735,32 @@ def test_a_repair_never_overwrites_an_alignment_published_while_it_ran(
     with session_factory()() as db:
         rows = db.scalars(select(Sentence).where(Sentence.work_id == work_id)).all()
     assert rows and all(r.matched and r.audio_start_s is not None for r in rows)
+
+
+def test_other_writers_never_wait_for_a_projection(client, owner, settings, monkeypatch):
+    """The sweep commits a sentence repair before projecting (parsing and matching a whole
+    book), so a reading position saved meanwhile is not held behind the write lock."""
+    from sqlalchemy import text
+
+    from lectern.pdftext import project as project_mod
+
+    fid = _file(settings, "two-column.pdf")
+    work_id = _work_of(fid).id
+    sweep(session_factory(), settings.library_dir)
+    _epub_of_the_story(settings.inbox_path / "keeper.epub")
+    drain_inbox(settings)
+    real, writes = project_mod.project, []
+
+    def project_while_someone_writes(work_texts, pdf_texts):
+        with session_factory()() as other:
+            other.execute(text("PRAGMA busy_timeout=200"))
+            other.execute(text("UPDATE works SET id = id WHERE id = :id"), {"id": work_id})
+            other.commit()  # raises "database is locked" if the sweep still holds the lock
+        writes.append(True)
+        return real(work_texts, pdf_texts)
+
+    monkeypatch.setattr(project_mod, "project", project_while_someone_writes)
+    sweep(session_factory(), settings.library_dir)
+    assert writes
+    st = client.get(f"/api/files/{fid}/text").json()
+    assert (st["text_source"], st["map"]) == ("epub", "epub")
