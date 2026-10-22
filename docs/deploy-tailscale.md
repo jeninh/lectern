@@ -1,5 +1,9 @@
 # Running Lectern at home with Tailscale
 
+Setting up a Raspberry Pi from a blank SD card? Follow the
+[end-to-end Pi setup guide](pi-setup.md); it walks through this page in order, together with
+the Mac worker, a Kindle, phones, and backups.
+
 This guide is for a first-time self-hoster. At the end, Lectern runs on a machine at home and
 is reachable from your phone, laptop, and e-reader anywhere, at
 `https://lectern.<your-tailnet>.ts.net`, with **no port opened on your router, nothing
@@ -367,26 +371,11 @@ What we recommend, and what we have and have not measured:
 ### Aligning audiobooks from a Mac or another computer
 
 A Pi is too small to transcribe audiobooks well, so the default image does not try: new
-alignment jobs wait in a queue until an external worker takes them. Run the worker on a Mac
-(Apple Silicon or Intel) or any Linux/Windows computer with Python 3.12+ that is on your
-tailnet. It connects out to Lectern's HTTPS address with an owner-issued worker key, so it
-needs nothing opened anywhere:
-
-1. As the owner, create a worker credential (see
-   [External workers](alignment.md#external-workers); the `lw_…` secret is shown once).
-2. On the Mac, install the worker from your clone of the repository and point it at the Pi:
-
-   ```sh
-   python3 -m venv ~/.lectern-worker
-   ~/.lectern-worker/bin/pip install "$HOME/src/lectern[align]"   # path to your clone
-   printf '%s\n' 'lw_paste-it-here' > ~/.lectern-worker/key && chmod 600 ~/.lectern-worker/key
-   ~/.lectern-worker/bin/lectern worker --server https://lectern.tail1234.ts.net \
-     --key-file ~/.lectern-worker/key --name mac
-   ```
-
-The worker downloads only the inputs of the job it holds, transcribes locally, uploads the
-result, and loops; `Ctrl-C` hands the current job back. Models download on first use. Leave
-it running while there is a backlog; nothing breaks while it is off, jobs just wait.
+alignment jobs wait in a queue until an external worker takes them. On a Mac, install the
+worker with one command from **Admin → Workers → Add a worker**; it connects out to Lectern's
+HTTPS address with its own worker key, so it needs nothing opened anywhere. See
+[The Mac worker](mac-worker.md), or [External workers](alignment.md#external-workers) for
+Linux and Windows computers. Nothing breaks while it is off; jobs just wait.
 
 ## Cloning a private repository with a deploy key
 
