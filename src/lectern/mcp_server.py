@@ -62,7 +62,6 @@ from lectern.models import (
     Import,
     ImportStatus,
     Job,
-    Shelf,
     ShelfItem,
     User,
     Work,
@@ -92,7 +91,10 @@ You act as one person, with only their permissions and only the scopes their AI 
   the match is not certain.
 - Find books with search_library / list_recent and inspect one with get_book. Book ids are
   numbers; use them for every other tool.
-- Organize: add_to_shelf / remove_from_shelf, send_to_device / list_device_queue,
+- Shelves are nested folders; name one by id or by path from the top level, e.g.
+  "Kids/Picture books" (list_shelves). A book can be on several shelves.
+- Organize: add_to_shelf / remove_from_shelf, create_shelf / move_shelf,
+  send_to_device / list_device_queue,
   start_alignment / job_status, edit_metadata.
 - Only EPUB has text: alignment, read-along, and read-aloud need an EPUB. PDF and comics are
   page-based and cannot be aligned. CBR is not supported; ask the person to convert it to CBZ.
@@ -710,13 +712,8 @@ def get_book(ctx: Context, book_id: int) -> dict:
         ).one()
         active = jobs.active_job(c.db, work.id)
         pj = progress_json(c.db, c.user.id, work.id)
-        shelves = c.db.execute(
-            select(Shelf.id, Shelf.name)
-            .join(ShelfItem, ShelfItem.shelf_id == Shelf.id)
-            .where(ShelfItem.work_id == work.id)
-            .order_by(func.lower(Shelf.name))
-        ).all()
-        visible_shelves = {s["id"] for s in _shelves(c)}
+        on = set(c.db.scalars(select(ShelfItem.shelf_id).where(ShelfItem.work_id == work.id)))
+        shelves = [_shelf_ref(s) for s in _shelves(c) if s["id"] in on]
         return {
             "id": work.id,
             "version": work.version,
@@ -746,7 +743,7 @@ def get_book(ctx: Context, book_id: int) -> dict:
             }
             if pj["source"]
             else None,
-            "shelves": [{"id": i, "name": n} for i, n in shelves if i in visible_shelves],
+            "shelves": shelves,
             "added_at": iso(work.created_at),
             "updated_at": iso(work.updated_at),
         }
@@ -788,39 +785,80 @@ def _shelves(c: Call) -> list[dict]:
     return shelves_api.list_shelves(c.auth, c.db)["shelves"]
 
 
+def _path(s: dict) -> str:
+    return "/".join(s["path"])
+
+
+def _segments(path: str) -> list[str]:
+    return [p.strip() for p in path.strip().strip("/").split("/") if p.strip()]
+
+
 def _shelf(c: Call, shelf: str) -> dict:
+    """A shelf this person sees, by id, by path from their top level ("Kids/Picture
+    books"), or by a name that only one of their shelves has."""
     found = _shelves(c)
     wanted = shelf.strip()
-    hits = [s for s in found if str(s["id"]) == wanted] or [
-        s for s in found if s["name"].casefold() == wanted.casefold()
-    ]
+    hits = [s for s in found if str(s["id"]) == wanted]
+    if not hits:
+        parts = _segments(wanted)
+        folded = [p.casefold() for p in parts]
+        hits = [s for s in found if [n.casefold() for n in s["path"]] == folded]
+        if not hits and len(parts) == 1:
+            hits = [s for s in found if s["name"].casefold() == folded[0]]
     if len(hits) != 1:
-        names = ", ".join(f"{s['name']} (#{s['id']})" for s in found) or "none"
+        listed = hits or found
+        names = ", ".join(f"{_path(s)} (#{s['id']})" for s in listed[:50]) or "none"
         reason = "ambiguous_shelf" if hits else "not_found"
-        raise ToolError(f"{reason}: no single shelf '{shelf}'. This person's shelves: {names}")
+        raise ToolError(f"{reason}: no single shelf '{shelf}'. Shelves: {names}")
     return hits[0]
 
 
-def add_to_shelf(
-    ctx: Context,
-    book_id: int,
-    shelf: Annotated[str, Field(max_length=128, description="Shelf name or id.")],
-) -> dict:
-    """Put a book on a shelf this person may edit. Scope: organize."""
+def _shelf_ref(s: dict) -> dict:
+    return {"id": s["id"], "name": s["name"], "path": _path(s)}
+
+
+def list_shelves(ctx: Context) -> dict:
+    """Every shelf (folder) this person sees, as paths from their top level ("Kids/Picture
+    books"), with how many books are directly on each and what they may do there
+    (owner: manage, edit: add and remove books and make sub-shelves, view). Scope: read."""
+    with _call(ctx, "list_shelves", "read") as c:
+        return {
+            "shelves": [
+                {
+                    **_shelf_ref(s),
+                    "parent_id": s["parent_id"],
+                    "books": s["work_count"],
+                    "sub_shelves": s["shelf_count"],
+                    "permission": s["permission"],
+                }
+                for s in _shelves(c)
+            ]
+        }
+
+
+ShelfArg = Annotated[
+    str,
+    Field(
+        max_length=1200,
+        description='Shelf id, path from the top level ("Kids/Picture books"), or a name '
+        "only one shelf has.",
+    ),
+]
+
+
+def add_to_shelf(ctx: Context, book_id: int, shelf: ShelfArg) -> dict:
+    """Put a book on a shelf this person may edit (it stays on its other shelves).
+    Scope: organize."""
     from lectern.routes.api import shelves as shelves_api
 
     with _call(ctx, "add_to_shelf", "organize") as c:
         s = _shelf(c, shelf)
         _visible(c.db, c.user, book_id)
         shelves_api.add_item(c.request, c.auth, c.db, s["id"], shelves_api.ItemIn(work_id=book_id))
-        return {"shelf": {"id": s["id"], "name": s["name"]}, "book_id": book_id, "on_shelf": True}
+        return {"shelf": _shelf_ref(s), "book_id": book_id, "on_shelf": True}
 
 
-def remove_from_shelf(
-    ctx: Context,
-    book_id: int,
-    shelf: Annotated[str, Field(max_length=128, description="Shelf name or id.")],
-) -> dict:
+def remove_from_shelf(ctx: Context, book_id: int, shelf: ShelfArg) -> dict:
     """Take a book off a shelf this person may edit (the book stays in the library).
     Scope: organize."""
     from lectern.routes.api import shelves as shelves_api
@@ -829,7 +867,74 @@ def remove_from_shelf(
         s = _shelf(c, shelf)
         _visible(c.db, c.user, book_id)
         shelves_api.remove_item(c.request, c.auth, c.db, s["id"], book_id)
-        return {"shelf": {"id": s["id"], "name": s["name"]}, "book_id": book_id, "on_shelf": False}
+        return {"shelf": _shelf_ref(s), "book_id": book_id, "on_shelf": False}
+
+
+def create_shelf(
+    ctx: Context,
+    path: Annotated[
+        str,
+        Field(
+            max_length=1200,
+            description='Where and what: "Kids" for a top-level shelf, "Kids/Picture books" '
+            "for one inside Kids. Missing shelves along the path are created too.",
+        ),
+    ],
+) -> dict:
+    """Make a shelf (folder), nested at most 8 deep. Top-level shelves need an owner or
+    member; inside a shelf, edit permission there. Names cannot contain "/".
+    Scope: organize."""
+    from lectern.routes.api import shelves as shelves_api
+
+    with _call(ctx, "create_shelf", "organize") as c:
+        parts = _segments(path)
+        if not parts:
+            raise ToolError("invalid: give a shelf name or path")
+        parent: dict | None = None
+        created: list[str] = []
+        for i, name in enumerate(parts):
+            here = [n.casefold() for n in parts[: i + 1]]
+            existing = [s for s in _shelves(c) if [n.casefold() for n in s["path"]] == here]
+            if len(existing) > 1:
+                raise ToolError(
+                    f"ambiguous_shelf: several shelves are '{'/'.join(parts[: i + 1])}'"
+                )
+            if existing:
+                parent = existing[0]
+                continue
+            try:
+                body = shelves_api.CreateIn(name=name, parent_id=parent["id"] if parent else None)
+            except ValidationError as exc:
+                raise ToolError(f"invalid: {exc.errors()[0]['msg']}") from None
+            parent = shelves_api.create_shelf(c.request, c.auth, c.db, body)
+            created.append(_path(parent))
+        if not created:
+            raise ToolError(f"duplicate_name: '{_path(parent)}' already exists (#{parent['id']})")
+        return {"shelf": _shelf_ref(parent), "created": created}
+
+
+def move_shelf(
+    ctx: Context,
+    shelf: ShelfArg,
+    to: Annotated[
+        str,
+        Field(
+            max_length=1200,
+            description='The shelf to move it into (id or path); "" or "/" for the top level.',
+        ),
+    ],
+) -> dict:
+    """Move a shelf, with its sub-shelves and books, into another shelf or to the top level.
+    Needs the right to manage the shelf and to make shelves where it goes; never into itself
+    or below itself, and at most 8 deep. Scope: organize."""
+    from lectern.routes.api import shelves as shelves_api
+
+    with _call(ctx, "move_shelf", "organize") as c:
+        s = _shelf(c, shelf)
+        dest = None if not _segments(to) else _shelf(c, to)
+        body = shelves_api.PatchIn(parent_id=dest["id"] if dest else None)
+        moved = shelves_api.update_shelf(c.request, c.auth, c.db, s["id"], body)
+        return {"shelf": _shelf_ref(moved), "parent": _shelf_ref(dest) if dest else None}
 
 
 def _device(c: Call, device: str) -> device_queue.Target:
@@ -1003,8 +1108,11 @@ _TOOLS: list[tuple[Any, ToolAnnotations]] = [
     (search_library, READ),
     (get_book, READ),
     (list_recent, READ),
+    (list_shelves, READ),
     (add_to_shelf, WRITE),
     (remove_from_shelf, DESTRUCTIVE),
+    (create_shelf, WRITE),
+    (move_shelf, WRITE),
     (send_to_device, WRITE),
     (list_device_queue, READ),
     (start_alignment, WRITE),

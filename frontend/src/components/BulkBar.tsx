@@ -2,6 +2,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { post } from "../lib/api";
 import { bulkSummary } from "../lib/editor";
 import { MOD } from "../lib/hooks";
+import { pathLabel } from "../lib/shelves";
 import { useStore } from "../lib/store";
 import type { BulkResult, Shelf } from "../lib/types";
 import { Close, Send, Trash } from "./Icons";
@@ -13,7 +14,7 @@ const uuid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.ra
 
 /** What a bulk request targets: explicit ids, or the server-resolved view minus exclusions
  * (Cmd/Ctrl+A over items that may not be loaded; lectern.routes.api.selection). */
-export type BulkTarget = { work_ids: number[] } | { selection: { filter: { q: string; status: string; shelf: number | null }; exclude_ids: number[]; view_token: string; expected_count: number } };
+export type BulkTarget = { work_ids: number[] } | { selection: { filter: { q: string; status: string; shelf: number | null; unshelved?: boolean }; exclude_ids: number[]; view_token: string; expected_count: number } };
 
 /** How many books one request may target, per action (the server's caps, listed or selected). */
 export const LIMITS = { edit: 500, send: 200, align: 50 } as const;
@@ -40,16 +41,18 @@ export function SelectionBar({ open = true, count, all, total, onSelectAll, onCl
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** The Library's selection bar: one change to many books, with Undo. */
-export function BulkBar({ open, ready, count, all, total, target, titles, shelves, onSelectAll, onClear, onDone, canEdit = true, canAlign = false, onSend }: { open: boolean; ready: boolean; count: number; all: boolean; total: number; target: () => BulkTarget | null; titles: string[]; shelves: Shelf[]; onSelectAll: () => void; onClear: () => void; onDone: () => Promise<void>; canEdit?: boolean; canAlign?: boolean; onSend?: () => void }) {
+/** The Library's selection bar: one change to many books, with Undo. `count` is everything
+ * selected (shelves too); `books` the books among it, which every book action applies to. */
+export function BulkBar({ open, ready, count, books, all, total, target, titles, shelves, onSelectAll, onClear, onDone, canEdit = true, canAlign = false, onSend, onMove }: { open: boolean; ready: boolean; count: number; books?: number; all: boolean; total: number; target: () => BulkTarget | null; titles: string[]; shelves: Shelf[]; onSelectAll: () => void; onClear: () => void; onDone: () => Promise<void>; canEdit?: boolean; canAlign?: boolean; onSend?: () => void; onMove?: () => void }) {
   const { toast } = useStore();
   const [dialog, setDialog] = useState<Action | null>(null);
   const [busy, setBusy] = useState(false);
-  const n = count;
-  /** Disabled: nothing selected, a request running, the view still being counted, or over
-   * the server's cap for that action. */
-  const off = (a: keyof typeof LIMITS) => !n || busy || !ready || n > LIMITS[a];
-  const over = (a: keyof typeof LIMITS) => (n > LIMITS[a] ? `Select at most ${LIMITS[a]} books for this` : undefined);
+  const n = books ?? count;
+  const mixed = n !== count;
+  /** Disabled: no books selected (or shelves too), a request running, the view still being
+   * counted, or over the server's cap for that action. */
+  const off = (a: keyof typeof LIMITS) => !n || mixed || busy || !ready || n > LIMITS[a];
+  const over = (a: keyof typeof LIMITS) => (mixed ? "Select only books for this" : n > LIMITS[a] ? `Select at most ${LIMITS[a]} books for this` : undefined);
 
   const run = async (body: Record<string, unknown>, verb: string) => {
     setBusy(true);
@@ -114,7 +117,8 @@ export function BulkBar({ open, ready, count, all, total, target, titles, shelve
 
   return (
     <>
-      <SelectionBar open={open} count={n} all={all} total={total} onSelectAll={onSelectAll} onClear={onClear} label={`${n} selected`}>
+      <SelectionBar open={open} count={count} all={all} total={total} onSelectAll={onSelectAll} onClear={onClear} label={`${count} selected`}>
+        {onMove && <button className="btn sm" disabled={!count || busy || !ready || n > LIMITS.edit} title={n > LIMITS.edit ? over("edit") : "Move to a shelf, or add books to one"} onClick={onMove}>Move to…</button>}
         {onSend && <button className="btn sm" disabled={off("send")} title={over("send")} onClick={onSend}><Send /> Send</button>}
         {canEdit && (
           <>
@@ -191,7 +195,7 @@ function BulkForm({ action, shelves, busy, titles, count, onSubmit }: { action: 
       <div className="chips" role="group" aria-label="Shelves">
         {shelves.map((s) => (
           <button key={s.id} type="button" className="chip subtle" aria-pressed={shelfIds.includes(s.id)} onClick={() => setShelfIds((x) => (x.includes(s.id) ? x.filter((y) => y !== s.id) : [...x, s.id]))}>
-            {s.name}
+            {pathLabel(s)}
           </button>
         ))}
       </div>

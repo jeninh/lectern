@@ -10,7 +10,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from lectern import instance
-from lectern.access import can_edit_library, visible_works
+from lectern.access import can_edit_library, shelf_permission, visible_shelf_ids, visible_works
 from lectern.models import (
     UPLOAD_CHUNK_MAX_BYTES,
     AudioTrack,
@@ -21,6 +21,7 @@ from lectern.models import (
     ReadingProgress,
     Role,
     Sentence,
+    Shelf,
     ShelfItem,
     SyncKey,
     User,
@@ -196,10 +197,23 @@ def library(
     q: str = Query(default="", max_length=200),
     sort: str = Query(default="title", pattern="^(title|author|added)$"),
     shelf: int | None = None,
+    unshelved: bool = False,
 ) -> dict:
-    stmt = select(Work).options(selectinload(Work.files)).where(visible_works(auth.user))
+    """Works this person sees, each with ``shelf_ids``: the visible shelves it is directly
+    on (``[]``: at the Library's root). ``shelf`` narrows to one shelf's direct works (a
+    hidden shelf is 404), ``unshelved`` to the root."""
+    user = auth.user
+    stmt = select(Work).options(selectinload(Work.files)).where(visible_works(user))
     if shelf is not None:
+        found = db.get(Shelf, shelf)
+        if found is None or shelf_permission(db, user, found) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
         stmt = stmt.where(Work.id.in_(select(ShelfItem.work_id).where(ShelfItem.shelf_id == shelf)))
+    on_visible = select(ShelfItem.work_id, ShelfItem.shelf_id).where(
+        ShelfItem.shelf_id.in_(visible_shelf_ids(user))
+    )
+    if unshelved:
+        stmt = stmt.where(Work.id.not_in(on_visible.with_only_columns(ShelfItem.work_id)))
     if q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Work.title.ilike(like), Work.author.ilike(like)))
@@ -212,11 +226,15 @@ def library(
     progress = _progress_by_doc(db, auth.user.id)
     audio = _audio_summary(db, [w.id for w in works])
     positions = _positions(db, auth.user.id, audio)
+    shelf_ids: dict[int, list[int]] = {}
+    for wid, sid in db.execute(on_visible.order_by(ShelfItem.shelf_id)).all():
+        shelf_ids.setdefault(wid, []).append(sid)
     return {
         "works": [
             _attach_progress(
                 work_json(w, audio=audio.get(w.id), position=positions.get(w.id)), progress
             )
+            | {"shelf_ids": shelf_ids.get(w.id, [])}
             for w in works
         ],
         "total": len(works),

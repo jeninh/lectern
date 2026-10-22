@@ -2,12 +2,12 @@ import { defineConfig, devices } from "@playwright/test";
 
 // Two end-to-end suites, each against its own freshly seeded server serving the built app
 // (`npm run build` first; `npm run e2e` runs both):
-// - desktop: multi-select in the Library, Trash, and Review before filing (e2e/seed.py via
+// - desktop: the Library's folders, multi-select in the Library, Trash, and Review before filing (e2e/seed.py via
 //   e2e/serve.sh, :8090; helpers in e2e/desktop-helpers.ts);
 // - phones: the installed, offline app (docs/offline.md#tests), iPhone on WebKit and Android on
 //   Chromium (e2e/serve.py, :8765; helpers in e2e/helpers.ts).
 const PORT = Number(process.env.E2E_PORT ?? 8765);
-const DESKTOP = ["library", "platform", "review", "trash"].map((n) => `${n}.spec.ts`);
+const DESKTOP = ["folders", "library", "platform", "review", "trash"].map((n) => `${n}.spec.ts`);
 const PHONES = ["app", "offline", "sync"].map((n) => `${n}.spec.ts`);
 
 export default defineConfig({

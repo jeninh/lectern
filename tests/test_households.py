@@ -231,7 +231,10 @@ def test_shelves_grants_and_reader_visibility(client, owner, settings):
     assert (
         api_delete(client, f"/api/shelves/{shelf}/grants/{reader['id']}", csrf).status_code == 204
     )
-    assert api_delete(client, f"/api/shelves/{shelf}", csrf).status_code == 204
+    # A shelf with works on it asks what to do with them first.
+    r = api_delete(client, f"/api/shelves/{shelf}", csrf)
+    assert r.status_code == 409 and r.json()["detail"] == "shelf_not_empty"
+    assert api_delete(client, f"/api/shelves/{shelf}?contents=move_up", csrf).status_code == 204
     assert len(client.get("/api/library").json()["works"]) == 3
     login(client, "rex", reader["password"])
     assert client.get("/api/library").json()["works"] == []

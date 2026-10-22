@@ -494,17 +494,40 @@ class Invite(Base):
 
 
 class Shelf(Base):
+    """A folder in the Library. Shelves nest (``parent_id``; ``NULL`` = top level, at most
+    ``lectern.access.MAX_DEPTH`` deep, never a cycle) and a grant on one covers its whole
+    subtree. A work may sit on any number of shelves; on none, it is at the Library's root.
+    Names are unique among one owner's siblings (checked in ``routes.api.shelves``)."""
+
     __tablename__ = "shelves"
-    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_shelf_owner_name"),)
+    __table_args__ = (
+        Index(
+            "uq_shelf_sibling_name",
+            "owner_id",
+            text("coalesce(parent_id, 0)"),
+            "name",
+            unique=True,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # Deleting a shelf deletes its subtree (the API first moves or trashes what was in it).
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("shelves.id", ondelete="CASCADE"), index=True, default=None
+    )
     name: Mapped[str] = mapped_column(String(128))
     # Reserved for smart shelves: a JSON rule evaluated instead of shelf_items. NULL = manual.
     rule: Mapped[dict | None] = mapped_column(JSON, default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
+    parent: Mapped[Shelf | None] = relationship(remote_side="Shelf.id", back_populates="children")
+    # The database deletes a subtree (ON DELETE CASCADE); the ORM never deletes or detaches
+    # children itself: a child moved to the top level (parent None) is not an orphan.
+    children: Mapped[list[Shelf]] = relationship(
+        back_populates="parent", cascade="save-update, merge", passive_deletes="all"
+    )
     items: Mapped[list[ShelfItem]] = relationship(
         back_populates="shelf", cascade="all, delete-orphan", order_by="ShelfItem.position"
     )
