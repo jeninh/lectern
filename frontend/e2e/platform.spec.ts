@@ -1,6 +1,6 @@
 // Platform-correct modifiers and touch selection mode.
 import { expect, test, type Locator } from "@playwright/test";
-import { book, countText, selectedTitles, signIn, titles } from "./helpers";
+import { book, countText, selectedTitles, signIn, titles } from "./desktop-helpers";
 
 test.describe("on a Mac", () => {
   test.beforeEach(async ({ page }) => {

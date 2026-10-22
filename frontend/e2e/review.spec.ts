@@ -1,6 +1,6 @@
 // Multi-select in Review before filing: uploads waiting to be filed.
 import { expect, test } from "@playwright/test";
-import { countText, library, signIn } from "./helpers";
+import { countText, library, signIn } from "./desktop-helpers";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 

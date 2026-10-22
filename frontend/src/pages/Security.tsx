@@ -1,17 +1,18 @@
 import QRCode from "qrcode";
 import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Check, Key, Shield } from "../components/Icons";
+import { Check, Key, Logout, Shield } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
-import { get, post } from "../lib/api";
+import { get, logout, post } from "../lib/api";
+import { clearDevice } from "../lib/offline/store";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { SecurityOverview } from "../lib/types";
-import { passkeysSupported, registerPasskey } from "../lib/webauthn";
+import { passkeysSupported, preparePasskey, registerPasskey } from "../lib/webauthn";
 
 export function SecurityPage() {
-  const { toast, refreshMe, me, setPreference } = useStore();
+  const { toast, refreshMe, me, setPreference, online } = useStore();
   const showTech = !!me?.preferences.show_technical_details;
   const [sec, setSec] = useState<SecurityOverview | null>(null);
   const [dialog, setDialog] = useState<"password" | "totp" | "totp-off" | "passkey" | null>(null);
@@ -30,12 +31,14 @@ export function SecurityPage() {
     await Promise.all([load(), refreshMe()]);
   };
 
-  if (!sec) return <><PageTitle>Security</PageTitle><div className="hint">Loading…</div></>;
+  // Sign out stays reachable while the rest of the page cannot load (offline).
+  if (!sec) return <><PageTitle aside={<button className="btn ghost" onClick={() => logout(clearDevice)}><Logout /> Sign out</button>}>Security</PageTitle><div className="hint">{online ? "Loading…" : "Security settings need a connection."}</div></>;
   const score = (sec.passkeys.length > 0 ? 1 : 0) + (sec.totp_enabled ? 1 : 0);
 
   return (
     <>
-      <PageTitle>Security</PageTitle>
+      {/* Phones have no sidebar, so signing out of this device lives here too. */}
+      <PageTitle aside={<button className="btn ghost" onClick={() => logout(clearDevice)}><Logout /> Sign out</button>}>Security</PageTitle>
       <div className="stack">
         <div className={`alert ${score === 2 ? "ok" : score === 1 ? "warn" : "error"}`} role="status">
           {score === 2
@@ -355,6 +358,11 @@ function PasskeyEnroll({ onDone }: { onDone: (label: string) => void }) {
   const [label, setLabel] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    preparePasskey();
+    const id = window.setInterval(preparePasskey, 4 * 60 * 1000);
+    return () => window.clearInterval(id);
+  }, []);
   return (
     <form
       onSubmit={async (e) => {
@@ -366,6 +374,7 @@ function PasskeyEnroll({ onDone }: { onDone: (label: string) => void }) {
           onDone(label.trim() || "Passkey");
         } catch (ex) {
           setErr((ex as Error).message);
+          preparePasskey();
         } finally {
           setBusy(false);
         }

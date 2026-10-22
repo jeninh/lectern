@@ -1,6 +1,6 @@
 // Multi-select on the Trash page: books and removed files in one selection.
 import { expect, test } from "@playwright/test";
-import { api, countText, idOf, signIn } from "./helpers";
+import { api, countText, idOf, signIn } from "./desktop-helpers";
 
 test("select trashed books with click, Shift, Ctrl+A; restore and delete in bulk", async ({ page }) => {
   page.on("dialog", (d) => d.accept());

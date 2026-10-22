@@ -16,6 +16,10 @@ build/
 !/.env.example
 src/lectern/static/app/
 frontend/node_modules/
+# Playwright output (frontend/e2e); docs/offline.md#tests
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e-screenshots/
 
 # fixture helper output (full LibriVox file is not checked in)
 tests/fixtures/magi/full/

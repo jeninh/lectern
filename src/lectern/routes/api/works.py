@@ -33,7 +33,9 @@ from lectern.models import (
     utcnow,
 )
 from lectern.progress import ProgressError, progress_json, put_progress
+from lectern.progress import get_progress as stored_progress
 from lectern.routes.api.core import _audio_summary, _positions
+from lectern.routes.api.offline import OfflineReplay, conflict
 from lectern.routes.api.serializers import iso, work_json
 from lectern.security import audit
 from lectern.security.deps import Auth, AuthContext, AuthCsrf, DbDep, SettingsDep, require_role
@@ -207,6 +209,8 @@ class ProgressIn(BaseModel):
     char: int | None = Field(default=None, ge=0)
     # Web reader only: its own precise locator (an EPUB CFI), kept as ``raw``.
     raw: str | None = Field(default=None, max_length=1024)
+    # A position saved while offline, sent later from the device's queue (docs/offline.md).
+    offline: OfflineReplay | None = None
 
     @model_validator(mode="after")
     def _one(self) -> ProgressIn:
@@ -225,6 +229,11 @@ def set_progress(auth: AuthCsrf, db: DbDep, work_id: int, body: ProgressIn) -> d
     _visible_work(db, auth.user, work_id)
     if body.source == "koreader":
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "koreader_source_reserved")
+    if body.offline is not None:
+        row = stored_progress(db, auth.user.id, work_id)
+        wins, recorded = body.offline.judge(row.received_at if row else None)
+        if not wins:
+            raise conflict(progress_json(db, auth.user.id, work_id), recorded)
     try:
         put_progress(
             db,

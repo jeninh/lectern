@@ -20,6 +20,7 @@ from lectern.access import can_see_work
 from lectern.ingest import formats
 from lectern.ingest.comic import ComicCache, read_page
 from lectern.models import BookFile, ReadingProgress, Work
+from lectern.routes.api.offline import OfflineReplay, conflict
 from lectern.routes.api.serializers import iso
 from lectern.security import downloads
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
@@ -133,6 +134,8 @@ class PageProgressIn(BaseModel):
     page: int = Field(ge=1, le=100_000)
     pages: int = Field(ge=1, le=100_000)
     device: str = Field(default="", max_length=128)
+    # A page saved while offline, sent later from the device's queue (docs/offline.md).
+    offline: OfflineReplay | None = None
 
 
 @router.put("/files/{file_id}/progress")
@@ -147,6 +150,10 @@ def put_page(auth: AuthCsrf, db: DbDep, settings: SettingsDep, file_id: int, bod
             ReadingProgress.user_id == auth.user.id, ReadingProgress.document == book.partial_md5
         )
     )
+    if body.offline is not None:
+        wins, recorded = body.offline.judge(row.updated_at if row else None)
+        if not wins:
+            raise conflict(_progress(db, auth.user.id, book), recorded)
     now = int(time.time())
     if row is None:
         row = ReadingProgress(user_id=auth.user.id, document=book.partial_md5, timestamp=now)

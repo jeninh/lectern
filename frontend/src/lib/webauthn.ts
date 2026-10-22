@@ -14,8 +14,23 @@ export function passkeysSupported(): boolean {
   return typeof window !== "undefined" && !!window.PublicKeyCredential;
 }
 
+// Safari (and the home-screen app on iPhone) shows the passkey sheet only when
+// navigator.credentials.create runs inside the tap; awaiting the options request first can use
+// up that tap. So the options are fetched when the form opens and reused if still fresh
+// (the server keeps a challenge for 5 minutes).
+let prepared: { at: number; publicKey: Promise<string> } | null = null;
+const FRESH_MS = 4 * 60 * 1000;
+
+export function preparePasskey(): void {
+  const publicKey = post<{ publicKey: string }>("/api/security/passkeys/options").then((r) => r.publicKey);
+  publicKey.catch(() => (prepared = null));
+  prepared = { at: Date.now(), publicKey };
+}
+
 export async function registerPasskey(label: string): Promise<void> {
-  const { publicKey } = await post<{ publicKey: string }>("/api/security/passkeys/options");
+  const fresh = prepared && Date.now() - prepared.at < FRESH_MS ? prepared : null;
+  prepared = null; // single-use challenge
+  const publicKey = await (fresh?.publicKey ?? post<{ publicKey: string }>("/api/security/passkeys/options").then((r) => r.publicKey));
   const pk = JSON.parse(publicKey);
   pk.challenge = b64uToBuf(pk.challenge);
   pk.user.id = b64uToBuf(pk.user.id);

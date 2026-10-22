@@ -9,7 +9,9 @@ import { usePlayer } from "../lib/player";
 import { CommandPalette } from "./CommandPalette";
 import { NotificationBell, UploadTray } from "./Notifications";
 import { MiniPlayer } from "./Player";
-import { Devices, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
+import { Devices, Download, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
+import { clearDevice } from "../lib/offline/store";
+import { ConflictPrompt, OfflineBanner, OfflineStatus, UpdateReady } from "./Offline";
 import { Sheet } from "./Sheet";
 import { ReviewSheet } from "./ReviewSheet";
 import { WorkEditor } from "./WorkEditor";
@@ -27,6 +29,7 @@ const READ: NavEntry[] = [
   { to: "/app", label: "Home", icon: <Home />, keys: "g h", end: true },
   { to: "/app/library", label: "Library", icon: <Library />, keys: "g l" },
   { to: "/app/listening", label: "Listening", icon: <Headphones />, keys: "g p" },
+  { to: "/app/downloads", label: "Downloads", icon: <Download />, keys: "g o" },
   { to: "/app/highlights", label: "Highlights", icon: <Highlighter />, soon: true },
 ];
 const MANAGE: NavEntry[] = [
@@ -115,6 +118,7 @@ export function Shell({ children }: { children: ReactNode }) {
     { keys: "g h", handler: () => nav("/app") },
     { keys: "g l", handler: () => nav("/app/library") },
     { keys: "g p", handler: () => nav("/app/listening") },
+    { keys: "g o", handler: () => nav("/app/downloads") },
     { keys: "g d", handler: () => nav("/app/devices") },
     { keys: "g s", handler: () => nav("/app/security") },
     { keys: "g a", handler: () => nav("/app/activity") },
@@ -174,7 +178,7 @@ export function Shell({ children }: { children: ReactNode }) {
                 <strong>{name}</strong>
                 <span>@{me.user.username} · {me.user.role}</span>
               </div>
-              <button className="icon-btn ghost sm" onClick={logout} aria-label="Sign out" title="Sign out">
+              <button className="icon-btn ghost sm" onClick={() => logout(clearDevice)} aria-label="Sign out" title="Sign out">
                 <Logout />
               </button>
             </div>
@@ -185,11 +189,14 @@ export function Shell({ children }: { children: ReactNode }) {
       <main className="main" id="main" tabIndex={-1}>
         <header className="topbar">
           <div className="title-slot" ref={setSlot} />
+          <OfflineStatus />
           <NotificationBell />
           <button className="icon-btn mobile-only" onClick={() => setPaletteOpen(true)} aria-label="Search books, pages, and actions">
             <Search />
           </button>
         </header>
+        <OfflineBanner />
+        <UpdateReady />
         <TitleSlot.Provider value={slot}>{children}</TitleSlot.Provider>
       </main>
 
@@ -208,7 +215,7 @@ export function Shell({ children }: { children: ReactNode }) {
       )}
 
       <nav className="bottom-nav" aria-label="Primary">
-        {[READ[0], READ[1], READ[2], MANAGE[0], MANAGE[1]].map((n) => (
+        {[READ[0], READ[1], READ[2], READ[3], MANAGE[0]].map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end}>
             {n.icon}
             <span>{n.label}</span>
@@ -217,6 +224,7 @@ export function Shell({ children }: { children: ReactNode }) {
       </nav>
 
       <CommandPalette />
+      <ConflictPrompt />
       <Sheet open={helpOpen} onClose={() => setHelpOpen(false)} title="Keyboard shortcuts" variant="dialog" labelledBy="help-title">
         <dl className="shortcut-list">
           <dt><kbd>{MOD}</kbd><kbd>K</kbd></dt><dd>Search books, authors, devices, settings, and actions</dd>
@@ -226,6 +234,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <dt><kbd>G</kbd> then <kbd>H</kbd></dt><dd>Home</dd>
           <dt><kbd>G</kbd> then <kbd>L</kbd></dt><dd>Library</dd>
           <dt><kbd>G</kbd> then <kbd>P</kbd></dt><dd>Listening (player)</dd>
+          <dt><kbd>G</kbd> then <kbd>O</kbd></dt><dd>Downloads (offline books)</dd>
           <dt><kbd>Space</kbd></dt><dd>Play or pause the audiobook</dd>
           <dt><kbd>G</kbd> then <kbd>D</kbd></dt><dd>Devices</dd>
           <dt><kbd>G</kbd> then <kbd>S</kbd></dt><dd>Security</dd>

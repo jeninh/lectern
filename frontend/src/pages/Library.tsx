@@ -5,6 +5,7 @@ import { EmptyState } from "../components/EmptyState";
 import { NeedsEpub, ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
+import { DownloadButton } from "../components/Offline";
 import { OverflowMenu } from "../components/Menu";
 import { BulkBar, type BulkTarget } from "../components/BulkBar";
 import { del, get, patch, post, put } from "../lib/api";
@@ -506,6 +507,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
                 <Pencil /> Edit
               </button>
             )}
+            {(ebook || work.audio) && <DownloadButton work={work} />}
             {ebook && <button className="btn ghost" onClick={() => setSending(true)}><Send /> Send to device</button>}
           </div>
           <SendToDevice open={sending} workIds={[work.id]} title={`Send “${work.title}” to a device`} onClose={() => setSending(false)} />

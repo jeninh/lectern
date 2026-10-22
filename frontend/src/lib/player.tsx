@@ -5,7 +5,9 @@
 // seconds and maps to (track, seconds into the file) only when touching the element.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { get, post, put } from "./api";
+import { get, post } from "./api";
+import { getBook, orOffline } from "./offline/store";
+import { savePosition } from "./offline/sync";
 import { pickHandoff } from "./handoff";
 import { useLocalStorage } from "./hooks";
 import { useStore } from "./store";
@@ -101,14 +103,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [sleep, setSleepState] = useState<Sleep>(null);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [usingLow, setUsingLow] = useState(false);
-  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>() });
+  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false });
 
   const duration = useMemo(() => tracks.reduce((s, tr) => s + tr.duration_s, 0), [tracks]);
   const chapters = useMemo(() => chaptersOf(tracks), [tracks]);
   const chapter = useMemo(() => [...chapters].reverse().find((c) => c.start <= t + 0.25) ?? chapters[0] ?? null, [chapters, t]);
 
+  // A downloaded audiobook always plays the copy on this device (its stream_url points there,
+  // and the service worker answers it), whatever the data-saver setting.
   const srcFor = useCallback(
-    (tr: Track) => (dataSaver && tr.variants.low ? tr.variants.low.stream_url : tr.stream_url),
+    (tr: Track) => (dataSaver && tr.variants.low && !state.current.local ? tr.variants.low.stream_url : tr.stream_url),
     [dataSaver],
   );
 
@@ -121,8 +125,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const gt = at ?? (tr ? tr.offset_s + el.currentTime : 0);
       state.current.lastSave = Date.now();
       try {
-        const r = await put<WorkProgressResponse>(`/api/works/${w.id}/progress`, { source: "audio", device: deviceName, audio_s: Math.round(gt * 100) / 100 }, keepalive);
-        writeMark(w.id, { t: gt, seenAt: r.received_at });
+        const r = await savePosition<WorkProgressResponse>({ kind: "work", id: w.id, workId: w.id, title: w.title }, { source: "audio", device: deviceName, audio_s: Math.round(gt * 100) / 100 }, keepalive);
+        writeMark(w.id, { t: gt, seenAt: r?.received_at ?? readMark(w.id)?.seenAt ?? null });
       } catch {
         writeMark(w.id, { t: gt, seenAt: readMark(w.id)?.seenAt ?? null });
       }
@@ -171,11 +175,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (state.current.work && state.current.work.id !== w.id) await save();
       setLoading(true);
       try {
+        const offline = await getBook(w.id);
+        const local = offline?.tracks ?? null;
         const [tr, prog] = await Promise.all([
-          get<TracksResponse>(`/api/works/${w.id}/tracks`),
-          get<WorkProgressResponse>(`/api/works/${w.id}/progress`),
+          local ?? get<TracksResponse>(`/api/works/${w.id}/tracks`),
+          orOffline(() => get<WorkProgressResponse>(`/api/works/${w.id}/progress`), async () => offline?.progress),
         ]);
         if (!tr.tracks.length) throw new Error("This book has no audio yet.");
+        state.current.local = !!local;
         state.current.work = w;
         state.current.tracks = tr.tracks;
         setWork(w);
@@ -238,7 +245,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const setDataSaver = useCallback(async (v: boolean) => {
     const w = state.current.work;
-    if (v && w) {
+    if (v && w && !state.current.local) {
       // A data-saver copy may have been made since the tracks were loaded.
       try {
         const tr = await get<TracksResponse>(`/api/works/${w.id}/tracks`);
@@ -413,6 +420,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       /* invalid state while loading */
     }
   }, [work, duration, t, playing, rate]);
+
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ kind: string; id: number; server: { audio_s?: number | null } }>).detail;
+      if (d.kind === "work" && d.id === state.current.work?.id && d.server.audio_s != null) seek(d.server.audio_s);
+    };
+    window.addEventListener("lectern:position", on);
+    return () => window.removeEventListener("lectern:position", on);
+  }, [seek]);
 
   const acceptHandoff = useCallback(() => {
     if (!handoff || handoff.audio_s == null || !work) return;
