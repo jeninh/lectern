@@ -235,7 +235,7 @@ With `align`, also set `LECTERN_ALIGN_MODEL=base` and `LECTERN_ALIGN_THREADS=4` 
 While the Mac worker is online it gets each new alignment job first, for 10 minutes
 ([What it runs](mac-worker.md#what-it-runs)).
 
-**Piper voices** (with `LECTERN_EXTRAS=tts`): put `<voice>.onnx` and `<voice>.onnx.json` in
+**Piper voices** (with `tts` in `LECTERN_EXTRAS`): put `<voice>.onnx` and `<voice>.onnx.json` in
 `data/lectern/tts/piper/`, or download them into the running container:
 
 ```sh
@@ -418,7 +418,8 @@ More in [the Tailscale guide](deploy-tailscale.md#troubleshooting).
 
 ### Alignment stuck on "Aligning…" or "cannot run"
 
-- **No worker.** The default image never aligns on the Pi; jobs wait for a worker. The book's
+- **No worker.** The default image never aligns on the Pi; jobs wait for a worker (or build
+  with `align`, [§5](#5-build-extras-and-piper-voices)). The book's
   Formats card says alignment cannot run when no worker has connected in 5 minutes. Check
   **Admin → Workers**: is the Mac listed, online, and not paused (battery, Wi-Fi rules, menu
   bar **Worker on**)? Jobs start as soon as it connects.

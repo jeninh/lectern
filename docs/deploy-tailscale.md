@@ -386,7 +386,7 @@ alignment jobs wait in a queue until an external worker takes them (an image bui
 a worker**; it connects out to Lectern's HTTPS address with its own worker key, so it needs
 nothing opened anywhere. See [The Mac worker](mac-worker.md), or
 [External workers](alignment.md#external-workers) for Linux and Windows computers. Nothing
-breaks while it is off; jobs just wait.
+breaks while it is off; jobs just wait (or run on the Pi with `align`).
 
 ## Cloning a private repository with a deploy key
 
