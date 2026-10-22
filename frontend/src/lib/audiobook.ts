@@ -9,6 +9,8 @@ export interface Voice {
   name: string;
   language?: string | null;
   category?: string | null;
+  /** Kokoro: a built-in clip of a standard sentence at 1×, playable with no engine running. */
+  sample?: { url: string; text: string; duration_s: number } | null;
 }
 
 export interface Engine {

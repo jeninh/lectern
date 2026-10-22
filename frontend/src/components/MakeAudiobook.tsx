@@ -200,7 +200,9 @@ function MakeAudiobookSheet({ work, state, onClose, onQueued }: { work: Work; st
     setError(null);
     try {
       let url: string;
-      if (isEl) {
+      if (builtIn) {
+        url = builtIn.url;
+      } else if (isEl) {
         url = await elevenLabsPreview({ voice, model: model || undefined, speed, work_id: work.id });
       } else {
         const res = await fetch(`/api/works/${work.id}/audiobook/preview`, {
@@ -212,7 +214,7 @@ function MakeAudiobookSheet({ work, state, onClose, onQueued }: { work: Work; st
         if (!res.ok) throw new Error((await res.json().catch(() => null))?.message ?? "This voice cannot be previewed on the server");
         url = URL.createObjectURL(await res.blob());
       }
-      if (sample) URL.revokeObjectURL(sample);
+      if (sample?.startsWith("blob:")) URL.revokeObjectURL(sample);
       setSample(url);
       window.setTimeout(() => audio.current?.play().catch(() => {}), 0);
     } catch (e) {
@@ -241,7 +243,10 @@ function MakeAudiobookSheet({ work, state, onClose, onQueued }: { work: Work; st
     }
   };
 
-  const canPreview = isEl || (eng.available && eng.runs_on === "server");
+  const onServer = !isEl && eng.available && eng.runs_on === "server";
+  // Kokoro usually runs on the Mac worker: without it here, play the voice's built-in clip.
+  const builtIn = isEl || onServer ? null : voices.find((v) => v.id === voice)?.sample ?? null;
+  const canPreview = isEl || onServer || !!builtIn;
   const canSubmit =
     !busy && voice && chosen.size > 0 &&
     (!isEl || (estimate?.elevenlabs && agree && cap >= estimate.elevenlabs.credits && estimate.elevenlabs.fits));
@@ -322,10 +327,18 @@ function MakeAudiobookSheet({ work, state, onClose, onQueued }: { work: Work; st
         </div>
 
         <div className="row" style={{ gap: 8 }}>
-          <button className="btn sm" onClick={playSample} disabled={busy || !voice || !canPreview} title={canPreview ? undefined : "Kokoro samples play once a narration runs on a worker"}>
+          <button className="btn sm" onClick={playSample} disabled={busy || !voice || !canPreview} title={canPreview ? undefined : "No sample for this voice"}>
             <Play /> Play a sample
           </button>
-          <span className="hint">{isEl ? "A sample uses up to 300 credits." : canPreview ? "Made on this server." : "Samples need the engine on this server."}</span>
+          <span className="hint">
+            {isEl
+              ? "A sample uses up to 300 credits."
+              : onServer
+                ? "Made on this server."
+                : builtIn
+                  ? <>Standard sample at 1×, not this book or your speed: “{builtIn.text}”</>
+                  : "Samples need the engine on this server."}
+          </span>
           {sample && <audio ref={audio} src={sample} controls style={{ height: 32 }} />}
         </div>
 

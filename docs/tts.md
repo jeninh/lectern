@@ -72,6 +72,30 @@ Voices: the Kokoro v1.0 set (`af_heart`, `bm_george`, …); the first letter is 
 (`a` American English, `b` British English, `e` Spanish, `f` French, `h` Hindi, `i` Italian,
 `j` Japanese, `p` Brazilian Portuguese, `z` Mandarin).
 
+### Voice samples
+
+Lectern ships one built-in clip per Kokoro voice in
+`src/lectern/static/voice-samples/kokoro/`: the same sentence for every voice of a language
+("Once upon a time, in a quiet town by the sea, there lived a curious reader." in English,
+its translation otherwise), at speed 1.0, 4.5 to 7.5 seconds each, AAC in M4A at 40 kbps
+(it plays on iOS; Opus does not on older Safari). The 26 clips total about 750 KB;
+`manifest.json` lists each clip's sentence, length, and size. When Kokoro is not installed on
+this server, **Play a sample** plays the chosen voice's clip straight from `/static`, whether or
+not a worker is online, and says it is a standard sample, not the book's text or the chosen
+speed. When Kokoro runs on this server, the sample is made here from the book's text, as for
+Piper.
+
+Regenerate the clips when `KOKORO_VOICES` changes (needs ffmpeg; downloads the weights from
+Hugging Face on first use):
+
+```sh
+uv run --with "kokoro>=0.9" --with "misaki[en,ja,zh]" python scripts/kokoro_samples.py
+```
+
+Licence: Kokoro-82M's weights and voices are Apache-2.0
+([hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)), which allows
+redistributing audio made with them; the attribution is in the clips' `NOTICE` file.
+
 ## ElevenLabs (bring your own key)
 
 **Admin → ElevenLabs** (owner only):
@@ -175,7 +199,7 @@ external worker, so the key never leaves the server.
 
 | Route | Who | |
 | --- | --- | --- |
-| `GET /api/works/{id}/audiobook` | owner, member | `{eligible, reason, chapters[{spine_index, title, sentences, characters, preview}], engines[…], recommended, job, edition, disclosure}`. No outbound request. |
+| `GET /api/works/{id}/audiobook` | owner, member | `{eligible, reason, chapters[{spine_index, title, sentences, characters, preview}], engines[…], recommended, job, edition, disclosure}`. Kokoro voices carry `sample: {url, text, duration_s}`, the built-in clip ([voice samples](#voice-samples)). No outbound request. |
 | `POST /api/works/{id}/audiobook/estimate` | owner, member (ElevenLabs: owner) | `{chapters, sentences, characters, audio_s, eta, elevenlabs: {model, credits_per_character, credits, quota, fits, suggested_cap, cost}}` |
 | `POST /api/works/{id}/audiobook` | owner, member (ElevenLabs: owner) | Body `{engine, voice, speed, model?, voice_settings?, chapters?: [spine_index], codec?, confirm?: {characters, credits, cap_credits, send_text}}` → `202` job |
 | `POST /api/works/{id}/audiobook/retry` | owner, member | `202` job |
