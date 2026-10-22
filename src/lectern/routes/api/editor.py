@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from lectern import covergen, editing, idempotency, instance, lookup, trash
-from lectern.access import can_see_work
+from lectern.access import can_see_work, shelf_perms, visible_path
 from lectern.align import jobs as align_jobs
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS
 from lectern.editing import EditError, Journal, WorkPatch
@@ -110,6 +110,8 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
     tracks = editing.ordered_tracks(db, work.id)
     on = set(db.scalars(select(ShelfItem.shelf_id).where(ShelfItem.work_id == work.id)))
     editable = editing.editable_shelves(db, user)
+    tree, perms = shelf_perms(db, user)
+    paths = {s.id: [x.name for x in visible_path(s, tree, perms)] for s in editable}
     last = db.scalar(
         select(WorkRevision)
         .where(WorkRevision.work_id == work.id)
@@ -172,7 +174,10 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
             }
             for t in tracks
         ],
-        "shelves": [{"id": s.id, "name": s.name, "member": s.id in on} for s in editable],
+        "shelves": [
+            {"id": s.id, "name": s.name, "path": paths[s.id], "member": s.id in on}
+            for s in editable
+        ],
         "alignment": align_jobs.alignment_json(db, alignment),
         "align_models": list(MODELS),
         "align_default_model": settings.align_model or DEFAULT_MODEL,
@@ -607,6 +612,7 @@ class BulkIn(BaseModel):
         "remove_tags",
         "add_to_shelves",
         "remove_from_shelves",
+        "move_to_shelf",
         "trash",
     ]
     authors: list[AuthorIn] | None = Field(default=None, max_length=20)
@@ -616,6 +622,10 @@ class BulkIn(BaseModel):
         default=None, max_length=50
     )
     shelf_ids: list[int] | None = Field(default=None, max_length=100)
+    # move_to_shelf: off ``from_shelf_id`` (null: from the root, nothing to leave) and onto
+    # ``to_shelf_id`` (null: the root, i.e. off every shelf this person can change).
+    from_shelf_id: int | None = None
+    to_shelf_id: int | None = None
 
 
 def _bulk_patch(db, user: User, work: Work, body: BulkIn) -> WorkPatch:
@@ -638,6 +648,23 @@ def _bulk_patch(db, user: User, work: Work, body: BulkIn) -> WorkPatch:
             meta["tags"] + tags
             if body.action == "add_tags"
             else [t for t in meta["tags"] if t.casefold() not in folded]
+        )
+    elif body.action == "move_to_shelf":
+        editable = {s.id for s in editing.editable_shelves(db, user)}
+        if {body.from_shelf_id, body.to_shelf_id} - {None} - editable:
+            raise EditError(403, "shelf_not_editable")
+        on = set(
+            db.scalars(
+                select(ShelfItem.shelf_id).where(
+                    ShelfItem.work_id == work.id, ShelfItem.shelf_id.in_(list(editable))
+                )
+            )
+        )
+        if body.to_shelf_id is None:
+            return WorkPatch(version=work.version, shelves=[])
+        return WorkPatch(
+            version=work.version,
+            shelves=sorted((on - {body.from_shelf_id}) | {body.to_shelf_id}),
         )
     else:
         if not body.shelf_ids:

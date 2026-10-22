@@ -5,9 +5,10 @@ those works may not be loaded or rendered. Bulk endpoints then take a :class:`Se
 (the view's filter, minus the works the user deselected) instead of ``work_ids`` and resolve
 it here, with exactly the filter the Library applies on the client (``frontend/src/pages/
 Library.tsx``: ``fold`` on title, author, and ISBN; reading status from KOReader progress;
-shelf membership).
+direct membership of one shelf, or ``unshelved``: on none of the shelves the person sees,
+the Library's root folder).
 
-- ``GET /api/library/count?q=&status=&shelf=``: how many works the view holds, for
+- ``GET /api/library/count?q=&status=&shelf=&unshelved=``: how many works the view holds, for
   "All N selected", and ``view_token``, a fingerprint of exactly which works they are.
 
 A selection names the view by ``view_token``; if the view resolves to a different set of
@@ -28,9 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from lectern.access import visible_works
+from lectern.access import shelf_permission, visible_shelf_ids, visible_works
 from lectern.models import ReadingProgress, Shelf, ShelfItem, User, Work
-from lectern.routes.api.shelves import _permission as shelf_permission
 from lectern.security.deps import Auth, DbDep
 
 router = APIRouter()
@@ -46,6 +46,8 @@ class ViewFilter(BaseModel):
     q: str = Field(default="", max_length=200)
     status: Status = "all"
     shelf: int | None = None
+    # The Library's root folder: works on none of the shelves this person sees.
+    unshelved: bool = False
 
 
 class Selection(BaseModel):
@@ -87,6 +89,11 @@ def _latest_percentage(work: Work, progress: dict[str, ReadingProgress]) -> floa
     return best.percentage if best is not None else None
 
 
+def shelved_work_ids(user: User):
+    """Works on at least one shelf ``user`` may see (the rest are at the Library's root)."""
+    return select(ShelfItem.work_id).where(ShelfItem.shelf_id.in_(visible_shelf_ids(user)))
+
+
 def view_token(ids: list[int]) -> str:
     """Fingerprint of which works a view holds (order does not matter: sorting a view does
     not change what \"all\" means)."""
@@ -105,6 +112,8 @@ def view_work_ids(db: Session, user: User, f: ViewFilter) -> list[int]:
         stmt = stmt.where(
             Work.id.in_(select(ShelfItem.work_id).where(ShelfItem.shelf_id == f.shelf))
         )
+    if f.unshelved:
+        stmt = stmt.where(Work.id.not_in(shelved_work_ids(user)))
     if f.status != "all":
         stmt = stmt.options(selectinload(Work.files))
     works = db.scalars(stmt.order_by(Work.sort_title, Work.id)).all()
@@ -163,6 +172,8 @@ def library_count(
     q: str = Query(default="", max_length=200),
     status_: Status = Query(default="all", alias="status"),
     shelf: int | None = None,
+    unshelved: bool = False,
 ) -> dict:
-    ids = view_work_ids(db, auth.user, ViewFilter(q=q, status=status_, shelf=shelf))
+    f = ViewFilter(q=q, status=status_, shelf=shelf, unshelved=unshelved)
+    ids = view_work_ids(db, auth.user, f)
     return {"total": len(ids), "view_token": view_token(ids)}

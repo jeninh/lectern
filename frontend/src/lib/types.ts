@@ -133,6 +133,8 @@ export interface Work {
   progress_file_id?: number;
   /** /api/continue: which record is newer, KOReader's or the canonical one. */
   latest?: "koreader" | "canonical";
+  /** /api/library: the visible shelves it is directly on; [] = the Library's root. */
+  shelf_ids?: number[];
 }
 
 export interface SyncKey {
@@ -398,10 +400,17 @@ export interface ReadAloudStatus {
 export interface Shelf {
   id: number;
   name: string;
+  /** The parent shelf, or null at this person's top level (also when the parent is hidden from them). */
+  parent_id: number | null;
+  /** Names from this person's top level down to this shelf. */
+  path: string[];
   owner: string | null;
   owner_id: number;
   permission: "owner" | "edit" | "view";
+  /** Books directly on it that this person sees. */
   work_count: number;
+  /** Sub-shelves directly in it. */
+  shelf_count: number;
   grant_count: number;
   smart: boolean;
 }
@@ -411,6 +420,8 @@ export interface ShelfGrant {
   permission: "view" | "edit";
   granted_by: string | null;
   created_at: string | null;
+  /** Inherited grants: the shelf above this one that holds it. */
+  shelf?: { id: number; name: string };
 }
 
 export interface Invite {
@@ -602,7 +613,7 @@ export interface EditorState {
   };
   files: EditorFile[];
   tracks: EditorTrack[];
-  shelves: { id: number; name: string; member: boolean }[];
+  shelves: { id: number; name: string; path?: string[]; member: boolean }[];
   alignment: AlignmentInfo | null;
   align_models: string[];
   align_default_model: string;

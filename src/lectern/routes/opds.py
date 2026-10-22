@@ -80,11 +80,13 @@ def _entry(work: Work) -> str:
     )
 
 
-def _nav_entry(title: str, urn: str, href: str, content: str, rel: str = "subsection") -> str:
+def _nav_entry(
+    title: str, urn: str, href: str, content: str, rel: str = "subsection", kind: str = ACQ
+) -> str:
     return (
         f"<entry><title>{_text(title)}</title><id>urn:lectern:{urn}</id>"
         f'<updated>{_iso(None)}</updated><content type="text">{_text(content)}</content>'
-        f'<link rel="{rel}" href="{href}" type="{ACQ}"/></entry>'
+        f'<link rel="{rel}" href="{href}" type="{kind}"/></entry>'
     )
 
 
@@ -133,6 +135,9 @@ def root(request: Request, user: OpdsUser, db: DbDep) -> Response:
             "/opds/queue",
             f"{_books(n_queue)} sent to {pw.label}" if n_queue else f"Nothing sent to {pw.label}",
         )
+        + _nav_entry(
+            "Shelves", "shelves", "/opds/shelves", "Browse by shelf and sub-shelf", kind=NAV
+        )
         + _nav_entry("All books", "all", "/opds/all", "Every work in the library")
         + _nav_entry(
             "Recently added",
@@ -154,12 +159,13 @@ def _acquisition(
     total: int,
     extra_q: str = "",
     feed_id: str | None = None,
+    up: str = "/opds",
 ) -> Response:
     pages = max(1, -(-total // PAGE_SIZE))
     links = [
         f'<link rel="self" href="{_text(self_href)}" type="{ACQ}"/>',
         f'<link rel="start" href="/opds" type="{NAV}"/>',
-        f'<link rel="up" href="/opds" type="{NAV}"/>',
+        f'<link rel="up" href="{_text(up)}" type="{NAV}"/>',
         f'<link rel="search" href="/opds/search.xml" type="{OPENSEARCH}"/>',
     ]
     base = self_href.split("?")[0]
@@ -258,6 +264,133 @@ def recent(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
         .limit(PAGE_SIZE)
     ).all()
     return _acquisition("Recently added", f"/opds/recent?page={page}", works, page, total)
+
+
+# --- shelves: nested navigation ---------------------------------------------------------------
+#
+# /opds/shelves lists this person's top-level shelves (those whose parent they cannot see
+# included, without the hidden parent). A shelf with sub-shelves opens as a navigation feed:
+# its own books first (one entry), then each sub-shelf. A shelf without sub-shelves opens
+# straight onto its books, so a leaf is one tap on e-ink. Hidden shelves are 404.
+
+
+def _nav_feed(feed_id: str, title: str, self_href: str, up: str, entries: str) -> Response:
+    body = (
+        '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">'
+        f"<id>urn:lectern:{feed_id}</id><title>{_text(title)}</title>"
+        f"<updated>{_iso(None)}</updated><author><name>Lectern</name></author>"
+        f'<link rel="self" href="{self_href}" type="{NAV}"/>'
+        f'<link rel="start" href="/opds" type="{NAV}"/>'
+        f'<link rel="up" href="{up}" type="{NAV}"/>'
+        f'<link rel="search" href="/opds/search.xml" type="{OPENSEARCH}"/>' + entries + "</feed>"
+    )
+    return _xml(body, NAV)
+
+
+def _shelf_entry(tree, shelf) -> str:
+    n = tree.counts().get(shelf.id, 0)
+    kids = len(tree.children.get(shelf.id, []))
+    parts = [_books(n)] + ([f"{kids} shelf" if kids == 1 else f"{kids} shelves"] if kids else [])
+    if kids:
+        return _nav_entry(
+            shelf.name, f"shelf:{shelf.id}", f"/opds/shelves/{shelf.id}", " · ".join(parts),
+            kind=NAV,
+        )  # fmt: skip
+    return _nav_entry(
+        shelf.name, f"shelf:{shelf.id}", f"/opds/shelves/{shelf.id}/books", " · ".join(parts)
+    )
+
+
+def _shelf_up(tree, shelf) -> str:
+    from lectern.access import visible_parent
+
+    parent = visible_parent(shelf, tree.perms)
+    return f"/opds/shelves/{parent}" if parent is not None else "/opds/shelves"
+
+
+@router.get("/shelves", include_in_schema=False)
+def shelves_root(user: OpdsUser, db: DbDep) -> Response:
+    from lectern.access import sees_whole_library
+    from lectern.routes.api.selection import shelved_work_ids
+    from lectern.routes.api.shelves import Tree
+
+    tree = Tree(db, user)
+    entries = "".join(_shelf_entry(tree, s) for s in tree.children.get(None, []))
+    if sees_whole_library(user):
+        loose = db.scalar(
+            select(func.count())
+            .select_from(Work)
+            .where(visible_works(user), Work.id.not_in(shelved_work_ids(user)))
+        )
+        if loose:
+            entries += _nav_entry(
+                "Not on a shelf", "unshelved", "/opds/shelves/none", _books(loose)
+            )
+    return _nav_feed("shelves", "Shelves", "/opds/shelves", "/opds", entries)
+
+
+@router.get("/shelves/none", include_in_schema=False)
+def unshelved_books(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
+    """Works on none of this person's visible shelves (the Library's root folder)."""
+    from lectern.routes.api.selection import shelved_work_ids
+
+    page = max(1, page)
+    ids = list(
+        db.scalars(
+            select(Work.id)
+            .where(visible_works(user), Work.id.not_in(shelved_work_ids(user)))
+            .order_by(Work.sort_title, Work.id)
+        )
+    )
+    return _acquisition(
+        "Not on a shelf", f"/opds/shelves/none?page={page}", _works_page(db, ids, page), page,
+        len(ids), feed_id="urn:lectern:unshelved", up="/opds/shelves",
+    )  # fmt: skip
+
+
+@router.get("/shelves/{shelf_id}", include_in_schema=False)
+def shelf_nav(user: OpdsUser, db: DbDep, shelf_id: int) -> Response:
+    from lectern.routes.api.shelves import Tree
+
+    tree = Tree(db, user)
+    shelf = tree.visible(shelf_id)
+    n = tree.counts().get(shelf.id, 0)
+    entries = ""
+    if n:
+        entries += _nav_entry(
+            f"Books on {shelf.name}", f"shelf:{shelf.id}:books",
+            f"/opds/shelves/{shelf.id}/books", _books(n),
+        )  # fmt: skip
+    entries += "".join(_shelf_entry(tree, s) for s in tree.children.get(shelf.id, []))
+    title = " / ".join(s.name for s in tree.path(shelf))
+    return _nav_feed(
+        f"shelf:{shelf.id}", title, f"/opds/shelves/{shelf.id}", _shelf_up(tree, shelf), entries
+    )
+
+
+@router.get("/shelves/{shelf_id}/books", include_in_schema=False)
+def shelf_books(user: OpdsUser, db: DbDep, shelf_id: int, page: int = 1) -> Response:
+    """The works directly on one shelf, in shelf order."""
+    from lectern.models import ShelfItem
+    from lectern.routes.api.shelves import Tree
+
+    page = max(1, page)
+    tree = Tree(db, user)
+    shelf = tree.visible(shelf_id)
+    ids = list(
+        db.scalars(
+            select(ShelfItem.work_id)
+            .join(Work, Work.id == ShelfItem.work_id)
+            .where(ShelfItem.shelf_id == shelf.id, visible_works(user))
+            .order_by(ShelfItem.position, ShelfItem.added_at)
+        )
+    )
+    # A leaf's books page is where its parent's entry leads, so "up" is the parent.
+    up = f"/opds/shelves/{shelf.id}" if tree.children.get(shelf.id) else _shelf_up(tree, shelf)
+    return _acquisition(
+        " / ".join(s.name for s in tree.path(shelf)), f"/opds/shelves/{shelf.id}/books?page={page}",
+        _works_page(db, ids, page), page, len(ids), feed_id=f"urn:lectern:shelf:{shelf.id}", up=up,
+    )  # fmt: skip
 
 
 @router.get("/search.xml", include_in_schema=False)

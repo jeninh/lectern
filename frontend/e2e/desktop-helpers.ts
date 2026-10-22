@@ -2,7 +2,9 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
 
 export const PASSWORD = "e2e correct horse battery"; // e2e/seed.py
 
-export async function signIn(page: Page, path = "/app/library") {
+/** The flat Everything view of the Library is where the multi-select suites run (the default
+ * Folders view shows only books on no shelf); e2e/folders.spec.ts covers Folders. */
+export async function signIn(page: Page, path = "/app/library?view=everything") {
   // The password form's POST, from the page's own cookie jar (the form itself sits behind
   // "Use password instead").
   const base = test.info().project.use.baseURL!;

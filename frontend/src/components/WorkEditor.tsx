@@ -642,7 +642,7 @@ function PlaybackTab({ state, draft, set, onRefresh }: { state: EditorState; dra
 }
 
 function ShelvesTab({ state, draft, set }: { state: EditorState; draft: Draft; set: SetDraft }) {
-  if (!state.shelves.length) return <p className="hint">No shelves you can change. Create one from Library → Shelves.</p>;
+  if (!state.shelves.length) return <p className="hint">No shelves you can change. Make one with New shelf in the Library.</p>;
   return (
     <fieldset className="field">
       <legend>Shelves this book is on</legend>
@@ -651,7 +651,7 @@ function ShelvesTab({ state, draft, set }: { state: EditorState; draft: Draft; s
           const on = draft.shelves.includes(s.id);
           return (
             <button key={s.id} type="button" className="chip subtle" aria-pressed={on} onClick={() => set("shelves", on ? draft.shelves.filter((x) => x !== s.id) : [...draft.shelves, s.id])}>
-              {on ? "✓ " : "+ "}{s.name}
+              {on ? "✓ " : "+ "}{(s.path ?? [s.name]).join(" / ")}
             </button>
           );
         })}

@@ -217,7 +217,7 @@ test("search results: Shift ranges follow the filtered order", async ({ page }) 
 test("shelves: add the selection to a shelf, then select all on that shelf", async ({ page }) => {
   const a = await api(page);
   const name = `E2E shelf ${Date.now() % 100000}`;
-  await a.post("/api/shelves", { name });
+  const { id } = await a.post("/api/shelves", { name });
   await page.reload();
   await page.getByPlaceholder("Filter by title or author").fill("Book 04");
   await book(page, "Book 040").click();
@@ -227,8 +227,9 @@ test("shelves: add the selection to a shelf, then select all on that shelf", asy
   await page.getByRole("button", { name: "Add to shelves" }).click();
   await expect(page.locator(".toast").filter({ hasText: "Shelved" })).toBeVisible();
   await page.getByPlaceholder("Filter by title or author").fill("");
-  await page.getByRole("group", { name: "Shelves" }).getByRole("button", { name: new RegExp(name) }).click();
-  const g = page.getByRole("grid", { name: `Books on ${name}` });
+  await page.getByRole("tree", { name: "Shelves" }).getByRole("link", { name }).click();
+  await expect(page).toHaveURL(new RegExp(`shelf=${id}`));
+  const g = page.getByRole("grid", { name: `Shelves and books in ${name}` });
   await expect(g.getByRole("gridcell")).toHaveCount(3);
   await book(page, "Book 041").click();
   await press(page, "Control+a");

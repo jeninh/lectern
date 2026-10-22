@@ -4,9 +4,9 @@
   work is in it when it has a KOReader progress record (any of its EPUB files' document hash)
   or a canonical position (web reader, read-along, audio player). Activity time is the newer
   of the two. This is exactly ``GET /api/continue``.
-- **Up next**: works on the person's shelves (their own, then those shared with them, by
-  name; within a shelf in shelf order) that they have not started, i.e. that are in neither
-  source of Continue.
+- **Up next**: works on the person's shelves and the shelves inside them (their own, then
+  those shared with them, by name; within a shelf in shelf order) that they have not
+  started, i.e. that are in neither source of Continue.
 
 Both only ever contain works the person can see (``lectern.access``).
 """
@@ -15,15 +15,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lectern.access import visible_works
+from lectern.access import own_shelf_ids, visible_works
 from lectern.models import (
     BookFile,
     ReadingProgress,
     Shelf,
-    ShelfGrant,
     ShelfItem,
     SyncKey,
     User,
@@ -75,13 +74,12 @@ def up_next_ids(db: Session, user: User, limit: int = UP_NEXT_LIMIT) -> list[int
         .where(ReadingProgress.user_id == user.id)
     )
     started = select(WorkProgress.work_id).where(WorkProgress.user_id == user.id)
-    granted = select(ShelfGrant.shelf_id).where(ShelfGrant.user_id == user.id)
     rows = db.execute(
         select(ShelfItem.work_id)
         .join(Shelf, Shelf.id == ShelfItem.shelf_id)
         .join(Work, Work.id == ShelfItem.work_id)
         .where(
-            or_(Shelf.owner_id == user.id, Shelf.id.in_(granted)),
+            Shelf.id.in_(own_shelf_ids(user)),
             visible_works(user),
             ShelfItem.work_id.not_in(started_ko),
             ShelfItem.work_id.not_in(started),

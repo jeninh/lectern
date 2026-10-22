@@ -7,9 +7,12 @@ import { NeedsEpub, ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
 import { DownloadButton } from "../components/Offline";
-import { OverflowMenu } from "../components/Menu";
+import { OverflowMenu, type MenuAction } from "../components/Menu";
 import { BulkBar, type BulkTarget } from "../components/BulkBar";
-import { del, get, patch, post, put } from "../lib/api";
+import { Breadcrumbs, canNestIn, DeleteShelfDialog, dragProps, FolderCell, folderSummary, FolderPicker, ShelfNameDialog } from "../components/Folders";
+import { del, get, post, put } from "../lib/api";
+import type { Items } from "../lib/folders";
+import { childrenOf, pathLabel, shelfKey, splitKeys, workKey, worksIn, type FolderId } from "../lib/shelves";
 import { clock, usePlayer } from "../lib/player";
 import type { MatchSuggestion, Shelf, ShelfGrant, User } from "../lib/types";
 import { fold } from "../lib/fuzzy";
@@ -66,7 +69,7 @@ const STATUS_LABEL: Record<Status, string> = { all: "All", reading: "Reading", u
 const SORT_LABEL: Record<Sort, string> = { title: "Title", author: "Author", added: "Newest" };
 
 export function LibraryPage() {
-  const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen } = useStore();
+  const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen, shelves, canCreateShelf } = useStore();
   const [sendingMany, setSendingMany] = useState(false);
   const readyImports = imports.filter((i) => i.status === "ready").length;
   const [params, setParams] = useSearchParams();
@@ -78,19 +81,20 @@ export function LibraryPage() {
   const nav = useNavigate();
   const loc = useLocation();
   const input = useRef<HTMLInputElement>(null);
-  const shelfId = params.get("shelf");
-  const [shelves, setShelves] = useState<Shelf[]>([]);
-  const [canCreateShelf, setCanCreateShelf] = useState(false);
-  const [shelfWorks, setShelfWorks] = useState<Set<number> | null>(null);
+  // Folders (default): the root, or one shelf (?shelf=). Everything (?view=everything): flat.
+  const everything = params.get("view") === "everything";
+  const shelfParam = params.get("shelf");
+  const folder: FolderId = everything || !shelfParam ? null : Number(shelfParam);
+  const current = folder === null ? null : shelves.find((s) => s.id === folder) ?? null;
   const [suggestions, setSuggestions] = useState<MatchSuggestion[]>([]);
   const [manageShelves, setManageShelves] = useState(false);
+  const [naming, setNaming] = useState<{ parent: FolderId; shelf: Shelf | null } | null>(null);
+  const [deleting, setDeleting] = useState<Shelf | null>(null);
+  const [sharing, setSharing] = useState<Shelf | null>(null);
+  const [moving, setMoving] = useState<{ items: Items; title: string } | null>(null);
   const review = params.get("review") === "1";
+  const reader = me?.user.role === "reader";
 
-  const loadShelves = useCallback(async () => {
-    const d = await get<{ shelves: Shelf[]; can_create: boolean }>("/api/shelves");
-    setShelves(d.shelves);
-    setCanCreateShelf(d.can_create);
-  }, []);
   const loadSuggestions = useCallback(async () => {
     if (!canUpload) return;
     setSuggestions((await get<{ suggestions: MatchSuggestion[] }>("/api/suggestions")).suggestions);
@@ -98,28 +102,31 @@ export function LibraryPage() {
 
   useEffect(() => {
     refreshLibrary().catch(() => {});
-    loadShelves().catch(() => {});
-  }, [refreshLibrary, loadShelves]);
+  }, [refreshLibrary]);
   useEffect(() => {
     loadSuggestions().catch(() => {});
   }, [loadSuggestions, works.length]);
-  useEffect(() => {
-    if (!shelfId) return setShelfWorks(null);
-    get<{ works: Work[] }>(`/api/shelves/${shelfId}`)
-      .then((d) => setShelfWorks(new Set(d.works.map((w) => w.id))))
-      .catch(() => setShelfWorks(new Set()));
-  }, [shelfId, shelves]);
 
+  const here = useMemo(() => (everything ? works : worksIn(works, folder)), [works, everything, folder]);
   const counts = useMemo(() => {
-    const c: Record<Status, number> = { all: works.length, reading: 0, unread: 0, finished: 0 };
-    for (const w of works) c[statusOf(w)] += 1;
+    const c: Record<Status, number> = { all: here.length, reading: 0, unread: 0, finished: 0 };
+    for (const w of here) c[statusOf(w)] += 1;
     return c;
+  }, [here]);
+  const libCounts = useMemo(() => {
+    let reading = 0;
+    let finished = 0;
+    for (const w of works) {
+      const st = statusOf(w);
+      if (st === "reading") reading += 1;
+      else if (st === "finished") finished += 1;
+    }
+    return { reading, finished };
   }, [works]);
 
   const filtered = useMemo(() => {
     const needle = fold(q.trim());
-    let list = needle ? works.filter((w) => fold(`${w.title} ${w.author} ${w.isbn ?? ""}`).includes(needle)) : works.slice();
-    if (shelfWorks) list = list.filter((w) => shelfWorks.has(w.id));
+    let list = needle ? here.filter((w) => fold(`${w.title} ${w.author} ${w.isbn ?? ""}`).includes(needle)) : here.slice();
     if (status !== "all") list = list.filter((w) => statusOf(w) === status);
     const by: Record<Sort, (a: Work, b: Work) => number> = {
       title: (a, b) => a.sort_title.localeCompare(b.sort_title),
@@ -127,7 +134,13 @@ export function LibraryPage() {
       added: (a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""),
     };
     return list.sort(by[sort]);
-  }, [works, q, sort, status, shelfWorks]);
+  }, [here, q, sort, status]);
+  // Sub-shelves of this folder come first, as in a file manager; the filter matches names.
+  const folders = useMemo(() => {
+    if (everything || status !== "all") return [];
+    const needle = fold(q.trim());
+    return childrenOf(shelves, folder).filter((s) => !needle || fold(s.name).includes(needle));
+  }, [everything, status, q, shelves, folder]);
 
   const selected = id ? works.find((w) => w.id === Number(id)) ?? null : null;
   const setParam = (k: string, v: string, dflt: string) => {
@@ -136,65 +149,109 @@ export function LibraryPage() {
     else next.delete(k);
     setParams(next, { replace: true });
   };
+  /** Open a folder: a new history entry (Back returns), keeping the sort and layout. */
+  const openFolder = (to: FolderId) => {
+    const next = new URLSearchParams(sort === "title" ? {} : { sort });
+    if (to !== null) next.set("shelf", String(to));
+    nav(`/app/library${next.size ? `?${next}` : ""}`);
+  };
+  const setMode = (all: boolean) => {
+    const next = new URLSearchParams(params);
+    next.delete("shelf");
+    if (all) next.set("view", "everything");
+    else next.delete("view");
+    nav(`/app/library${next.size ? `?${next}` : ""}`);
+  };
   const open = (w: Work) => nav(`/app/library/${w.id}${loc.search}`);
-  const filtering = !!q || status !== "all" || !!shelfId;
-  const reader = me?.user.role === "reader";
+  const filtering = !!q || status !== "all";
 
-  // Multi-select over the filtered view (lib/useSelection). The collection is windowed: only
-  // rows near the viewport are rendered, and Cmd/Ctrl+A selects the whole view on the server.
+  // Multi-select over folders and books together (lib/useSelection), keys "s12" and "w34"
+  // (lib/shelves). The collection is windowed: only rows near the viewport are rendered, and
+  // Cmd/Ctrl+A selects the whole view, its books resolved on the server.
   const [scope, setScope] = useState<HTMLDivElement | null>(null);
   const grid = view === "grid";
-  const keys = useMemo(() => filtered.map((w) => w.id), [filtered]);
+  const keys = useMemo(() => [...folders.map((s) => shelfKey(s.id)), ...filtered.map((w) => workKey(w.id))], [folders, filtered]);
   const { columns, width } = useGridColumns(scope, 136, 20, grid);
   const rowGap = grid ? 26 : 2;
   const win = useWindowRows(scope, { count: keys.length, columns, gap: rowGap, estimate: grid ? 280 : 58, width });
-  const viewFilter = useMemo(() => ({ q: q.trim(), status, shelf: shelfId ? Number(shelfId) : null }), [q, status, shelfId]);
-  // The view as the server counted it when everything was selected: its size and which works
-  // they are. Kept as the user saw it ("All N selected"); the server refuses the action if the
-  // view no longer holds exactly those works.
+  const viewFilter = useMemo(
+    () => ({ q: q.trim(), status, shelf: everything ? null : folder, ...(everything || folder !== null ? {} : { unshelved: true }) }),
+    [q, status, everything, folder],
+  );
+  // The view's books as the server counted them when everything was selected: how many and
+  // which. Kept as the user saw them ("All N selected"); the server refuses the action if the
+  // view no longer holds exactly those books.
   const [viewInfo, setViewInfo] = useState<{ total: number; view_token: string } | null>(null);
-  const viewTotal = viewInfo?.total ?? null;
-  const s = useSelection<number>({
+  const bookTotal = viewInfo?.total ?? filtered.length;
+  const s = useSelection<string>({
     scope,
     keys,
     columns,
-    total: viewTotal ?? keys.length,
-    onOpen: (id) => nav(`/app/library/${id}${loc.search}`),
+    total: folders.length + bookTotal,
+    onOpen: (key) => (key[0] === "s" ? openFolder(Number(key.slice(1))) : nav(`/app/library/${key.slice(1)}${loc.search}`)),
     reveal: win.reveal,
     rendered: [win.start * columns, Math.min(keys.length, win.end * columns)],
     resetOn: JSON.stringify(viewFilter),
     global: true,
     marquee: true,
   });
-  // "All N selected" counts the view on the server: it may hold more than the client loaded.
   useEffect(() => {
     if (!s.sel.all) return setViewInfo(null);
     const p = new URLSearchParams({ q: viewFilter.q, status: viewFilter.status });
     if (viewFilter.shelf !== null) p.set("shelf", String(viewFilter.shelf));
+    if ("unshelved" in viewFilter) p.set("unshelved", "true");
     let stale = false;
     get<{ total: number; view_token: string }>(`/api/library/count?${p}`).then((d) => !stale && setViewInfo(d)).catch((e) => toast((e as Error).message, "error"));
     return () => {
       stale = true;
     };
   }, [s.sel.all, viewFilter, toast]);
-  /** Explicit ids, or for "all" the view the user saw minus what they deselected; null while
-   * that view is still being counted. */
+  const picked = splitKeys(s.sel.all ? [...s.sel.set] : s.selectedKeys());
+  const pickedShelves = s.sel.all ? folders.map((f) => f.id).filter((x) => !picked.shelves.includes(x)) : picked.shelves;
+  const pickedBooks = s.sel.all ? Math.max(0, bookTotal - picked.works.length) : picked.works.length;
+  /** The selected books: explicit ids, or for "all" the view the user saw minus what they
+   * deselected; null while that view is still being counted. */
   const target = (): BulkTarget | null => {
-    if (!s.sel.all) return { work_ids: s.selectedKeys() };
+    if (!s.sel.all) return { work_ids: picked.works };
     if (!viewInfo) return null;
-    return { selection: { filter: viewFilter, exclude_ids: [...s.sel.set], view_token: viewInfo.view_token, expected_count: s.count } };
+    return { selection: { filter: viewFilter, exclude_ids: picked.works, view_token: viewInfo.view_token, expected_count: pickedBooks } };
   };
-  const pickedTitles = useMemo(() => filtered.filter((w) => s.isSelected(w.id)).map((w) => w.title), [filtered, s]);
+  const from: FolderId | "all" = everything ? "all" : folder;
+  const selectionItems = (): Items => ({ shelves: pickedShelves, works: pickedBooks ? target() ?? { work_ids: [] } : null, workCount: pickedBooks, from });
+  const describe = (shelvesN: number, books: number) => [shelvesN && plural(shelvesN, "shelf", "shelves"), books && plural(books, "book")].filter(Boolean).join(" and ");
+  /** Dragging a selected item drags the selection; an unselected one, just itself. */
+  const dragFor = (key: string) =>
+    dragProps(
+      !reader && !s.selecting,
+      () => (s.isSelected(key) ? selectionItems() : key[0] === "s" ? { shelves: [Number(key.slice(1))], works: null, workCount: 0, from } : { shelves: [], works: { work_ids: [Number(key.slice(1))] }, workCount: 1, from }),
+      () => (s.isSelected(key) ? describe(pickedShelves.length, pickedBooks) : key[0] === "s" ? shelves.find((x) => shelfKey(x.id) === key)?.name ?? "" : works.find((w) => workKey(w.id) === key)?.title ?? ""),
+    );
+  const pickedTitles = useMemo(() => filtered.filter((w) => s.isSelected(workKey(w.id))).map((w) => w.title), [filtered, s]);
   const rowsShown = Array.from({ length: win.end - win.start }, (_, i) => win.start + i);
+  const canCreateHere = !reader && (folder === null ? canCreateShelf : !!current && current.permission !== "view" && !current.smart) && canNestIn(shelves, folder);
+  const folderMenu = (sh: Shelf): MenuAction[] => [
+    { label: "Open", onSelect: () => openFolder(sh.id) },
+    ...(sh.permission === "owner"
+      ? [
+          { label: "Rename…", onSelect: () => setNaming({ parent: sh.parent_id, shelf: sh }) },
+          { label: "Move to…", onSelect: () => setMoving({ items: { shelves: [sh.id], works: null, workCount: 0, from: folder }, title: `Move “${sh.name}”` }) },
+          { label: "Sharing…", onSelect: () => setSharing(sh) },
+          { label: "Delete…", danger: true, onSelect: () => setDeleting(sh) },
+        ]
+      : []),
+  ];
+  const coversOf = (sh: Shelf) => worksIn(works, sh.id).slice(0, 3);
+  const unknownFolder = !everything && folder !== null && worksLoaded && !current;
+  const emptyHere = keys.length === 0;
 
   return (
     <>
       <PageTitle
-        sub={worksLoaded ? `${works.length} ${works.length === 1 ? "book" : "books"} · ${counts.reading} reading · ${counts.finished} finished` : undefined}
+        sub={worksLoaded ? `${works.length} ${works.length === 1 ? "book" : "books"} · ${libCounts.reading} reading · ${libCounts.finished} finished` : undefined}
         aside={
           <>
             {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
-            {works.length > 0 && (
+            {keys.length > 0 && (
               <button className="btn ghost" aria-pressed={s.selecting} onClick={() => (s.selecting ? s.exit() : s.setSelecting(true))} title={`Click to select, ${MOD}-click to add, Shift-click for a range, ${MOD} A for all`}>
                 <Select /> {s.selecting ? "Done" : "Select"}
               </button>
@@ -231,16 +288,18 @@ export function LibraryPage() {
           <button className="btn sm" onClick={() => setParam("review", "1", "")}>Review</button>
         </div>
       )}
-      {shelves.length > 0 && (
-        <div className="chips shelf-chips" role="group" aria-label="Shelves">
-          {!reader && <button className="chip subtle" aria-pressed={!shelfId} onClick={() => setParam("shelf", "", "")}>Everything</button>}
-          {shelves.map((sh) => (
-            <button key={sh.id} className="chip subtle" aria-pressed={shelfId === String(sh.id)} onClick={() => setParam("shelf", shelfId === String(sh.id) ? "" : String(sh.id), "")}>
-              <ShelfIcon width={14} height={14} /> {sh.name} <span className="n">{sh.work_count}</span>
-            </button>
-          ))}
+      <div className="folder-bar">
+        {everything ? <h2 className="crumbs-title">Everything <span className="hint">every book, on any shelf or none</span></h2> : <Breadcrumbs folder={folder} />}
+        <span className="spacer" />
+        {!everything && canCreateHere && (
+          <button className="btn sm ghost" onClick={() => setNaming({ parent: folder, shelf: null })}><Folder /> New shelf</button>
+        )}
+        {!everything && current?.permission === "owner" && <OverflowMenu label={`More for ${current.name}`} actions={folderMenu(current).slice(1)} />}
+        <div className="seg seg-text" role="group" aria-label="Library view">
+          <button aria-pressed={!everything} onClick={() => setMode(false)} title="Shelves as folders"><Folder /> Folders</button>
+          <button aria-pressed={everything} onClick={() => setMode(true)} title="Every book, flat"><Book /> Everything</button>
         </div>
-      )}
+      </div>
       <div className="filter-bar" role="search" aria-label="Library">
         <div className="filter-input">
           <SearchIcon aria-hidden="true" />
@@ -250,7 +309,7 @@ export function LibraryPage() {
             ref={input}
             data-page-filter
             className="input"
-            placeholder="Filter by title or author"
+            placeholder={everything || folder === null ? "Filter by title or author" : `Filter ${current?.name ?? "this shelf"}`}
             value={q}
             onChange={(e) => setParam("q", e.target.value, "")}
             onKeyDown={(e) => {
@@ -274,16 +333,16 @@ export function LibraryPage() {
           )}
         </div>
         <div className="chips" role="group" aria-label="Reading status">
-          {(Object.keys(STATUS_LABEL) as Status[]).map((s) => (
-            <button key={s} className="chip" aria-pressed={status === s} onClick={() => setParam("status", s, "all")}>
-              {STATUS_LABEL[s]} <span className="n">{counts[s]}</span>
+          {(Object.keys(STATUS_LABEL) as Status[]).map((st) => (
+            <button key={st} className="chip" aria-pressed={status === st} onClick={() => setParam("status", st, "all")}>
+              {STATUS_LABEL[st]} <span className="n">{counts[st]}</span>
             </button>
           ))}
         </div>
         <div className="chips" role="group" aria-label="Sort by">
-          {(Object.keys(SORT_LABEL) as Sort[]).map((s) => (
-            <button key={s} className="chip subtle" aria-pressed={sort === s} onClick={() => setParam("sort", s, "title")}>
-              {SORT_LABEL[s]}
+          {(Object.keys(SORT_LABEL) as Sort[]).map((so) => (
+            <button key={so} className="chip subtle" aria-pressed={sort === so} onClick={() => setParam("sort", so, "title")}>
+              {SORT_LABEL[so]}
             </button>
           ))}
         </div>
@@ -291,12 +350,16 @@ export function LibraryPage() {
           <button aria-pressed={view === "grid"} onClick={() => setView("grid")} aria-label="Grid" title="Grid"><GridIcon /></button>
           <button aria-pressed={view === "list"} onClick={() => setView("list")} aria-label="List" title="List"><ListIcon /></button>
         </div>
-        <span className="sr-only" aria-live="polite">{filtering ? `${filtered.length} of ${works.length} books shown` : ""}</span>
+        <span className="sr-only" aria-live="polite">{filtering ? `${filtered.length} of ${here.length} books shown` : ""}</span>
       </div>
 
       {!worksLoaded ? (
         <div className="book-grid" aria-busy="true" aria-label="Loading">{Array.from({ length: 6 }, (_, i) => <div key={i} className="book skeleton"><div className="cover" /></div>)}</div>
-      ) : works.length === 0 ? (
+      ) : unknownFolder ? (
+        <EmptyState icon={<ShelfIcon />} title="This shelf isn’t available" action={<button className="btn" onClick={() => openFolder(null)}>Back to the Library</button>}>
+          It was deleted, or it isn’t shared with you.
+        </EmptyState>
+      ) : works.length === 0 && shelves.length === 0 ? (
         reader ? (
           <EmptyState icon={<ShelfIcon />} title="No shelves shared with you yet">
             Your household shares books with you shelf by shelf. Ask the owner to add you to one.
@@ -310,20 +373,26 @@ export function LibraryPage() {
             Drop EPUBs and audiobooks (M4B, or a folder of MP3s) anywhere on this page, or put them in <code>{me?.inbox_path ?? "the inbox"}</code>. You check the details before anything is filed.
           </EmptyState>
         )
-      ) : filtered.length === 0 ? (
-        <EmptyState
-          icon={<SearchIcon />}
-          title={q ? `Nothing matches “${q}”` : `No ${STATUS_LABEL[status].toLowerCase()} books`}
-          action={<button className="btn" onClick={() => setParams(new URLSearchParams(sort === "title" ? {} : { sort }), { replace: true })}>Clear filters</button>}
-        >
-          {q ? "Try a shorter word, an author’s surname, or another status." : shelfId ? "This shelf has nothing in this view yet." : "Books move here as KOReader reports progress."}
-        </EmptyState>
+      ) : emptyHere ? (
+        filtering ? (
+          <EmptyState
+            icon={<SearchIcon />}
+            title={q ? `Nothing matches “${q}”` : `No ${STATUS_LABEL[status].toLowerCase()} books here`}
+            action={<button className="btn" onClick={() => setParams(new URLSearchParams([...params].filter(([k]) => k === "shelf" || k === "view" || k === "sort")), { replace: true })}>Clear filters</button>}
+          >
+            {q ? "Try a shorter word, an author’s surname, or another status." : "Books move here as KOReader reports progress."}
+          </EmptyState>
+        ) : (
+          <EmptyState icon={<Folder />} title={current ? `“${current.name}” is empty` : "Every book is on a shelf"} action={canCreateHere ? <button className="btn" onClick={() => setNaming({ parent: folder, shelf: null })}><Folder /> New shelf</button> : undefined}>
+            {current ? "Drag books or shelves here, or use Move to… on a selection." : "Books on no shelf show up here. Open a shelf, or switch to Everything."}
+          </EmptyState>
+        )
       ) : (
         <div
           ref={setScope}
           className={grid ? "book-grid" : "book-list"}
           role="grid"
-          aria-label={shelfId ? `Books on ${shelves.find((x) => String(x.id) === shelfId)?.name ?? "this shelf"}` : q ? `Books matching ${q}` : "Books"}
+          aria-label={everything ? (q ? `Books matching ${q}` : "Every book") : current ? `Shelves and books in ${current.name}` : "Shelves and books not on a shelf"}
           aria-multiselectable="true"
           aria-rowcount={win.rows}
           aria-colcount={columns}
@@ -333,9 +402,14 @@ export function LibraryPage() {
         >
           {rowsShown.map((r) => (
             <div key={r} role="row" aria-rowindex={r + 1} data-vrow className="vrow" style={{ gridTemplateColumns: grid ? `repeat(${columns}, minmax(0, 1fr))` : undefined, height: win.stride - rowGap, marginBottom: rowGap }}>
-              {filtered.slice(r * columns, (r + 1) * columns).map((w, c) => (
-                <BookCell key={w.id} work={w} q={q} grid={grid} cell={s.cellProps(w.id)} col={c + 1} />
-              ))}
+              {keys.slice(r * columns, (r + 1) * columns).map((key, c) => {
+                if (key[0] === "s") {
+                  const sh = folders.find((x) => shelfKey(x.id) === key)!;
+                  return <FolderCell key={key} shelf={sh} grid={grid} cell={s.cellProps(key)} col={c + 1} covers={coversOf(sh)} menu={reader ? [] : folderMenu(sh)} drag={dragFor(key)} />;
+                }
+                const w = filtered[r * columns + c - folders.length];
+                return <BookCell key={key} work={w} q={q} grid={grid} cell={s.cellProps(key)} col={c + 1} drag={dragFor(key)} />;
+              })}
             </div>
           ))}
           {s.marquee && <div className="marquee" style={s.marquee} aria-hidden="true" />}
@@ -346,33 +420,46 @@ export function LibraryPage() {
           open={s.count > 0 || s.selecting}
           ready={!s.sel.all || !!viewInfo}
           count={s.count}
+          books={pickedBooks}
           all={s.allSelected}
-          total={viewTotal ?? keys.length}
+          total={folders.length + bookTotal}
           target={target}
           titles={pickedTitles}
           shelves={shelves.filter((sh) => sh.permission !== "view" && !sh.smart)}
           onSelectAll={s.selectAll}
           onClear={s.exit}
           onDone={async () => {
-            await Promise.all([refreshLibrary(), loadShelves()]).catch(() => {});
+            await refreshLibrary().catch(() => {});
           }}
           canEdit={canEdit}
           canAlign={canEdit}
           onSend={() => setSendingMany(true)}
+          onMove={reader ? undefined : () => setMoving({ items: selectionItems(), title: `Move or add ${describe(pickedShelves.length, pickedBooks)}` })}
         />
       <SendToDevice
         open={sendingMany}
         target={() => target() ?? { work_ids: [] }}
-        count={s.count}
-        title={`Send ${s.count} ${s.count === 1 ? "book" : "books"} to a device`}
+        count={pickedBooks}
+        title={`Send ${plural(pickedBooks, "book")} to a device`}
         onClose={() => setSendingMany(false)}
         onSent={s.exit}
       />
+      <FolderPicker items={moving?.items ?? null} title={moving?.title ?? ""} onClose={() => { setMoving(null); }} />
+      <ShelfNameDialog open={!!naming} parent={naming?.parent} shelf={naming?.shelf} onClose={() => setNaming(null)} />
+      <DeleteShelfDialog shelf={deleting} onClose={() => setDeleting(null)} onDeleted={(parent) => deleting?.id === folder && openFolder(parent)} />
+      <Sheet open={!!sharing} onClose={() => setSharing(null)} title={sharing ? `Share “${pathLabel(sharing)}”` : ""} labelledBy="share-title">
+        {sharing && (
+          <div className="stack">
+            <p className="sub" style={{ margin: 0 }}>Sharing a shelf shares everything inside it, sub-shelves included. People see it as a top-level shelf; shelves above it stay private.</p>
+            <Grants shelf={sharing} onChanged={() => refreshLibrary().catch(() => {})} />
+          </div>
+        )}
+      </Sheet>
       <Sheet open={!!selected} onClose={() => nav(`/app/library${loc.search}`)} title={selected?.title ?? ""}>
-        {selected && <WorkDetail work={selected} shelves={shelves} onShelvesChanged={() => loadShelves().catch(() => {})} />}
+        {selected && <WorkDetail work={selected} shelves={shelves} onShelvesChanged={() => refreshLibrary().catch(() => {})} />}
       </Sheet>
       <Sheet open={manageShelves} onClose={() => setManageShelves(false)} title="Shelves" labelledBy="shelves-title">
-        <ShelvesManager shelves={shelves} canCreate={canCreateShelf} reload={() => loadShelves().catch(() => {})} />
+        <ShelvesManager shelves={shelves} canCreate={canCreateHere} folder={folder} reload={() => refreshLibrary().catch(() => {})} onOpen={(sid) => { setManageShelves(false); openFolder(sid); }} />
       </Sheet>
       <Sheet open={review} onClose={() => setParam("review", "", "")} title="Review matches" labelledBy="review-title">
         <SuggestionReview
@@ -387,9 +474,11 @@ export function LibraryPage() {
   );
 }
 
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
 /** One book in the Library grid or list: a grid cell, selected with the pointer or keyboard
  * (lib/useSelection), opened with Enter, a double-click, or a tap. */
-function BookCell({ work: w, q, grid, cell, col }: { work: Work; q: string; grid: boolean; cell: CellProps; col: number }) {
+function BookCell({ work: w, q, grid, cell, col, drag }: { work: Work; q: string; grid: boolean; cell: CellProps; col: number; drag: ReturnType<typeof dragProps> }) {
   const label = `${w.title} by ${w.author}${w.progress ? `, ${percent(w.progress.percentage)} read` : ""}`;
   const pick = (
     <span className="pick" data-sel-toggle aria-hidden="true" title="Select">
@@ -397,7 +486,7 @@ function BookCell({ work: w, q, grid, cell, col }: { work: Work; q: string; grid
     </span>
   );
   return grid ? (
-    <div className="book" style={tintStyle(w)} aria-label={label} aria-colindex={col} {...cell}>
+    <div className="book" style={tintStyle(w)} aria-label={label} aria-colindex={col} {...cell} {...drag}>
       {pick}
       <span className="cover-wrap">
         <Cover work={w} />
@@ -414,7 +503,7 @@ function BookCell({ work: w, q, grid, cell, col }: { work: Work; q: string; grid
       )}
     </div>
   ) : (
-    <div className="book" style={tintStyle(w)} aria-label={label} aria-colindex={col} {...cell}>
+    <div className="book" style={tintStyle(w)} aria-label={label} aria-colindex={col} {...cell} {...drag}>
       {pick}
       <Cover work={w} />
       <span className="titles">
@@ -446,29 +535,15 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
   const epub = hasEpub(work);
   const pos = work.position;
   const editable = shelves.filter((sh) => sh.permission !== "view" && !sh.smart);
-  const [member, setMember] = useState<Set<number> | null>(null);
+  const member = new Set(work.shelf_ids ?? []);
   const [sending, setSending] = useState(false);
   const [merging, setMerging] = useState(false);
 
-  useEffect(() => {
-    if (!editable.length) return;
-    Promise.all(editable.map((sh) => get<{ works: Work[] }>(`/api/shelves/${sh.id}`).then((d) => [sh.id, d.works.some((w) => w.id === work.id)] as const)))
-      .then((pairs) => setMember(new Set(pairs.filter(([, on]) => on).map(([id]) => id))))
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [work.id, shelves.length]);
-
   const toggleShelf = async (sh: Shelf) => {
-    const on = member?.has(sh.id);
+    const on = member.has(sh.id);
     try {
       if (on) await del(`/api/shelves/${sh.id}/items/${work.id}`);
       else await post(`/api/shelves/${sh.id}/items`, { work_id: work.id });
-      setMember((m) => {
-        const n = new Set(m);
-        if (on) n.delete(sh.id);
-        else n.add(sh.id);
-        return n;
-      });
       onShelvesChanged();
     } catch (e) {
       toast((e as Error).message, "error");
@@ -579,8 +654,8 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
           <h3 className="detail-h">Shelves</h3>
           <div className="chips" role="group" aria-label="Shelves for this book">
             {editable.map((sh) => (
-              <button key={sh.id} className="chip subtle" aria-pressed={!!member?.has(sh.id)} onClick={() => toggleShelf(sh)} disabled={!member}>
-                {member?.has(sh.id) ? "✓ " : "+ "}{sh.name}
+              <button key={sh.id} className="chip subtle" aria-pressed={member.has(sh.id)} onClick={() => toggleShelf(sh)} title={pathLabel(sh)}>
+                {member.has(sh.id) ? "✓ " : "+ "}{pathLabel(sh)}
               </button>
             ))}
           </div>
@@ -681,47 +756,39 @@ function SuggestionReview({ items, onResolved }: { items: MatchSuggestion[]; onR
   );
 }
 
-function ShelvesManager({ shelves, canCreate, reload }: { shelves: Shelf[]; canCreate: boolean; reload: () => void }) {
-  const { toast, me } = useStore();
-  const [name, setName] = useState("");
+/** Every shelf as an indented tree: open, share, rename, delete, and make one in the folder
+ * the Library is showing. */
+function ShelvesManager({ shelves, canCreate, folder, reload, onOpen }: { shelves: Shelf[]; canCreate: boolean; folder: FolderId; reload: () => void; onOpen: (id: number) => void }) {
+  const { me } = useStore();
   const [open, setOpen] = useState<number | null>(null);
-  const create = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      await post("/api/shelves", { name: name.trim() });
-      setName("");
-      reload();
-    } catch (ex) {
-      toast((ex as Error).message, "error");
-    }
-  };
+  const [naming, setNaming] = useState<{ parent: FolderId; shelf: Shelf | null } | null>(null);
+  const [deleting, setDeleting] = useState<Shelf | null>(null);
+  const here = folder === null ? null : shelves.find((s) => s.id === folder) ?? null;
   return (
     <div className="stack">
       <p className="sub" style={{ margin: 0 }}>
         {me?.user.role === "reader"
-          ? "Shelves the household shares with you. You see only the books on them."
-          : "Group books, and share a shelf with readers in your household: readers see only the shelves they are given."}
+          ? "Shelves the household shares with you, and the shelves inside them. You see only the books on them."
+          : "Shelves are folders: they nest, and a book can be on several. Share a shelf with readers in your household and they see it and everything inside it."}
       </p>
       {canCreate && (
-        <form className="row" onSubmit={create}>
-          <label className="sr-only" htmlFor="new-shelf">New shelf name</label>
-          <input id="new-shelf" className="input" style={{ flex: 1 }} placeholder="New shelf, e.g. Kids" value={name} onChange={(e) => setName(e.target.value)} maxLength={128} required />
-          <button className="btn primary"><Plus /> Create</button>
-        </form>
+        <div className="row">
+          <button className="btn" onClick={() => setNaming({ parent: folder, shelf: null })}><Plus /> New shelf {here ? `in ${here.name}` : "at the top level"}</button>
+        </div>
       )}
       {shelves.length === 0 ? (
         <p className="hint">No shelves yet.</p>
       ) : (
         <ul className="shelf-list">
           {shelves.map((sh) => (
-            <li key={sh.id}>
+            <li key={sh.id} style={{ marginLeft: (sh.path.length - 1) * 18 }}>
               <div className="shelf-row">
-                <ShelfIcon />
+                <Folder />
                 <div>
-                  <strong>{sh.name}</strong>
+                  <button className="link-btn" onClick={() => onOpen(sh.id)}><strong>{sh.name}</strong></button>
                   <div className="hint">
-                    {sh.work_count} {sh.work_count === 1 ? "book" : "books"}
-                    {sh.permission === "owner" ? ` · shared with ${sh.grant_count}` : ` · ${sh.owner ? `@${sh.owner}’s` : "shared"} · you can ${sh.permission}`}
+                    {folderSummary(sh)}
+                    {sh.permission === "owner" ? (sh.grant_count ? ` · shared with ${sh.grant_count}` : "") : ` · ${sh.owner ? `@${sh.owner}’s` : "shared"} · you can ${sh.permission}`}
                   </div>
                 </div>
                 {sh.permission === "owner" && (
@@ -730,32 +797,8 @@ function ShelvesManager({ shelves, canCreate, reload }: { shelves: Shelf[]; canC
                     <OverflowMenu
                       label={`More for ${sh.name}`}
                       actions={[
-                        {
-                          label: "Rename",
-                          onSelect: async () => {
-                            const n = window.prompt("Shelf name", sh.name)?.trim();
-                            if (!n || n === sh.name) return;
-                            try {
-                              await patch(`/api/shelves/${sh.id}`, { name: n });
-                              reload();
-                            } catch (e) {
-                              toast((e as Error).message, "error");
-                            }
-                          },
-                        },
-                        {
-                          label: "Delete shelf",
-                          danger: true,
-                          onSelect: async () => {
-                            if (!window.confirm(`Delete “${sh.name}”? Books stay in the library; people it was shared with lose access to them.`)) return;
-                            try {
-                              await del(`/api/shelves/${sh.id}`);
-                              reload();
-                            } catch (e) {
-                              toast((e as Error).message, "error");
-                            }
-                          },
-                        },
+                        { label: "Rename…", onSelect: () => setNaming({ parent: sh.parent_id, shelf: sh }) },
+                        { label: "Delete…", danger: true, onSelect: () => setDeleting(sh) },
                       ]}
                     />
                   </>
@@ -766,6 +809,8 @@ function ShelvesManager({ shelves, canCreate, reload }: { shelves: Shelf[]; canC
           ))}
         </ul>
       )}
+      <ShelfNameDialog open={!!naming} parent={naming?.parent} shelf={naming?.shelf} onClose={() => setNaming(null)} />
+      <DeleteShelfDialog shelf={deleting} onClose={() => setDeleting(null)} />
     </div>
   );
 }
@@ -773,10 +818,18 @@ function ShelvesManager({ shelves, canCreate, reload }: { shelves: Shelf[]; canC
 function Grants({ shelf, onChanged }: { shelf: Shelf; onChanged: () => void }) {
   const { me, toast } = useStore();
   const [grants, setGrants] = useState<ShelfGrant[] | null>(null);
+  const [inherited, setInherited] = useState<ShelfGrant[]>([]);
   const [users, setUsers] = useState<User[] | null>(null);
   const [pick, setPick] = useState("");
   const isOwner = me?.user.role === "owner";
-  const load = useCallback(() => get<{ grants: ShelfGrant[] }>(`/api/shelves/${shelf.id}/grants`).then((d) => setGrants(d.grants)), [shelf.id]);
+  const load = useCallback(
+    () =>
+      get<{ grants: ShelfGrant[]; inherited: ShelfGrant[] }>(`/api/shelves/${shelf.id}/grants`).then((d) => {
+        setGrants(d.grants);
+        setInherited(d.inherited ?? []);
+      }),
+    [shelf.id],
+  );
   useEffect(() => {
     load().catch(() => setGrants([]));
     if (isOwner) get<{ users: User[] }>("/api/admin/users").then((d) => setUsers(d.users)).catch(() => {});
@@ -817,6 +870,15 @@ function Grants({ shelf, onChanged }: { shelf: Shelf; onChanged: () => void }) {
                 <option value="edit">Can add books</option>
               </select>
               <button className="btn sm ghost" onClick={() => revoke(g.user.id)}>Remove</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {inherited.length > 0 && (
+        <ul className="inherited" aria-label="Shared through shelves above">
+          {inherited.map((g) => (
+            <li key={`${g.shelf?.id}-${g.user.id}`}>
+              <span><strong>{g.user.display_name}</strong> <span className="hint">@{g.user.username} · can {g.permission === "edit" ? "add books" : "view"} through “{g.shelf?.name}”</span></span>
             </li>
           ))}
         </ul>

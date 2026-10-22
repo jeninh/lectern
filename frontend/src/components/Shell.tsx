@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, Fragment, useContext, useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { logout } from "../lib/api";
@@ -13,6 +13,7 @@ import { Devices, Download, Gear, Headphones, Help, Highlighter, Home, Library, 
 import { clearDevice } from "../lib/offline/store";
 import { ConflictPrompt, OfflineBanner, OfflineStatus, UpdateReady } from "./Offline";
 import { Sheet } from "./Sheet";
+import { ShelfTree } from "./Folders";
 import { ReviewSheet } from "./ReviewSheet";
 import { WorkEditor } from "./WorkEditor";
 
@@ -156,7 +157,12 @@ export function Shell({ children }: { children: ReactNode }) {
         </button>
         <nav className="nav-groups" aria-label="Primary">
           <div className="nav-section" aria-hidden={collapsed || undefined}>Read</div>
-          {READ.map((n) => <NavItem key={n.to} n={n} collapsed={collapsed} />)}
+          {READ.map((n) => (
+            <Fragment key={n.to}>
+              <NavItem n={n} collapsed={collapsed} />
+              {n.to === "/app/library" && !collapsed && <ShelfTree />}
+            </Fragment>
+          ))}
           <div className="nav-section" aria-hidden={collapsed || undefined}>Manage</div>
           {manage.map((n) => <NavItem key={n.to} n={n} collapsed={collapsed} />)}
         </nav>
@@ -253,6 +259,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <dt><kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd></dt><dd>Move; with <kbd>Shift</kbd>, extend the selection</dd>
           <dt><kbd>Home</kbd> <kbd>End</kbd></dt><dd>Start or end of the row; with <kbd>{MOD}</kbd> (or <kbd>{MOD}</kbd> + arrows), of everything</dd>
           <dt><kbd>Space</kbd></dt><dd>Select or deselect the focused one</dd>
+          <dt>Drag</dt><dd>Onto a shelf (in the grid, the path above it, or the sidebar) to move there; hold <kbd>{MOD === "⌘" ? "⌥" : "Alt"}</kbd> to add instead</dd>
           <dt>Long press</dt><dd>On a touch screen: start selecting, then tap to add</dd>
           <dt><kbd>?</kbd></dt><dd>This list</dd>
         </dl>

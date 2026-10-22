@@ -78,6 +78,32 @@ metadata and cover, optionally the library files, into an encrypted restic repos
 `LECTERN_BACKUP_PATH` (a USB drive on a Pi, not the SD card). Restore with `lectern restore`:
 [docs/backups.md](docs/backups.md).
 
+## Library
+
+The Library is a file manager for your books. **Folders** (the default) shows your top-level
+shelves first, then the books that are on no shelf; open a shelf for its sub-shelves and its
+books. Each folder has its own address (`/app/library?shelf=12`), so Back and Forward, the
+path above the grid (**Library › Kids › Picture books**), and bookmarks all work.
+**Everything** is every book in one flat list. The sidebar shows the shelf tree under
+**Library** (collapsible), and Cmd/Ctrl+K finds a shelf by its path (`kids/pic`).
+
+- **Shelves nest**, up to 8 deep. **New shelf** makes one in the folder you are in; a shelf's
+  **⋯** menu renames, moves, shares, or deletes it. A shelf never moves into itself or a
+  shelf inside it.
+- **A book can be on several shelves.** Dragging books (or **Move to…** on a selection)
+  takes them out of the folder you are in and puts them on the target; hold **Alt** (**Option**
+  on a Mac) while dropping, or choose **Add to shelf**, to keep them where they are too.
+  Dropping on **Library** takes them off the shelf. Shelves and books select together, with
+  the same clicks and keys as below, and move together. Every move has **Undo**.
+- **Deleting a shelf** with things in it asks first: move its sub-shelves and books up a
+  level, or move its books to the Trash (restorable for 30 days) with its sub-shelves.
+- **Sharing a shelf shares everything inside it.** A reader given *Kids › Picture books*
+  sees it as a top-level shelf, with its sub-shelves; the shelves above it, and the shelves
+  next to it, stay private, names and counts included. The server enforces this everywhere:
+  the web app, OPDS (**Shelves** in the catalogue), and the MCP tools.
+
+![The Library as folders](docs/screenshots/library-folders.png)
+
 ## Adding books
 
 Owners and members add books from the web app: **Add books** in the Library (its menu also has
@@ -238,8 +264,9 @@ Playwright phone tests: [`docs/offline.md`](docs/offline.md).
 
 The owner invites people from **Admin → Household invites**: an expiring, one-use link for a
 *member* (sees the whole library and can upload) or a *reader* (sees only the shelves shared
-with them). The invitee picks their own username and password. Shelves (**Library → Shelves**)
-group books; their owner shares them with readers, view-only or with permission to add books.
+with them). The invitee picks their own username and password. Shelves (the Library's
+folders) group books; their owner shares them with readers, view-only or with permission to
+add books, and a shared shelf includes the shelves inside it.
 Everyone's progress is their own.
 
 ## Security alerts and download limits
@@ -266,7 +293,8 @@ values to enter, then waits and confirms the device's first sync live.
   then **Login** (not Register) with your Lectern username and the sync key.
 - Catalogue: OPDS catalog → add `https://lectern.example/opds` with your username and
   the app password. Its first page is made for e-ink: **Continue reading**, **Up next**
-  (unstarted books on your shelves), and **Queued for this device**, then the whole library.
+  (unstarted books on your shelves), and **Queued for this device**, then your **Shelves**
+  as folders and the whole library.
 
 ### Send to device
 
