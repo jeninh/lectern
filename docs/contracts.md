@@ -668,7 +668,9 @@ Milestone 3 implements this; Step 0 fixes the schema and the rules.
 - `GET /api/worker-credentials` lists `{id, label, created_at, last_used_at, revoked_at}`;
   `DELETE /api/worker-credentials/{id}` revokes (`revoked_at`), effective on the next request.
   Jobs leased by a revoked credential go back to the queue at once without spending an
-  attempt, and the artifacts it uploaded (recorded per artifact) are deleted.
+  attempt, and the artifacts it uploaded (recorded per artifact) are deleted; any other
+  worker's lease on a job that lost artifacts is requeued the same way, so it starts over
+  instead of failing on a missing artifact.
   `PATCH /api/worker-credentials/{id} {capabilities}` requeues the same way the leases the
   new allowlist no longer permits. Failed enrollment codes count against their own
   per-address limit (`worker_enroll`, 10/min), not the bad-key limit.

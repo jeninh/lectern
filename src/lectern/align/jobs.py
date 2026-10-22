@@ -584,20 +584,33 @@ def heartbeat(
 # --- failure and reclaim --------------------------------------------------------------------
 
 
-def requeue_leases(db: Session, credential_id: int, *, keep: Iterable[str] | None = None) -> int:
+def requeue_leases(
+    db: Session,
+    credential_id: int | None = None,
+    *,
+    keep: Iterable[str] | None = None,
+    job_ids: Iterable[int] = (),
+) -> int:
     """Give back, like :func:`release`, every lease ``credential_id`` holds (only the ones
-    whose capability is not in ``keep``, when given): the credential was revoked or its
-    allowlist narrowed, which is not the job's fault, so no attempt is spent. The lease token
-    is cleared, so the old holder's next call is ``409 lease_lost``. Caller commits."""
+    whose capability is not in ``keep``, when given), and every lease, whoever holds it, on
+    ``job_ids`` (jobs whose artifacts were just deleted). Not the job's fault, so no attempt
+    is spent. The lease token is cleared, so the old holder's next call is
+    ``409 lease_lost``. Caller commits."""
+    ids = list(job_ids)
+    match = Job.leased_by_id == credential_id if credential_id is not None else None
+    if ids:
+        match = Job.id.in_(ids) if match is None else (match | Job.id.in_(ids))
+    if match is None:
+        return 0
     held = db.scalars(
         select(Job)
-        .where(Job.status == JobStatus.LEASED, Job.leased_by_id == credential_id)
+        .where(Job.status == JobStatus.LEASED, match)
         .execution_options(populate_existing=True)
     ).all()
     keep = None if keep is None else set(keep)
     n = 0
     for job in held:
-        if keep is not None and job.capability in keep:
+        if keep is not None and job.capability in keep and job.id not in ids:
             continue
         _release(db, job)
         n += 1

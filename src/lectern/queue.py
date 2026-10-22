@@ -292,12 +292,14 @@ def uploader_path(artifact: Path) -> Path:
     return artifact.with_name(f".{artifact.name}.uploader")
 
 
-def drop_artifacts_of(data_dir: Path, credential_id: int) -> int:
-    """Delete every stored artifact a (revoked) credential uploaded, with its sidecars."""
+def drop_artifacts_of(data_dir: Path, credential_id: int) -> set[int]:
+    """Delete every stored artifact a (revoked) credential uploaded, with its sidecars.
+    Returns the ids of the jobs that lost artifacts: a lease on one of them (another
+    worker's, resuming from those files) must start over (``requeue_leases(job_ids=…)``)."""
     root = data_dir / "jobs"
     if not root.is_dir():
-        return 0
-    removed = 0
+        return set()
+    removed: set[int] = set()
     for marker in root.glob("*/artifacts/.*.uploader"):
         try:
             owner = marker.read_text()[:32].strip()
@@ -310,7 +312,9 @@ def drop_artifacts_of(data_dir: Path, credential_id: int) -> int:
         artifact.with_name(name + ".sha256").unlink(missing_ok=True)
         artifact.unlink(missing_ok=True)
         marker.unlink(missing_ok=True)
-        removed += 1
+        job_dir = marker.parent.parent.name
+        if job_dir.isdigit():
+            removed.add(int(job_dir))
     return removed
 
 

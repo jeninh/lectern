@@ -513,6 +513,9 @@ def revoke_credential(
         # upload finishing meanwhile either lands first (and is deleted) or finds its lease
         # gone.
         jobs.requeue_leases(db, row.id)
-        queue.drop_artifacts_of(settings.data_dir, row.id)
+        dropped = queue.drop_artifacts_of(settings.data_dir, row.id)
+        # another worker resuming from those files starts over too (its result would name
+        # artifacts that are gone and fail for good)
+        jobs.requeue_leases(db, job_ids=dropped)
         db.commit()
     return _credential_json(row)

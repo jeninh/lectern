@@ -79,6 +79,15 @@ class Agent:
         if not self.cfg.server.startswith("https://") and not self.cfg.allow_http:
             raise SystemExit("refusing to send the worker credential over plain http")
         self.conditions = conditions or Conditions()
+        if self.cfg.ca_bundle and not Path(self.cfg.ca_bundle).expanduser().is_file():
+            # exit 0: launchd does not restart a clean exit, so no restart loop; the menu
+            # bar shows why
+            msg = f"ca_bundle {self.cfg.ca_bundle} not found: fix it in config.json, then "
+            msg += "`lectern worker-service install`"
+            wcfg.write_state({"state": "off", "error": msg, "updated_at": time.time(),
+                              "server": self.cfg.server, "job": None}, self.home)  # fmt: skip
+            log.error(msg)
+            raise SystemExit(0)
         # before the engines load: their model downloads go through the same proxy and CAs
         apply_network_env(self.cfg.proxy, self.cfg.ca_bundle, self.home)
         engines: dict[str, str] = {}

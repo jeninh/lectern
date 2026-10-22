@@ -1255,3 +1255,83 @@ def test_mlx_is_tried_again_on_the_next_job_and_loads_only_known_models(monkeypa
     odd = MLXTranscriber("someone/evil-repo", fallback=FakeCPU())
     odd.load()
     assert odd.using_fallback and "someone/evil-repo" not in state["repos"]
+
+
+# --- review round 3 -----------------------------------------------------------------------------
+
+
+def test_revoking_the_uploader_restarts_another_workers_lease_that_reused_its_artifacts(
+    client, owner, work_id, wc, app, settings
+):
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "tracks": []})
+    a = lease(claim(wc, capabilities=["transcode"]))
+    assert _upload(wc, job_id, a, "r.m4a").status_code == 201
+    wc.post(f"/api/worker/jobs/{job_id}/release", headers=a)
+    other = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "b"}).json()
+    bc = TestClient(app, headers={"Authorization": f"Bearer {other['secret']}"})
+    b = lease(claim(bc, capabilities=["transcode"]))  # B resumes from A's upload
+    with session_factory()() as db:
+        a_id = db.scalar(select(WorkerCredential).where(WorkerCredential.label == "mac")).id
+    r = client.delete(f"/api/worker-credentials/{a_id}",
+                      headers={"x-csrf-token": owner["csrf"], "origin": ORIGIN})  # fmt: skip
+    assert r.status_code == 200
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        assert job.status == JobStatus.QUEUED and job.attempts == 0  # not failed for good
+    assert bc.post(f"/api/worker/jobs/{job_id}/heartbeat", headers=b).status_code == 409
+    fresh = lease(claim(bc, capabilities=["transcode"]))  # B starts over with a new lease
+    listed = bc.get(f"/api/worker/jobs/{job_id}/artifacts", headers=fresh).json()
+    assert listed == {"artifacts": []}  # nothing of A's to resume from
+
+
+@needs_ffmpeg
+def test_a_work_folder_on_another_filesystem_still_gets_its_rendition(
+    remote_transcode, monkeypatch
+):
+    import errno
+
+    import lectern.jobs as jmod
+
+    real = jmod.os.replace
+    seen = []
+
+    def cross_device(src, dst):
+        if ".lectern-staging" in str(src):
+            seen.append(src)
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real(src, dst)
+
+    monkeypatch.setattr(jmod.os, "replace", cross_device)
+    assert remote_transcode.put_result().status_code == 200
+    assert seen and remote_transcode.published() == remote_transcode.body
+
+
+def test_backups_skip_staged_results(tmp_path):
+    from lectern.backups import _walk
+
+    (tmp_path / queue.STAGING_DIR / "1-ab").mkdir(parents=True)
+    (tmp_path / queue.STAGING_DIR / "1-ab" / "1.m4a").write_bytes(b"x")
+    (tmp_path / "Author").mkdir()
+    (tmp_path / "Author" / "book.epub").write_bytes(b"y")
+    assert [p.name for p in _walk(tmp_path, skip_inbox=True)] == ["book.epub"]
+
+
+def test_a_missing_ca_bundle_stops_the_agent_cleanly_with_a_reason(tmp_path):
+    from lectern.worker.agent import Agent
+
+    wcfg.update_config(tmp_path, server="https://l.example", ca_bundle=str(tmp_path / "no.pem"))
+    wcfg.save_key("lw_x", tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        Agent(tmp_path, runners=[TranscodeRunner()])
+    assert exc.value.code == 0  # launchd's KeepAlive does not restart a clean exit
+    assert "no.pem not found" in wcfg.read_state(tmp_path)["error"]
+
+
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="needs setsid")
+def test_the_installer_without_a_terminal_says_what_is_missing(client):
+    script = client.get("/worker/install.sh").text
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    r = subprocess.run(["setsid", "sh"], input=script.encode(), capture_output=True, env=env,
+                       timeout=30)  # fmt: skip
+    assert r.returncode != 0
+    assert b"no enrollment code" in r.stderr and b"/dev/tty" not in r.stderr

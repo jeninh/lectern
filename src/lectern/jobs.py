@@ -314,8 +314,22 @@ def _pin(src: Path, dest: Path) -> str:
 
 
 def _place(staged: Path, dest: Path, digest: str) -> None:
-    """The publication step proper: a rename on one filesystem, then the checksum sidecar."""
-    os.replace(staged, dest)
+    """The publication step proper: a rename, then the checksum sidecar. A work folder on
+    another filesystem than the library root (a bind mount) gets a copy next to ``dest``
+    first, so the final step is still an atomic rename."""
+    import errno
+
+    try:
+        os.replace(staged, dest)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        tmp = dest.with_name(f".{dest.name}.{new_secret()[:8]}.part")
+        try:
+            shutil.copyfile(staged, tmp)
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
     dest.with_name(dest.name + ".sha256").write_text(digest)
 
 

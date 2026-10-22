@@ -41,7 +41,8 @@ Options: `--name`, `--proxy`, `--ca-bundle` (see [School mode](#school-and-proxy
 The installer pins that source to the server's own commit (`@<LECTERN_WORKER_INSTALL_REF>`),
 so the worker speaks the same protocol as the server. The image sets the ref from the
 `LECTERN_COMMIT` build argument: `LECTERN_COMMIT=$(git rev-parse HEAD) docker compose … up -d
---build`. Without it the newest code is installed and the installer says so.
+--build`. **It is off unless you pass it** (the image cannot see the git checkout): without
+it the newest code on the default branch is installed and the installer says so.
 **The repository is private**, so the Mac needs read access to it. The installer checks first
 (`git ls-remote`) and stops with instructions if it cannot read the repository: sign in with
 `gh auth login` and `gh auth setup-git`, use an SSH key with

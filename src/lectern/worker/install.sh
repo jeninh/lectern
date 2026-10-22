@@ -36,7 +36,7 @@ done
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-if [ -z "$CODE" ] && [ -r /dev/tty ]; then
+if [ -z "$CODE" ] && (: </dev/tty) 2>/dev/null; then
   # Asked for, not typed on the command line: the code stays out of the shell history.
   printf 'One-time code from Admin → Workers (lwe_…): ' >/dev/tty
   stty -echo </dev/tty 2>/dev/null || true
