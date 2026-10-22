@@ -864,14 +864,39 @@ def test_a_lease_is_bound_to_the_credential_that_claimed_it(client, owner, work_
     assert put_result(wc, job_id, headers, body).status_code == 200
 
 
-def test_transcode_jobs_never_leave_the_server(client, owner, work_id, wc):
+def test_jobs_go_only_to_workers_with_the_capability_and_the_allowlist(client, owner, work_id, wc):
+    """Routing (docs/contracts.md, "Capabilities and routing"): a transcode job is not
+    leased to a worker that advertises only align, nor to one whose credential the owner
+    limited to align; a server-only capability never leaves the server at all."""
     with session_factory()() as db:
         db.add(Job(kind="transcode", work_id=work_id, status=JobStatus.QUEUED, payload={}))
+        db.add(Job(kind="tts", work_id=work_id, status=JobStatus.QUEUED,
+                   payload={"engine": "elevenlabs"}))  # fmt: skip
         db.commit()
-    assert claim(wc, kinds=["transcode"]).status_code == 204
+    assert claim(wc, capabilities=["align"]).status_code == 204
+    cred_id = client.get("/api/worker-credentials").json()["credentials"][0]["id"]
+    r = client.patch(
+        f"/api/worker-credentials/{cred_id}",
+        json={"capabilities": ["align"]},
+        headers={"x-csrf-token": owner["csrf"], "origin": ORIGIN},
+    )
+    assert r.status_code == 200 and r.json()["claimable"] == ["align"]
+    assert claim(wc, capabilities=["transcode", "tts-elevenlabs"]).status_code == 204
     job_id = request_align(client, owner, work_id).json()["id"]
-    got = claim(wc, kinds=["transcode", "align"])
+    got = claim(wc, capabilities=["transcode", "align"])
     assert got.status_code == 200 and got.json()["job"]["id"] == job_id
+    # lifting the allowlist lets transcode through; ElevenLabs stays on the server
+    client.patch(
+        f"/api/worker-credentials/{cred_id}",
+        json={"capabilities": None},
+        headers={"x-csrf-token": owner["csrf"], "origin": ORIGIN},
+    )
+    got = claim(wc, capabilities=["transcode", "tts-elevenlabs"])
+    assert got.status_code == 200 and got.json()["job"]["kind"] == "transcode"
+    assert claim(wc, capabilities=["tts-elevenlabs"]).status_code == 204
+    with session_factory()() as db:
+        eleven = db.scalar(select(Job).where(Job.kind == "tts"))
+        assert eleven.capability == "tts-elevenlabs" and eleven.status == JobStatus.QUEUED
 
 
 def test_a_result_moves_stored_positions_onto_the_aligned_sentences(

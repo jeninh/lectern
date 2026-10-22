@@ -66,6 +66,8 @@ vCPUs with 1.4 GB peak memory** on a 13-minute recording (see [Benchmark](#bench
 - **NAS or mini PC with ≥ 8 GB.** The `align` image is fine. One job runs at a time and the
   thread yields to requests; reading and sync stay responsive, but it will use the CPU for
   hours per book.
+- **A Mac with Apple Silicon.** Install the worker with one command and align on the GPU with
+  MLX (falls back to the CPU): see [`mac-worker.md`](mac-worker.md).
 - **Laptop or desktop with a GPU.** The fastest option: `lectern worker --device cuda
   --compute-type float16 --model medium` (needs the CUDA libraries CTranslate2 expects). It
   connects out to the server, so it works from behind NAT, on the tailnet, or anywhere the

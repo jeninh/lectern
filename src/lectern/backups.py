@@ -210,6 +210,8 @@ def _walk(
         here = Path(here_s)
         if skip_inbox and here == root and "_inbox" in dirs:
             dirs.remove("_inbox")
+        if here == root and ".lectern-staging" in dirs:  # remote results being published
+            dirs.remove(".lectern-staging")
         if "derived" in dirs and (here / "book.json").is_file():
             dirs.remove("derived")
         for name in [d for d in dirs if (here / d).is_symlink()]:

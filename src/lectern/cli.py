@@ -1,7 +1,10 @@
 """`lectern` console entry point.
 
 - ``lectern`` / ``lectern serve``: run the server.
-- ``lectern worker --server URL``: an external alignment worker (needs ``lectern[align]``).
+- ``lectern worker --server URL``: an external worker (alignment needs ``lectern[align]``;
+  MLX alignment and Kokoro TTS on a Mac need ``lectern[mac]``).
+- ``lectern worker-enroll`` / ``worker-agent`` / ``worker-menubar`` / ``worker-service``: the
+  installed desktop worker and its macOS menu-bar app (docs/mac-worker.md).
 - ``lectern align-transcribe AUDIO...``: timed words of audio files as JSON (how
   ``tests/fixtures/magi/transcript_small.json`` was made).
 - ``lectern align-bench EPUB AUDIO...``: run the whole alignment offline and print timing,
@@ -110,7 +113,16 @@ def _read_key(args: argparse.Namespace) -> str:
 
 
 def worker(args: argparse.Namespace) -> None:
-    from lectern.align.worker import RemoteWorker
+    from lectern.align.mlx import worker_transcriber
+    from lectern.align.worker import AlignRunner, RemoteWorker
+    from lectern.worker import config as wcfg
+    from lectern.worker.conditions import apply_network_env, http_options
+    from lectern.worker.runners import (
+        KokoroRunner,
+        TranscodeRunner,
+        ffmpeg_available,
+        kokoro_available,
+    )
 
     server = args.server.rstrip("/")
     if not server.startswith("https://") and not args.allow_http:
@@ -120,15 +132,45 @@ def worker(args: argparse.Namespace) -> None:
         )
     key = _read_key(args)
     stop = threading.Event()
+    # model downloads (below and in jobs) use the same proxy and extra CAs as the worker
+    apply_network_env(args.proxy, args.ca_bundle, wcfg.worker_home())
+    caps = set(args.capabilities.split(",")) if args.capabilities else {"align"}
+    runners = []
+    if "align" in caps:
+        try:
+            from lectern.align.transcribe import check_window
+
+            check_window(args.window, args.overlap)
+        except ValueError as exc:
+            sys.exit(f"--window/--overlap: {exc}")
+        tr = worker_transcriber(
+            args.engine, args.model, threads=args.threads, download_root=args.models_dir,
+            window_s=args.window, overlap_s=args.overlap, device=args.device,
+            compute_type=args.compute_type,
+        )  # fmt: skip
+        if tr is None:
+            sys.exit("no transcription engine: pip install 'lectern[align]' (or 'lectern[mac]')")
+        runners.append(AlignRunner(tr))
+    if "tts-kokoro" in caps:
+        if not (kokoro_available() and ffmpeg_available()):
+            sys.exit("tts-kokoro needs lectern[mac] (kokoro) and ffmpeg on the PATH")
+        runners.append(KokoroRunner())
+    if "transcode" in caps:
+        if not ffmpeg_available():
+            sys.exit("transcode needs ffmpeg on the PATH")
+        runners.append(TranscodeRunner())
+    if unknown := caps - {"align", "tts-kokoro", "transcode"}:
+        sys.exit(f"--capabilities: this worker cannot run {', '.join(sorted(unknown))}")
     w = RemoteWorker(
         server,
         key,
-        transcriber=_transcriber(args),
         name=args.name,
         lease_s=args.lease,
         poll_s=args.poll,
         workdir=args.workdir,
         stop=stop,
+        runners=runners,
+        **http_options(args.proxy, args.ca_bundle),
     )
 
     def _on_signal(signum, _frame) -> None:
@@ -148,6 +190,45 @@ def worker(args: argparse.Namespace) -> None:
             w.run_forever()
     except PermissionError as exc:
         sys.exit(str(exc))
+
+
+def worker_enroll(args: argparse.Namespace) -> None:
+    from lectern.worker import agent
+
+    code = args.code or os.environ.get("LECTERN_WORKER_CODE", "")
+    if not code.strip():
+        sys.exit("pass --code lwe_… or set LECTERN_WORKER_CODE")
+    cfg = agent.enroll(
+        args.server, code, name=args.name, proxy=args.proxy, ca_bundle=args.ca_bundle,
+        allow_http=args.allow_http,
+    )  # fmt: skip
+    print(f"enrolled as {cfg.name!r} with {cfg.server}")
+    if not args.no_service and sys.platform == "darwin":
+        for path in agent.install_service(start_at_login=not args.no_login):
+            print(f"installed {path}")
+
+
+def worker_agent(_args: argparse.Namespace) -> None:
+    from lectern.worker.agent import Agent
+
+    Agent().run()
+
+
+def worker_menubar(_args: argparse.Namespace) -> None:
+    from lectern.worker.menubar import main as menubar
+
+    menubar()
+
+
+def worker_service(args: argparse.Namespace) -> None:
+    from lectern.worker import agent
+
+    if args.action == "install":
+        for path in agent.install_service(start_at_login=not args.no_login):
+            print(f"installed {path}")
+    else:
+        agent.uninstall_service()
+        print("removed the launchd agents (config and key are kept; delete the folder to forget)")
 
 
 def align_transcribe(args: argparse.Namespace) -> None:
@@ -350,7 +431,40 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--workdir", type=Path, default=None, help="scratch space for inputs")
     w.add_argument("--once", action="store_true", help="run at most one job and exit")
     w.add_argument("--allow-http", action="store_true", help="permit http:// (trusted LAN only)")
+    w.add_argument(
+        "--capabilities",
+        default=os.environ.get("LECTERN_WORKER_CAPABILITIES", "align"),
+        help="comma-separated: align, tts-kokoro, transcode (default align)",
+    )
+    w.add_argument(
+        "--engine",
+        choices=("auto", "mlx", "cpu"),
+        default=os.environ.get("LECTERN_ALIGN_ENGINE", "auto"),
+        help="alignment engine: mlx-whisper on Apple Silicon (auto), or faster-whisper (cpu)",
+    )
+    w.add_argument("--proxy", default="system", help="system (HTTPS_PROXY / macOS), none, or a URL")
+    w.add_argument("--ca-bundle", default=None, help="extra CA certificates (PEM) to trust")
     _transcriber_args(w)
+
+    e = sub.add_parser("worker-enroll", help="enroll this machine with a one-time code")
+    e.add_argument("--server", required=True)
+    e.add_argument(
+        "--code",
+        default=None,
+        help="lwe_… from Admin → Workers (default: $LECTERN_WORKER_CODE, kept out of argv)",
+    )
+    e.add_argument("--name", default=None)
+    e.add_argument("--proxy", default="system")
+    e.add_argument("--ca-bundle", default=None)
+    e.add_argument("--allow-http", action="store_true")
+    e.add_argument("--no-service", action="store_true", help="do not install the launchd agents")
+    e.add_argument("--no-login", action="store_true", help="do not start the menu bar at login")
+
+    sub.add_parser("worker-agent", help="run the installed worker (launchd runs this)")
+    sub.add_parser("worker-menubar", help="the macOS menu-bar app")
+    sv = sub.add_parser("worker-service", help="install or remove the launchd agents")
+    sv.add_argument("action", choices=("install", "uninstall"))
+    sv.add_argument("--no-login", action="store_true", help="do not start the menu bar at login")
 
     t = sub.add_parser("align-transcribe", help="transcribe audio to timed words (JSON)")
     t.add_argument("audio", type=Path, nargs="+")
@@ -406,6 +520,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     {
         "worker": worker,
+        "worker-enroll": worker_enroll,
+        "worker-agent": worker_agent,
+        "worker-menubar": worker_menubar,
+        "worker-service": worker_service,
         "align-transcribe": align_transcribe,
         "align-bench": align_bench,
         "backup": backup,

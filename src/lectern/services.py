@@ -15,6 +15,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+from lectern import queue
 from lectern.align import jobs
 from lectern.align.worker import LocalWorker
 from lectern.config import Settings
@@ -78,6 +79,8 @@ class Housekeeping:
                 try:
                     with self.session_factory() as db:
                         n = jobs.reclaim_expired(db, stall_s=self.settings.align_stall_seconds)
+                        queue.sweep_artifacts(db, self.settings.data_dir)
+                        queue.sweep_staging(db, self.settings.library_dir)
                     if n:
                         log.warning("reclaimed %d expired lease(s)", n)
                 except Exception:  # noqa: BLE001
@@ -122,6 +125,8 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
         # the OOM killer): its lease would otherwise hold the job for up to the lease length.
         if n := jobs.reclaim_expired(db, orphaned_local=True, stall_s=settings.align_stall_seconds):
             log.warning("requeued %d alignment job(s) interrupted by a restart", n)
+        # nothing is being published yet: every staged result copy is a leftover
+        queue.sweep_staging(db, settings.library_dir, everything=True)
     started: list = [
         Housekeeping(session_factory, settings),
         Maintenance(session_factory, settings),
@@ -146,6 +151,7 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
                 isolated=True,
                 memory_limit_mb=settings.align_memory_limit_mb,
                 stall_s=settings.align_stall_seconds,
+                defer_s=settings.local_defer_seconds,
             )
         )
         log.info(

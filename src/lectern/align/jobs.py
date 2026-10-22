@@ -12,6 +12,7 @@ import logging
 import math
 import random
 import statistics
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from lectern import queue
 from lectern.align.text import spine_lengths
 from lectern.align.tracks import fingerprint_of, sync_tracks, work_epub, work_tracks
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS, larger_model
@@ -55,7 +57,7 @@ SPEED_SAMPLE_JOBS = 5
 # a slow link report no progress, hence the generous default (LECTERN_ALIGN_STALL_SECONDS).
 STALL_S = 3600.0
 # An external worker that polled within this window counts as an alignment engine.
-WORKER_SEEN_S = 300
+WORKER_SEEN_S = queue.WORKER_SEEN_S
 DOCS_URL = "https://github.com/jeninh/lectern/blob/main/docs/alignment.md#turning-it-on"
 
 
@@ -235,7 +237,7 @@ def cancel_job(db: Session, job: Job) -> bool:
     job.lease_expires_at = None
     job.heartbeat_at = None
     job.finished_at = utcnow()
-    alignment = work_alignment(db, job.work_id) if job.work_id is not None else None
+    alignment = _alignment_of(db, job)
     if alignment is not None and alignment.status in (
         AlignmentStatus.PENDING,
         AlignmentStatus.RUNNING,
@@ -323,7 +325,10 @@ def reclaim_expired(
     leased = db.scalars(
         select(Job)
         .where(
-            Job.kind == KIND_ALIGN,  # transcode jobs belong to lectern.jobs.JobRunner
+            # Align leases of every holder; other kinds only when an external worker holds
+            # them (in-process transcode runs belong to lectern.jobs.JobRunner).
+            (Job.kind == KIND_ALIGN)
+            | (Job.kind.in_(queue.remote_kinds()) & Job.leased_by_id.is_not(None)),
             Job.status == JobStatus.LEASED,
         )
         .execution_options(populate_existing=True)
@@ -388,6 +393,9 @@ def _reclaim_one(db: Session, job: Job, error: str, now: datetime) -> bool:
     db.expire(job)
     if done != 1:
         return False
+    if job.kind != KIND_ALIGN:
+        _on_fail(db, job, terminal=not retry)
+        return True
     alignment = (
         db.scalar(
             select(Alignment)
@@ -425,20 +433,46 @@ def claim(
     worker: str,
     lease_s: int,
     credential_id: int | None,
+    capabilities: list[str] | None = None,
+    credential: WorkerCredential | None = None,
     now: datetime | None = None,
     stall_s: float = STALL_S,
+    defer_s: float = 0.0,
 ) -> tuple[Job, str] | None:
     """Atomically lease the next runnable job. Returns ``(job, lease_token)`` or ``None``.
-    ``stall_s`` is ``LECTERN_ALIGN_STALL_SECONDS`` for the reclaim that runs first."""
+
+    Only jobs whose ``capability`` is in ``capabilities`` (default: the kinds themselves)
+    are taken. For an external worker (``credential_id`` set) the kinds are narrowed to the
+    ones registered as remote and the capabilities to the credential's allowlist, never
+    server-only ones (``lectern.queue``). For the in-process runner (``credential_id``
+    ``None``), ``defer_s`` leaves jobs to an online external worker that can run them until
+    they have waited that long. ``stall_s`` is ``LECTERN_ALIGN_STALL_SECONDS`` for the
+    reclaim that runs first."""
     now = now or utcnow()
     lease_s = max(LEASE_MIN_S, min(LEASE_MAX_S, int(lease_s)))
-    kinds = [k for k in kinds if k == KIND_ALIGN]  # only align jobs leave the server
-    if not kinds:
+    caps = list(capabilities) if capabilities is not None else list(kinds)
+    if credential_id is not None:
+        remote = queue.remote_kinds()
+        kinds = [k for k in kinds if k in remote]
+        caps = queue.claimable(caps, credential) if credential is not None else caps
+        caps = [c for c in caps if c not in queue.SERVER_ONLY]
+    if not kinds or not caps:
         return None
     reclaim_expired(db, now, stall_s=stall_s)
     token = new_secret()
+    routable = Job.capability.in_(caps)
+    if credential_id is None and defer_s > 0:
+        deferred = queue.deferred_capabilities(db, caps, now)
+        if deferred:
+            waited = now - timedelta(seconds=defer_s)
+            # only a kind an external worker can claim is left to one
+            routable = (
+                Job.capability.in_([c for c in caps if c not in deferred])
+                | Job.kind.not_in(queue.remote_kinds())
+                | (Job.capability.in_(sorted(deferred)) & (Job.created_at <= waited))
+            )
     runnable = select(Job.id).where(
-        Job.status == JobStatus.QUEUED, Job.kind.in_(kinds), Job.run_after <= now
+        Job.status == JobStatus.QUEUED, Job.kind.in_(kinds), routable, Job.run_after <= now
     )
     for _ in range(3):
         candidate = (
@@ -475,7 +509,7 @@ def claim(
             continue
         job = db.get(Job, job_id)
         assert job is not None
-        alignment = work_alignment(db, job.work_id) if job.work_id is not None else None
+        alignment = _alignment_of(db, job)
         if alignment is not None and alignment.status in (
             AlignmentStatus.PENDING,
             AlignmentStatus.FAILED,
@@ -499,8 +533,9 @@ def verify_lease(
     ``credential_id`` (``None`` = the in-process worker); ``LeaseLost`` otherwise. A token is
     a secret, but binding it to the credential that claimed means a leaked token is useless
     with any other worker key. With ``allow_succeeded`` a finished job whose last lease
-    matches is returned too (idempotent result upload)."""
-    job = db.get(Job, job_id)
+    matches is returned too (idempotent result upload). The row is always re-read: sessions
+    keep loaded objects, and a lease may have been released or reassigned since."""
+    job = db.get(Job, job_id, populate_existing=True)
     if job is None or not token or job.lease_token_hash is None:
         raise LeaseLost()
     if job.leased_by_id != credential_id:
@@ -538,9 +573,9 @@ def heartbeat(
     if message is not None:
         result["message"] = message[:200]
     if stats is not None:
-        result["stats"] = (
-            stats if isinstance(stats, AlignStats) else AlignStats.model_validate(stats)
-        ).stored()
+        stored = _validated_stats(job, stats)
+        if stored is not None:
+            result["stats"] = stored
     job.result = result
     db.commit()
     return job.lease_expires_at
@@ -549,9 +584,48 @@ def heartbeat(
 # --- failure and reclaim --------------------------------------------------------------------
 
 
+def requeue_leases(
+    db: Session,
+    credential_id: int | None = None,
+    *,
+    keep: Iterable[str] | None = None,
+    job_ids: Iterable[int] = (),
+) -> int:
+    """Give back, like :func:`release`, every lease ``credential_id`` holds (only the ones
+    whose capability is not in ``keep``, when given), and every lease, whoever holds it, on
+    ``job_ids`` (jobs whose artifacts were just deleted). Not the job's fault, so no attempt
+    is spent. The lease token is cleared, so the old holder's next call is
+    ``409 lease_lost``. Caller commits."""
+    ids = list(job_ids)
+    match = Job.leased_by_id == credential_id if credential_id is not None else None
+    if ids:
+        match = Job.id.in_(ids) if match is None else (match | Job.id.in_(ids))
+    if match is None:
+        return 0
+    held = db.scalars(
+        select(Job)
+        .where(Job.status == JobStatus.LEASED, match)
+        .execution_options(populate_existing=True)
+    ).all()
+    keep = None if keep is None else set(keep)
+    n = 0
+    for job in held:
+        if keep is not None and job.capability in keep and job.id not in ids:
+            continue
+        _release(db, job)
+        n += 1
+    db.flush()
+    return n
+
+
 def release(db: Session, job: Job) -> None:
     """Give a leased job back untouched (the worker is shutting down, not failing): queued
     again at once, and the attempt does not count."""
+    _release(db, job)
+    db.commit()
+
+
+def _release(db: Session, job: Job) -> None:
     job.status = JobStatus.QUEUED
     job.attempts = max(0, job.attempts - 1)
     job.lease_token_hash = None
@@ -559,11 +633,9 @@ def release(db: Session, job: Job) -> None:
     job.heartbeat_at = None
     job.run_after = utcnow()
     job.result = None
-    if job.work_id is not None:
-        alignment = work_alignment(db, job.work_id)
-        if alignment is not None and alignment.status == AlignmentStatus.RUNNING:
-            alignment.status = AlignmentStatus.PENDING
-    db.commit()
+    alignment = _alignment_of(db, job)
+    if alignment is not None and alignment.status == AlignmentStatus.RUNNING:
+        alignment.status = AlignmentStatus.PENDING
 
 
 def fail(db: Session, job: Job, error: str, *, retryable: bool) -> dict:
@@ -581,18 +653,49 @@ def _retry_or_fail(db: Session, job: Job, error: str, *, retryable: bool, now: d
         job.lease_token_hash = None  # a late upload from the old lease is 409 lease_lost
         job.run_after = now + timedelta(seconds=backoff_s(job.attempts))
         job.result = None
-        alignment = work_alignment(db, job.work_id) if job.work_id is not None else None
+        alignment = _alignment_of(db, job)
         if alignment is not None and alignment.status == AlignmentStatus.RUNNING:
             alignment.status = AlignmentStatus.PENDING
+        if job.kind != KIND_ALIGN:
+            _on_fail(db, job, terminal=False)
         return {"status": "queued", "run_after": job.run_after}
     job.status = JobStatus.FAILED
     job.finished_at = now
-    if job.work_id is not None:
-        alignment = work_alignment(db, job.work_id)
-        if alignment is not None and alignment.status != AlignmentStatus.SUCCEEDED:
-            alignment.status = AlignmentStatus.FAILED
-            alignment.error = job.error
+    alignment = _alignment_of(db, job)
+    if alignment is not None and alignment.status != AlignmentStatus.SUCCEEDED:
+        alignment.status = AlignmentStatus.FAILED
+        alignment.error = job.error
+    if job.kind != KIND_ALIGN:
+        _on_fail(db, job, terminal=True)
     return {"status": "failed"}
+
+
+def _alignment_of(db: Session, job: Job) -> Alignment | None:
+    """The work's alignment row, for align jobs only: other kinds share the queue, not the
+    alignment state."""
+    if job.kind != KIND_ALIGN or job.work_id is None:
+        return None
+    return work_alignment(db, job.work_id)
+
+
+def _on_fail(db: Session, job: Job, *, terminal: bool) -> None:
+    found = queue.handler(job.kind)
+    if found is not None and found.on_fail is not None:
+        found.on_fail(db, job, terminal)
+
+
+def _validated_stats(job: Job, stats) -> dict | None:
+    """Heartbeat ``stats`` as stored: align's are :class:`AlignStats` (``ValidationError``
+    when they do not fit); other kinds' go through their handler, or are dropped."""
+    if job.kind == KIND_ALIGN:
+        return (
+            stats if isinstance(stats, AlignStats) else AlignStats.model_validate(stats)
+        ).stored()
+    found = queue.handler(job.kind)
+    if found is None or found.stats is None:
+        return None
+    raw = stats.stored() if isinstance(stats, AlignStats) else stats
+    return found.stats(raw) if isinstance(raw, dict) else None
 
 
 # --- result ------------------------------------------------------------------------------------
@@ -815,6 +918,8 @@ def eta(db: Session, job: Job, now: datetime | None = None) -> dict | None:
     draining the queue in order."""
     if job.status not in JOB_ACTIVE_STATUSES:
         return None
+    if job.kind != KIND_ALIGN:
+        return _eta_from_this_run(job, now or utcnow())
     measured = measured_speed(db, (job.payload or {}).get("model"))
     if measured is None:
         return _eta_from_this_run(job, now or utcnow())
@@ -885,6 +990,7 @@ def job_json(db: Session, job: Job, workers: dict[int, str] | None = None) -> di
     return {
         "id": job.id,
         "kind": job.kind,
+        "capability": job.capability,
         "work_id": job.work_id,
         "status": job.status.value,
         "attempts": job.attempts,
@@ -973,13 +1079,7 @@ def engine_unavailable(db: Session, settings, now: datetime | None = None) -> di
     reason = local_engine_missing(settings)
     if reason is None:
         return None
-    cutoff = (now or utcnow()) - timedelta(seconds=WORKER_SEEN_S)
-    seen = db.scalar(
-        select(WorkerCredential.id)
-        .where(WorkerCredential.revoked_at.is_(None), WorkerCredential.last_used_at >= cutoff)
-        .limit(1)
-    )
-    if seen is not None:
+    if queue.capability_online(db, KIND_ALIGN, now):
         return None
     return {
         "reason": reason,
@@ -1061,7 +1161,10 @@ _COMPUTE_TYPES = ("int8", "int8_float16", "int8_float32", "float16", "float32")
 
 
 def _model_name(label: str) -> str:
-    """``faster-whisper-small-int8`` → ``small``; anything else is returned as is."""
+    """``faster-whisper-small-int8`` / ``mlx-whisper-small`` → ``small``; anything else is
+    returned as is."""
+    if label.startswith("mlx-whisper-"):
+        return label[len("mlx-whisper-") :]
     if label.startswith("faster-whisper-"):
         rest = label[len("faster-whisper-") :]
         for ct in _COMPUTE_TYPES:
@@ -1073,3 +1176,12 @@ def _model_name(label: str) -> str:
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat().replace("+00:00", "Z") if dt else None
+
+
+queue.register(
+    queue.KindHandler(
+        kind=KIND_ALIGN,
+        capability=lambda _payload: queue.ALIGN,
+        # inputs and results have their own routes (epub, tracks/{position}, SentenceMap)
+    )
+)
