@@ -28,7 +28,6 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import ConfigDict, Field
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
 
 from lectern import ai_keys
 from lectern.models import AIKey, utcnow
@@ -58,18 +57,7 @@ def key_json(k: AIKey) -> dict:
     }
 
 
-def _commit(db) -> None:
-    """Commit, or 503 ``busy`` while another request holds SQLite's write lock past its
-    busy timeout (nothing was changed; the client can simply try again)."""
-    try:
-        db.commit()
-    except OperationalError as exc:
-        db.rollback()
-        if "locked" not in str(exc) and "busy" not in str(exc):
-            raise
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "busy", headers={"Retry-After": "2"}
-        ) from None
+_commit = stepup.commit_or_busy
 
 
 def _owned(db, auth, key_id: int) -> AIKey:

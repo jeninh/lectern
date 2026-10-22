@@ -22,6 +22,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from lectern.config import Settings
@@ -50,6 +51,20 @@ class StepUpIn(BaseModel):
     @property
     def offered(self) -> bool:
         return self.password is not None or self.passkey is not None
+
+
+def commit_or_busy(db: Session) -> None:
+    """Commit, or 503 ``busy`` with ``Retry-After`` while another request holds SQLite's write
+    lock past its busy timeout (an AI tool filing a book). Nothing was changed; retry."""
+    try:
+        db.commit()
+    except OperationalError as exc:
+        db.rollback()
+        if "locked" not in str(exc) and "busy" not in str(exc):
+            raise
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "busy", headers={"Retry-After": "2"}
+        ) from None
 
 
 def methods(db: Session, user: User, settings: Settings) -> list[str]:
@@ -133,7 +148,7 @@ def require(
             db, failed_action, actor_user_id=user.id, target=target, ip=client_ip(request),
             detail=detail,
         )  # fmt: skip
-        db.commit()
+        commit_or_busy(db)
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             {"detail": "step_up_failed", "methods": methods(db, user, settings)},

@@ -495,6 +495,7 @@ def upload_book(
                 imp.ai_key_id = c.key.id
             else:
                 imp, created = imports.get_owned(c.db, c.user, import_id), False
+                _own_import(c, imp)
             row, _ = uploads_api.start_session(
                 c.db,
                 c.request,
@@ -512,6 +513,8 @@ def upload_book(
             upload_id = row.public_id
         else:
             created = False
+            row = uploads_api._own(c.db, c.auth, upload_id)
+            _own_import(c, c.db.get(Import, row.import_id) if row.import_id else None)
         try:
             uploads_api._open_session(c.db, c.auth, c.settings, upload_id)
             if data:
@@ -563,6 +566,16 @@ def upload_book(
                     c.db.commit()
                     imports.cleanup_staging(c.settings, imp)
             raise
+
+
+def _own_import(c: Call, imp: Import | None) -> None:
+    """An AI key adds files only to imports it opened: otherwise one key could slip content
+    into another (filing) key's import, or into the person's own uploads."""
+    if imp is None or imp.ai_key_id != c.key.id:
+        raise ToolError(
+            "forbidden: this import was not opened by this AI key. Start a new upload "
+            "without import_id."
+        )
 
 
 def list_pending_imports(ctx: Context) -> dict:

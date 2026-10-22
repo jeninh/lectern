@@ -77,7 +77,8 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
   their ability to file: every key that had `upload` was given `file` too (migration `0012`).
   A key files only imports it opened itself with `upload_book`. Uploads you started in the web
   app, or that another key uploaded, are yours to file in the review sheet, even if the key
-  has `file` and knows the import id.
+  has `file` and knows the import id. Likewise a key adds files (`import_id`, or resuming an
+  `upload_id`) only to imports it opened.
 - **API callers**: a script that creates keys with explicit `{"scopes": ["upload"]}` now gets
   a key that uploads but cannot file. Add `"file"` to keep the old behaviour. Editing metadata and alignment
   need an owner or member, as in the web app.
@@ -102,7 +103,9 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
   with the scopes before and after and how it was confirmed, and `ai_key.step_up_failed` /
   `passkey.step_up_failed` for wrong confirmations (rate limited like sign-in).
 - If the server is busy writing (an AI app filing a book holds SQLite's write lock), an edit
-  answers `503 busy` with `Retry-After` and changes nothing; try again.
+  answers `503 busy` with `Retry-After` and changes nothing (also for a wrong step-up); try
+  again. A filing refused at the last moment leaves the library exactly as it was, including
+  `book.json`.
 - A key is accepted **only** at `/mcp`. It cannot open `/api`, `/library`, or `/opds`, so it
   cannot download book files, audio, covers, or read-aloud EPUBs. No tool returns file
   contents or download links. No tool manages users, invites, keys, or server settings.

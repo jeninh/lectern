@@ -1165,3 +1165,92 @@ def test_migration_0012_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
         "file-read": (["read"], False),
     }
     assert "ai_key_id" not in {c["name"] for c in sa.inspect(engine).get_columns("imports")}
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """Every file and folder under ``root``, with each file's SHA-256."""
+    return {
+        str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "/"
+        for p in sorted(root.rglob("*"))
+    }
+
+
+@pytest.mark.parametrize("title", ["Zulu Unique", "Alpha"])
+def test_a_refused_filing_leaves_the_library_as_it_was(app, home, settings, monkeypatch, title):
+    """Review finding: when the file scope was removed during filing, the rows and files were
+    rolled back but book.json was not: a stale sidecar on the joined book, or an orphan folder
+    holding only book.json for a new one."""
+    secret = home["owner"].key("upload", "file")
+    mcp = MCP(app, secret)
+    data = make_epub(settings.data_dir / "Z.epub", title=title, authors=[f"Author {title}"],
+                     padding=4242).read_bytes()  # fmt: skip
+    out = mcp.ok("upload_book", filename="Z.epub", content_base64=base64.b64encode(data).decode())
+    assert out["status"] == "ready"
+    assert out["proposal"]["action"] == ("join" if title == "Alpha" else "new")
+    before = _tree(settings.library_dir)
+    real = imports.file
+
+    def scope_removed_meanwhile(*args, **kw):
+        _set_scopes(secret, ["upload"])  # the owner unticks file while this call is filing
+        return real(*args, **kw)
+
+    monkeypatch.setattr(imports, "file", scope_removed_meanwhile)
+    ok, err = mcp.call("confirm_import", import_id=out["import_id"])
+    assert not ok and "needs file scope" in err
+    assert _tree(settings.library_dir) == before
+    with session_factory()() as db:
+        assert db.scalar(select(Work).where(Work.title == "Zulu Unique")) is None
+        assert db.scalar(select(Import)).status.value == "ready"
+
+
+def test_a_failed_step_up_while_the_database_is_locked_is_busy(app, home, settings):
+    import sqlite3
+
+    owner = home["owner"]
+    key_id = _key_row(owner.key("read")).id
+    writer = sqlite3.connect(settings.db_path, timeout=0)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        r = _edit(owner, key_id, ["read", "organize"], password="wrong password, sorry")
+        assert r.status_code == 503 and r.json()["detail"] == "busy", r.text
+        r = api_post(owner.http, "/api/security/passkeys/options", owner.csrf,
+                     {"password": "wrong password, sorry"})  # fmt: skip
+        assert r.status_code == 503 and r.json()["detail"] == "busy", r.text
+    finally:
+        writer.rollback()
+        writer.close()
+    r = _edit(owner, key_id, ["read", "organize"], password="wrong password, sorry")
+    assert r.json()["detail"] == "step_up_failed"
+
+
+def test_a_key_adds_files_only_to_imports_it_opened(app, home, settings, monkeypatch):
+    """Review finding: an upload-only key could append files to an import a filing key
+    opened, which the filing key would then file."""
+    monkeypatch.setattr(mcp_server, "CHUNK_BYTES", 4096)
+    owner = home["owner"]
+    filer = MCP(app, owner.key("upload", "file", label="filer"))
+    other = MCP(app, owner.key("upload", label="other"))
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    small = make_epub(settings.data_dir / "M.epub", title="Mike").read_bytes()
+    theirs = filer.ok("upload_book", filename="M.epub", content_base64=b64(small), finish=False)
+    big = make_epub(settings.data_dir / "N.epub", title="Nov", padding=20000).read_bytes()
+    started = filer.ok("upload_book", filename="N.epub", content_base64=b64(big[:4096]),
+                       total_size=len(big), sha256=hashlib.sha256(big).hexdigest(),
+                       import_id=theirs["import_id"])  # fmt: skip
+    web = api_post(owner.http, "/api/imports", owner.csrf, {"label": "web"}).json()["id"]
+    for import_id in (theirs["import_id"], web):
+        ok, err = other.call("upload_book", filename="X.epub", content_base64=b64(small),
+                             import_id=import_id)  # fmt: skip
+        assert not ok and "not opened by this AI key" in err
+    # Nor by continuing the filing key's upload session.
+    ok, err = other.call("upload_book", filename="N.epub", upload_id=started["upload_id"],
+                         offset=4096, content_base64=b64(big[4096:8192]))  # fmt: skip
+    assert not ok and "not opened by this AI key" in err
+    with session_factory()() as db:
+        imp = db.scalar(select(Import).where(Import.public_id == theirs["import_id"]))
+        assert [f.filename for f in imp.files] == ["M.epub"]
+    # The key that opened it can still add to it.
+    assert (
+        filer.ok("upload_book", filename="N.epub", upload_id=started["upload_id"])["received_bytes"]
+        == 4096
+    )

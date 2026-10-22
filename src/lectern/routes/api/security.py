@@ -153,7 +153,7 @@ def passkey_options(
         request, db, auth.user, settings, body or stepup.StepUpIn(),
         failed_action="passkey.step_up_failed",
     )  # fmt: skip
-    db.commit()  # a passkey step-up updated that passkey's counter
+    stepup.commit_or_busy(db)  # a passkey step-up updated that passkey's counter
     existing = db.scalars(select(Passkey).where(Passkey.user_id == auth.user.id)).all()
     options_json, challenge = registration_options(settings, auth.user, existing)
     key = request.app.state.challenges.put(challenge, auth.user.id, "register")
