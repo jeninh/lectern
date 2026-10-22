@@ -4,17 +4,17 @@ Upgrade: every key that could file books (it holds ``upload``) keeps that abilit
 ``file`` too. Imports remember the AI key that opened them (``imports.ai_key_id``): a key
 files only its own uploads. Imports already pending have none, so the person files those.
 
-Downgrade never widens a key. Before 0012, ``upload`` also meant filing, and ``file`` did not
+Downgrade never widens a key. Before 0013, ``upload`` also meant filing, and ``file`` did not
 exist, so:
 
-- ``upload`` + ``file`` → ``upload`` (the same abilities as before 0012);
+- ``upload`` + ``file`` → ``upload`` (the same abilities as before 0013);
 - ``upload`` without ``file`` (filing deliberately turned off) → ``upload`` is dropped, since
   keeping it would turn filing back on;
 - ``file`` without ``upload`` → dropped (the old schema cannot express it);
 - a key left with no scopes is revoked (the old code never created an empty key).
 
-Revision ID: 0012
-Revises: 0011
+Revision ID: 0013
+Revises: 0012_worker_capabilities
 Create Date: 2026-10-21
 
 """
@@ -26,8 +26,8 @@ from datetime import UTC, datetime
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0012"
-down_revision = "0011"
+revision = "0013"
+down_revision = "0012_worker_capabilities"
 branch_labels = None
 depends_on = None
 

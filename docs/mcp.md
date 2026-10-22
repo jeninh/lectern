@@ -74,7 +74,7 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 - `file` is on by default for new keys; untick it and the app's uploads wait in **Review
   before filing** for you. Without `file`, `upload_book` never files a book, even with your
   “file certain matches automatically” preference on. Keys created before `file` existed kept
-  their ability to file: every key that had `upload` was given `file` too (migration `0012`).
+  their ability to file: every key that had `upload` was given `file` too (migration `0013`).
   A key files only imports it opened itself with `upload_book`. Uploads you started in the web
   app, or that another key uploaded, are yours to file in the review sheet, even if the key
   has `file` and knows the import id. Likewise a key adds files (`import_id`, or resuming an

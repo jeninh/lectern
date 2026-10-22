@@ -1097,7 +1097,7 @@ def test_file_is_rechecked_right_before_auto_filing(app, home, settings, monkeyp
     assert not audit_rows("import.auto_file")
 
 
-def test_migration_0012_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
+def test_migration_0013_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
     import sqlalchemy as sa
     from alembic import command
     from alembic.autogenerate import compare_metadata
@@ -1107,11 +1107,11 @@ def test_migration_0012_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
     from lectern.migrate import alembic_config, upgrade_to_head
     from lectern.models import Base
 
-    engine = make_engine(f"sqlite:///{tmp_path / 'm12.db'}")
+    engine = make_engine(f"sqlite:///{tmp_path / 'm13.db'}")
     cfg = alembic_config(str(engine.url))
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.upgrade(cfg, "0011")
+        command.upgrade(cfg, "0012_worker_capabilities")
 
     def insert(keys: dict) -> None:
         with engine.begin() as conn:
@@ -1146,13 +1146,13 @@ def test_migration_0012_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
     }
     with engine.connect() as conn:
         assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
-    # Keys edited after 0012: filing turned off, or file without upload.
+    # Keys edited after 0013: filing turned off, or file without upload.
     insert({"no-filing": ["upload", "read"], "upload-only": ["upload"],
             "file-only": ["file"], "file-read": ["file", "read"]})  # fmt: skip
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.downgrade(cfg, "0011")
-    # Before 0012 upload meant filing too: a downgrade drops it rather than re-enabling
+        command.downgrade(cfg, "0012_worker_capabilities")
+    # Before 0013 upload meant filing too: a downgrade drops it rather than re-enabling
     # filing, drops file, and revokes a key left with nothing.
     assert state() == {
         "uploader": (["upload"], False),
