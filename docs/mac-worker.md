@@ -23,10 +23,13 @@ connects to it.
    a command with a one-time code (valid for an hour, single use, stored hashed):
 
    ```sh
-   curl -fsSL https://lectern.example/worker/install.sh | sh -s -- --code lwe_…
+   curl -fsSL https://lectern.example/worker/install.sh | LECTERN_WORKER_CODE=lwe_… sh
    ```
 
-2. Paste it into Terminal on the Mac. It installs [uv](https://docs.astral.sh/uv/) if needed,
+2. Paste it into Terminal on the Mac. The code travels in the environment, never in a
+   process's arguments, so `ps` does not show it. It is single use and expires, so the copy
+   left in the shell history is worthless once used. To keep it out of the history as well,
+   run the command without `LECTERN_WORKER_CODE=…`; the installer then asks for the code. It installs [uv](https://docs.astral.sh/uv/) if needed,
    then `lectern[mac]` as a uv tool (Python 3.12, MLX Whisper, Kokoro, the menu bar), then ffmpeg
    with Homebrew if Homebrew is present. It exchanges the code for a worker key and installs two
    launch agents. Nothing runs as root. Run the same command again with a new code to upgrade or
@@ -35,15 +38,21 @@ connects to it.
 Options: `--name`, `--proxy`, `--ca-bundle` (see [School mode](#school-and-proxy-mode)),
 `--no-login` (no menu bar at login), `--source` (where to install Lectern from, default
 `LECTERN_WORKER_INSTALL_SOURCE` on the server, `git+https://github.com/jeninh/lectern`).
-**The repository is private**, so the Mac needs read access to it: sign in with
-`gh auth login` (git uses its credential helper), or point `--source` at a wheel or a checkout
-you can reach, for example `--source /Users/me/src/lectern`.
+The installer pins that source to the server's own commit (`@<LECTERN_WORKER_INSTALL_REF>`),
+so the worker speaks the same protocol as the server. The image sets the ref from the
+`LECTERN_COMMIT` build argument: `LECTERN_COMMIT=$(git rev-parse HEAD) docker compose … up -d
+--build`. Without it the newest code is installed and the installer says so.
+**The repository is private**, so the Mac needs read access to it. The installer checks first
+(`git ls-remote`) and stops with instructions if it cannot read the repository: sign in with
+`gh auth login` and `gh auth setup-git`, use an SSH key with
+`--source git+ssh://git@github.com/jeninh/lectern`, or point `--source` at a wheel or a
+checkout you can reach, for example `--source /Users/me/src/lectern`.
 
 Without the installer:
 
 ```sh
 uv tool install --python 3.12 'lectern[mac] @ git+https://github.com/jeninh/lectern'
-lectern worker-enroll --server https://lectern.example --code lwe_…   # also installs launchd
+LECTERN_WORKER_CODE=lwe_… lectern worker-enroll --server https://lectern.example   # also installs launchd
 ```
 
 Files: settings in `~/Library/Application Support/Lectern Worker/config.json`, the key in
@@ -110,7 +119,8 @@ the Pi never wait.
 MLX differs from faster-whisper in two ways that matter little here: it has no Silero VAD
 (the worker skips silent stretches with mlx-whisper's `hallucination_silence_threshold`, and
 the matcher ignores words that match no text), and it decodes greedily. The sentence map's
-`model` is `mlx-whisper-<model>` (or the CPU label after a fallback); retries and "larger
+`model` is `mlx-whisper-<model>` (or the CPU label after a fallback; only the conversions
+listed in `MLX_REPOS` are loaded); retries and "larger
 model" suggestions treat both the same. No Mac timings are quoted here: none were measured.
 
 Choose with `lectern worker --engine auto|mlx|cpu` or `"engine"` in `config.json`.
@@ -122,10 +132,12 @@ it is allowed to run, download the inputs of jobs it holds a lease on (the lease
 required on every call), upload artifacts and results for those jobs, and report its status.
 It cannot read the library, progress, OPDS, or any user route. The owner can:
 
-- **Revoke** it (Admin → Workers → Revoke): the next request fails, and its leased jobs return
-  to the queue at once.
+- **Revoke** it (Admin → Workers → Revoke): the next request fails, its leased jobs return
+  to the queue at once without spending an attempt, and every artifact it uploaded is
+  deleted, so no later attempt resumes from (or publishes) its output.
 - **Limit** it to some capabilities ("Only align", or `PATCH /api/worker-credentials/{id}
-  {"capabilities": ["align"]}`).
+  {"capabilities": ["align"]}`). Leases the narrower list no longer permits go back to the
+  queue at once.
 - See its status, platform, engines, and the job it is running.
 
 The enrollment code is single use and expires; it is not a credential. The install script is
@@ -143,11 +155,18 @@ models), so it works there:
   Network → Proxies; automatic proxy configuration (PAC) files are not evaluated), `none`, or a
   URL such as `http://proxy.school.example:3128`.
 - **TLS inspection.** `ca_bundle` / `--ca-bundle /path/school-ca.pem` trusts the network's
-  certificate for connections to your server. Without it the worker fails with a certificate
-  error, by design: it never turns verification off.
-- **Blocked downloads.** If Hugging Face is blocked, download the models on another network
-  first (they are cached in `~/.cache/huggingface`). If MLX models are blocked but the CPU
-  model is cached, alignment falls back to the CPU engine.
+  certificate *in addition to* the public roots, so the same Mac still works at home.
+  Without it the worker fails with a certificate error, by design: it never turns
+  verification off. `proxy: none` ignores proxy environment variables too.
+- **Model downloads** (Hugging Face, by mlx-whisper, faster-whisper, and Kokoro) go through
+  the same proxy and trust the same extra CA: the agent exports `HTTPS_PROXY`/`HTTP_PROXY`
+  and `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` (public roots plus your CA, written to
+  `ca-bundle.pem` in the worker's folder) before any engine loads.
+- **Blocked downloads.** If an engine still cannot load its model, the worker hands the job
+  back without spending an attempt and stops offering that capability for 30 minutes, so the
+  Pi or another worker takes it. Download the models on another network first (they are
+  cached in `~/.cache/huggingface`). If MLX cannot load but the CPU model is cached,
+  alignment falls back to the CPU for that job and tries MLX again on the next.
 - **Tailscale** blocked? Give the server a public HTTPS address (for example `tailscale
   funnel` for `/api/worker/*` only, or Cloudflare Tunnel; see
   [deploy-tailscale.md](deploy-tailscale.md)). The worker key is all the worker needs; it never

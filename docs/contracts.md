@@ -667,7 +667,11 @@ Milestone 3 implements this; Step 0 fixes the schema and the rules.
   passwords.
 - `GET /api/worker-credentials` lists `{id, label, created_at, last_used_at, revoked_at}`;
   `DELETE /api/worker-credentials/{id}` revokes (`revoked_at`), effective on the next request.
-  Jobs leased by a revoked credential are reclaimed as if the lease had expired.
+  Jobs leased by a revoked credential go back to the queue at once without spending an
+  attempt, and the artifacts it uploaded (recorded per artifact) are deleted.
+  `PATCH /api/worker-credentials/{id} {capabilities}` requeues the same way the leases the
+  new allowlist no longer permits. Failed enrollment codes count against their own
+  per-address limit (`worker_enroll`, 10/min), not the bad-key limit.
 - Scope: the key is sent as `Authorization: Bearer lw_…` and is accepted **only** by
   `/api/worker/*`. It is not a user: it has no session, no role, no CSRF token, and cannot read
   the library, progress, or any other route. Sessions and app passwords are in turn rejected by
@@ -880,7 +884,7 @@ All with `Authorization: Bearer lw_…` and `X-Lease-Token`:
 | Route | |
 | --- | --- |
 | `GET /api/worker/jobs/{id}/inputs/{name}` | A named input from the kind's `inputs` (Range, `ETag`, `X-Content-SHA256`). |
-| `PUT /api/worker/jobs/{id}/artifacts/{name}` | Raw streamed body with `X-Content-SHA256` (required; `422 checksum_mismatch`). `name` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, not ending in `.sha256` or `.part` (reserved, `400`). At most `LECTERN_WORKER_ARTIFACT_MAX_BYTES` per file (default 2 GiB) and `LECTERN_WORKER_ARTIFACT_JOB_MAX_BYTES` for the whole job, uploads in flight included (default 8 GiB), `413`; 5000 files and 4 concurrent uploads per job (`429`). The lease is re-read after the body arrives. Written to a temporary file, then renamed into `<data>/jobs/<id>/artifacts/`; re-uploading a name replaces it. `201 {name, size, sha256}`. |
+| `PUT /api/worker/jobs/{id}/artifacts/{name}` | Raw streamed body with `X-Content-SHA256` (required; `422 checksum_mismatch`). `name` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, not ending in `.sha256` or `.part` (reserved, `400`). At most `LECTERN_WORKER_ARTIFACT_MAX_BYTES` per file (default 2 GiB) and `LECTERN_WORKER_ARTIFACT_JOB_MAX_BYTES` for the whole job, uploads in flight included (default 8 GiB), `413`; 5000 files and 4 concurrent uploads per job (`429`). The lease is re-read after the body arrives. Written to a temporary file, then renamed into `<data>/jobs/<id>/artifacts/` under the write lock of the still-current lease; re-uploading a name replaces it (the old checksum is removed first and the new one written last, so an artifact is never listed with another upload's checksum). `201 {name, size, sha256}`. |
 | `GET /api/worker/jobs/{id}/artifacts` | `{artifacts: [{name, size, sha256}]}`: what this or an earlier attempt uploaded. |
 | `GET /api/worker/jobs/{id}/artifacts/{name}` | Download one back (resume). |
 | `POST /api/worker/jobs/{id}/release` | Give the job back without spending an attempt (worker paused or switched off): `queued` at once. `{status: "queued"}`. |
@@ -897,14 +901,21 @@ capabilities. While `queue.capability_online(db, cap)` (an unrevoked credential 
 within 5 minutes, is not `paused`/`off`, and may claim `cap`; a credential that never
 advertised counts as `align` only), the local runner takes that capability's jobs only once
 they were queued at least `LECTERN_LOCAL_DEFER_SECONDS` ago (default 600; `0` = never defer).
-The "alignment cannot run" notice uses the same test.
+Only kinds external workers may claim (`queue.remote_kinds()`) are ever deferred. The "alignment cannot run" notice uses the same test.
+
+Downgrading below `0012_worker_capabilities` requeues non-align leases held by external
+workers (nothing older could finish them).
+
+Worker side: a runner whose engine cannot load (a blocked model download) releases the job
+and withholds its capability for 30 minutes. Workers only fetch URLs under their own job's
+`/api/worker/jobs/{id}/` and only plain file names (the artifact name pattern).
 
 ### `transcode` on external workers
 
 Inputs `track-<track_id>` for each payload track that is still the same file. Each rendition
 is uploaded as an artifact (`<original sha256>.<m4a|opus>`), then the result
 `{"renditions": [{"track_id", "sha256", "artifact", "artifact_sha256"}]}`; the server checks
-every artifact's hash, requires one rendition (no duplicates) for every payload track that is still current and has none yet (`422 missing_renditions`), takes the job's success with a conditional update on the uploading lease (a released or reassigned lease gets `409 lease_lost` and publishes nothing), then publishes under `derived/audio/` as the local runner does.
+every artifact's hash, requires one rendition (no duplicates) for every payload track that is still current and has none yet (`422 missing_renditions`), takes the job's success with a conditional update on the uploading lease (a released or reassigned lease gets `409 lease_lost` and publishes nothing), then publishes under `derived/audio/` as the local runner does. Each artifact is first copied to `<library>/.lectern-staging/<job>-<tag>/` (same filesystem, outside every work folder; removed afterwards, swept at startup and hourly) and must play as long as its original (within 1 s or 1 %; `422 bad_rendition`); the destination folder is read under the library lock, so a work renamed meanwhile still gets its rendition.
 `max_attempts` is now 3 (an expired remote lease is retried).
 
 ### Generated audiobooks: the `tts` kind

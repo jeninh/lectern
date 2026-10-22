@@ -319,17 +319,33 @@ def _place(staged: Path, dest: Path, digest: str) -> None:
     dest.with_name(dest.name + ".sha256").write_text(digest)
 
 
+def _plays_like(path: Path, original: AudioTrack) -> bool:
+    """A rendition must be audio mutagen can read, as long as the original (within 1 s or
+    1 %): a worker cannot publish a truncated file or something that is not audio at all."""
+    from lectern.align.tracks import probe
+
+    duration, _codec, _chapters = probe(path)
+    if duration <= 0:
+        return False
+    if original.duration_s <= 0:
+        return True
+    return abs(duration - original.duration_s) <= max(1.0, 0.01 * original.duration_s)
+
+
 def _remote_result(db: Session, settings: Settings, job: Job, body: bytes, artifacts: Path) -> dict:
     """Check a worker's renditions and publish them, fenced by the uploading lease.
 
     Every payload track that is still current and has no rendition yet must be in the result,
-    once. Each artifact is pinned: copied, under its own name, into the work's
-    ``derived/audio/`` (the destination filesystem) and hashed from that one read, before any
-    lock is taken. Then, under the library lock, the lease is held (``queue.hold_lease``: the
-    database write lock on the exact, unexpired lease), the pinned files are renamed into
-    place, and the job becomes ``succeeded`` in that same transaction. A lost lease publishes
-    nothing (``LeaseLost``); a failure rolls back, the job stays leased, and the worker's
-    retry of the upload finishes it."""
+    once. Each artifact is pinned: copied into ``<library>/.lectern-staging/<job>-<tag>/``
+    (the library's filesystem, outside every work folder, so a rename or trash of the work
+    meanwhile strands nothing) and hashed from that one read, then probed (it must play as
+    long as the original), before any lock is taken. Then, under the library lock, the
+    work's current folder is read, the lease is held (``queue.hold_lease``: the database
+    write lock on the exact, unexpired lease), the pinned files are renamed into place, and
+    the job becomes ``succeeded`` in that same transaction. A lost lease publishes nothing
+    (``LeaseLost``); a failure rolls back, the job stays leased, and the worker's retry of
+    the upload finishes it. The staged copies are always removed (and swept if the server
+    dies in between: ``queue.sweep_staging``)."""
     from lectern.align.jobs import LeaseLost, ResultError
     from lectern.fsops import LIBRARY_LOCK
 
@@ -359,36 +375,40 @@ def _remote_result(db: Session, settings: Settings, job: Job, body: bytes, artif
     ]  # fmt: skip
     if missing:
         raise ResultError(422, "missing_renditions", [f"track {t}" for t in missing])
-    stage_dir = variant_path(settings.library_dir, work, "x", codec).parent
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    tag = new_secret()[:8]
-    staged: list[Path] = []
+    stage = queue.staging_dir(settings.library_dir, job.id, new_secret()[:8])
     try:
+        stage.mkdir(parents=True)
         pinned = []
         for r in parsed.renditions:
             if expected.get(r.track_id) != r.sha256:
                 raise ResultError(422, "input_mismatch", [f"track {r.track_id} is not in the job"])
             src = artifacts / r.artifact
-            copy = stage_dir / f".stage-{job.id}-{r.track_id}-{tag}"  # one per track
-            if not src.is_file():
-                raise ResultError(422, "missing_artifact", [r.artifact])
-            staged.append(copy)
-            if _pin(src, copy) != r.artifact_sha256:
+            copy = stage / f"{r.track_id}.{EXT.get(codec, 'bin')}"  # one per track
+            try:
+                digest = _pin(src, copy)
+            except FileNotFoundError:
+                digest = None
+            if digest != r.artifact_sha256:
                 raise ResultError(422, "missing_artifact", [r.artifact])
             if r.track_id in current:
+                if not _plays_like(copy, current[r.track_id]):
+                    raise ResultError(422, "bad_rendition", [f"track {r.track_id}"])
                 pinned.append((r, copy))
         result = {"done": len(pinned), "total": total}
         # The library lock first, then the database's: the order rescans and edits use.
         with LIBRARY_LOCK:
             db.refresh(work)
-            if variant_path(settings.library_dir, work, "x", codec).parent != stage_dir:
-                raise RuntimeError("the work was moved or trashed meanwhile; upload again")
+            if work.trashed_at is not None:
+                raise LeaseLost()
             if not queue.hold_lease(db, job):
                 raise LeaseLost()
             try:
                 for r, copy in pinned:
                     if find_variant(settings.library_dir, work, r.sha256) is None:
+                        # the work's folder as it is now, under the lock: a rename earlier
+                        # moved nothing of ours
                         dest = variant_path(settings.library_dir, work, r.sha256, codec)
+                        dest.parent.mkdir(parents=True, exist_ok=True)
                         _place(copy, dest, r.artifact_sha256)
                 now = utcnow()
                 db.execute(
@@ -409,8 +429,7 @@ def _remote_result(db: Session, settings: Settings, job: Job, body: bytes, artif
                 raise
             db.commit()
     finally:
-        for p in staged:
-            p.unlink(missing_ok=True)
+        shutil.rmtree(stage, ignore_errors=True)
     db.refresh(job)
     log.info("transcode job %s: %d renditions from an external worker", job.id, len(pinned))
     return {"job_id": job.id, "status": "succeeded", **result}

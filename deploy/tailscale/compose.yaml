@@ -53,6 +53,9 @@ services:
         # Empty = the default, slim image (no transcription). Keep it empty on a Raspberry
         # Pi and align from another machine with `lectern worker`.
         LECTERN_EXTRAS: ${LECTERN_EXTRAS:-}
+        # Pins Mac workers installed from /worker/install.sh to this code:
+        #   LECTERN_COMMIT=$(git rev-parse HEAD) docker compose … up -d --build
+        LECTERN_COMMIT: ${LECTERN_COMMIT:-}
     image: lectern:local
     restart: unless-stopped
     network_mode: service:tailscale          # Lectern lives inside the sidecar's network stack

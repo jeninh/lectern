@@ -15,13 +15,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lectern.align.worker import JobContext, PermanentJobError
+from lectern.align.worker import EngineUnavailable, JobContext, PermanentJobError
 
 if TYPE_CHECKING:
     import numpy as np
@@ -46,6 +47,11 @@ KOKORO_LANGS = {
     "zh": "z",
 }
 CODECS = {"aac": "m4a", "flac": "flac"}
+# Kokoro voice names (af_heart, bm_george, …): a language letter, f/m, a name. Anything else
+# is refused: kokoro loads a voice that ends in ".pt" from the local disk with torch.load.
+KOKORO_VOICE = re.compile(r"^[abefhijpz][fm]_[a-z]{2,24}$")
+SPEED_RANGE = (0.5, 2.0)
+PAUSE_MAX_S = 5.0
 
 
 def kokoro_available() -> bool:
@@ -105,7 +111,8 @@ def render_chapter(
                 "end_s": round(pos / sample_rate, 3),
             }  # fmt: skip
         )
-        pause = int(round(float(s.get("pause_s", DEFAULT_PAUSE_S)) * sample_rate))
+        pause_s = min(PAUSE_MAX_S, max(0.0, float(s.get("pause_s", DEFAULT_PAUSE_S))))
+        pause = int(round(pause_s * sample_rate))
         if pause > 0:
             chunks.append(np.zeros(pause, dtype=np.float32))
             pos += pause
@@ -116,23 +123,24 @@ def render_chapter(
 
 
 def encode(samples: np.ndarray, sample_rate: int, dest: Path, codec: str, kbps: int,
-           ffmpeg: str = "ffmpeg") -> float:  # fmt: skip
+           ffmpeg: str = "ffmpeg", check: Callable[[], None] = lambda: None) -> float:  # fmt: skip
     """Encode float32 mono PCM to ``dest`` (AAC in M4A, or FLAC); returns the duration.
-    The encoder must not trim: sentence times are relative to the first sample."""
+    The encoder must not trim: sentence times are relative to the first sample. ffmpeg runs
+    supervised (:func:`run_supervised`): pausing the worker stops it at once."""
     import numpy as np
 
-    pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    pcm = dest.with_name(dest.name + ".pcm")
+    pcm.write_bytes((np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes())
     args = [ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "s16le", "-ar", str(sample_rate),
-            "-ac", "1", "-i", "pipe:0"]  # fmt: skip
+            "-ac", "1", "-i", str(pcm)]  # fmt: skip
     if codec == "flac":
         args += ["-c:a", "flac", "-f", "flac"]
     else:
         args += ["-c:a", "aac", "-b:a", f"{kbps}k", "-movflags", "+faststart", "-f", "mp4"]
-    res = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [*args, str(dest)], input=pcm, capture_output=True, timeout=3600, check=False
-    )
-    if res.returncode != 0:
-        raise RuntimeError(res.stderr.decode(errors="replace")[-500:] or "ffmpeg failed")
+    try:
+        run_supervised([*args, str(dest)], check, poll_s=0.5)
+    finally:
+        pcm.unlink(missing_ok=True)
     return round(len(samples) / sample_rate, 3)
 
 
@@ -153,8 +161,14 @@ class KokoroRunner:
         codec = audio.get("codec") or "aac"
         if codec not in CODECS:
             raise PermanentJobError(f"unsupported codec {codec!r}")
-        kbps = int(audio.get("bitrate_kbps") or 64)
+        kbps = min(320, max(16, int(audio.get("bitrate_kbps") or 64)))
         rate = int(audio.get("sample_rate") or KOKORO_SAMPLE_RATE)
+        voice = str(p.get("voice") or "af_heart")
+        if not KOKORO_VOICE.match(voice):
+            raise PermanentJobError(f"not a Kokoro voice: {voice!r:.40}")
+        speed = float(p.get("speed") or 1.0)
+        if not SPEED_RANGE[0] <= speed <= SPEED_RANGE[1]:
+            raise PermanentJobError(f"speed must be {SPEED_RANGE[0]}–{SPEED_RANGE[1]}")
         if rate != KOKORO_SAMPLE_RATE:
             raise PermanentJobError(f"Kokoro renders {KOKORO_SAMPLE_RATE} Hz, not {rate}")
         ctx.progress(0.0, "downloading the script")
@@ -184,8 +198,12 @@ class KokoroRunner:
                     continue
             if synth is None:
                 ctx.progress(done / total, "loading Kokoro")
-                synth = self._synthesizer(p.get("voice") or "af_heart",
-                                          float(p.get("speed") or 1.0), p.get("lang") or "en-us")  # fmt: skip
+                try:
+                    synth = self._synthesizer(voice, speed, p.get("lang") or "en-us")
+                except PermanentJobError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - the model would not load here
+                    raise EngineUnavailable(f"{type(exc).__name__}: {exc}"[:300]) from exc
 
             def tick(idx=idx) -> None:
                 nonlocal done
@@ -194,7 +212,7 @@ class KokoroRunner:
 
             samples, timings = render_chapter(sentences, synth, rate, tick)
             path = ctx.tmp / audio_name
-            duration = encode(samples, rate, path, codec, kbps, self.ffmpeg)
+            duration = encode(samples, rate, path, codec, kbps, self.ffmpeg, ctx.check)
             digest = ctx.upload_artifact(audio_name, path)
             path.unlink(missing_ok=True)
             entry = {"index": idx, "title": ch.get("title") or "", "artifact": audio_name,
@@ -207,8 +225,8 @@ class KokoroRunner:
             "version": 1,
             "engine": "kokoro",
             "model": p.get("model") or "kokoro-82m",
-            "voice": p.get("voice") or "af_heart",
-            "speed": float(p.get("speed") or 1.0),
+            "voice": voice,
+            "speed": speed,
             "sample_rate": rate,
             "codec": codec,
             "chapters": [

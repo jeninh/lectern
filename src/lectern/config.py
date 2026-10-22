@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     # Where /worker/install.sh installs the worker from (a pip requirement URL). A private
     # repository needs git access on the Mac (docs/mac-worker.md, "Installing").
     worker_install_source: str = "git+https://github.com/jeninh/lectern"
+    # The git ref (commit or tag) of this server's code; the installer pins the worker to it.
+    # The image sets it from the LECTERN_COMMIT build argument (docs/mac-worker.md).
+    worker_install_ref: str = Field(default="", pattern=r"^[A-Za-z0-9._/-]{0,100}$")
     # How long a worker enrollment code (the one-command installer) stays valid.
     worker_enrollment_ttl_seconds: int = Field(default=3600, ge=60, le=7 * 24 * 3600)
 

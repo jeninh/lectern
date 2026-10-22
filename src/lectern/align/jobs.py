@@ -12,6 +12,7 @@ import logging
 import math
 import random
 import statistics
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -464,8 +465,11 @@ def claim(
         deferred = queue.deferred_capabilities(db, caps, now)
         if deferred:
             waited = now - timedelta(seconds=defer_s)
-            routable = Job.capability.in_([c for c in caps if c not in deferred]) | (
-                Job.capability.in_(sorted(deferred)) & (Job.created_at <= waited)
+            # only a kind an external worker can claim is left to one
+            routable = (
+                Job.capability.in_([c for c in caps if c not in deferred])
+                | Job.kind.not_in(queue.remote_kinds())
+                | (Job.capability.in_(sorted(deferred)) & (Job.created_at <= waited))
             )
     runnable = select(Job.id).where(
         Job.status == JobStatus.QUEUED, Job.kind.in_(kinds), routable, Job.run_after <= now
@@ -580,9 +584,35 @@ def heartbeat(
 # --- failure and reclaim --------------------------------------------------------------------
 
 
+def requeue_leases(db: Session, credential_id: int, *, keep: Iterable[str] | None = None) -> int:
+    """Give back, like :func:`release`, every lease ``credential_id`` holds (only the ones
+    whose capability is not in ``keep``, when given): the credential was revoked or its
+    allowlist narrowed, which is not the job's fault, so no attempt is spent. The lease token
+    is cleared, so the old holder's next call is ``409 lease_lost``. Caller commits."""
+    held = db.scalars(
+        select(Job)
+        .where(Job.status == JobStatus.LEASED, Job.leased_by_id == credential_id)
+        .execution_options(populate_existing=True)
+    ).all()
+    keep = None if keep is None else set(keep)
+    n = 0
+    for job in held:
+        if keep is not None and job.capability in keep:
+            continue
+        _release(db, job)
+        n += 1
+    db.flush()
+    return n
+
+
 def release(db: Session, job: Job) -> None:
     """Give a leased job back untouched (the worker is shutting down, not failing): queued
     again at once, and the attempt does not count."""
+    _release(db, job)
+    db.commit()
+
+
+def _release(db: Session, job: Job) -> None:
     job.status = JobStatus.QUEUED
     job.attempts = max(0, job.attempts - 1)
     job.lease_token_hash = None
@@ -593,7 +623,6 @@ def release(db: Session, job: Job) -> None:
     alignment = _alignment_of(db, job)
     if alignment is not None and alignment.status == AlignmentStatus.RUNNING:
         alignment.status = AlignmentStatus.PENDING
-    db.commit()
 
 
 def fail(db: Session, job: Job, error: str, *, retryable: bool) -> dict:

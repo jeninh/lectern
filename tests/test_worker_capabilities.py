@@ -13,7 +13,8 @@ import shutil
 import subprocess
 import sys
 import types
-from datetime import timedelta
+from datetime import UTC, timedelta
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -57,6 +58,19 @@ def worker_key(client, owner) -> str:
 @pytest.fixture
 def wc(app, worker_key) -> TestClient:
     return TestClient(app, headers={"Authorization": f"Bearer {worker_key}"})
+
+
+def real_rendition(settings, work_id: int, track: dict, tmp_dir) -> bytes:
+    """What an honest worker uploads for a payload track: an AAC rendition of it."""
+    from lectern.jobs import transcode_track
+    from lectern.models import AudioTrack
+
+    with session_factory()() as db:
+        work, t = db.get(Work, work_id), db.get(AudioTrack, track["track_id"])
+        src = settings.library_dir / work.dir_path / t.rel_path
+    dest = tmp_dir / f"rendition-{track['track_id']}.m4a"
+    transcode_track(settings, src, dest, "aac", 32)
+    return dest.read_bytes()
 
 
 def add_job(work_id: int, kind: str, payload: dict, **kw) -> int:
@@ -150,7 +164,7 @@ def test_enrollment_code_is_single_use_and_yields_a_job_only_credential(client, 
                  {"label": "Jen's MacBook", "capabilities": ["align", "tts-kokoro"]})  # fmt: skip
     assert r.status_code == 201
     code, command = r.json()["code"], r.json()["command"]
-    assert code.startswith("lwe_") and command.endswith(f"| sh -s -- --code {code}")
+    assert code.startswith("lwe_") and command.endswith(f"| LECTERN_WORKER_CODE={code} sh")
     assert "/worker/install.sh" in command
     anon = TestClient(app)
     got = anon.post("/api/worker/enroll", json={"code": code, "name": "mbp"})
@@ -614,7 +628,7 @@ def test_a_released_lease_is_seen_by_a_session_that_already_loaded_the_job(
 
 @needs_ffmpeg
 def test_a_stale_transcode_result_publishes_nothing_and_keeps_the_new_lease(
-    client, owner, work_id, wc, settings
+    client, owner, work_id, wc, settings, tmp_path
 ):
     import hashlib
 
@@ -627,7 +641,7 @@ def test_a_stale_transcode_result_publishes_nothing_and_keeps_the_new_lease(
     first = claim(wc, capabilities=["transcode"])
     job_id = first.json()["job"]["id"]
     track = first.json()["job"]["payload"]["tracks"][0]
-    body = b"not really audio"
+    body = real_rendition(settings, work_id, track, tmp_path)
     digest = hashlib.sha256(body).hexdigest()
     url = f"/api/worker/jobs/{job_id}/artifacts/r.m4a"
     old = lease(first)
@@ -738,7 +752,7 @@ def test_an_open_worker_home_is_made_private(tmp_path):
 
 
 @pytest.fixture
-def remote_transcode(client, owner, work_id, wc, settings):
+def remote_transcode(client, owner, work_id, wc, settings, tmp_path):
     """A claimed transcode job with one uploaded rendition; returns what the tests need."""
     import hashlib
 
@@ -749,7 +763,7 @@ def remote_transcode(client, owner, work_id, wc, settings):
     r = claim(wc, capabilities=["transcode"])
     job_id, track = r.json()["job"]["id"], r.json()["job"]["payload"]["tracks"][0]
     headers = lease(r)
-    body = b"the real rendition"
+    body = real_rendition(settings, work_id, track, tmp_path)
     digest = hashlib.sha256(body).hexdigest()
     wc.put(f"/api/worker/jobs/{job_id}/artifacts/r.m4a", content=body,
            headers={**headers, "X-Content-SHA256": digest})  # fmt: skip
@@ -834,3 +848,410 @@ def test_hold_lease_refuses_a_released_or_expired_lease(client, owner, work_id, 
         assert not queue.hold_lease(db, job, now=job.lease_expires_at + timedelta(seconds=1))
         wc.post(f"/api/worker/jobs/{job_id}/release", headers=headers)
         assert not queue.hold_lease(db, job)
+
+
+# --- review round 2: staging, revocation, allowlists, downgrade, rendition checks ------------
+
+
+def _staged(settings) -> list:
+    root = settings.library_dir / queue.STAGING_DIR
+    stray = [p for p in settings.library_dir.rglob(".stage-*")]
+    return stray + (list(root.iterdir()) if root.is_dir() else [])
+
+
+@needs_ffmpeg
+def test_a_work_renamed_while_its_result_is_pinned_still_publishes_and_strands_nothing(
+    remote_transcode, settings, work_id, monkeypatch
+):
+    import lectern.jobs as jmod
+
+    real = jmod._pin
+
+    def pin_then_rename(src, dest):  # the owner renames the book while the copy is made
+        digest = real(src, dest)
+        with session_factory()() as db:
+            work = db.get(Work, work_id)
+            old = settings.library_dir / work.dir_path
+            work.dir_path = work.dir_path + " (renamed)"
+            shutil.move(old, settings.library_dir / work.dir_path)
+            db.commit()
+        return digest
+
+    monkeypatch.setattr(jmod, "_pin", pin_then_rename)
+    r = remote_transcode.put_result()
+    assert r.status_code == 200, r.text
+    assert remote_transcode.published() == remote_transcode.body  # in the renamed folder
+    with session_factory()() as db:
+        assert db.get(Work, work_id).dir_path.endswith("(renamed)")
+    assert _staged(settings) == []
+
+
+@needs_ffmpeg
+def test_a_failed_publication_leaves_no_staged_copy(remote_transcode, settings, monkeypatch):
+    import lectern.jobs as jmod
+
+    monkeypatch.setattr(jmod, "_place", lambda *a: (_ for _ in ()).throw(OSError(28, "full")))
+    with pytest.raises(OSError):
+        remote_transcode.put_result()
+    assert _staged(settings) == []
+
+
+def test_staging_sweep_keeps_only_young_copies_of_active_jobs(client, owner, work_id, settings):
+    import os
+    import time
+
+    active = add_job(work_id, "transcode", {"codec": "aac", "tracks": []})
+    done = add_job(work_id, "align", {}, finished_at=utcnow())
+    with session_factory()() as db:
+        db.get(Job, done).status = JobStatus.SUCCEEDED
+        db.commit()
+    young = queue.staging_dir(settings.library_dir, active, "aaaa")
+    old = queue.staging_dir(settings.library_dir, active, "bbbb")
+    finished = queue.staging_dir(settings.library_dir, done, "cccc")
+    for d in (young, old, finished):
+        d.mkdir(parents=True)
+        (d / "1.m4a").write_bytes(b"x")
+    past = time.time() - queue.STAGING_MAX_AGE.total_seconds() - 60
+    os.utime(old, (past, past))
+    with session_factory()() as db:
+        assert queue.sweep_staging(db, settings.library_dir) == 2
+        assert [p.name for p in _staged(settings)] == [young.name]
+        assert queue.sweep_staging(db, settings.library_dir, everything=True) == 1
+    assert _staged(settings) == []
+
+
+@needs_ffmpeg
+def test_a_rendition_that_is_not_the_track_is_refused(
+    client, owner, work_id, wc, settings, tmp_path
+):
+    import hashlib
+
+    with session_factory()() as db:
+        jobs.refresh_work(db, settings.library_dir, db.get(Work, work_id), auto_enqueue=False)
+        db.commit()
+    api_post(client, f"/api/works/{work_id}/transcode", owner["csrf"])
+    r = claim(wc, capabilities=["transcode"])
+    job_id, track = r.json()["job"]["id"], r.json()["job"]["payload"]["tracks"][0]
+    headers = lease(r)
+    short = tmp_path / "short.m4a"  # real audio, but a fraction of the track
+    subprocess.run(["ffmpeg", "-v", "quiet", "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
+                    "-t", "0.2", "-c:a", "aac", str(short)], check=True)  # fmt: skip
+    for body in (b"not audio at all", short.read_bytes()):
+        digest = hashlib.sha256(body).hexdigest()
+        wc.put(f"/api/worker/jobs/{job_id}/artifacts/r.m4a", content=body,
+               headers={**headers, "X-Content-SHA256": digest})  # fmt: skip
+        result = json.dumps({"renditions": [{"track_id": track["track_id"],
+                                             "sha256": track["sha256"], "artifact": "r.m4a",
+                                             "artifact_sha256": digest}]})  # fmt: skip
+        out = wc.put(f"/api/worker/jobs/{job_id}/result", content=result,
+                     headers={**headers, "Content-Type": "application/json"})  # fmt: skip
+        assert out.status_code == 422 and out.json()["detail"] == "bad_rendition"
+    with session_factory()() as db:
+        assert find_variant(settings.library_dir, db.get(Work, work_id), track["sha256"]) is None
+        assert db.get(Job, job_id).status == JobStatus.LEASED
+
+
+def _upload(wc, job_id, headers, name, body=b"chapter audio"):
+    import hashlib
+
+    return wc.put(f"/api/worker/jobs/{job_id}/artifacts/{name}", content=body,
+                  headers={**headers, "X-Content-SHA256": hashlib.sha256(body).hexdigest()})  # fmt: skip
+
+
+def test_revoking_a_worker_requeues_its_lease_free_and_deletes_what_it_uploaded(
+    client, owner, work_id, wc, app, settings
+):
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "tracks": []})
+    other_job = add_job(work_id, "align", {}, priority=5)
+    headers = lease(claim(wc, capabilities=["transcode"]))
+    assert _upload(wc, job_id, headers, "ch-0001.m4a").status_code == 201
+    # a second, trusted worker's upload to another job survives the revocation
+    trusted = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "pi"}).json()
+    tc = TestClient(app, headers={"Authorization": f"Bearer {trusted['secret']}"})
+    theirs = lease(claim(tc, capabilities=["align"]))
+    assert _upload(tc, other_job, theirs, "keep.bin").status_code == 201
+    with session_factory()() as db:
+        cred_id = db.get(Job, job_id).leased_by_id
+    r = client.delete(f"/api/worker-credentials/{cred_id}",
+                      headers={"x-csrf-token": owner["csrf"], "origin": ORIGIN})  # fmt: skip
+    assert r.status_code == 200
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        assert job.status == JobStatus.QUEUED and job.attempts == 0
+    art = queue.artifacts_dir(settings.data_dir, job_id)
+    assert sorted(p.name for p in art.iterdir()) == []
+    assert (queue.artifacts_dir(settings.data_dir, other_job) / "keep.bin").is_file()
+    # the next worker resumes from nothing the revoked one left
+    assert tc.get(f"/api/worker/jobs/{job_id}/artifacts").status_code in (409, 401, 422)
+
+
+def test_narrowing_an_allowlist_gives_back_the_leases_it_no_longer_permits(
+    client, owner, work_id, wc
+):
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "tracks": []})
+    headers = lease(claim(wc, capabilities=["transcode", "align"]))
+    with session_factory()() as db:
+        cred_id = db.get(Job, job_id).leased_by_id
+    keep = patch(client, f"/api/worker-credentials/{cred_id}", owner["csrf"],
+                 {"capabilities": ["transcode", "align"]})  # fmt: skip
+    assert keep.status_code == 200
+    with session_factory()() as db:
+        assert db.get(Job, job_id).status == JobStatus.LEASED
+    patch(client, f"/api/worker-credentials/{cred_id}", owner["csrf"], {"capabilities": ["align"]})
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        assert job.status == JobStatus.QUEUED and job.attempts == 0
+    assert wc.post(f"/api/worker/jobs/{job_id}/heartbeat", headers=headers).status_code == 409
+
+
+def test_failed_enrollment_codes_do_not_lock_out_working_workers(app, wc):
+    anon = TestClient(app)
+    for _ in range(app.state.settings.rate_limit_per_minute + 1):
+        anon.post("/api/worker/enroll", json={"code": "lwe_wrongwrongwrong"})
+    assert anon.post("/api/worker/enroll", json={"code": "lwe_wrongwrongwrong"}).status_code == 429
+    assert wc.post("/api/worker/status", json={"state": "ready"}).status_code == 200
+
+
+def test_the_pi_does_not_wait_for_a_worker_on_a_kind_no_worker_can_claim(
+    client, owner, work_id, wc
+):
+    wc.post("/api/worker/status", json={"state": "ready", "capabilities": ["ocr"]})
+    job_id = add_job(work_id, "ocr", {})  # no handler: external workers can never lease it
+    with session_factory()() as db:
+        got = jobs.claim(db, kinds=["ocr"], worker="pi", lease_s=60, credential_id=None,
+                         defer_s=600)  # fmt: skip
+        assert got is not None and got[0].id == job_id
+
+
+def test_a_reupload_never_pairs_new_bytes_with_the_old_checksum(
+    client, owner, work_id, wc, settings, monkeypatch
+):
+    from lectern.routes.api import worker as wroutes
+
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "tracks": []})
+    headers = lease(claim(wc, capabilities=["transcode"]))
+    assert _upload(wc, job_id, headers, "a.m4a", b"first").status_code == 201
+    dest = queue.artifacts_dir(settings.data_dir, job_id) / "a.m4a"
+    seen = []
+    real = wroutes.os.replace
+
+    def watch(src, dst):
+        if str(dst) == str(dest):  # the data lands: the old checksum must already be gone
+            seen.append(dest.with_name("a.m4a.sha256").exists())
+        return real(src, dst)
+
+    monkeypatch.setattr(wroutes.os, "replace", watch)
+    assert _upload(wc, job_id, headers, "a.m4a", b"second").status_code == 201
+    assert seen == [False]
+    listed = wc.get(f"/api/worker/jobs/{job_id}/artifacts", headers=headers).json()
+    import hashlib
+
+    assert listed["artifacts"][0]["sha256"] == hashlib.sha256(b"second").hexdigest()
+
+
+def test_0012_downgrade_requeues_leases_external_workers_held(tmp_path):
+    import sqlalchemy as sa
+    from alembic import command
+
+    from lectern.db import make_engine
+    from lectern.migrate import alembic_config
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'm12d.db'}")
+    cfg = alembic_config(str(engine.url))
+    now = "2026-10-21 00:00:00"
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "head")
+        conn.execute(sa.text(
+            "INSERT INTO worker_credentials (id, label, key_hash, created_at) "
+            f"VALUES (1, 'mac', '{'0' * 64}', '{now}')"))  # fmt: skip
+        for kind, holder in (("transcode", "1"), ("transcode", "NULL"), ("align", "1")):
+            conn.execute(sa.text(
+                "INSERT INTO jobs (kind, capability, status, priority, attempts, max_attempts, "
+                "run_after, created_at, updated_at, leased_by_id, lease_token_hash, "
+                f"lease_expires_at) VALUES ('{kind}', '{kind}', 'LEASED', 0, 1, 3, '{now}', "
+                f"'{now}', '{now}', {holder}, 'h', '{now}')"))  # fmt: skip
+        command.downgrade(cfg, "0011")
+        rows = conn.execute(sa.text(
+            "SELECT kind, status, attempts, leased_by_id, lease_token_hash FROM jobs ORDER BY id"
+        )).all()  # fmt: skip
+    assert [tuple(r) for r in rows] == [
+        ("transcode", "QUEUED", 0, None, None),  # an external worker's: back to the queue
+        ("transcode", "LEASED", 1, None, "h"),  # the Pi's own run: its runner recovers it
+        ("align", "LEASED", 1, 1, "h"),  # align leases stay valid under 0011
+    ]
+
+
+# --- review round 2: the worker side -----------------------------------------------------------
+
+
+def _ca_pem(tmp_path, cn="School Inspection CA"):
+    pytest.importorskip("cryptography")
+    from datetime import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder().subject_name(name).issuer_name(name)
+        .public_key(key.public_key()).serial_number(1)
+        .not_valid_before(now).not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )  # fmt: skip
+    path = tmp_path / "school.pem"
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return path
+
+
+def test_an_extra_ca_is_trusted_in_addition_to_the_public_roots(tmp_path):
+    import certifi
+
+    pem = _ca_pem(tmp_path)
+    ctx = cond.tls_verify(str(pem))
+    subjects = [dict(x[0] for x in c["subject"]).get("commonName") for c in ctx.get_ca_certs()]
+    assert "School Inspection CA" in subjects
+    public = certifi.contents().count("BEGIN CERTIFICATE")
+    assert len(subjects) >= public  # not replaced: every public root is still there
+    assert cond.tls_verify(None) is True
+
+
+def test_proxy_none_ignores_environment_proxies(monkeypatch, tmp_path):
+    monkeypatch.setenv("HTTPS_PROXY", "http://env:1")
+    assert cond.http_options("none", None) == {"proxy": None, "verify": True, "trust_env": False}
+    assert "trust_env" not in cond.http_options("system", None)
+    env = cond.network_env("none", None, tmp_path)
+    assert env["HTTPS_PROXY"] is None and env["NO_PROXY"] == "*"
+
+
+def test_model_downloads_get_the_same_proxy_and_a_combined_ca_bundle(tmp_path, monkeypatch):
+    import certifi
+
+    pem = _ca_pem(tmp_path)
+    for var in cond.PROXY_VARS + cond.CA_VARS:
+        monkeypatch.delenv(var, raising=False)
+    env = cond.apply_network_env("http://proxy.school:3128", str(pem), tmp_path / "home")
+    import os
+
+    assert os.environ["HTTPS_PROXY"] == os.environ["HTTP_PROXY"] == "http://proxy.school:3128"
+    bundle = Path(os.environ["SSL_CERT_FILE"])
+    assert os.environ["REQUESTS_CA_BUNDLE"] == str(bundle) == env["SSL_CERT_FILE"]
+    text = bundle.read_text()
+    assert pem.read_text().strip() in text
+    assert text.count("BEGIN CERTIFICATE") == certifi.contents().count("BEGIN CERTIFICATE") + 1
+
+
+def test_the_installer_is_pinned_to_the_servers_commit_and_keeps_the_code_out_of_argv(
+    client, settings
+):
+    from lectern.routes.worker_install import install_source
+
+    settings.worker_install_ref = "0123abc"
+    assert install_source(settings) == "git+https://github.com/jeninh/lectern@0123abc"
+    settings.worker_install_source = "git+https://github.com/jeninh/lectern@v1"  # already pinned
+    assert install_source(settings) == "git+https://github.com/jeninh/lectern@v1"
+    settings.worker_install_source = "git+ssh://git@github.com/jeninh/lectern"
+    assert install_source(settings) == "git+ssh://git@github.com/jeninh/lectern@0123abc"
+    settings.worker_install_source = "git+https://github.com/jeninh/lectern"
+    text = client.get("/worker/install.sh").text
+    assert "git+https://github.com/jeninh/lectern@0123abc" in text
+    assert "git ls-remote" in text
+    assert '--code "$CODE"' not in text and 'LECTERN_WORKER_CODE="$CODE" lectern' in text
+
+
+def test_a_worker_whose_engine_will_not_load_hands_the_job_back_and_stops_offering_it(
+    client, owner, work_id, app, worker_key, tts_kind
+):
+    job_id = add_job(work_id, "tts", {"engine": "kokoro", "voice": "af_heart",
+                                      "audio": {"codec": "flac"}})  # fmt: skip
+
+    def blocked(voice, speed, lang):
+        raise OSError("huggingface.co: connection refused by the school proxy")
+
+    http = TestClient(app, headers={"Authorization": f"Bearer {worker_key}"})
+    worker = RemoteWorker("http://testserver", worker_key, client=http,
+                          runners=[KokoroRunner(blocked)])  # fmt: skip
+    assert worker.capabilities == ["tts-kokoro"]
+    assert worker.run_once()
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        assert job.status == JobStatus.QUEUED and job.attempts == 0 and job.error is None
+        cred = db.scalar(select(WorkerCredential))
+    assert worker.capabilities == [] and "school proxy" in worker.unavailable["tts-kokoro"]
+    assert not worker.run_once()  # claims nothing while the engine is out
+    with session_factory()() as db:
+        cred = db.get(WorkerCredential, cred.id)
+        assert cred.state == "paused" and cred.advertised == []
+        assert db.get(Job, job_id).status == JobStatus.QUEUED
+
+
+def test_kokoro_refuses_voices_that_are_not_names_and_clamps_pauses(
+    client, owner, work_id, app, worker_key, tts_kind
+):
+    job_id = add_job(work_id, "tts", {"engine": "kokoro", "voice": "../../tmp/evil.pt",
+                                      "audio": {"codec": "flac"}})  # fmt: skip
+    loaded = []
+    http = TestClient(app, headers={"Authorization": f"Bearer {worker_key}"})
+    worker = RemoteWorker("http://testserver", worker_key, client=http,
+                          runners=[KokoroRunner(lambda *a: loaded.append(a))])  # fmt: skip
+    assert worker.run_once()
+    with session_factory()() as db:
+        assert db.get(Job, job_id).status == JobStatus.FAILED
+    assert loaded == []  # never handed to kokoro
+    synth = fake_synth([])("v", 1.0, "en-us")
+    samples, _ = render_chapter([{"n": 0, "text": "a", "pause_s": 3600}], synth, 24000)
+    assert len(samples) == 2400 + 5 * 24000
+
+
+def test_a_worker_only_downloads_its_own_jobs_paths(tmp_path):
+    from lectern.align.worker import JobContext, PermanentJobError
+
+    fetched = []
+    worker = types.SimpleNamespace(client=types.SimpleNamespace(
+        stream=lambda *a, **k: fetched.append(a)))  # fmt: skip
+    claimed = {
+        "job": {"id": 7},
+        "lease": {"token": "t"},
+        "artifacts_url": "x",
+        "inputs": {
+            "script": {"url": "https://evil.example/steal", "sha256": "0" * 64},
+            "../key": {"url": "/api/worker/jobs/7/inputs/x", "sha256": "0" * 64},
+            "other": {"url": "/api/worker/jobs/8/inputs/x", "sha256": "0" * 64},
+        },
+    }
+    ctx = JobContext(worker, claimed, None, tmp_path)  # fmt: skip
+    for name in ("script", "../key", "other"):
+        with pytest.raises(PermanentJobError):
+            ctx.input(name)
+    with pytest.raises(PermanentJobError):
+        ctx.fetch_artifact("../../key", "0" * 64)
+    assert fetched == []
+
+
+def test_mlx_is_tried_again_on_the_next_job_and_loads_only_known_models(monkeypatch):
+    fake = types.ModuleType("mlx_whisper")
+    loader = types.ModuleType("mlx_whisper.load_models")
+    state = {"broken": True, "repos": []}
+
+    def load(repo):
+        state["repos"].append(repo)
+        if state["broken"]:
+            raise RuntimeError("Metal busy")
+
+    loader.load_model = load
+    monkeypatch.setitem(sys.modules, "mlx_whisper", fake)
+    monkeypatch.setitem(sys.modules, "mlx_whisper.load_models", loader)
+    tr = MLXTranscriber("small", fallback=FakeCPU())
+    tr.load()
+    assert tr.using_fallback
+    state["broken"] = False
+    tr.begin_job()
+    assert tr.load() is fake and not tr.using_fallback
+    odd = MLXTranscriber("someone/evil-repo", fallback=FakeCPU())
+    odd.load()
+    assert odd.using_fallback and "someone/evil-repo" not in state["repos"]

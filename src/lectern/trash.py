@@ -71,6 +71,7 @@ def _cancel_jobs(db: Session, work_id: int) -> None:
             align_jobs.cancel_job(db, job)
         else:
             job.status, job.finished_at = JobStatus.CANCELLED, utcnow()
+            job.lease_token_hash, job.lease_expires_at = None, None
 
 
 def _digests(db: Session, work_id: int) -> dict[str, str]:

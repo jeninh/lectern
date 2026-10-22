@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import shutil
 import tempfile
 import threading
@@ -27,7 +28,12 @@ from sqlalchemy.orm import sessionmaker
 from lectern.align import isolate, jobs
 from lectern.align.pipeline import TrackInput, TranscribeFn, align_work
 from lectern.align.tracks import work_epub, work_tracks
-from lectern.align.transcribe import Transcriber, TranscriptionUnavailable, transcribe_tracks
+from lectern.align.transcribe import (
+    MODELS,
+    Transcriber,
+    TranscriptionUnavailable,
+    transcribe_tracks,
+)
 from lectern.models import Job, Work
 from lectern.sentence_map import SentenceMap
 
@@ -423,6 +429,18 @@ class LeaseLostError(Exception):
     pass
 
 
+class EngineUnavailable(Exception):
+    """This worker's engine for the job cannot load right now (its model download is
+    blocked, a broken install): the job is handed back without spending an attempt and the
+    capability is not advertised for ``ENGINE_RETRY_S``, so another worker or the server
+    takes it."""
+
+
+ENGINE_RETRY_S = 1800.0
+# What the server may name: inputs and artifacts are plain file names, never paths.
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
 class PermanentJobError(Exception):
     """The job cannot succeed on this worker (bad input, missing engine): fail, no retry."""
 
@@ -452,7 +470,12 @@ class JobContext:
         self.hb.on_progress(self.hb.progress, self.hb.message)
 
     def download(self, url: str, dest: Path, expected_sha256: str) -> Path:
-        """Authenticated streaming download verified against the expected hash."""
+        """Authenticated streaming download verified against the expected hash. Only this
+        job's own paths on the server are fetched: the request carries the worker key."""
+        if not isinstance(url, str) or not url.startswith(f"/api/worker/jobs/{self.id}/"):
+            raise PermanentJobError(f"the server named an input outside the job: {url!r:.80}")
+        if not SAFE_NAME.match(dest.name):
+            raise PermanentJobError(f"unsafe file name {dest.name!r:.80}")
         digest = hashlib.sha256()
         with self.client.stream("GET", url, headers=self.headers) as r:
             if r.status_code == 409:
@@ -477,7 +500,7 @@ class JobContext:
     def input(self, name: str, dest: Path | None = None) -> Path:
         """A named input of a non-align job (``inputs[name] = {url, sha256, …}``)."""
         spec = (self.claimed.get("inputs") or {}).get(name)
-        if not isinstance(spec, dict):
+        if not SAFE_NAME.match(name) or not isinstance(spec, dict):
             raise PermanentJobError(f"the job has no input {name!r}")
         return self.download(spec["url"], dest or self.tmp / name, spec["sha256"])
 
@@ -487,9 +510,15 @@ class JobContext:
         if r.status_code == 409:
             raise LeaseLostError()
         r.raise_for_status()
-        return {a["name"]: a for a in r.json().get("artifacts", [])}
+        return {
+            a["name"]: a
+            for a in r.json().get("artifacts", [])
+            if isinstance(a, dict) and SAFE_NAME.match(str(a.get("name")))
+        }
 
     def fetch_artifact(self, name: str, sha256: str, dest: Path | None = None) -> Path:
+        if not SAFE_NAME.match(name):
+            raise PermanentJobError(f"unsafe artifact name {name!r:.80}")
         return self.download(
             f"{self.claimed['artifacts_url']}/{name}", dest or self.tmp / name, sha256
         )
@@ -591,8 +620,15 @@ class AlignRunner:
     def _transcribe_for(self, model: str) -> tuple[TranscribeFn, str]:
         if self._transcribe is not None:
             return self._transcribe, self._model_label or f"recorded-{model}"
+        if model not in MODELS:
+            raise PermanentJobError(f"unknown model {model!r:.40}")
         tr = (self.transcriber or Transcriber()).with_model(model)
-        tr.load()  # before reading the label: MLX may fall back to the CPU here
+        if hasattr(tr, "begin_job"):
+            tr.begin_job()  # MLX gets another chance after an earlier fallback
+        try:
+            tr.load()  # before reading the label: MLX may fall back to the CPU here
+        except Exception as exc:  # noqa: BLE001 - not this job's fault: hand it back
+            raise EngineUnavailable(_error_text(exc)) from exc
         return transcriber_fn(tr), tr.label
 
     def run(self, ctx: JobContext) -> None:
@@ -671,6 +707,7 @@ class RemoteWorker:
         info: dict | None = None,
         proxy: str | None = None,
         verify=True,
+        trust_env: bool = True,
     ) -> None:
         import httpx
 
@@ -694,6 +731,8 @@ class RemoteWorker:
         self.info = info or {}
         self._stop = stop or threading.Event()
         self._running: tuple[dict, _Heartbeat] | None = None
+        # runner -> (monotonic time it may be tried again, why): its engine would not load
+        self._unavailable: dict[int, tuple[float, str]] = {}
         self.client = client or httpx.Client(
             base_url=self.server,
             headers={"Authorization": f"Bearer {key}", "User-Agent": "lectern-worker"},
@@ -701,6 +740,7 @@ class RemoteWorker:
             follow_redirects=False,
             proxy=proxy,
             verify=verify,
+            trust_env=trust_env,
         )
 
     @property
@@ -712,13 +752,30 @@ class RemoteWorker:
         about, hb = running
         return {**about, "progress": hb.progress, "message": hb.message}
 
+    def _available(self) -> list:
+        now = time.monotonic()
+        for key, (until, _why) in list(self._unavailable.items()):
+            if until <= now:
+                del self._unavailable[key]
+        return [r for r in self.runners if id(r) not in self._unavailable]
+
+    @property
+    def unavailable(self) -> dict[str, str]:
+        """Capabilities withheld because their engine would not load: ``{capability: why}``."""
+        self._available()
+        out: dict[str, str] = {}
+        for r in self.runners:
+            if id(r) in self._unavailable:
+                out.update(dict.fromkeys(r.capabilities, self._unavailable[id(r)][1]))
+        return out
+
     @property
     def kinds(self) -> list[str]:
-        return list(dict.fromkeys(r.kind for r in self.runners))
+        return list(dict.fromkeys(r.kind for r in self._available()))
 
     @property
     def capabilities(self) -> list[str]:
-        return list(dict.fromkeys(c for r in self.runners for c in r.capabilities))
+        return list(dict.fromkeys(c for r in self._available() for c in r.capabilities))
 
     def paused(self) -> str | None:
         return "stopping" if self._stop.is_set() else self._pause()
@@ -770,6 +827,10 @@ class RemoteWorker:
     # -- protocol steps ----------------------------------------------------------------------
 
     def run_once(self) -> bool:
+        if not self.capabilities:  # every engine failed to load: say so, claim nothing
+            self.report("paused", "engines unavailable: " + "; ".join(
+                sorted(set(self.unavailable.values())))[:150])  # fmt: skip
+            return False
         r = self.client.post(
             "/api/worker/jobs/claim",
             json={
@@ -788,13 +849,15 @@ class RemoteWorker:
         claimed = r.json()
         job, token = claimed["job"], claimed["lease"]["token"]
         headers = {"X-Lease-Token": token}
-        job_id = job["id"]
+        job_id = int(job["id"])
+        # this job's own endpoints, whatever the response says (they carry the worker key)
+        claimed["artifacts_url"] = f"/api/worker/jobs/{job_id}/artifacts"
+        claimed["result_url"] = f"/api/worker/jobs/{job_id}/result"
         lease_s = int(claimed["lease"].get("lease_s") or self.lease_s)
         runner = next((x for x in self.runners if x.kind == job["kind"]), None)
         if runner is None:  # the server sent a kind we did not ask for
             self._release(job_id, headers)
             return True
-        claimed.setdefault("artifacts_url", f"/api/worker/jobs/{job_id}/artifacts")
 
         def send(progress: float, message: str) -> bool:
             hr = self.client.post(
@@ -825,6 +888,13 @@ class RemoteWorker:
             log.warning("job %d: lease lost, abandoning", job_id)
         except WorkerStopping:
             log.info("job %d: %s, handing the job back", job_id, self.paused() or "stopping")
+            self._release(job_id, headers)
+        except EngineUnavailable as exc:
+            why = str(exc)[:200]
+            log.warning("job %d: %s cannot load (%s); handing the job back and not offering "
+                        "%s for %.0f min", job_id, runner.kind, why,
+                        ", ".join(runner.capabilities), ENGINE_RETRY_S / 60)  # fmt: skip
+            self._unavailable[id(runner)] = (time.monotonic() + ENGINE_RETRY_S, why)
             self._release(job_id, headers)
         except PermanentJobError as exc:
             self._fail(job_id, headers, str(exc)[:2000], retryable=False)

@@ -243,8 +243,8 @@ def worker_status(cred: WorkerAuth, db: DbDep, body: StatusIn = small_json(Statu
 async def _enroll_body(request: Request) -> EnrollIn:
     """Unauthenticated: an address over the failure limit is refused before its body is
     read, and the body is read with the small-body cap before it is parsed."""
-    ip_key = f"worker:{client_ip(request) or '?'}"
-    if request.app.state.limiters["worker_fail"].exhausted(ip_key):
+    ip_key = f"enroll:{client_ip(request) or '?'}"
+    if request.app.state.limiters["worker_enroll"].exhausted(ip_key):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
     raw = await read_capped(request, SMALL_BODY_MAX_BYTES)
     try:
@@ -258,11 +258,12 @@ def enroll(
     request: Request, db: DbDep, settings: SettingsDep, body: EnrollIn = Depends(_enroll_body)
 ) -> dict:
     """Exchange a one-time enrollment code (``POST /api/worker-enrollments``, owner) for a
-    worker credential. The code is used up atomically; failures share the per-address limit
-    of bad worker keys."""
+    worker credential. The code is used up atomically; failures count against a per-address
+    limit of their own (``worker_enroll``), so guessing codes cannot lock out working
+    workers behind the same address (a school proxy, a NAT)."""
     limiters = request.app.state.limiters
     ip = client_ip(request) or "?"
-    ip_key = f"worker:{ip}"
+    ip_key = f"enroll:{ip}"
     now = utcnow()
     row = db.query(WorkerEnrollment).filter_by(code_hash=sha256_hex(body.code.strip())).first()
     claimed = 0
@@ -279,7 +280,7 @@ def enroll(
         ).rowcount
     if claimed != 1:
         db.rollback()
-        limiters["worker_fail"].allow(ip_key)
+        limiters["worker_enroll"].allow(ip_key)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_code")
     secret = WORKER_KEY_PREFIX + new_secret()
     cred = WorkerCredential(
@@ -513,16 +514,25 @@ async def put_artifact(
     if size > settings.worker_artifact_max_bytes:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "too_large")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    files = [p for p in dest.parent.iterdir() if p.is_file() and not p.name.endswith(".part")]
-    if sum(p.name.endswith(".sha256") for p in files) >= ARTIFACTS_MAX and not dest.exists():
+
+    def stored() -> list:
+        return [p for p in dest.parent.iterdir() if p.is_file() and not p.name.endswith(".part")]
+
+    if sum(p.name.endswith(".sha256") for p in stored()) >= ARTIFACTS_MAX and not dest.exists():
         raise HTTPException(status.HTTP_409_CONFLICT, "too_many_artifacts")
+
+    def on_disk() -> int:
+        total = 0
+        for p in stored():
+            try:
+                total += p.stat().st_size
+            except FileNotFoundError:
+                pass
+        return total
+
     # Files already stored count in full (a replaced one too: both exist until the rename).
     refused = queue.ARTIFACT_BUDGET.reserve(
-        job.id,
-        size,
-        sum(p.stat().st_size for p in files),
-        settings.worker_artifact_job_max_bytes,
-        ARTIFACT_UPLOADS_MAX,
+        job.id, size, on_disk, settings.worker_artifact_job_max_bytes, ARTIFACT_UPLOADS_MAX
     )
     if refused == "too_many_uploads":
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, refused)
@@ -552,13 +562,22 @@ async def put_artifact(
 
 
 def _finish_artifact(db, cred, job_id: int, token, tmp, dest, digest: str) -> None:
-    """Rename the upload into place under the write lock of its still-current lease."""
+    """Rename the upload into place under the write lock of its still-current lease.
+
+    The old checksum goes first and the new one is written (atomically) last, so a reader
+    never pairs one upload's bytes with another's checksum: an artifact without a valid
+    sidecar is not listed and not served. The uploader is recorded for revocation."""
     job = _leased(db, cred, job_id, token)  # re-reads the row
     if not queue.hold_lease(db, job):
         raise _lease_lost()
+    sidecar = dest.with_name(dest.name + ".sha256")
     try:
+        sidecar.unlink(missing_ok=True)
+        queue.uploader_path(dest).write_text(str(cred.id))
         os.replace(tmp, dest)
-        dest.with_name(dest.name + ".sha256").write_text(digest)
+        side_tmp = tmp.with_name(tmp.name + ".sha256.part")
+        side_tmp.write_text(digest)
+        os.replace(side_tmp, sidecar)
     except BaseException:
         db.rollback()
         raise

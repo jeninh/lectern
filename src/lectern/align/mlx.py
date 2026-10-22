@@ -17,7 +17,8 @@ Differences from faster-whisper, and how they are handled:
 Fallback: :func:`worker_transcriber` picks MLX when it is installed on Apple Silicon. If the
 MLX model cannot be loaded (no Metal device, a broken install, the download is blocked), or
 MLX fails during a job, the transcriber switches to faster-whisper on the CPU for the rest of
-the process and logs why. The sentence map's ``model`` names the engine that started the job.
+that job and logs why; the next job tries MLX again. The sentence map's ``model`` names the
+engine that started the job. Only the conversions in ``MLX_REPOS`` are ever loaded.
 """
 
 from __future__ import annotations
@@ -83,7 +84,8 @@ class MLXTranscriber(Transcriber):
     ) -> None:
         super().__init__(model, device="gpu", compute_type="mlx", window_s=window_s,
                          overlap_s=overlap_s)  # fmt: skip
-        self.repo = repo or MLX_REPOS.get(model, model)
+        # only the known conversions: a job's model name never picks an arbitrary repo
+        self.repo = repo or MLX_REPOS.get(model)
         self.fallback = fallback
         self.using_fallback = False
         self._mlx = None
@@ -104,8 +106,12 @@ class MLXTranscriber(Transcriber):
             fallback=self.fallback.with_model(model) if self.fallback else None,
         )
         other.decode = self.decode
-        other.using_fallback = self.using_fallback
         return other
+
+    def begin_job(self) -> None:
+        """A new job tries MLX again: a fallback lasts for the job it happened in (a GPU
+        hiccup or a blocked download need not cost every later book its speed)."""
+        self.using_fallback = False
 
     def _switch(self, why: str) -> None:
         if self.fallback is None:
@@ -118,6 +124,8 @@ class MLXTranscriber(Transcriber):
             return self.fallback.load()
         if self._mlx is None:
             try:
+                if self.repo is None:
+                    raise ValueError(f"no MLX conversion of {self.model_name!r}")
                 import mlx_whisper
                 from mlx_whisper.load_models import load_model
 

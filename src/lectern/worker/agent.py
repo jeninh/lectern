@@ -25,7 +25,7 @@ from pathlib import Path
 
 from lectern import __version__
 from lectern.worker import config as wcfg
-from lectern.worker.conditions import Conditions, resolve_proxy
+from lectern.worker.conditions import Conditions, apply_network_env, http_options
 
 log = logging.getLogger("lectern.worker.agent")
 
@@ -79,6 +79,8 @@ class Agent:
         if not self.cfg.server.startswith("https://") and not self.cfg.allow_http:
             raise SystemExit("refusing to send the worker credential over plain http")
         self.conditions = conditions or Conditions()
+        # before the engines load: their model downloads go through the same proxy and CAs
+        apply_network_env(self.cfg.proxy, self.cfg.ca_bundle, self.home)
         engines: dict[str, str] = {}
         if runners is None:
             runners, engines = build_runners(self.cfg)
@@ -101,8 +103,7 @@ class Agent:
                 "platform": f"{sys.platform}-{platform.machine()}",
                 "engines": engines,
             },  # fmt: skip
-            proxy=resolve_proxy(self.cfg.proxy),
-            verify=self.cfg.ca_bundle or True,
+            **http_options(self.cfg.proxy, self.cfg.ca_bundle),
         )
         self.last_error: str | None = None
 
@@ -181,8 +182,7 @@ def enroll(server: str, code: str, *, name: str | None = None, home: Path | None
     if not server.startswith("https://") and not allow_http:
         raise SystemExit("the server URL must be https:// (or pass --allow-http on a trusted LAN)")
     name = name or platform.node() or "mac"
-    http = client or httpx.Client(timeout=30.0, proxy=resolve_proxy(proxy),
-                                  verify=ca_bundle or True)  # fmt: skip
+    http = client or httpx.Client(timeout=30.0, **http_options(proxy, ca_bundle))
     r = http.post(f"{server}/api/worker/enroll", json={"code": code.strip(), "name": name})
     if r.status_code == 401:
         raise SystemExit("the enrollment code is invalid, used, or expired: make a new one")

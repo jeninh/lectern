@@ -362,6 +362,9 @@ def update_credential(
     if "capabilities" in body.model_fields_set:
         row.capabilities = body.capabilities
         changed.append("capabilities")
+        if row.capabilities is not None:
+            # leases the narrowed allowlist no longer permits go back to the queue now
+            jobs.requeue_leases(db, row.id, keep=row.capabilities)
     if changed:
         audit.record(
             db,
@@ -406,7 +409,7 @@ def _enrollment_json(e: WorkerEnrollment, now) -> dict:
 def create_enrollment(
     request: Request, auth: OwnerOnly, db: DbDep, settings: SettingsDep, body: CredentialIn
 ) -> dict:
-    """A single-use code for ``curl …/worker/install.sh | sh -s -- --code …``. The code is
+    """A single-use code for ``curl …/worker/install.sh | LECTERN_WORKER_CODE=… sh``. The code is
     shown once and stored hashed; it expires after ``LECTERN_WORKER_ENROLLMENT_TTL_SECONDS``."""
     code = ENROLL_PREFIX + new_secret()
     now = utcnow()
@@ -433,7 +436,8 @@ def create_enrollment(
     return {
         **_enrollment_json(row, now),
         "code": code,
-        "command": f"curl -fsSL {base}/worker/install.sh | sh -s -- --code {code}",
+        # in the environment, not argv: `ps` does not show it while the installer runs
+        "command": f"curl -fsSL {base}/worker/install.sh | LECTERN_WORKER_CODE={code} sh",
     }
 
 
@@ -503,7 +507,12 @@ def revoke_credential(
             ip=client_ip(request),
             detail=row.label,
         )
-        # its leases go back to the queue now, not at the next sweep
-        jobs.reclaim_expired(db, stall_s=settings.align_stall_seconds)
+        # Its leases go back to the queue now, without spending an attempt, and what it
+        # uploaded is deleted: a later attempt must not resume from (or publish) a revoked
+        # worker's output. Both happen under the write lock this transaction holds, so an
+        # upload finishing meanwhile either lands first (and is deleted) or finds its lease
+        # gone.
+        jobs.requeue_leases(db, row.id)
+        queue.drop_artifacts_of(settings.data_dir, row.id)
         db.commit()
     return _credential_json(row)

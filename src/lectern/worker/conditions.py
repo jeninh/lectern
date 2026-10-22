@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from lectern.worker.config import AgentConfig
 
@@ -117,6 +118,80 @@ def resolve_proxy(setting: str, scutil_output: str | None = None) -> str | None:
     if scutil_output is None:
         scutil_output = _run(["scutil", "--proxy"]) if sys.platform == "darwin" else ""
     return parse_scutil_proxy(scutil_output)
+
+
+PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+CA_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+
+
+def _public_roots() -> str | None:
+    """The public CA bundle httpx and requests use by default (certifi), if installed."""
+    try:
+        import certifi
+    except ImportError:
+        return None
+    return certifi.where()
+
+
+def tls_verify(ca_bundle: str | None):
+    """``verify=`` for httpx: the usual public roots *plus* ``ca_bundle`` (a school's or
+    company's TLS-inspection CA). Adding it must not replace the public roots: the same
+    worker still reaches the server and the model hosts outside the inspecting network."""
+    import ssl
+
+    if not ca_bundle:
+        return True
+    ctx = ssl.create_default_context()
+    roots = _public_roots()
+    if roots:
+        ctx.load_verify_locations(cafile=roots)
+    ctx.load_verify_locations(cafile=str(Path(ca_bundle).expanduser()))
+    return ctx
+
+
+def http_options(proxy: str, ca_bundle: str | None) -> dict:
+    """Keyword arguments for every ``httpx.Client`` the worker makes. ``proxy`` ``none``
+    means no proxy at all: environment proxies are ignored too (``trust_env=False``)."""
+    opts = {"proxy": resolve_proxy(proxy), "verify": tls_verify(ca_bundle)}
+    if (proxy or "system").strip() == "none":
+        opts["trust_env"] = False
+    return opts
+
+
+def network_env(proxy: str, ca_bundle: str | None, home: Path) -> dict[str, str | None]:
+    """Environment for libraries that make their own connections (model downloads from
+    Hugging Face by mlx-whisper, faster-whisper, and Kokoro): the same proxy, and a CA bundle
+    that is the public roots plus ``ca_bundle``, written to ``home/ca-bundle.pem``. ``None``
+    values mean: remove the variable."""
+    env: dict[str, str | None] = {}
+    if (proxy or "system").strip() == "none":
+        env.update(dict.fromkeys(PROXY_VARS))
+        env["NO_PROXY"] = env["no_proxy"] = "*"
+    elif url := resolve_proxy(proxy):
+        for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+            env[var] = url
+    if ca_bundle:
+        extra = Path(ca_bundle).expanduser().read_text()
+        roots = _public_roots()
+        combined = home / "ca-bundle.pem"
+        home.mkdir(parents=True, exist_ok=True)
+        tmp = combined.with_name(f".ca-bundle.{os.getpid()}.tmp")
+        tmp.write_text((Path(roots).read_text() if roots else "") + "\n" + extra + "\n")
+        os.replace(tmp, combined)
+        for var in CA_VARS:
+            env[var] = str(combined)
+    return env
+
+
+def apply_network_env(proxy: str, ca_bundle: str | None, home: Path) -> dict[str, str | None]:
+    """Put :func:`network_env` into this process's environment (before engines load)."""
+    env = network_env(proxy, ca_bundle, home)
+    for k, v in env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    return env
 
 
 def pause_reason(cfg: AgentConfig, power: Power | None, net: Network | None) -> str | None:

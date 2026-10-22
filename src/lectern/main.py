@@ -202,6 +202,8 @@ def create_app(
         "worker": SlidingWindowLimiter(
             limit=settings.worker_requests_per_minute, window_seconds=60
         ),
+        # failed enrollment codes per address (POST /api/worker/enroll)
+        "worker_enroll": SlidingWindowLimiter(limit=10, window_seconds=60),
         # KOReader plugin (lectern.koplugin): setup-secret exchanges and pairing-code tries per
         # address, tries per username (whatever the address), and codes shown per user.
         "koplugin": SlidingWindowLimiter(limit=10, window_seconds=60),

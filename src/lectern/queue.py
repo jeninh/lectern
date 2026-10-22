@@ -212,7 +212,9 @@ def capability_online(db: Session, capability: str, now: datetime | None = None)
 def deferred_capabilities(
     db: Session, capabilities: Iterable[str], now: datetime | None = None
 ) -> set[str]:
-    """Of a local runner's capabilities, the ones an external worker is online for."""
+    """Of a local runner's capabilities, the ones an external worker is online for. Only
+    jobs of kinds external workers may claim (``remote_kinds``) are ever left to them: the
+    claim applies that part (``lectern.align.jobs.claim``)."""
     return {c for c in capabilities if capability_online(db, c, now)}
 
 
@@ -240,6 +242,75 @@ def sweep_artifacts(db: Session, data_dir: Path) -> int:
         if job is None or job.status not in JOB_ACTIVE_STATUSES:
             shutil.rmtree(d, ignore_errors=True)
             removed += 1
+    return removed
+
+
+# Remote results are copied here (same filesystem as the library) before they are renamed into
+# a work's folder: outside every work folder, so a work renamed or trashed meanwhile cannot
+# strand them, and dot-named, so no library scan or backup listing treats them as books.
+STAGING_DIR = ".lectern-staging"
+STAGING_MAX_AGE = timedelta(hours=6)
+
+
+def staging_dir(library: Path, job_id: int, tag: str) -> Path:
+    return library / STAGING_DIR / f"{int(job_id)}-{tag}"
+
+
+def sweep_staging(db: Session, library: Path, *, everything: bool = False) -> int:
+    """Remove staged copies of finished jobs, and any older than ``STAGING_MAX_AGE`` (a
+    result being published right now is younger and its job still active). ``everything`` at
+    startup, when no publication can be in flight."""
+    import time
+
+    from lectern.models import JOB_ACTIVE_STATUSES, Job
+
+    root = library / STAGING_DIR
+    if not root.is_dir():
+        return 0
+    removed = 0
+    for d in root.iterdir():
+        job_id = d.name.split("-", 1)[0]
+        if not everything:
+            job = db.get(Job, int(job_id)) if job_id.isdigit() else None
+            try:
+                young = time.time() - d.lstat().st_mtime < STAGING_MAX_AGE.total_seconds()
+            except OSError:
+                continue
+            if young and job is not None and job.status in JOB_ACTIVE_STATUSES:
+                continue
+        if d.is_dir() and not d.is_symlink():
+            shutil.rmtree(d, ignore_errors=True)
+        else:
+            d.unlink(missing_ok=True)
+        removed += 1
+    return removed
+
+
+# The worker credential that uploaded an artifact, next to it (dot-named: workers cannot
+# address it, listings skip it). Revoking a credential deletes what it uploaded.
+def uploader_path(artifact: Path) -> Path:
+    return artifact.with_name(f".{artifact.name}.uploader")
+
+
+def drop_artifacts_of(data_dir: Path, credential_id: int) -> int:
+    """Delete every stored artifact a (revoked) credential uploaded, with its sidecars."""
+    root = data_dir / "jobs"
+    if not root.is_dir():
+        return 0
+    removed = 0
+    for marker in root.glob("*/artifacts/.*.uploader"):
+        try:
+            owner = marker.read_text()[:32].strip()
+        except OSError:
+            continue
+        if owner != str(int(credential_id)):
+            continue
+        name = marker.name[1 : -len(".uploader")]
+        artifact = marker.with_name(name)
+        artifact.with_name(name + ".sha256").unlink(missing_ok=True)
+        artifact.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+        removed += 1
     return removed
 
 
@@ -292,12 +363,16 @@ class ArtifactBudget:
         self._bytes: dict[int, int] = {}
         self._slots: dict[int, int] = {}
 
-    def reserve(self, job_id: int, size: int, on_disk: int, budget: int, slots: int) -> str | None:
-        """``None`` when reserved, else why not (``too_large`` / ``too_many_uploads``)."""
+    def reserve(
+        self, job_id: int, size: int, on_disk: Callable[[], int], budget: int, slots: int
+    ) -> str | None:
+        """``None`` when reserved, else why not (``too_large`` / ``too_many_uploads``).
+        ``on_disk()`` is measured inside the lock, so an upload that finished just before
+        is counted and two reservations never both see the same free space."""
         with self._lock:
             if self._slots.get(job_id, 0) >= slots:
                 return "too_many_uploads"
-            if on_disk + self._bytes.get(job_id, 0) + size > budget:
+            if on_disk() + self._bytes.get(job_id, 0) + size > budget:
                 return "too_large"
             self._slots[job_id] = self._slots.get(job_id, 0) + 1
             self._bytes[job_id] = self._bytes.get(job_id, 0) + size

@@ -115,7 +115,8 @@ def _read_key(args: argparse.Namespace) -> str:
 def worker(args: argparse.Namespace) -> None:
     from lectern.align.mlx import worker_transcriber
     from lectern.align.worker import AlignRunner, RemoteWorker
-    from lectern.worker.conditions import resolve_proxy
+    from lectern.worker import config as wcfg
+    from lectern.worker.conditions import apply_network_env, http_options
     from lectern.worker.runners import (
         KokoroRunner,
         TranscodeRunner,
@@ -131,6 +132,8 @@ def worker(args: argparse.Namespace) -> None:
         )
     key = _read_key(args)
     stop = threading.Event()
+    # model downloads (below and in jobs) use the same proxy and extra CAs as the worker
+    apply_network_env(args.proxy, args.ca_bundle, wcfg.worker_home())
     caps = set(args.capabilities.split(",")) if args.capabilities else {"align"}
     runners = []
     if "align" in caps:
@@ -167,8 +170,7 @@ def worker(args: argparse.Namespace) -> None:
         workdir=args.workdir,
         stop=stop,
         runners=runners,
-        proxy=resolve_proxy(args.proxy),
-        verify=args.ca_bundle or True,
+        **http_options(args.proxy, args.ca_bundle),
     )
 
     def _on_signal(signum, _frame) -> None:
@@ -193,8 +195,11 @@ def worker(args: argparse.Namespace) -> None:
 def worker_enroll(args: argparse.Namespace) -> None:
     from lectern.worker import agent
 
+    code = args.code or os.environ.get("LECTERN_WORKER_CODE", "")
+    if not code.strip():
+        sys.exit("pass --code lwe_… or set LECTERN_WORKER_CODE")
     cfg = agent.enroll(
-        args.server, args.code, name=args.name, proxy=args.proxy, ca_bundle=args.ca_bundle,
+        args.server, code, name=args.name, proxy=args.proxy, ca_bundle=args.ca_bundle,
         allow_http=args.allow_http,
     )  # fmt: skip
     print(f"enrolled as {cfg.name!r} with {cfg.server}")
@@ -443,7 +448,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = sub.add_parser("worker-enroll", help="enroll this machine with a one-time code")
     e.add_argument("--server", required=True)
-    e.add_argument("--code", required=True, help="lwe_… from Admin → Workers")
+    e.add_argument(
+        "--code",
+        default=None,
+        help="lwe_… from Admin → Workers (default: $LECTERN_WORKER_CODE, kept out of argv)",
+    )
     e.add_argument("--name", default=None)
     e.add_argument("--proxy", default="system")
     e.add_argument("--ca-bundle", default=None)

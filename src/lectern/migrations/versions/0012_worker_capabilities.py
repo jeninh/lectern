@@ -54,14 +54,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Before this revision only "align" went to external workers; the in-process runner
+    # never picks up a transcode lease an external worker held. Give such leases back to the
+    # queue (without spending the attempt), or they would stay "leased" for good.
+    op.execute(
+        "UPDATE jobs SET status = 'QUEUED', lease_token_hash = NULL, lease_expires_at = NULL, "
+        "heartbeat_at = NULL, leased_by_id = NULL, result = NULL, "
+        "attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END "
+        "WHERE status = 'LEASED' AND kind != 'align' AND leased_by_id IS NOT NULL"
+    )
     op.drop_index("ix_worker_enrollments_code_hash", table_name="worker_enrollments")
     op.drop_table("worker_enrollments")
-    with op.batch_alter_table("worker_credentials") as batch:
-        batch.drop_column("status_at")
-        batch.drop_column("info")
-        batch.drop_column("state")
-        batch.drop_column("advertised")
-        batch.drop_column("capabilities")
-    with op.batch_alter_table("jobs") as batch:
-        batch.drop_index("ix_jobs_capability")
-        batch.drop_column("capability")
+    # Plain ALTER TABLE … DROP COLUMN (SQLite ≥ 3.35), not a batch copy: recreating
+    # worker_credentials would fire jobs.leased_by_id's ON DELETE SET NULL and turn every
+    # external align lease into an orphaned local one.
+    for column in ("status_at", "info", "state", "advertised", "capabilities"):
+        op.drop_column("worker_credentials", column)
+    op.drop_index("ix_jobs_capability", table_name="jobs")
+    op.drop_column("jobs", "capability")
