@@ -10,6 +10,7 @@ RUN npm run build
 FROM python:3.12-slim-bookworm AS build
 # LECTERN_EXTRAS=align adds faster-whisper (~0.6 GB more image) so the server aligns itself;
 # the default image stays small and leaves alignment to `lectern worker` on another machine.
+# LECTERN_EXTRAS=tts adds Piper (CPU text-to-speech for generated audiobooks, docs/tts.md).
 ARG LECTERN_EXTRAS=""
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never

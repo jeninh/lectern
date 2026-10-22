@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 
 from lectern.access import can_edit_library, can_see_work
-from lectern.align.jobs import alignment_activity
+from lectern.align.jobs import SYNTHESIZED_PREFIX, alignment_activity
 from lectern.ingest.epub import EpubError, read_spine
 from lectern.ingest.sentences import primary_epub
 from lectern.models import (
@@ -49,6 +49,8 @@ def alignment_json(a: Alignment | None, *, detailed: bool = True) -> dict | None
     return {
         "status": a.status.value,
         "model": a.model,
+        # "synthesis": a generated audiobook's own timings; no alignment run made them
+        "source": "synthesis" if a.model.startswith(SYNTHESIZED_PREFIX) else "alignment",
         "coverage": a.coverage,
         "error": a.error if detailed else None,  # paths and logs: owners and members only
     }

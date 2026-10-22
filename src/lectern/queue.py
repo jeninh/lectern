@@ -89,6 +89,9 @@ class KindHandler:
     apply_result: Callable[[Session, Settings, Job, bytes, Path], dict] | None = None
     on_fail: Callable[[Session, Job, bool], None] | None = None
     stats: Callable[[dict], dict | None] | None = None
+    # Artifacts kept after the job finishes (a later Retry resumes from them); the kind's own
+    # housekeeping removes them. ``sweep_artifacts`` leaves them alone.
+    keeps_artifacts: bool = False
 
 
 _HANDLERS: dict[str, KindHandler] = {}
@@ -239,6 +242,8 @@ def sweep_artifacts(db: Session, data_dir: Path) -> int:
         if not d.is_dir() or not d.name.isdigit():
             continue
         job = db.get(Job, int(d.name))
+        if job is not None and (found := handler(job.kind)) is not None and found.keeps_artifacts:
+            continue
         if job is None or job.status not in JOB_ACTIVE_STATUSES:
             shutil.rmtree(d, ignore_errors=True)
             removed += 1

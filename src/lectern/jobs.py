@@ -476,6 +476,7 @@ def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda 
     the rest."""
     from lectern import editing, idempotency, imports, trash
     from lectern.fsops import LIBRARY_LOCK
+    from lectern.tts.jobs import sweep as tts_sweep
     from lectern.uploads import sweep
 
     steps = [
@@ -484,6 +485,7 @@ def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda 
         ("trash", lambda db: (trash.purge_expired(db, settings), db.commit())),
         ("idempotency", idempotency.sweep),
         ("editing", lambda db: editing.sweep(db, settings, busy)),
+        ("tts", lambda db: tts_sweep(db, settings.data_dir)),
     ]
     for name, step in steps:
         with LIBRARY_LOCK, session_factory() as db:

@@ -21,6 +21,7 @@ from lectern.routes.api import (
     security,
     selection,
     shelves,
+    tts,
     uploads,
     worker,
     works,
@@ -46,3 +47,4 @@ router.include_router(readalong.router)
 router.include_router(pages.router)
 router.include_router(align.router)
 router.include_router(worker.router)
+router.include_router(tts.router)

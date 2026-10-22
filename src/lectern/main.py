@@ -150,6 +150,7 @@ def create_app(
         if run_background:
             services = start_services(session_factory(), settings)
         app.state.services = services
+        app.state.tts = next((s for s in services if type(s).__name__ == "TTSRunner"), None)
         # A fresh MCP session manager per lifespan: each one can run only once.
         mcp_manager = mcp_server.build(settings)
         log.info("Lectern %s ready on %s", __version__, settings.base_url)

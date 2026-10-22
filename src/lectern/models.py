@@ -1110,3 +1110,91 @@ class DevicePairingCode(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+# --- Generated audiobooks and third-party integrations (migration 0012_tts) ---------------------
+
+
+class Integration(Base):
+    """An owner-configured third-party API key (``provider`` ``elevenlabs``).
+
+    The key is encrypted at rest (``lectern.integrations``: Fernet, key derived from the
+    server's secret key) and never returned by the API after it is saved; ``key_hint`` (the
+    last four characters) is all anyone sees again. One row per provider; revoking deletes the
+    ciphertext and keeps the row for the audit trail.
+    """
+
+    __tablename__ = "integrations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), unique=True)
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, default=None)
+    key_hint: Mapped[str | None] = mapped_column(String(8), default=None)
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    last_tested_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    last_test_detail: Mapped[str | None] = mapped_column(String(256), default=None)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+class IntegrationUsage(Base):
+    """What a paid provider was asked to do: one row per billed request (characters sent,
+    credits charged). The per-job spending cap and the cost history are read from here."""
+
+    __tablename__ = "integration_usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    kind: Mapped[str] = mapped_column(String(32))  # "tts", "preview"
+    # Jobs that resume a failed one share its ``cap_group`` (the first job's id).
+    cap_group: Mapped[int | None] = mapped_column(Integer, default=None, index=True)
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), default=None
+    )
+    work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("works.id", ondelete="SET NULL"), default=None
+    )
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    characters: Mapped[int] = mapped_column(Integer, default=0)
+    credits: Mapped[float] = mapped_column(Float, default=0.0)
+    # A narration chunk's request: ``pending`` while it is in flight (reserved against the
+    # cap), ``billed`` once its audio is cached, ``uncertain`` when the outcome is unknown
+    # (a lost response, a crash). Previews are recorded ``billed``.
+    request_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    state: Mapped[str] = mapped_column(String(16), default="billed")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+
+
+class GeneratedAudiobook(Base):
+    """A work's audiobook edition made by text-to-speech (``lectern.tts``): which engine,
+    voice, and settings produced its tracks. One per work; the tracks themselves are ordinary
+    ``audio_tracks`` under ``audio/``, and the sentence map comes from the synthesis."""
+
+    __tablename__ = "generated_audiobooks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), unique=True)
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), default=None
+    )
+    engine: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(64))
+    voice: Mapped[str] = mapped_column(String(128))
+    speed: Mapped[float] = mapped_column(Float, default=1.0)
+    settings: Mapped[dict | None] = mapped_column(JSON, default=None)
+    chapters: Mapped[int] = mapped_column(Integer, default=0)
+    characters: Mapped[int] = mapped_column(Integer, default=0)
+    duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    epub_sha256: Mapped[str] = mapped_column(String(64))
+    audio_fingerprint: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

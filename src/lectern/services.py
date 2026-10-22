@@ -167,6 +167,10 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
             missing,
             jobs.DOCS_URL,
         )
+    if settings.tts_local_runner:
+        from lectern.tts.runner import TTSRunner
+
+        started.append(TTSRunner(session_factory, settings, poll_s=settings.worker_poll_seconds))
     for s in started:
         s.start()
     return started
