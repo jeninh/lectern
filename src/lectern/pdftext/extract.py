@@ -47,6 +47,9 @@ BATCH_PAGES = 48
 MAX_PAGE_CHARS = 30_000
 # Words kept for the whole document (≈ 2,500 dense pages), so memory stays bounded.
 MAX_WORDS = 1_500_000
+# ... and at this many characters (about 2,000 dense pages): the batches are kept and laid out
+# in the server process, so this bounds its memory whatever the words look like.
+MAX_CHARS = 8_000_000
 TOC_MAX = 2_000
 FLAG_HYPHEN = 1
 FLAG_BREAK = 2
@@ -88,19 +91,25 @@ def extract_words(path: Path) -> RawDoc:
     pages = [_page(p) for p in first.get("batch") or []]
     toc = [(int(lv), str(t), int(pi)) for lv, t, pi in (first.get("toc") or [])[:TOC_MAX]]
     words = sum(len(p.words) for p in pages)
+    chars = sum(_chars(p) for p in pages)
     truncated = False
     start = BATCH_PAGES
     while start < total:
-        if words >= MAX_WORDS:
+        if words >= MAX_WORDS or chars >= MAX_CHARS:
             truncated = True
             break
         out = _run_batch(path, start, min(total, start + BATCH_PAGES))
         for p in out.get("batch") or []:
             page = _page(p)
             words += len(page.words)
+            chars += _chars(page)
             pages.append(page)
         start += BATCH_PAGES
     return RawDoc(pages, toc, truncated)
+
+
+def _chars(page: RawPage) -> int:
+    return sum(len(w[0]) for w in page.words)
 
 
 def _page(p: dict) -> RawPage:

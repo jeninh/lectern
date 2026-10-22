@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from tests.conftest import (
     api_post,
     drain_inbox,
@@ -202,6 +202,12 @@ def test_reading_keeps_the_ingest_parser_limits(monkeypatch, tmp_path):
     whole = read("two-column.pdf")
     monkeypatch.setattr(extract, "BATCH_PAGES", 1)
     assert read("two-column.pdf") == whole
+    # The server keeps what the children read: a character budget stops reading, whatever
+    # the words look like (one long word per line costs few words but many characters).
+    monkeypatch.setattr(extract, "MAX_CHARS", 1)
+    capped = extract_words(FIX / "two-column.pdf")
+    assert capped.truncated and [p.index for p in capped.pages] == [0]
+    monkeypatch.setattr(extract, "MAX_CHARS", 10**9)
     monkeypatch.setattr(pdf_ingest, "TIMEOUT_S", 0.001)  # the same wall clock as ingest
     with pytest.raises(FormatError) as e:
         extract_words(FIX / "plain.pdf")
@@ -551,3 +557,82 @@ def test_pdf_pages_and_the_canonical_position_follow_each_other(client, owner, s
              {"source": "audio", "sentence_n": 3, "device": "Phone"})  # fmt: skip
     got = client.get(f"/syncs/progress/{book.partial_md5}", headers=ko).json()
     assert (got["progress"], got["device"]) == ("1", "Phone")
+
+
+def test_the_sentence_list_follows_the_text_when_an_epub_comes_and_goes(client, owner, settings):
+    """A PDF-only work's sentences are the PDF's; an EPUB added later becomes the text, and the
+    list (and the reader's place in it) moves to the EPUB, and back when it goes again."""
+    csrf = owner["csrf"]
+    fid = _file(settings, "two-column.pdf")
+    work_id = _work_of(fid).id
+    sweep(session_factory(), settings.library_dir)
+    assert client.get(f"/api/files/{fid}/text").json()["map"] == "self"
+    with session_factory()() as db:
+        pdf_count = db.scalar(select(PdfText.sentence_count).where(PdfText.file_id == fid))
+    assert (
+        put_json(client, f"/api/files/{fid}/progress", csrf, {"page": 3, "pages": 3}).status_code
+        == 200
+    )
+
+    def place() -> str:  # the text of the work sentence the reader is at
+        with session_factory()() as db:
+            n = db.scalar(select(WorkProgress.sentence_n).where(WorkProgress.work_id == work_id))
+        return _work_sentence_texts(settings, work_id)[n]
+
+    _epub_of_the_story(settings.inbox_path / "keeper.epub")
+    drain_inbox(settings)
+    with session_factory()() as db:
+        epub = db.scalar(select(BookFile).where(BookFile.work_id == work_id,
+                                                BookFile.media_type == "application/epub+zip"))  # fmt: skip
+        assert epub is not None, "the EPUB joined the PDF's work"
+    sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/files/{fid}/text").json()
+    assert (st["text_source"], st["map"]) == ("epub", "epub")
+    # The list is the EPUB's (two chapters, no title page), and the place is still Chapter Two.
+    with session_factory()() as db:
+        spines = set(db.scalars(select(Sentence.spine_index).where(Sentence.work_id == work_id)))
+    assert spines == {0, 1}
+    assert place().startswith("Chapter Two") or "Wren read the letter" in place(), place()
+
+    # The EPUB goes: the PDF is the text again, with its own list (a count alone proves nothing).
+    with session_factory()() as db:
+        db.delete(db.get(BookFile, epub.id))
+        db.commit()
+    assert client.get(f"/api/files/{fid}/sentences").status_code == 409
+    sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/files/{fid}/text").json()
+    assert (st["text_source"], st["map"]) == ("pdf", "self")
+    with session_factory()() as db:
+        assert (
+            db.scalar(select(func.count(Sentence.id)).where(Sentence.work_id == work_id))
+            == pdf_count
+        )
+
+
+def test_an_older_offline_page_turn_does_not_rewind_a_newer_audio_position(client, owner, settings):
+    from datetime import UTC, datetime, timedelta
+
+    csrf = owner["csrf"]
+    fid = _file(settings, "two-column.pdf")
+    work = _work_of(fid)
+    sweep(session_factory(), settings.library_dir)
+    iso = lambda d: d.isoformat()  # noqa: E731
+    turned = datetime.now(UTC) - timedelta(minutes=10)  # page 3, offline, ten minutes ago
+    # Meanwhile the audiobook moved on, to sentence 3 (page 1), on another device.
+    r = put_json(client, f"/api/works/{work.id}/progress", csrf,
+                 {"source": "audio", "sentence_n": 3, "device": "Phone"})  # fmt: skip
+    assert r.status_code == 200, r.text
+    r = put_json(client, f"/api/files/{fid}/progress", csrf, {"page": 3, "pages": 3, "offline": {
+        "recorded_at": iso(turned), "sent_at": iso(turned + timedelta(seconds=1))}})  # fmt: skip
+    assert r.status_code == 200, r.text  # the page record is this device's own
+    with session_factory()() as db:
+        wp = db.scalar(select(WorkProgress).where(WorkProgress.work_id == work.id))
+        assert (wp.sentence_n, wp.source.value) == (3, "audio")
+    # A page turned now (online) still moves the work there.
+    assert (
+        put_json(client, f"/api/files/{fid}/progress", csrf, {"page": 3, "pages": 3}).status_code
+        == 200
+    )
+    with session_factory()() as db:
+        wp = db.scalar(select(WorkProgress).where(WorkProgress.work_id == work.id))
+        assert wp.raw == "page:3"

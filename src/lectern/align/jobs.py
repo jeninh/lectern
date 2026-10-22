@@ -1120,15 +1120,17 @@ _MISSING = {
 }
 
 
-def engine_unavailable(db: Session, settings, now: datetime | None = None) -> dict | None:
+def engine_unavailable(
+    db: Session, settings, now: datetime | None = None, capability: str = queue.ALIGN
+) -> dict | None:
     """``None`` when something can run align jobs: the local worker, or an external worker
     that polled in the last ``WORKER_SEEN_S``. Otherwise why not, and where to read how to
     turn alignment on. Queued jobs are left queued: they run as soon as an engine appears."""
     reason = local_engine_missing(settings)
     if reason is None:
         return None
-    if queue.capability_online(db, KIND_ALIGN, now):
-        return None  # a worker that aligns EPUBs also aligns PDF text once it is updated
+    if queue.capability_online(db, capability, now):
+        return None  # ``align-pdf`` for PDF text: a worker from before PDF text cannot run it
     return {
         "reason": reason,
         "message": f"{_MISSING[reason]} and no external worker (lectern worker) has "
@@ -1200,7 +1202,9 @@ def alignment_activity(db: Session, work_id: int, settings, *, detailed: bool = 
         },
         "retry_model": retry,
         "unavailable": (
-            engine_unavailable(db, settings) if job.status == JobStatus.QUEUED else None
+            engine_unavailable(db, settings, capability=align_capability(job.payload))
+            if job.status == JobStatus.QUEUED
+            else None
         ),
     }
 

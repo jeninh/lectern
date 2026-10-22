@@ -443,11 +443,27 @@ class Layout:
     columns: int  # pages read as more than one column
 
 
+def _weighted_median(pairs: list[tuple[float, int]], default: float) -> float:
+    """The median of the values, each counted `weight` times (font size per character),
+    without expanding them: a page of one long word must not cost a list entry per letter."""
+    total = sum(n for _, n in pairs)
+    if not total:
+        return default
+    ordered = sorted(p for p in pairs if p[1] > 0)
+    half, seen = total / 2, 0
+    for i, (value, n) in enumerate(ordered):
+        seen += n
+        if seen > half:
+            return value
+        if seen == half:  # an even count split here: the mean of the two middle values
+            return (value + ordered[i + 1][0]) / 2
+    return default
+
+
 def layout(raw: RawDoc) -> Layout:
     words_by_page = [(p, _words(p)) for p in raw.pages]
     body, removed = strip_margins(words_by_page)
-    sizes = [w.size for page in body for w in page for _ in range(len(w.text))]
-    body_size = statistics.median(sizes) if sizes else 10.0
+    body_size = _weighted_median([(w.size, len(w.text)) for page in body for w in page], 10.0)
     pages_with_text = [sum(len(w.text) for w in page) >= MIN_PAGE_CHARS for page in body]
     paragraphs: list[Paragraph] = []
     columns = 0

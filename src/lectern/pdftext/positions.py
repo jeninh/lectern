@@ -21,11 +21,11 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lectern.models import BookFile, PdfSentence, PdfText, Sentence, Work
-from lectern.pdftext.store import READY, pdf_text_of, sentences_key, work_text
+from lectern.models import BookFile, PdfSentence, PdfText, Work
+from lectern.pdftext.store import READY, is_self, pdf_text_of, sentences_key, work_text
 
 
 @dataclass
@@ -81,8 +81,7 @@ def pdf_map(db: Session, library: Path, book: BookFile) -> PdfMap | None:
     if source.kind == "pdf":
         if source.file.id != book.id:
             return None  # another PDF of the work is its text
-        count = db.scalar(select(func.count(Sentence.id)).where(Sentence.work_id == work.id))
-        if count != row.sentence_count:
+        if not is_self(db, work, row):
             return None  # the work's sentence list is not (yet) this PDF's
         mode = "self"
     else:

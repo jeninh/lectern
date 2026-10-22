@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
@@ -120,16 +121,24 @@ def primary_epub(db: Session, work_id: int) -> BookFile | None:
     )
 
 
-def replace_sentences(db: Session, work_id: int, entries: list[dict]) -> None:
+def replace_sentences(
+    db: Session, work_id: int, entries: list[dict], move: Callable[[int], int] | None = None
+) -> None:
     """Swap a work's sentence list and move every stored position along the text timeline.
 
     Each ``work_progress`` row is projected to a text position with the old list and back to a
-    sentence with the new one. Caller commits.
+    sentence with the new one. When the new list is of a different text (a PDF's sentences
+    replaced by its EPUB's, docs/pdf-read-along.md), text positions mean nothing across the
+    two, and ``move`` maps an old sentence number to a new one instead. Caller commits.
     """
     old_rows = db.scalars(select(Sentence).where(Sentence.work_id == work_id)).all()
     old = SentenceIndex(old_rows) if old_rows else None
     texts = {}
-    if old is not None:
+    if move is not None and old_rows:
+        for p in db.scalars(select(WorkProgress).where(WorkProgress.work_id == work_id)):
+            p.sentence_n = max(0, min(move(p.sentence_n), max(0, len(entries) - 1)))
+            p.sentence_offset = 0
+    elif old is not None:
         for p in db.scalars(select(WorkProgress).where(WorkProgress.work_id == work_id)):
             if p.sentence_n < len(old):
                 texts[p.id] = old.to_text(SentencePos(p.sentence_n, p.sentence_offset))

@@ -33,7 +33,8 @@ or was read by an older extractor.
   process (`python -I -m lectern.pdftext.extract`) under the ingest check's limits: the same
   CPU and memory rlimits, wall-clock timeout, page count and page size caps, and the same
   concurrency slots (`lectern.ingest.pdf`). On top of that: at most 30,000 characters per
-  page and 1.5 million words per book. Encrypted PDFs are refused (`pdf_encrypted`). A PDF that
+  page, and 1.5 million words or 8 million characters per book (beyond that the rest
+  is not read and the document says `truncated`). Encrypted PDFs are refused (`pdf_encrypted`). A PDF that
   fails three times is marked `failed` with the reason; owners and members can **Retry** it.
 - **Words with boxes.** For every word it records its text, a loose box in PDF user space,
   font size, and whether it is bold, ends in a hyphen, or ends a line. It also records the
@@ -84,9 +85,14 @@ A work has one list of sentences (its *canonical* positions), from its text:
   is simply not highlighted.
 - **PDF only**: the PDF's sentences are the work's sentences.
 
+The list follows the text: an EPUB added to a PDF-only work replaces the PDF's list with the
+EPUB's on the next sweep (positions move through the projection), and when the EPUB goes,
+the PDF's list comes back. Once an alignment exists, its sentence map owns the list.
+
 So a page in the PDF viewer, a sentence in the EPUB reader, an audio second and a KOReader
 page all point at the same place. Saving a page projects to the first sentence on it; the
-viewer offers *"Continue there?"* when the audiobook, the EPUB or KOReader got further.
+viewer offers *"Continue there?"* when the audiobook, the EPUB or KOReader got further. A
+page turned offline and synced later never moves a work position that changed after it.
 
 ## Alignment
 

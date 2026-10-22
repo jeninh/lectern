@@ -189,6 +189,7 @@ def put_page(auth: AuthCsrf, db: DbDep, settings: SettingsDep, file_id: int, bod
             ReadingProgress.user_id == auth.user.id, ReadingProgress.document == book.partial_md5
         )
     )
+    recorded = None
     if body.offline is not None:
         wins, recorded = body.offline.judge(row.updated_at if row else None)
         if not wins:
@@ -203,15 +204,19 @@ def put_page(auth: AuthCsrf, db: DbDep, settings: SettingsDep, file_id: int, bod
     row.device_id = WEB_DEVICE_ID
     row.timestamp = now
     row.sync_key_id = None
-    _project_page(db, settings, auth.user.id, book, page, row.device)
+    _project_page(db, settings, auth.user.id, book, page, row.device, recorded)
     db.commit()
     return _progress(db, auth.user.id, book)
 
 
-def _project_page(db, settings, user_id: int, book: BookFile, page: int, device: str) -> None:
+def _project_page(
+    db, settings, user_id: int, book: BookFile, page: int, device: str, recorded=None
+) -> None:
     """Move the work's canonical position to the first sentence on ``page`` (1-based) of a
     text PDF, unless it is on that page already (reading a page must not rewind the audio to
-    the page's first sentence)."""
+    the page's first sentence), or the page was turned offline (``recorded``, server clock)
+    before the canonical position last moved: the audiobook, the EPUB, or KOReader got there
+    later, and the viewer offers that position instead of losing it."""
     from lectern.models import ProgressSource
     from lectern.pdftext.positions import pdf_map
     from lectern.positions import SentencePos
@@ -225,6 +230,8 @@ def _project_page(db, settings, user_id: int, book: BookFile, page: int, device:
         return
     wp = get_progress(db, user_id, book.work_id)
     if wp is not None and m.page_of(wp.sentence_n) == page - 1:
+        return
+    if recorded is not None and wp is not None and wp.received_at and wp.received_at > recorded:
         return
     set_progress(
         db,

@@ -256,31 +256,119 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
 
 
 def ensure_pdf_sentences(db: Session, library: Path, work: Work) -> int:
-    """A work whose text is a PDF and that has no sentences yet gets the PDF's sentence list
-    (text only, ``matched = false``), exactly the list an alignment of it will produce, so
-    ``n`` is the same in ``sentences`` and ``pdf_sentences``. Caller commits."""
-    from lectern.ingest.sentences import replace_sentences
+    """Keep a work's text-only sentence list on the work's text source (no alignment yet;
+    an alignment's sentence map owns the list once there is one).
+
+    - The text is a PDF and the list is empty, or is not that PDF's (the EPUB it came from
+      was removed, or another PDF was the text): install the PDF's list (``matched =
+      false``), exactly the list an alignment of it will produce, so ``n`` is the same in
+      ``sentences`` and ``pdf_sentences``, and stamp the PDF as the list's source.
+    - The text is an EPUB but the list is still a PDF's (the EPUB was added later): rebuild
+      the EPUB's list, moving positions through the EPUB↔PDF projection.
+
+    Positions move with the list. Returns the sentences written. Caller commits."""
+    from lectern.ingest.sentences import epub_sentences, replace_sentences
     from lectern.models import Alignment
 
     if db.scalar(select(Alignment.id).where(Alignment.work_id == work.id)) is not None:
         return 0
-    if db.scalar(select(func.count()).select_from(Sentence).where(Sentence.work_id == work.id)):
-        return 0
     found = work_text(db, library, work)
-    if found is None or found[0].kind != "pdf":
+    if found is None:
         return 0
-    rows = db.scalars(
-        select(PdfSentence).where(PdfSentence.file_id == found[0].file.id).order_by(PdfSentence.n)
-    ).all()
-    replace_sentences(
-        db,
-        work.id,
-        [
+    old_count = db.scalar(select(func.count(Sentence.id)).where(Sentence.work_id == work.id))
+    source, path = found
+    if source.kind == "pdf":
+        row = pdf_text_of(db, source.file.id)
+        if row is None or (old_count and is_self(db, work, row)):
+            return 0
+        rows = db.scalars(
+            select(PdfSentence).where(PdfSentence.file_id == source.file.id).order_by(PdfSentence.n)
+        ).all()
+        entries = [
             {"n": r.n, "spine_index": r.section, "char_start": r.char_start, "char_end": r.char_end}
             for r in rows
-        ],
-    )
-    return len(rows)
+        ]
+        if old_count:
+            replace_sentences(db, work.id, entries, move=_proportional(old_count, len(entries)))
+        else:
+            replace_sentences(db, work.id, entries)
+        for other in db.scalars(select(PdfText).where(PdfText.work_id == work.id)):
+            other.projected_key = None
+        row.projected_key = self_key(db, work.id, row)
+        return len(entries)
+    # The text is an EPUB: is the list still the PDF's it was before the EPUB came?
+    if not old_count:
+        return 0  # the EPUB's own list is built at ingest (ingest.sentences)
+    was = next(
+        (r for r in db.scalars(select(PdfText).where(PdfText.work_id == work.id))
+         if is_self(db, work, r)),
+        None,
+    )  # fmt: skip
+    if was is None:
+        return 0
+    try:
+        entries = epub_sentences(path)
+    except Exception:  # noqa: BLE001 - an unreadable EPUB keeps the list it has
+        log.warning("could not segment the EPUB of work %d", work.id)
+        return 0
+    move = _proportional(old_count, len(entries))
+    book = db.get(BookFile, was.file_id)
+    doc = load_document(library, work, book, was) if book else None
+    if doc is not None and entries:
+        from lectern.align.text import iter_spine_items
+        from lectern.pdftext.project import project
+
+        items = {item.index: item.text.text for item in iter_spine_items(path)}
+        work_texts = [items.get(e["spine_index"], "")[e["char_start"] : e["char_end"]]
+                      for e in entries]  # fmt: skip
+        pdf_rows = db.scalars(
+            select(PdfSentence).where(PdfSentence.file_id == was.file_id).order_by(PdfSentence.n)
+        ).all()
+        sections = doc["sections"]
+        epub_n = project(
+            work_texts, [sections[r.section]["text"][r.char_start : r.char_end] for r in pdf_rows]
+        )
+        move = _through(epub_n, move)
+    replace_sentences(db, work.id, entries, move=move)
+    was.projected_key = None
+    return len(entries)
+
+
+def self_key(db: Session, work_id: int, row: PdfText) -> str:
+    """The stamp a PDF's text row carries while the work's sentence list is the one installed
+    from it (``projected_key`` holds it: a PDF that is the work's text has no projection)."""
+    return hashlib.sha256(
+        f"self:{sentences_key(db, work_id, row.text_sha256 or '')}".encode()
+    ).hexdigest()
+
+
+def is_self(db: Session, work: Work, row: PdfText) -> bool:
+    """Whether the work's sentences are this PDF's: installed from it (and not replaced
+    since), or the sentence map of an alignment of its text. A count is not enough: an EPUB's
+    list can happen to have as many sentences."""
+    from lectern.models import Alignment
+
+    alignment = db.scalar(select(Alignment).where(Alignment.work_id == work.id))
+    if alignment is not None:
+        return bool(row.text_sha256) and alignment.epub_sha256 == row.text_sha256
+    return row.projected_key is not None and row.projected_key == self_key(db, work.id, row)
+
+
+def _proportional(old: int, new: int):
+    return lambda n: round(n * new / old) if old else 0
+
+
+def _through(epub_n: list[int | None], fallback):
+    """Old (PDF) sentence ``n`` to the EPUB sentence it was projected onto, or the nearest
+    earlier one that was; past the projection, ``fallback``."""
+
+    def move(n: int) -> int:
+        for k in range(min(n, len(epub_n) - 1), -1, -1):
+            if epub_n[k] is not None:
+                return epub_n[k]
+        return fallback(n)
+
+    return move
 
 
 def sentences_key(db: Session, work_id: int, source_sha: str) -> str:
@@ -303,7 +391,8 @@ def refresh_projection(
 
     found = work_text(db, library, work)
     if found is None or found[0].kind != "epub":
-        if row.projected_key is None:
+        # No EPUB: no projection. A self stamp (ensure_pdf_sentences) stays as it is.
+        if row.projected_key is None or is_self(db, work, row):
             return False
         db.execute(
             PdfSentence.__table__.update().where(PdfSentence.file_id == book.id).values(epub_n=None)
