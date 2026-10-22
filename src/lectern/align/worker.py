@@ -13,7 +13,9 @@ through :func:`lectern.align.jobs.apply_result`, so the validation path is ident
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -112,6 +114,9 @@ def transcriber_fn(transcriber: Transcriber) -> TranscribeFn:
 
 
 def _error_text(exc: BaseException) -> str:
+    if isinstance(exc, SystemExit):
+        # sys.exit() inside an engine: str() is only the exit code
+        return f"the engine called sys.exit({exc.code!r})"[:2000]
     return f"{type(exc).__name__}: {exc}"[:2000]
 
 
@@ -437,6 +442,10 @@ class EngineUnavailable(Exception):
 
 
 ENGINE_RETRY_S = 1800.0
+CRASHED_ERROR = (
+    "the worker process died while running this job (a crash, out of memory, or killed); "
+    "its log has the details"
+)
 # What the server may name: inputs and artifacts are plain file names, never paths.
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -708,6 +717,8 @@ class RemoteWorker:
         proxy: str | None = None,
         verify=True,
         trust_env: bool = True,
+        crash_marker: Path | None = None,
+        withheld: dict[str, str] | None = None,
     ) -> None:
         import httpx
 
@@ -733,6 +744,13 @@ class RemoteWorker:
         self._running: tuple[dict, _Heartbeat] | None = None
         # runner -> (monotonic time it may be tried again, why): its engine would not load
         self._unavailable: dict[int, tuple[float, str]] = {}
+        # capabilities a self-test (lectern.worker.doctor) failed: never offered, shown to the
+        # owner with the reason
+        self.withheld = dict(withheld or {})
+        # Written before a job runs and removed after; still there at the next start means
+        # the process died mid-job, which is reported for that job (it counts as a crash).
+        self.crash_marker = crash_marker
+        self._marker_checked = False
         self.client = client or httpx.Client(
             base_url=self.server,
             headers={"Authorization": f"Bearer {key}", "User-Agent": "lectern-worker"},
@@ -761,9 +779,10 @@ class RemoteWorker:
 
     @property
     def unavailable(self) -> dict[str, str]:
-        """Capabilities withheld because their engine would not load: ``{capability: why}``."""
+        """Capabilities withheld because their engine would not load or its self-test failed:
+        ``{capability: why}``."""
         self._available()
-        out: dict[str, str] = {}
+        out: dict[str, str] = dict(self.withheld)
         for r in self.runners:
             if id(r) in self._unavailable:
                 out.update(dict.fromkeys(r.capabilities, self._unavailable[id(r)][1]))
@@ -814,7 +833,7 @@ class RemoteWorker:
                     "worker": self.name,
                     "state": state,
                     "capabilities": self.capabilities,
-                    "info": {**self.info, "reason": reason} if reason else self.info,
+                    "info": {**self._info(), "reason": reason} if reason else self._info(),
                 },
             )
         except Exception:  # noqa: BLE001 - presence is best effort
@@ -824,9 +843,54 @@ class RemoteWorker:
             raise PermissionError("the server rejected the worker credential")
         return r.status_code == 200
 
+    def _info(self) -> dict:
+        unavailable = {k: v[:200] for k, v in sorted(self.unavailable.items())[:16]}
+        return {**self.info, "unavailable": unavailable} if unavailable else self.info
+
+    # -- crash marker ------------------------------------------------------------------------
+
+    def _write_marker(self, job_id: int, token: str, capability: str) -> None:
+        if self.crash_marker is None:
+            return
+        try:
+            self.crash_marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(self.crash_marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump({"job_id": job_id, "token": token, "capability": capability,
+                           "server": self.server, "pid": os.getpid(),
+                           "started_at": time.time()}, fh)  # fmt: skip
+        except OSError:
+            log.warning("could not write %s", self.crash_marker, exc_info=True)
+
+    def report_crash(self) -> int | None:
+        """If the previous process died during a job, tell the server (once): the job fails
+        with ``crashed``, and the server terminally fails a job that crashed workers twice.
+        Returns the job id reported."""
+        if self._marker_checked or self.crash_marker is None:
+            return None
+        self._marker_checked = True
+        try:
+            data = json.loads(self.crash_marker.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            self.crash_marker.unlink(missing_ok=True)
+            return None
+        job_id = data.get("job_id")
+        if not isinstance(job_id, int) or data.get("server") != self.server:
+            self.crash_marker.unlink(missing_ok=True)
+            return None
+        log.error("job %d: the previous worker process died while running it; reporting a "
+                  "crash", job_id)  # fmt: skip
+        self._fail(job_id, {"X-Lease-Token": str(data.get("token") or "")}, CRASHED_ERROR,
+                   retryable=True, crashed=True)  # fmt: skip
+        self.crash_marker.unlink(missing_ok=True)
+        return job_id
+
     # -- protocol steps ----------------------------------------------------------------------
 
     def run_once(self) -> bool:
+        self.report_crash()
         if not self.capabilities:  # every engine failed to load: say so, claim nothing
             self.report("paused", "engines unavailable: " + "; ".join(
                 sorted(set(self.unavailable.values())))[:150])  # fmt: skip
@@ -838,7 +902,7 @@ class RemoteWorker:
                 "capabilities": self.capabilities,
                 "worker": self.name,
                 "lease_s": self.lease_s,
-                "info": self.info,
+                "info": self._info(),
             },
         )
         if r.status_code == 204:
@@ -881,6 +945,7 @@ class RemoteWorker:
         }
         self._running = (about, hb)
         log.info("job %d: claimed (%s, work %s)", job_id, about["capability"], job["work_id"])
+        self._write_marker(job_id, token, about["capability"])
         hb.start()
         try:
             runner.run(ctx)
@@ -903,10 +968,27 @@ class RemoteWorker:
         except Exception as exc:  # noqa: BLE001
             log.exception("job %d failed", job_id)
             self._fail(job_id, headers, _error_text(exc), retryable=True)
+        except KeyboardInterrupt:
+            # a second Ctrl-C / SIGTERM: stop now, but hand the job back first
+            self._release(job_id, headers)
+            raise
+        except BaseException as exc:  # noqa: BLE001 - SystemExit from inside an engine
+            # An engine (or a library under it) that exits the process would otherwise kill
+            # the worker with the lease held: the job would sit at 0 % until the lease
+            # expired, and launchd would restart the worker into the same job. Fail it now,
+            # with the reason, as a crash (the server's backoff applies, and two crashes end
+            # the job), and stop offering the capability for a while.
+            why = _error_text(exc)
+            log.error("job %d: %s crashed the engine (%s)", job_id, about["capability"], why,
+                      exc_info=True)  # fmt: skip
+            self._unavailable[id(runner)] = (time.monotonic() + ENGINE_RETRY_S, why[:200])
+            self._fail(job_id, headers, why, retryable=True, crashed=True)
         finally:
             hb.stop()
             self._running = None
             shutil.rmtree(tmp, ignore_errors=True)
+            if self.crash_marker is not None:
+                self.crash_marker.unlink(missing_ok=True)
         return True
 
     def _release(self, job_id: int, headers: dict) -> None:
@@ -919,12 +1001,12 @@ class RemoteWorker:
         except Exception:  # noqa: BLE001 - the lease will expire and the server reclaims it
             log.warning("job %d: could not hand the job back", job_id, exc_info=True)
 
-    def _fail(self, job_id: int, headers: dict, error: str, *, retryable: bool) -> None:
+    def _fail(self, job_id: int, headers: dict, error: str, *, retryable: bool,
+              crashed: bool = False) -> None:  # fmt: skip
+        body: dict = {"error": error, "retryable": retryable}
+        if crashed:
+            body["crashed"] = True
         try:
-            self.client.post(
-                f"/api/worker/jobs/{job_id}/fail",
-                json={"error": error, "retryable": retryable},
-                headers=headers,
-            )
+            self.client.post(f"/api/worker/jobs/{job_id}/fail", json=body, headers=headers)
         except Exception:  # noqa: BLE001 - the lease will expire and the server reclaims it
             log.warning("job %d: could not report failure", job_id, exc_info=True)

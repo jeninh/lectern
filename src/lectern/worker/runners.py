@@ -72,10 +72,13 @@ def kokoro_synthesizer(voice: str, speed: float, lang: str) -> Synthesize:
     import numpy as np
     from kokoro import KPipeline
 
+    from lectern.tts.engines import KOKORO_REPO, forbid_runtime_installs
+
     code = KOKORO_LANGS.get((lang or "en-us").lower())
     if code is None:
         raise PermanentJobError(f"Kokoro has no voice for language {lang!r}")
-    pipeline = KPipeline(lang_code=code)
+    forbid_runtime_installs()  # a missing spaCy model is an error here, never a pip install
+    pipeline = KPipeline(lang_code=code, repo_id=KOKORO_REPO)
 
     def synth(text: str) -> np.ndarray:
         parts = [np.asarray(audio, dtype=np.float32) for _, _, audio in

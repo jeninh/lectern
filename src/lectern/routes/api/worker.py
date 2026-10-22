@@ -81,12 +81,22 @@ class WorkerInfo(BaseModel):
     platform: str | None = Field(default=None, max_length=64)
     engines: dict[str, str] | None = Field(default=None, max_length=16)
     reason: str | None = Field(default=None, max_length=200)
+    # Capabilities this worker has but does not offer, and why (a failed self-test, an engine
+    # that would not load): shown to the owner next to the queue.
+    unavailable: dict[str, str] | None = Field(default=None, max_length=16)
 
     @field_validator("engines")
     @classmethod
     def _short(cls, v: dict[str, str] | None) -> dict[str, str] | None:
         if v and any(len(k) > 48 or len(str(x)) > 64 for k, x in v.items()):
             raise ValueError("engine names and versions are short strings")
+        return v
+
+    @field_validator("unavailable")
+    @classmethod
+    def _reasons(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        if v and any(len(k) > 48 or len(str(x)) > 200 for k, x in v.items()):
+            raise ValueError("capabilities are short and reasons at most 200 characters")
         return v
 
 
@@ -128,6 +138,9 @@ class HeartbeatIn(BaseModel):
 class FailIn(BaseModel):
     error: str = Field(default="", max_length=2000)
     retryable: bool = True
+    # The job took the worker process down (an engine that exits, a segfault); the second
+    # crash fails the job for good (lectern.align.jobs.CRASH_LIMIT).
+    crashed: bool = False
 
 
 def _lease_lost() -> HTTPException:
@@ -632,7 +645,7 @@ def fail(
     x_lease_token: LeaseToken = None,
 ) -> dict:
     job = _leased(db, cred, job_id, x_lease_token)
-    out = jobs.fail(db, job, body.error, retryable=body.retryable)
+    out = jobs.fail(db, job, body.error, retryable=body.retryable, crashed=body.crashed)
     cred.state = "ready"
     db.commit()
     log.warning("job %d failed on %s: %s (%s)", job.id, cred.label, body.error, out["status"])

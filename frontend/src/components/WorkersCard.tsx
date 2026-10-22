@@ -17,8 +17,39 @@ export interface WorkerCredential {
   claimable: string[];
   state: "ready" | "busy" | "paused" | "off" | "offline" | "revoked";
   status_at: string | null;
-  info: { platform?: string; version?: string; engines?: Record<string, string>; reason?: string };
+  info: { platform?: string; version?: string; engines?: Record<string, string>; reason?: string; unavailable?: Record<string, string> };
   jobs: { id: number; kind: string; capability: string; work_id: number | null; progress: number | null; message: string | null }[];
+}
+
+/** Why an active job is where it is (lectern.queue.explain_wait). */
+export interface JobWait {
+  capability: string;
+  summary: string;
+  workers: { id: number; label: string; state: string; eligible: boolean; why: string | null }[];
+  eligible_online: number;
+  server_runs: boolean | null;
+  ahead: number;
+  lease: { holder: string; expires_at: string | null; heartbeat_at: string | null } | null;
+  run_after: string | null;
+  attempts: number;
+  max_attempts: number;
+  crashes: number;
+  last_error: string | null;
+}
+
+export interface QueueJob {
+  id: number;
+  kind: string;
+  capability: string;
+  work_id: number | null;
+  status: "queued" | "leased" | "succeeded" | "failed" | "cancelled";
+  attempts: number;
+  max_attempts: number;
+  crashes: number;
+  progress?: number | null;
+  error: string | null;
+  finished_at: string | null;
+  waiting: JobWait | null;
 }
 
 interface Enrollment {
@@ -53,8 +84,15 @@ export function WorkersCard() {
   const { toast } = useStore();
   const [rows, setRows] = useState<WorkerCredential[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [queue, setQueue] = useState<{ active: QueueJob[]; failed: QueueJob[] } | null>(null);
   const load = useCallback(
-    () => get<{ credentials: WorkerCredential[] }>("/api/worker-credentials").then((d) => setRows(d.credentials)),
+    () =>
+      Promise.all([
+        get<{ credentials: WorkerCredential[] }>("/api/worker-credentials").then((d) => setRows(d.credentials)),
+        Promise.all([get<{ jobs: QueueJob[] }>("/api/jobs?status=active"), get<{ jobs: QueueJob[] }>("/api/jobs?status=failed")])
+          .then(([a, f]) => setQueue({ active: a.jobs, failed: f.jobs.slice(0, 5) }))
+          .catch(() => setQueue({ active: [], failed: [] })),
+      ]),
     [],
   );
   useEffect(() => {
@@ -103,7 +141,13 @@ export function WorkersCard() {
               <tr key={w.id}>
                 <td><strong>{w.label}</strong><div className="hint">{[w.info.platform, w.info.version && `v${w.info.version}`].filter(Boolean).join(" · ") || `added ${relativeTime(w.created_at)}`}</div></td>
                 <td><span className={`badge ${STATE_BADGE[w.state]}`}>{w.state}</span><div className="hint">{describeWorker(w)}</div></td>
-                <td>{w.claimable.length ? w.claimable.join(", ") : <span className="hint">—</span>}{w.capabilities && <div className="hint">limited to {w.capabilities.join(", ")}</div>}</td>
+                <td>
+                  {w.claimable.length ? w.claimable.join(", ") : <span className="hint">—</span>}
+                  {w.capabilities && <div className="hint">limited to {w.capabilities.join(", ")}</div>}
+                  {Object.entries(w.info.unavailable ?? {}).map(([cap, why]) => (
+                    <div key={cap} className="hint" title={why}>not offering {cap}: {why}</div>
+                  ))}
+                </td>
                 <td style={{ textAlign: "right" }}>
                   <div className="row" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
                     {w.capabilities ? (
@@ -119,10 +163,72 @@ export function WorkersCard() {
           </tbody>
         </table>
       )}
+      {queue && <JobQueue active={queue.active} failed={queue.failed} />}
       <Sheet open={adding} onClose={() => setAdding(false)} title="Add a worker" variant="dialog" labelledBy="addw-title">
         {adding && <AddWorker onDone={() => { setAdding(false); load(); }} />}
       </Sheet>
     </section>
+  );
+}
+
+function when(iso: string | null): string {
+  return iso ? new Date(iso).toLocaleString() : "—";
+}
+
+/** Waiting and running jobs with why they wait, and the latest failures with their reason. */
+export function JobQueue({ active, failed }: { active: QueueJob[]; failed: QueueJob[] }) {
+  if (!active.length && !failed.length) return null;
+  return (
+    <div className="stack" style={{ marginTop: 16 }} aria-label="Job queue">
+      {active.length > 0 && <h3 style={{ margin: 0, fontSize: 15 }}>Queue</h3>}
+      {active.map((j) => {
+        const w = j.waiting;
+        return (
+          <div key={j.id} className="queue-job" data-status={j.status}>
+            <div className="row" style={{ gap: 8, flexWrap: "nowrap", alignItems: "baseline" }}>
+              <span className={`badge ${j.status === "leased" ? "accent" : ""}`}>{j.status === "leased" ? "running" : "queued"}</span>
+              <strong>Job {j.id}</strong>
+              <span className="hint">{j.capability}{j.work_id != null ? ` · work ${j.work_id}` : ""}</span>
+            </div>
+            <div className="hint" data-testid="wait-summary">{w?.summary ?? ""}</div>
+            {w && (
+              <details className="tech">
+                <summary>Why it is waiting</summary>
+                <dl className="kv">
+                  <dt>Needs</dt>
+                  <dd>a worker that offers <code>{w.capability}</code>{w.server_runs ? " (this server also runs it itself)" : ""}</dd>
+                  <dt>Workers</dt>
+                  <dd>
+                    {w.workers.length === 0 ? "none added" : (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {w.workers.map((x) => <li key={x.id}>{x.label}: {x.eligible ? "can take it" : x.why}</li>)}
+                      </ul>
+                    )}
+                  </dd>
+                  {w.lease && (<><dt>Lease</dt><dd>{w.lease.holder}, expires {when(w.lease.expires_at)}, last heartbeat {when(w.lease.heartbeat_at)}</dd></>)}
+                  <dt>Runs after</dt>
+                  <dd>{when(w.run_after)}{w.ahead ? ` · ${w.ahead} ahead in line` : ""}</dd>
+                  <dt>Attempts</dt>
+                  <dd>{w.attempts} of {w.max_attempts}{w.crashes ? ` · crashed its worker ${w.crashes}×` : ""}</dd>
+                  {w.last_error && (<><dt>Last error</dt><dd>{w.last_error}</dd></>)}
+                </dl>
+              </details>
+            )}
+          </div>
+        );
+      })}
+      {failed.length > 0 && <h3 style={{ margin: "8px 0 0", fontSize: 15 }}>Recently failed</h3>}
+      {failed.map((j) => (
+        <div key={j.id} className="queue-job" data-status="failed">
+          <div className="row" style={{ gap: 8, flexWrap: "nowrap", alignItems: "baseline" }}>
+            <span className="badge danger">failed</span>
+            <strong>Job {j.id}</strong>
+            <span className="hint">{j.capability}{j.work_id != null ? ` · work ${j.work_id}` : ""} · {when(j.finished_at)}</span>
+          </div>
+          <div className="hint">{j.error ?? "no reason recorded"}</div>
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -255,6 +255,35 @@ def test_retry_resumes_finished_chapters(client, owner, settings, tmp_path):
     assert second.calls[0] == "Chapter Three"
 
 
+def test_an_engine_that_exits_does_not_kill_the_servers_runner(client, owner, settings, tmp_path):
+    """Kokoro in the server (LECTERN_TTS_KOKORO_LOCAL=1): spaCy's model download calling
+    sys.exit() used to end the runner thread silently, lease held."""
+    work_id = _work(settings, owner, client, tmp_path)
+    _piper_voice(settings)
+    job_id = api_post(client, f"/api/works/{work_id}/audiobook", owner["csrf"],
+                      {"engine": "piper", "voice": "en_US-test-low"}).json()["id"]  # fmt: skip
+
+    def exits(engine, payload, settings):
+        raise SystemExit(2)
+
+    runner = TTSRunner(session_factory(), settings, synth_factory=exits,
+                       engines=lambda db: {"piper"})  # fmt: skip
+    assert runner.run_once()
+    with session_factory()() as db:
+        j = db.get(Job, job_id)
+        assert j.status == JobStatus.QUEUED and j.crashes == 1
+        assert j.error == "the engine called sys.exit(2)"
+        j.run_after = j.created_at  # the backoff passes
+        db.commit()
+    assert runner.run_once()
+    with session_factory()() as db:
+        j = db.get(Job, job_id)
+        assert j.status == JobStatus.FAILED and j.attempts == 2
+        assert j.error.startswith("crashed the worker 2 times; last error: the engine called")
+    state = client.get(f"/api/works/{work_id}/audiobook").json()
+    assert state["job"]["error"].startswith("crashed the worker 2 times")
+
+
 def test_cancel_keeps_alignment_and_stops_runner(client, owner, settings, tmp_path):
     work_id = _work(settings, owner, client, tmp_path)
     _piper_voice(settings)

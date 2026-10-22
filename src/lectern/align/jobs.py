@@ -48,6 +48,9 @@ LEASE_MAX_S = 3600
 BACKOFF_BASE_S = 30.0
 BACKOFF_MAX_S = 3600.0
 BACKOFF_JITTER = 0.2
+# A job that crashed its worker this many times fails for good with the last error: an engine
+# that exits the process on this input would otherwise take every worker down in turn.
+CRASH_LIMIT = 2
 RESULT_MAX_BYTES = 32 * 1024 * 1024
 LOW_COVERAGE = 0.85
 TRACK_TOLERANCE_S = 0.05
@@ -640,10 +643,23 @@ def _release(db: Session, job: Job) -> None:
         alignment.status = AlignmentStatus.PENDING
 
 
-def fail(db: Session, job: Job, error: str, *, retryable: bool) -> dict:
+def fail(db: Session, job: Job, error: str, *, retryable: bool, crashed: bool = False) -> dict:
+    """Record a failed attempt: queued again after :func:`backoff_s` while ``retryable`` and
+    attempts remain, else failed. ``crashed``: the job took its worker down (see
+    :func:`count_crash`)."""
+    if crashed:
+        error, retryable = count_crash(job, error, retryable)
     out = _retry_or_fail(db, job, error, retryable=retryable, now=utcnow())
     db.commit()
     return out
+
+
+def count_crash(job: Job, error: str, retryable: bool) -> tuple[str, bool]:
+    """One more crash of ``job``; at ``CRASH_LIMIT`` it is no longer retryable."""
+    job.crashes = (job.crashes or 0) + 1
+    if job.crashes >= CRASH_LIMIT:
+        return f"crashed the worker {job.crashes} times; last error: {error}", False
+    return error, retryable
 
 
 def _retry_or_fail(db: Session, job: Job, error: str, *, retryable: bool, now: datetime) -> dict:
@@ -968,7 +984,13 @@ def _payload_duration(job: Job) -> float:
     return sum(float(t.get("duration_s") or 0.0) for t in (job.payload or {}).get("tracks", []))
 
 
-def job_json(db: Session, job: Job, workers: dict[int, str] | None = None) -> dict:
+def job_json(
+    db: Session,
+    job: Job,
+    workers: dict[int, str] | None = None,
+    *,
+    server_caps: set[str] | None = None,
+) -> dict:
     result = job.result or {}
     lease = None
     if job.status == JobStatus.LEASED:
@@ -997,6 +1019,7 @@ def job_json(db: Session, job: Job, workers: dict[int, str] | None = None) -> di
         "status": job.status.value,
         "attempts": job.attempts,
         "max_attempts": job.max_attempts,
+        "crashes": job.crashes or 0,
         "priority": job.priority,
         "model": (job.payload or {}).get("model"),
         "audio_s": round(_payload_duration(job), 3),
@@ -1008,6 +1031,7 @@ def job_json(db: Session, job: Job, workers: dict[int, str] | None = None) -> di
         "error": job.error,
         "result": done,
         "eta": eta(db, job),
+        "waiting": queue.explain_wait(db, job, server_caps=server_caps),
     }
 
 

@@ -19,6 +19,7 @@ from lectern import queue
 from lectern.align import jobs
 from lectern.align.transcribe import MODELS
 from lectern.models import (
+    JOB_ACTIVE_STATUSES,
     AlignmentStatus,
     Job,
     JobStatus,
@@ -63,12 +64,17 @@ class AlignIn(BaseModel):
 def list_jobs(
     auth: JobViewer,
     db: DbDep,
+    settings: SettingsDep,
     status_: str | None = Query(default=None, alias="status", max_length=16),
     work_id: int | None = Query(default=None, ge=1),
     kind: str | None = Query(default=None, max_length=32),
 ) -> dict:
+    """Newest first. ``status=active``: queued and leased jobs, each with ``waiting`` (why it
+    is where it is: :func:`lectern.queue.explain_wait`)."""
     stmt = select(Job)
-    if status_:
+    if status_ == "active":
+        stmt = stmt.where(Job.status.in_(JOB_ACTIVE_STATUSES))
+    elif status_:
         try:
             stmt = stmt.where(Job.status == JobStatus(status_))
         except ValueError as exc:
@@ -80,26 +86,42 @@ def list_jobs(
     rows = db.scalars(stmt.order_by(Job.id.desc()).limit(JOBS_PAGE)).all()
     workers = _worker_names(db)
     speed = jobs.measured_speed(db, None)
+    caps = server_capabilities(db, settings)
     return {
-        "jobs": [_job_json(db, j, workers) for j in rows],
+        "jobs": [_job_json(db, j, workers, caps) for j in rows],
         "measured_speed": ({"speed": round(speed[0], 3), "samples": speed[1]} if speed else None),
     }
 
 
 @router.get("/jobs/{job_id}")
-def job_detail(auth: JobViewer, db: DbDep, job_id: int) -> dict:
+def job_detail(auth: JobViewer, db: DbDep, settings: SettingsDep, job_id: int) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    return _job_json(db, job, _worker_names(db))
+    return _job_json(db, job, _worker_names(db), server_capabilities(db, settings))
 
 
-def _job_json(db: Session, job: Job, workers: dict[int, str]) -> dict:
+def server_capabilities(db: Session, settings) -> set[str]:
+    """Capabilities this server's own runners take (after leaving them to an online worker
+    for ``LECTERN_LOCAL_DEFER_SECONDS``): the same decisions ``lectern.services`` makes."""
+    if not settings.background_jobs:
+        return set()
+    from lectern.tts.runner import local_engines
+
+    caps = {queue.TRANSCODE}
+    if settings.tts_local_runner:
+        caps |= {f"tts-{e}" for e in local_engines(db, settings)}
+    if jobs.local_engine_missing(settings) is None:
+        caps.add(queue.ALIGN)
+    return caps
+
+
+def _job_json(db: Session, job: Job, workers: dict[int, str], caps: set[str] | None = None) -> dict:
     from lectern.tts import jobs as tts_jobs
 
     if job.kind == tts_jobs.KIND:
-        return tts_jobs.job_json(db, job, workers)
-    return jobs.job_json(db, job, workers)
+        return tts_jobs.job_json(db, job, workers, server_caps=caps)
+    return jobs.job_json(db, job, workers, server_caps=caps)
 
 
 @router.post("/works/{work_id}/align")

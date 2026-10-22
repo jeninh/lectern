@@ -59,7 +59,12 @@ run; no Raspberry Pi was measured, and ARM will be slower.
 A Kokoro worker (the Mac worker) claims `tts-kokoro` jobs (it downloads the
 script, uploads each chapter as it finishes, then the result; see
 [contracts](#wire-contract-the-tts-kind)). To run Kokoro in the server instead, install
-`kokoro` into the server's environment and set `LECTERN_TTS_KOKORO_LOCAL=1`. While a Kokoro
+the `kokoro` extra into the server's environment (`pip install 'lectern[kokoro]'`, which
+includes spaCy's pinned `en_core_web_sm`: Kokoro's English text analysis needs it and would
+otherwise try to `pip install` it in the middle of a narration) and set
+`LECTERN_TTS_KOKORO_LOCAL=1`. An engine that exits the process fails the narration with the
+reason instead of stopping the runner; two such crashes fail it for good (see
+[mac-worker.md](mac-worker.md#when-a-job-crashes-the-worker)). While a Kokoro
 worker is online and not paused, the server's own runner leaves new Kokoro jobs to it for
 `LECTERN_LOCAL_DEFER_SECONDS` (default 600) before running them itself.
 

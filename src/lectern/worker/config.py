@@ -63,6 +63,8 @@ class AgentConfig:
     lease_s: int = 600
     poll_s: float = 15.0
     allow_http: bool = False
+    # Run `lectern worker-doctor --prepare` checks at start and offer only what passes.
+    self_test: bool = True
 
     @classmethod
     def from_dict(cls, data: dict) -> AgentConfig:

@@ -79,11 +79,13 @@ export function MakeAudiobookRow({ work }: { work: Work }) {
     const pct = job.progress != null ? Math.floor(job.progress * 100) : null;
     hint =
       job.status === "queued"
-        ? job.attempts > 0 && job.error
-          ? `Retrying after: ${job.error}`
-          : job.engine === "kokoro" && !st.engines.find((e) => e.id === "kokoro")?.available
-            ? "Queued: waiting for a worker with Kokoro"
-            : "Queued"
+        ? job.waiting?.summary
+          ? `Queued: ${job.waiting.summary}`
+          : job.attempts > 0 && job.error
+            ? `Retrying after: ${job.error}`
+            : job.engine === "kokoro" && !st.engines.find((e) => e.id === "kokoro")?.available
+              ? "Queued: waiting for a worker with Kokoro"
+              : "Queued"
         : `Narrating${pct != null ? ` · ${pct}%` : ""}${job.eta ? ` · about ${duration(job.eta.seconds)} left` : ""}${job.lease && job.lease.worker !== "local" ? ` on ${job.lease.worker}` : ""}`;
     if (job.engine === "elevenlabs" && job.spent_credits != null) hint += ` · ${Math.round(job.spent_credits)} of ${Math.round(job.cap_credits ?? 0)} credits`;
     action = <button className="btn sm ghost" onClick={() => act(() => cancelJob(job.id), "Could not cancel")}>Cancel</button>;

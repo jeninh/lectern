@@ -96,6 +96,11 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   fi
 fi
 
+# Models and voices now, with progress, instead of in the first job; every engine is tried once.
+# A failure is not fatal: the worker offers only what passes (docs/mac-worker.md, Self-test).
+say "preparing engines (first run downloads the alignment model and Kokoro's voices)"
+lectern worker-doctor --prepare --no-restart || say "some engines are not ready: see above; the worker offers the rest"
+
 say "enrolling with $SERVER"
 set -- --server "$SERVER" --proxy "$PROXY"
 [ -n "$NAME" ] && set -- "$@" --name "$NAME"

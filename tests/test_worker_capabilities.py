@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from tests.conftest import ORIGIN, api_post
 from tests.test_jobs import claim, ingest_fixture, lease, request_align
 
@@ -27,13 +27,13 @@ from lectern import queue
 from lectern.align import jobs
 from lectern.align.mlx import MLXTranscriber, words_from_segments, worker_transcriber
 from lectern.align.transcribe import Transcriber, Word
-from lectern.align.worker import RemoteWorker
+from lectern.align.worker import CRASHED_ERROR, RemoteWorker
 from lectern.db import session_factory
 from lectern.jobs import find_variant
 from lectern.models import Job, JobStatus, Work, WorkerCredential, utcnow
 from lectern.worker import conditions as cond
 from lectern.worker import config as wcfg
-from lectern.worker import menubar
+from lectern.worker import doctor, menubar
 from lectern.worker.runners import KokoroRunner, TranscodeRunner, render_chapter
 
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
@@ -1335,3 +1335,198 @@ def test_the_installer_without_a_terminal_says_what_is_missing(client):
                        timeout=30)  # fmt: skip
     assert r.returncode != 0
     assert b"no enrollment code" in r.stderr and b"/dev/tty" not in r.stderr
+
+
+# --- an engine that exits or crashes the worker (docs/mac-worker.md, "Troubleshooting") --------
+# Faked exactly where the real failure happened: Kokoro's loader raising SystemExit (what
+# spaCy's model download does when it cannot install a package).
+
+KOKORO = {"engine": "kokoro", "voice": "af_heart", "speed": 1.0, "lang": "en-us",
+          "audio": {"codec": "flac", "sample_rate": 24000}}  # fmt: skip
+
+
+def exits(voice, speed, lang):
+    # what misaki's spacy.cli.download did on a uv tool install: print, then sys.exit()
+    raise SystemExit(2)
+
+
+def _worker(app, key, runner, **kw) -> RemoteWorker:
+    http = TestClient(app, headers={"Authorization": f"Bearer {key}"})
+    return RemoteWorker("http://testserver", key, client=http, runners=[runner], **kw)
+
+
+def _job_row(job_id: int) -> Job:
+    with session_factory()() as db:
+        return db.get(Job, job_id)
+
+
+def test_an_engine_that_exits_fails_the_job_with_the_reason_and_two_crashes_end_it(
+    client, owner, work_id, app, worker_key, tts_kind, tmp_path
+):
+    job_id = add_job(work_id, "tts", KOKORO)
+    worker = _worker(app, worker_key, KokoroRunner(exits), crash_marker=tmp_path / "job.json")
+    assert worker.run_once()  # returns: the SystemExit did not take the worker down
+    job = _job_row(job_id)
+    assert job.status == JobStatus.QUEUED and job.attempts == 1 and job.crashes == 1
+    assert job.error == "the engine called sys.exit(2)"
+    assert job.run_after > utcnow() + timedelta(seconds=15)  # backoff, not an instant retry
+    assert not (tmp_path / "job.json").exists()
+    # the broken engine is not offered again for a while, and the owner is told why
+    assert worker.capabilities == [] and "sys.exit(2)" in worker.unavailable["tts-kokoro"]
+    detail = client.get(f"/api/jobs/{job_id}").json()
+    assert detail["crashes"] == 1
+    assert detail["waiting"]["summary"].startswith("Waiting ")
+    assert "before retrying after: the engine called sys.exit(2)" in detail["waiting"]["summary"]
+
+    # The backoff passes and a worker crashes on it again: failed for good, with attempts
+    # left over (3 allowed), so it is the crash limit that ended it.
+    with session_factory()() as db:
+        db.execute(update(Job).where(Job.id == job_id).values(run_after=utcnow()))
+        db.commit()
+    assert _worker(app, worker_key, KokoroRunner(exits)).run_once()
+    job = _job_row(job_id)
+    assert job.status == JobStatus.FAILED and job.attempts == 2 and job.crashes == 2
+    assert job.error == "crashed the worker 2 times; last error: the engine called sys.exit(2)"
+    assert client.get(f"/api/jobs/{job_id}").json()["waiting"] is None
+
+
+def test_a_worker_that_died_mid_job_reports_the_crash_when_it_starts_again(
+    client, owner, work_id, app, worker_key, wc, tts_kind, tmp_path
+):
+    job_id = add_job(work_id, "tts", KOKORO)
+    held = lease(claim(wc, capabilities=["tts-kokoro"]))
+    marker = tmp_path / "current-job.json"
+    # what the dead process left behind (written before its runner started)
+    marker.write_text(json.dumps({"job_id": job_id, "token": held["X-Lease-Token"],
+                                  "server": "http://testserver"}))  # fmt: skip
+    worker = _worker(app, worker_key, TranscodeRunner(), crash_marker=marker)
+    worker.run_once()
+    job = _job_row(job_id)
+    assert job.status == JobStatus.QUEUED and job.crashes == 1 and job.error == CRASHED_ERROR
+    assert job.lease_token_hash is None and not marker.exists()
+    # reported once: a restart without a new marker reports nothing more
+    worker.run_once()
+    assert _job_row(job_id).crashes == 1
+
+
+def test_a_crash_marker_for_another_server_is_dropped_without_a_report(
+    client, owner, work_id, app, worker_key, wc, tts_kind, tmp_path
+):
+    job_id = add_job(work_id, "tts", KOKORO)
+    held = lease(claim(wc, capabilities=["tts-kokoro"]))
+    marker = tmp_path / "m.json"
+    marker.write_text(json.dumps({"job_id": job_id, "token": held["X-Lease-Token"],
+                                  "server": "https://elsewhere.example"}))  # fmt: skip
+    _worker(app, worker_key, TranscodeRunner(), crash_marker=marker).run_once()
+    assert _job_row(job_id).status == JobStatus.LEASED and not marker.exists()
+
+
+def test_kokoro_never_installs_a_spacy_model_while_a_job_runs(monkeypatch):
+    from lectern.tts import engines as eng
+
+    installs = []
+    spacy = types.ModuleType("spacy")
+    spacy.cli = types.ModuleType("spacy.cli")
+    spacy.cli.download = lambda name, *a: installs.append(name)
+    monkeypatch.setitem(sys.modules, "spacy", spacy)
+    monkeypatch.setitem(sys.modules, "spacy.cli", spacy.cli)
+    eng.forbid_runtime_installs()
+    # what misaki.en.G2P does when en_core_web_sm is missing
+    with pytest.raises(eng.KokoroSetupMissing, match="worker-doctor --prepare"):
+        sys.modules["spacy"].cli.download("en_core_web_sm")
+    assert installs == []
+    # an ordinary exception: the runner hands the job back and stops offering Kokoro
+    assert issubclass(eng.KokoroSetupMissing, Exception)
+
+
+def test_the_queue_explains_why_a_job_waits(client, owner, work_id, app, worker_key, wc):
+    job_id = add_job(work_id, "tts", KOKORO)
+    why = "spaCy model: en_core_web_sm is not installed"
+    r = wc.post("/api/worker/status", json={"worker": "mbp", "state": "ready",
+                "capabilities": ["align"], "info": {"unavailable": {"tts-kokoro": why}}})  # fmt: skip
+    assert r.status_code == 200, r.text
+
+    def waiting() -> dict:
+        (job,) = [j for j in client.get("/api/jobs?status=active").json()["jobs"]
+                  if j["id"] == job_id]  # fmt: skip
+        return job["waiting"]
+
+    w = waiting()
+    assert w["capability"] == "tts-kokoro" and w["eligible_online"] == 0
+    assert (
+        w["summary"]
+        == f"Waiting for a worker that can run tts-kokoro (mac: tts-kokoro unavailable: {why})"
+    )
+    (cred,) = w["workers"]
+    assert cred["label"] == "mac" and not cred["eligible"] and cred["state"] == "ready"
+    shown = client.get("/api/worker-credentials").json()["credentials"][0]
+    assert shown["info"]["unavailable"] == {"tts-kokoro": why}
+
+    # paused: the reason it gave
+    wc.post("/api/worker/status", json={"state": "paused", "capabilities": ["tts-kokoro"],
+                                        "info": {"reason": "on battery"}})  # fmt: skip
+    assert waiting()["workers"][0]["why"] == "paused: on battery"
+    # offered and online: next in line
+    wc.post("/api/worker/status", json={"state": "ready", "capabilities": ["tts-kokoro"]})
+    assert waiting()["summary"] == "Next for mac"
+    # an allowlist that excludes it
+    with session_factory()() as db:
+        db.execute(update(WorkerCredential).values(capabilities=["align"]))
+        db.commit()
+    assert waiting()["workers"][0]["why"] == "its allowlist does not include tts-kokoro"
+    with session_factory()() as db:
+        db.execute(update(WorkerCredential).values(capabilities=None))
+        db.commit()
+    # leased: who holds it and until when
+    lease(claim(wc, capabilities=["tts-kokoro"]))
+    w = waiting()
+    assert w["summary"] == "Running on mac" and w["lease"]["holder"] == "mac"
+    assert w["lease"]["expires_at"] and w["attempts"] == 1
+
+
+def test_the_agent_offers_only_what_passes_its_self_test(tmp_path, monkeypatch):
+    from lectern.align import mlx
+    from lectern.worker import runners
+    from lectern.worker.agent import Agent
+    from lectern.worker.conditions import Conditions, Power
+
+    monkeypatch.setattr(mlx, "worker_transcriber", lambda *a, **k: None)
+    monkeypatch.setattr(runners, "kokoro_available", lambda: True)
+    monkeypatch.setattr(runners, "ffmpeg_available", lambda *a: True)
+    tested = []
+
+    def check_isolated(caps, **kw):
+        tested.append(list(caps))
+        return {
+            "tts-kokoro": doctor.Result(
+                "tts-kokoro", [doctor.Step("spaCy model", False, "missing")]
+            ),
+            "transcode": doctor.Result("transcode", [doctor.Step("encode", True)]),
+        }
+
+    monkeypatch.setattr(doctor, "check_isolated", check_isolated)
+    wcfg.update_config(tmp_path, server="https://l.example", name="mbp")
+    wcfg.save_key("lw_x", tmp_path)
+    agent = Agent(tmp_path, conditions=Conditions(power=lambda: Power(True, 100),
+                                                  network=lambda: None), client=object())  # fmt: skip
+    assert tested == [["tts-kokoro", "transcode"]]
+    assert agent.worker.capabilities == ["transcode"]
+    assert agent.worker.unavailable == {"tts-kokoro": "spaCy model: missing"}
+    assert agent.worker._info()["unavailable"] == {"tts-kokoro": "spaCy model: missing"}
+    assert agent.state()["unavailable"] == {"tts-kokoro": "spaCy model: missing"}
+
+
+def test_doctor_checks_fail_instead_of_exiting(monkeypatch):
+    from lectern.align import mlx
+
+    def exiting(*a, **k):
+        raise SystemExit("No virtual environment found")
+
+    monkeypatch.setattr(mlx, "worker_transcriber", exiting)
+    (r,) = doctor.check(["align"]).values()
+    assert not r.ok and r.reason == "engine: called sys.exit('No virtual environment found')"
+
+
+def test_doctor_runs_isolated_and_reports_per_capability():
+    out = doctor.check_isolated(["ocr"], prepare=False, timeout_s=120)
+    assert not out["ocr"].ok and out["ocr"].reason == "known: this worker cannot run it"

@@ -5,6 +5,7 @@
   MLX alignment and Kokoro TTS on a Mac need ``lectern[mac]``).
 - ``lectern worker-enroll`` / ``worker-agent`` / ``worker-menubar`` / ``worker-service``: the
   installed desktop worker and its macOS menu-bar app (docs/mac-worker.md).
+- ``lectern worker-doctor [--prepare]``: check (and set up) every capability a worker offers.
 - ``lectern align-transcribe AUDIO...``: timed words of audio files as JSON (how
   ``tests/fixtures/magi/transcript_small.json`` was made).
 - ``lectern align-bench EPUB AUDIO...``: run the whole alignment offline and print timing,
@@ -162,6 +163,16 @@ def worker(args: argparse.Namespace) -> None:
         runners.append(TranscodeRunner())
     if unknown := caps - {"align", "tts-kokoro", "transcode"}:
         sys.exit(f"--capabilities: this worker cannot run {', '.join(sorted(unknown))}")
+    withheld: dict[str, str] = {}
+    if not args.no_self_test:
+        from lectern.worker import doctor
+
+        results = doctor.check_isolated([r.capabilities[0] for r in runners],
+                                        engine=args.engine, model=args.model)  # fmt: skip
+        withheld = {c: r.reason or "self-test failed" for c, r in results.items() if not r.ok}
+        for cap, why in withheld.items():
+            logging.getLogger("lectern.worker").error("not offering %s: %s", cap, why)
+        runners = [r for r in runners if r.capabilities[0] not in withheld]
     w = RemoteWorker(
         server,
         key,
@@ -171,6 +182,8 @@ def worker(args: argparse.Namespace) -> None:
         workdir=args.workdir,
         stop=stop,
         runners=runners,
+        withheld=withheld,
+        crash_marker=wcfg.worker_home() / f"current-job-{_slug(args.name)}.json",
         **http_options(args.proxy, args.ca_bundle),
     )
 
@@ -191,6 +204,16 @@ def worker(args: argparse.Namespace) -> None:
             w.run_forever()
     except PermissionError as exc:
         sys.exit(str(exc))
+
+
+def _slug(name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:64] or "worker"
+
+
+def worker_doctor(args: argparse.Namespace) -> None:
+    from lectern.worker import doctor
+
+    sys.exit(doctor.run(args))
 
 
 def worker_enroll(args: argparse.Namespace) -> None:
@@ -452,7 +475,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     w.add_argument("--proxy", default="system", help="system (HTTPS_PROXY / macOS), none, or a URL")
     w.add_argument("--ca-bundle", default=None, help="extra CA certificates (PEM) to trust")
+    w.add_argument(
+        "--no-self-test",
+        action="store_true",
+        help="offer the capabilities without running `lectern worker-doctor` checks first",
+    )
     _transcriber_args(w)
+
+    from lectern.worker.doctor import build_parser as doctor_parser
+
+    doctor_parser(
+        sub.add_parser(
+            "worker-doctor",
+            help="check (and with --prepare, set up) every capability this worker can offer",
+        )
+    )
 
     e = sub.add_parser("worker-enroll", help="enroll this machine with a one-time code")
     e.add_argument("--server", required=True)
@@ -536,9 +573,15 @@ def main(argv: list[str] | None = None) -> None:
         level=os.environ.get("LECTERN_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.command in ("worker", "worker-agent"):
+        import faulthandler
+
+        # a segfault or abort in an engine still leaves a Python traceback in the worker log
+        faulthandler.enable()
     {
         "worker": worker,
         "worker-enroll": worker_enroll,
+        "worker-doctor": worker_doctor,
         "worker-agent": worker_agent,
         "worker-menubar": worker_menubar,
         "worker-service": worker_service,

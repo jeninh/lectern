@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -397,3 +397,128 @@ class ArtifactBudget:
 
 
 ARTIFACT_BUDGET = ArtifactBudget()
+
+
+# --- why a job is waiting ---------------------------------------------------------------------
+
+
+def _human_time(at: datetime, now: datetime) -> str:
+    s = max(0, round((at - now).total_seconds()))
+    return f"{s} s" if s < 90 else f"{round(s / 60)} min" if s < 5400 else f"{s / 3600:.1f} h"
+
+
+def explain_wait(
+    db: Session,
+    job: Job,
+    *,
+    server_caps: set[str] | None = None,
+    now: datetime | None = None,
+) -> dict | None:
+    """Why an active job is where it is, for the owner (Admin → Workers, the job detail):
+    the capability it needs, every worker that could take it and why it does not (offline,
+    paused, not offering it and why, not allowed by its allowlist, busy), the lease holder and
+    expiry, and ``run_after`` (backoff). ``server_caps``: capabilities this server runs
+    itself, when known. ``None`` for a finished job."""
+    from lectern.models import JOB_ACTIVE_STATUSES, Job, JobStatus, WorkerCredential, utcnow
+
+    if job.status not in JOB_ACTIVE_STATUSES:
+        return None
+    now = now or utcnow()
+    cap = job.capability
+    cutoff = now - timedelta(seconds=WORKER_SEEN_S)
+    busy = {
+        holder: job_id
+        for job_id, holder in db.execute(
+            select(Job.id, Job.leased_by_id).where(
+                Job.status == JobStatus.LEASED, Job.leased_by_id.is_not(None)
+            )
+        ).all()
+    }
+    workers = []
+    ready = []
+    for c in db.scalars(
+        select(WorkerCredential)
+        .where(WorkerCredential.revoked_at.is_(None))
+        .order_by(WorkerCredential.id)
+    ).all():
+        online = c.last_used_at is not None and c.last_used_at >= cutoff
+        state = (c.state or "ready") if online else "offline"
+        advertised = c.advertised if c.advertised is not None else [ALIGN]
+        info = c.info or {}
+        if cap in SERVER_ONLY:
+            why = "this kind of job never leaves the server"
+        elif c.capabilities is not None and cap not in c.capabilities:
+            why = f"its allowlist does not include {cap}"
+        elif cap not in advertised:
+            missing = (info.get("unavailable") or {}).get(cap)
+            why = f"{cap} unavailable: {missing}" if missing else f"does not offer {cap}"
+        elif not online:
+            why = "offline" + (
+                f" (last seen {_human_time(now, c.last_used_at)} ago)" if c.last_used_at else ""
+            )
+        elif state in IDLE_STATES:
+            why = f"{state}" + (f": {info['reason']}" if info.get("reason") else "")
+        elif c.id in busy and busy[c.id] != job.id:
+            why = f"busy with job {busy[c.id]}"
+        else:
+            why = None
+            ready.append(c.label)
+        workers.append(
+            {"id": c.id, "label": c.label, "state": state, "eligible": why is None, "why": why}
+        )
+    ahead = 0
+    if job.status == JobStatus.QUEUED:
+        ahead = db.scalar(
+            select(func.count(Job.id)).where(
+                Job.status == JobStatus.QUEUED,
+                Job.capability == cap,
+                Job.id != job.id,
+                (Job.priority < job.priority)
+                | ((Job.priority == job.priority) & (Job.created_at < job.created_at)),
+            )
+        )
+    lease = None
+    if job.status == JobStatus.LEASED:
+        holder = None
+        if job.leased_by_id is not None:
+            cred = db.get(WorkerCredential, job.leased_by_id)
+            holder = cred.label if cred else None
+        lease = {
+            "holder": holder or (job.result or {}).get("worker") or "this server",
+            "expires_at": _iso(job.lease_expires_at),
+            "heartbeat_at": _iso(job.heartbeat_at),
+        }
+    server = None if server_caps is None else cap in server_caps
+    run_after = job.run_after
+    if lease is not None:
+        summary = f"Running on {lease['holder']}"
+    elif run_after is not None and run_after > now:
+        summary = f"Waiting {_human_time(run_after, now)} before retrying"
+        if job.error:
+            summary += f" after: {job.error[:200]}"
+    elif ready:
+        summary = f"Next for {', '.join(ready[:3])}" + (f" ({ahead} ahead)" if ahead else "")
+    elif server:
+        summary = "No worker can take it now; this server will run it itself"
+    else:
+        summary = f"Waiting for a worker that can run {cap}"
+        reasons = [f"{w['label']}: {w['why']}" for w in workers if w["why"]]
+        summary += f" ({'; '.join(reasons[:3])})" if reasons else " (no workers added)"
+    return {
+        "capability": cap,
+        "summary": summary[:400],
+        "workers": workers,
+        "eligible_online": len(ready),
+        "server_runs": server,
+        "ahead": ahead,
+        "lease": lease,
+        "run_after": _iso(run_after),
+        "attempts": job.attempts,
+        "max_attempts": job.max_attempts,
+        "crashes": job.crashes or 0,
+        "last_error": job.error,
+    }
+
+
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat().replace("+00:00", "Z") if dt else None

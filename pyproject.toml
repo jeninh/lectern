@@ -49,9 +49,20 @@ align = [
 ]
 
 # Generated audiobooks with Piper on the server's CPU (a Raspberry Pi included). Kokoro comes
-# with the Mac worker (`mac` extra) or `pip install kokoro` on a capable server; see docs/tts.md.
+# with the Mac worker (`mac` extra) or the `kokoro` extra on a capable server; see docs/tts.md.
 tts = [
     "piper-tts>=1.2",
+]
+
+# Kokoro TTS in the server itself (LECTERN_TTS_KOKORO_LOCAL=1) or a non-Mac worker. Kokoro's
+# English G2P (misaki) needs spaCy's en_core_web_sm; when it is missing misaki downloads it at
+# run time with `pip`/`uv pip install`, which fails in a uv tool or a container (no pip, no
+# venv) and then calls sys.exit(). So the model is a pinned dependency: the 3.8.0 wheel is the
+# one spaCy 3.8 accepts (spacy-models compatibility.json). Keep both pins in step.
+kokoro = [
+    "kokoro>=0.9",
+    "spacy>=3.8,<3.9",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 
 # The Mac worker (docs/mac-worker.md): MLX alignment on the Apple GPU, Kokoro TTS, the
@@ -64,6 +75,9 @@ mac = [
     "numpy>=1.26",
     "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "kokoro>=0.9; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # Kokoro's English G2P model, installed rather than downloaded at run time (see `kokoro`).
+    "spacy>=3.8,<3.9; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "rumps>=0.4; sys_platform == 'darwin'",
 ]
 
@@ -73,6 +87,10 @@ lectern = "lectern.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# en-core-web-sm is not on PyPI: the `mac` and `kokoro` extras name its release wheel.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lectern"]
