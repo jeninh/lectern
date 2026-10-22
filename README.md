@@ -196,6 +196,24 @@ Readers never see add, edit, or trash controls, and the API refuses them (`403`)
   estimates and are labelled as such. KOReader keeps syncing through its own protocol and
   document hashes; its latest position is offered the same way.
 
+## On your phone: install it, read and listen offline
+
+Lectern installs as an app on iPhone (Safari **Share › Add to Home Screen**) and Android
+(Chrome **Install app**): its own icon and launch screen, full screen around the notch, and
+passkey sign-in inside the app. **Download** on any book keeps its EPUB and/or PDF, its
+audiobook (data saver or full quality), and its read-along data on the phone, so the reader,
+player, and read-along work with no connection or with Tailscale off. **Downloads** shows
+what is stored, the space left, and whether the browser may evict it.
+
+Positions saved offline queue on the phone and sync on reconnect; if another device saved a
+later position meanwhile, Lectern asks which to keep. Downloads still pass the visibility
+checks and hourly download limits, books no longer shared with you are deleted from the phone
+on reconnect, and signing out deletes everything the app stored. The service worker never
+caches API responses. Details, the iPhone storage and background-audio caveats, and the
+Playwright phone tests: [`docs/offline.md`](docs/offline.md).
+
+![Downloads on an iPhone, offline](docs/screenshots/pwa-iphone-downloads-offline.png)
+
 ## Household
 
 The owner invites people from **Admin → Household invites**: an expiring, one-use link for a
@@ -302,6 +320,7 @@ and bursts of calls raise alerts. Keep it private: no Funnel, no public exposure
 | `LECTERN_INSECURE_HTTP` | `0` | Drop the Secure cookie flag (development only) |
 | `LECTERN_SECRET_KEY` | generated | Signing key; persisted under the data dir if unset |
 | `LECTERN_SESSION_TTL_SECONDS` | 30 days | Browser session lifetime |
+| `LECTERN_OFFLINE_MAX_AGE_SECONDS` | 14 days | How long the installed app keeps downloads without reaching the server ([offline.md](docs/offline.md#signing-out)) |
 | `LECTERN_LOGIN_MAX_FAILURES` | 5 | Failures per account before lockout |
 | `LECTERN_LOGIN_LOCKOUT_SECONDS` | 900 | Lockout window |
 | `LECTERN_RATE_LIMIT_PER_MINUTE` | 60 | Per-IP limit on OPDS/sync auth attempts |
@@ -333,8 +352,13 @@ and bursts of calls raise alerts. Keep it private: no Funnel, no public exposure
 
 - Every route except `/healthz`, `/login`, and `/setup` requires authentication. The
   exception is `/app/assets/*`: content-hashed JS, CSS, and fonts built from `frontend/`,
-  with no data or configuration in them. The app shell at `/app` and every `/api` route
-  require a session.
+  with no data or configuration in them, and the installed app's public files: `sw.js`,
+  `manifest.webmanifest`, icons and launch screens under `/app/pwa/`, pdf.js data under
+  `/app/pdfjs/`, and `/app/shell.html` (the same HTML everyone gets, for offline use). Every
+  other page under `/app` and every `/api` route require a session.
+- The installed app keeps only books you downloaded on the device; the service worker never
+  caches API responses, and sign-out (or an ended session, or someone else signing in)
+  deletes everything it stored ([docs/offline.md](docs/offline.md#privacy-what-is-stored-where)).
 - Owner password: argon2id. TOTP optional. Passkeys preferred.
 - Sessions, sync keys, app passwords, and the setup token are 256-bit random secrets;
   only their SHA-256 digests are stored.
@@ -403,7 +427,10 @@ npm --prefix frontend run dev        # http://localhost:5173/app/
 the command above, cookies and the CSRF/same-origin checks behave as in production. Sign in at
 `http://localhost:5173/login`.
 
-Keyboard: `⌘/Ctrl K` search, `/` filter, `N` add device, `G` then `H`/`L`/`D`/`S`/`A`,
+Phone tests (iPhone on WebKit, Android on Chromium, offline included): `npm --prefix frontend
+run e2e` after a build; see [`docs/offline.md#tests`](docs/offline.md#tests).
+
+Keyboard: `⌘/Ctrl K` search, `/` filter, `N` add device, `G` then `H`/`L`/`O`/`D`/`S`/`A`,
 `T` theme, `[` sidebar, `Esc` close, `?` all shortcuts. Screenshots: `docs/screenshots/`.
 
 End-to-end tests (Playwright, Chromium) start a freshly seeded server on `:8090`

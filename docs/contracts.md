@@ -889,6 +889,42 @@ which download marks an item delivered.
   `notify.register_sink(...)` at startup, gated by your own setting; every notification reaches
   it after the row is written. Failures are logged, never raised.
 
+## Offline downloads and replayed positions (installed app)
+
+Implemented in `lectern.routes.api.offline`; the app side and the rules are in
+[`offline.md`](offline.md).
+
+- `GET /api/works/{id}/offline` → `{work_id, revision, files: [{key, kind: "epub"|"pdf",
+  file_id, media_type, size, sha256, url}], audio: {tracks: [{id, position, full: {url, size,
+  media_type}, low: {…} | null}], full_bytes, low_bytes | null} | null, readalong}`. `404` if
+  not visible. `POST` (CSRF, body `{parts: [...]}`) returns the same and audits
+  `download.offline`. File URLs are the usual `/library` routes (`?offline=1` only changes the
+  audit `detail`); they are counted against the download caps as always.
+- `POST /api/offline/check` `{works: [{id, revision}]}` (≤ 1000) →
+  `{works: [{id, status: "ok"|"changed"|"gone", revision?}]}`. `gone` = deleted, trashed, or
+  not visible to the caller; the device deletes its copy. `revision` covers the work's version
+  and update time, primary file, book file hashes, track hashes, the alignment, and the
+  sentence list.
+- `PUT /api/works/{id}/progress` and `PUT /api/files/{id}/progress` accept
+  `offline: {recorded_at, sent_at, base?, keep?, expect?}` (aware ISO 8601). Without `keep`, the
+  replay is refused with `409 {"detail": "progress_conflict", "server": <position>, "recorded_at"}`
+  when the stored position is newer than `base` and newer than `recorded_at` corrected by
+  `now - sent_at` (`lectern.progress.replay_wins`); otherwise it is written like any save.
+  With `keep`, it is written only if the stored position's time (`received_at` / `updated_at`)
+  equals `expect` (`null`: no stored position); otherwise the same 409 with the current one.
+- `GET /api/me` includes `offline: {now, until}`: how long the installed app may keep downloads
+  and the identity without reaching the server (the session expiry, or
+  `offline_max_age_seconds` from now, whichever is sooner).
+- Signing in (password or passkey) revokes the session the request's cookie still carries.
+- `POST /logout` with `x-lectern-app: signout` (the installed app; form field `csrf_token`)
+  names the session to end by its CSRF token, whatever cookie the browser sends. It answers
+  `200 {"signed_out": true}` once that session is revoked (also when it already was, and when
+  no session is named and the cookie has none), `409 signout_token_missing` when the token names
+  no session but the cookie holds a live one, and `403` cross-site. No redirect and no
+  `Clear-Site-Data`. The app clears its pending sign-out on that `200` only.
+- The `download.offline` audit row is advisory (the app sends it; a client could skip it). The
+  file fetches themselves are metered and audited like any download or stream.
+
 ## `lectern.positions` interface
 
 ```python

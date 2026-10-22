@@ -25,6 +25,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; font: 15px/1.5 var(--font-ui); color: var(--ink); background: var(--paper); -webkit-font-smoothing: antialiased; }
 header.top { display: flex; justify-content: space-between; align-items: center; padding: 14px 24px; }
+/* Home-screen app: the page runs under the status bar and around the notch. */
+body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 header .brand { display: inline-flex; align-items: center; gap: 10px; font-family: var(--font-display); font-size: 22px; text-decoration: none; color: var(--ink); }
 header .brand::before { content: ""; width: 24px; height: 24px; border-radius: 7px; background: var(--accent); }
 header nav { display: flex; gap: 1rem; align-items: center; }

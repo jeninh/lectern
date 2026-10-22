@@ -186,20 +186,28 @@ def work_download(
 
 @router.get("/library/works/{work_id}/book.epub", include_in_schema=False)
 def reader_copy(
-    request: Request, auth: LibraryUser, db: DbDep, settings: SettingsDep, work_id: int
+    request: Request,
+    auth: LibraryUser,
+    db: DbDep,
+    settings: SettingsDep,
+    work_id: int,
+    offline: bool = False,
 ):
     """The EPUB the web reader opens. Cached by the browser (ETag = sha256), so reopening a
-    book is a 304 and only the first transfer counts as a download."""
+    book is a 304 and only the first transfer counts as a download. ``offline=1`` is the
+    installed app keeping a copy (docs/offline.md): counted the same, audited as such."""
     if not can_see_work(db, auth.user, work_id):
         raise _not_found()
     book = primary_epub(db, work_id)
     if book is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no_ebook")
     book, path = resolve_file(db, settings, book.id, auth.user)
-    return _reader_response(request, auth, db, settings, book, path)
+    return _reader_response(
+        request, auth, db, settings, book, path, "offline" if offline else "reader"
+    )
 
 
-def _reader_response(request: Request, auth, db, settings, book: BookFile, path: Path):
+def _reader_response(request: Request, auth, db, settings, book: BookFile, path: Path, detail: str):
     """A book file for an in-browser reader: cached (ETag = sha256), so reopening is a 304 and
     only the first transfer counts as a download."""
     etag = f'"{book.sha256}"'
@@ -211,7 +219,7 @@ def _reader_response(request: Request, auth, db, settings, book: BookFile, path:
     ip = client_ip(request)
     downloads.admit(db, settings, auth.user, auth.device, f"file:{book.id}", ip)
     audit.record(
-        db, "download", actor_user_id=auth.user.id, target=f"file:{book.id}", ip=ip, detail="reader"
+        db, "download", actor_user_id=auth.user.id, target=f"file:{book.id}", ip=ip, detail=detail
     )
     db.commit()
     resp = FileResponse(path, media_type=book.media_type, content_disposition_type="inline")
@@ -221,7 +229,14 @@ def _reader_response(request: Request, auth, db, settings, book: BookFile, path:
 
 
 @router.get("/library/files/{file_id}/view", include_in_schema=False)
-def view_pdf(request: Request, auth: LibraryUser, db: DbDep, settings: SettingsDep, file_id: int):
+def view_pdf(
+    request: Request,
+    auth: LibraryUser,
+    db: DbDep,
+    settings: SettingsDep,
+    file_id: int,
+    offline: bool = False,
+):
     """The PDF the web viewer (pdf.js) opens. pdf.js fetches it in many Range requests, so
     opening it counts as one download per device per hour (``admit_once``), not one per range;
     reopening is a 304 (ETag = sha256)."""
@@ -234,7 +249,13 @@ def view_pdf(request: Request, auth: LibraryUser, db: DbDep, settings: SettingsD
     if inm and etag in [t.strip() for t in inm.split(",")]:
         return Response(status_code=304, headers=cache)
     downloads.admit_once(
-        db, settings, auth.user, auth.device, f"file:{book.id}", client_ip(request), "pdf reader"
+        db,
+        settings,
+        auth.user,
+        auth.device,
+        f"file:{book.id}",
+        client_ip(request),
+        "offline pdf" if offline else "pdf reader",
     )
     return FileResponse(
         path, media_type=book.media_type, content_disposition_type="inline", headers=cache

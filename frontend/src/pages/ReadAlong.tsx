@@ -5,6 +5,7 @@ import { EmptyState } from "../components/EmptyState";
 import { Alert, Book, Follow, Headphones, NextSentence, Pause, Play, PrevSentence } from "../components/Icons";
 import { PageTitle } from "../components/Shell";
 import { ApiError, get } from "../lib/api";
+import { getBook, orOffline } from "../lib/offline/store";
 import { useLocalStorage, useReducedMotion } from "../lib/hooks";
 import {
   cpIndexer,
@@ -80,7 +81,7 @@ export function ReadAlongPage() {
     let live = true;
     setData(null);
     setError(null);
-    Promise.all([get<Work>(`/api/works/${workId}`), loadReadAlong(workId)]).then(
+    Promise.all([orOffline(() => get<Work>(`/api/works/${workId}`), async () => (await getBook(workId))?.work), loadReadAlong(workId)]).then(
       ([w, d]) => live && (setWork(w), setData(d)),
       (e) => live && setError({ status: e instanceof ApiError ? e.status : 0, message: (e as Error).message }),
     );
@@ -229,7 +230,7 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
       const n = currentRef.current;
       if (n < 0) return;
       lastSave.current = { at: Date.now(), n };
-      saveProgress(work.id, modeRef.current === "listen" ? "audio" : "web", { sentence_n: n }, keepalive).catch(() => {});
+      saveProgress(work.id, modeRef.current === "listen" ? "audio" : "web", { sentence_n: n }, keepalive, work.title).catch(() => {});
     },
     [work.id],
   );
@@ -441,7 +442,7 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
     ms.metadata = new MediaMetadata({
       title: work.title,
       artist: work.author,
-      artwork: work.cover_url ? [{ src: work.cover_url, type: "image/jpeg" }] : [],
+      artwork: work.cover_url ? [{ src: new URL(work.cover_url, location.origin).href, sizes: "512x512", type: "image/jpeg" }] : [],
     });
     const handlers: [MediaSessionAction, MediaSessionActionHandler][] = [
       ["play", () => audio.current?.play()],
@@ -450,6 +451,7 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
       ["nexttrack", () => step(1)],
       ["seekbackward", () => seek(now() - 10, !audio.current?.paused)],
       ["seekforward", () => seek(now() + 10, !audio.current?.paused)],
+      ["seekto", (d) => d.seekTime != null && seek(d.seekTime, !audio.current?.paused)],
     ];
     for (const [a, h] of handlers) {
       try {

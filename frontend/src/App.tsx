@@ -11,6 +11,7 @@ import { AdminPage } from "./pages/Admin";
 import { HighlightsPage } from "./pages/Placeholder";
 import { ListeningPage } from "./pages/Listening";
 import { TrashPage } from "./pages/Trash";
+import { DownloadsPage } from "./pages/Downloads";
 import { ReaderPage } from "./pages/Reader";
 import { PlayerProvider } from "./lib/player";
 
@@ -39,6 +40,7 @@ export default function App() {
           <Route path="/app/devices" element={<DevicesPage />} />
           <Route path="/app/devices/new" element={<DevicesPage />} />
           <Route path="/app/listening" element={<ListeningPage />} />
+          <Route path="/app/downloads" element={<DownloadsPage />} />
           <Route path="/app/reader/:id" element={<ReaderPage />} />
           <Route path="/app/highlights" element={<HighlightsPage />} />
           <Route path="/app/security" element={<SecurityPage />} />

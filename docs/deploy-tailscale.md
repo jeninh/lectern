@@ -196,7 +196,10 @@ sign in with the **same account**, and turn it on. Open `https://lectern.tail123
 the browser. That is all; there is nothing to configure per device. With Tailscale off, the
 address simply does not resolve.
 
-Add it to the home screen on a phone if you like; the web app is responsive.
+On a phone, install it as an app and download books to read and listen without a connection
+(or with Tailscale off): Safari **Share › Add to Home Screen** on iPhone, Chrome **Install app**
+on Android. Sign in again inside the installed app; passkeys work there. See
+[`offline.md`](offline.md) for downloads, offline sync, and what iOS may delete.
 
 ## 5. Your household
 

@@ -1,55 +1,78 @@
-import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
+import { expect, type APIRequestContext, type Page, type Route, type TestInfo, request as pwRequest } from "@playwright/test";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 
-export const PASSWORD = "e2e correct horse battery"; // e2e/seed.py
+export const PASSWORD = "correct horse battery staple e2e";
+export const MAGI = "The Gift of the Magi";
 
-export async function signIn(page: Page, path = "/app/library") {
-  // The password form's POST, from the page's own cookie jar (the form itself sits behind
-  // "Use password instead").
-  const base = test.info().project.use.baseURL!;
-  const r = await page.request.post("/login", { form: { username: "owner", password: PASSWORD, totp: "", next: "/app" }, headers: { origin: base }, maxRedirects: 0 });
-  expect(r.status(), await r.text()).toBe(303);
-  await page.goto(path);
+/** The seeded reader for this project (playwright.config.ts metadata). */
+export const userOf = (info: TestInfo) => info.project.metadata.user as string;
+
+export async function signIn(page: Page, username: string) {
+  // The login page prefetches a passkey challenge, which counts against the per-IP passkey rate
+  // limit; password sign-ins don't need one, so many of them in a row must not use it up.
+  const skip = (r: Route) => r.abort();
+  await page.route("**/login/passkey/options", skip);
+  await page.goto("/login");
+  await page.getByText("Use password instead").click();
+  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.waitForURL(/\/app/);
+  await page.unroute("**/login/passkey/options", skip);
+  await expect(page.locator(".user-chip:visible, .bottom-nav:visible").first()).toBeVisible();
 }
 
-export const grid = (page: Page) => page.getByRole("grid").first();
-/** A Library cell by its book title. */
-export const book = (page: Page, title: string) => page.getByRole("gridcell", { name: new RegExp(`^${title} by `) });
-export const selectedTitles = async (page: Page) =>
-  (await page.locator('[role="gridcell"][aria-selected="true"]').evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")?.split(" by ")[0] ?? "")))
-    .sort();
-export const countText = (page: Page) => page.getByTestId("selection-count");
-export const focusedLabel = (page: Page) => page.evaluate(() => document.activeElement?.getAttribute("aria-label")?.split(" by ")[0] ?? document.activeElement?.tagName);
+/** Wait until the service worker controls the page (first visit: after it activates). */
+export async function controlled(page: Page) {
+  await page.waitForFunction(() => navigator.serviceWorker.ready.then(() => true));
+  if (!(await page.evaluate(() => !!navigator.serviceWorker.controller))) {
+    await page.reload();
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+  }
+}
 
-export const titles = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `Book ${String(from + i).padStart(3, "0")}`);
-
-/** The platform's command modifier for this page ("Meta" when the page thinks it is a Mac). */
-export const MOD = "Control";
-
-/** Writes from the test: same-origin + the session's CSRF token. */
-export async function api(page: Page) {
-  const me = await (await page.request.get("/api/me")).json();
-  const headers = { "x-csrf-token": me.csrf_token, origin: new URL(page.url()).origin };
-  const r: APIRequestContext = page.request;
+/** A signed-in API client for the same person on "another device", or the owner. */
+export async function apiAs(baseURL: string, username: string, device = "Kobo"): Promise<{ api: APIRequestContext; csrf: string; put: (url: string, body: unknown) => Promise<unknown>; del: (url: string) => Promise<number> }> {
+  const api = await pwRequest.newContext({ baseURL, extraHTTPHeaders: { origin: baseURL, "user-agent": device } });
+  const r = await api.post("/login", { form: { username, password: PASSWORD, totp: "" }, maxRedirects: 0 });
+  expect(r.status()).toBe(303);
+  const csrf = (await (await api.get("/api/me")).json()).csrf_token as string;
   return {
-    get: async (url: string) => (await r.get(url)).json(),
-    post: async (url: string, data: unknown) => {
-      const res = await r.post(url, { data, headers });
-      expect(res.ok(), await res.text()).toBeTruthy();
-      return res.json();
-    },
+    api,
+    csrf,
+    put: async (url, body) => (await api.put(url, { data: body, headers: { "x-csrf-token": csrf } })).json(),
+    del: async (url) => (await api.delete(url, { headers: { "x-csrf-token": csrf } })).status(),
   };
 }
 
-export async function library(page: Page): Promise<{ id: number; title: string; tags: string[] }[]> {
-  return (await (await page.request.get("/api/library")).json()).works;
+export async function workId(page: Page, title: string): Promise<number> {
+  const works = await page.evaluate(async () => (await (await fetch("/api/library")).json()).works as { id: number; title: string }[]);
+  return works.find((w) => w.title === title)!.id;
 }
 
-export async function idOf(page: Page, title: string): Promise<number> {
-  const w = (await library(page)).find((x) => x.title === title);
-  if (!w) throw new Error(`no ${title}`);
-  return w.id;
+/** Download a book from its details page with the given choices left as defaults. */
+export async function downloadBook(page: Page, id: number, opts: { fullQuality?: boolean } = {}) {
+  await page.goto(`/app/library/${id}`);
+  await page.getByTestId("download-offline").click();
+  const start = page.getByTestId("download-start");
+  await expect(start).toBeEnabled();
+  if (opts.fullQuality) await page.getByRole("switch", { name: /Full quality/ }).click();
+  await start.click();
+  await expect(page.locator(".toast").filter({ hasText: "is on this device" })).toBeVisible({ timeout: 30_000 });
 }
 
-export async function isRendered(loc: Locator) {
-  return (await loc.count()) > 0;
+export async function cacheKeys(page: Page): Promise<Record<string, string[]>> {
+  return page.evaluate(async () => {
+    const out: Record<string, string[]> = {};
+    for (const name of await caches.keys()) out[name] = (await (await caches.open(name)).keys()).map((r) => new URL(r.url).pathname + new URL(r.url).search);
+    return out;
+  });
+}
+
+/** Screenshots for docs/screenshots (copied there by hand; see docs/offline.md#tests). */
+export async function shot(page: Page, info: TestInfo, name: string) {
+  const dir = resolve(info.project.testDir, "..", "e2e-screenshots");
+  mkdirSync(dir, { recursive: true });
+  await page.screenshot({ path: resolve(dir, `${info.project.name}-${name}.png`) });
 }

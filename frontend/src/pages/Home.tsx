@@ -5,7 +5,8 @@ import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { Book, Devices as DevicesIcon, Plus, Reader, Upload } from "../components/Icons";
 import { PageTitle } from "../components/Shell";
-import { get } from "../lib/api";
+import { get, OfflineError } from "../lib/api";
+import { listBooks } from "../lib/offline/store";
 import { relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
@@ -19,9 +20,16 @@ export function HomePage() {
   const [devices, setDevices] = useState<Device[] | null>(null);
 
   const load = useCallback(async () => {
-    const [c, d] = await Promise.all([get<{ items: Work[] }>("/api/continue"), get<{ devices: Device[] }>("/api/devices")]);
-    setItems(c.items);
-    setDevices(d.devices.filter((x) => !x.revoked_at));
+    try {
+      const [c, d] = await Promise.all([get<{ items: Work[] }>("/api/continue"), get<{ devices: Device[] }>("/api/devices")]);
+      setItems(c.items);
+      setDevices(d.devices.filter((x) => !x.revoked_at));
+    } catch (e) {
+      if (!(e instanceof OfflineError)) throw e;
+      // Offline: continue with what is downloaded here.
+      setItems((await listBooks()).map((b) => b.work));
+      setDevices((d) => d ?? []);
+    }
   }, []);
   useEffect(() => {
     load().catch(() => {});

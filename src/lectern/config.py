@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     trust_cf_connecting_ip: bool = Field(default=False)
 
     session_ttl_seconds: int = 60 * 60 * 24 * 30
+    # How long the installed app keeps downloads and the signed-in identity without reaching the
+    # server (docs/offline.md#privacy). Never past the session's own expiry.
+    offline_max_age_seconds: int = 60 * 60 * 24 * 14
     setup_token_ttl_seconds: int = 60 * 30
 
     # Login protection

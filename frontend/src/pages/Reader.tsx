@@ -7,7 +7,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Chevron, TextSize, Toc } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
-import { ApiError, get, put } from "../lib/api";
+import { ApiError, get, OfflineError } from "../lib/api";
+import { getBook, orOffline } from "../lib/offline/store";
+import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
 import { pickHandoff } from "../lib/handoff";
 import { useLocalStorage } from "../lib/hooks";
@@ -107,6 +109,8 @@ function writeMark(id: number, m: ReadMark) {
   }
 }
 
+const EMPTY_PROGRESS = (id: number): WorkProgressResponse => ({ work_id: id, position: null, source: null, raw: null, device: null, received_at: null, text: null, audio_s: null, percent: null, estimated: false, count: 0, total_duration_s: 0, koreader: null });
+
 /** `/app/reader/:id` opens the EPUB reader; `?file=<id>` opens a PDF or comic in the page viewer. */
 export function ReaderPage() {
   const { id: idParam } = useParams();
@@ -145,7 +149,7 @@ function EpubReader() {
   const dirty = useRef(false);
 
   useEffect(() => {
-    if (!work || work.id !== id) get<Work>(`/api/works/${id}`).then(setWork).catch((e) => setError((e as Error).message));
+    if (!work || work.id !== id) orOffline(() => get<Work>(`/api/works/${id}`), async () => (await getBook(id))?.work).then(setWork).catch((e) => setError((e as Error).message));
   }, [id, work]);
 
   const save = useCallback(
@@ -157,13 +161,14 @@ function EpubReader() {
       lastSaved.current = key;
       dirty.current = false;
       try {
-        const r = await put<WorkProgressResponse>(`/api/works/${id}/progress`, { source: "web", device: deviceName, ...p }, keepalive);
-        writeMark(id, { cfi: p.raw, seenAt: r.received_at });
+        // Offline, the position waits in the queue and syncs on reconnect (lib/offline/sync.ts).
+        const r = await savePosition<WorkProgressResponse>({ kind: "work", id, workId: id, title: work?.title ?? "this book" }, { source: "web", device: deviceName, ...p }, keepalive);
+        writeMark(id, { cfi: p.raw, seenAt: r?.received_at ?? readMark(id)?.seenAt ?? null });
       } catch {
         writeMark(id, { cfi: p.raw, seenAt: readMark(id)?.seenAt ?? null });
       }
     },
-    [id, deviceName],
+    [id, deviceName, work?.title],
   );
 
   const jumpTo = useCallback(async (c: { raw: string | null; source: string; text: { spine_index: number; char: number } | null }) => {
@@ -183,9 +188,12 @@ function EpubReader() {
     let v: FoliateView | null = null;
     (async () => {
       try {
+        // A downloaded book is answered by the service worker from this device.
         const [res, prog] = await Promise.all([
-          fetch(`/library/works/${id}/book.epub`, { credentials: "same-origin" }),
-          get<WorkProgressResponse>(`/api/works/${id}/progress`),
+          fetch(`/library/works/${id}/book.epub`, { credentials: "same-origin" }).catch(() => {
+            throw new OfflineError();
+          }),
+          orOffline(() => get<WorkProgressResponse>(`/api/works/${id}/progress`), async () => (await getBook(id))?.progress ?? EMPTY_PROGRESS(id)),
           import("foliate-js/view.js"),
         ]);
         if (!res.ok) {
@@ -273,6 +281,17 @@ function EpubReader() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(s), theme]);
   useEffect(applySettings, [applySettings]);
+
+  // "Use the other device's" in a sync conflict (components/Offline.tsx): go there.
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ kind: string; id: number; server: { source?: string | null; raw?: string | null; text?: { spine_index: number; char: number } | null } }>).detail;
+      if (d.kind !== "work" || d.id !== id || !view.current) return;
+      jumpTo({ raw: d.server.raw ?? null, source: d.server.source ?? "", text: d.server.text ?? null }).catch(() => {});
+    };
+    window.addEventListener("lectern:position", on);
+    return () => window.removeEventListener("lectern:position", on);
+  }, [id, jumpTo]);
 
   // Save when the tab hides (phones rarely give an unload).
   useEffect(() => {

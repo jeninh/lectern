@@ -262,6 +262,28 @@ def koreader_candidate(
     }
 
 
+def replay_wins(
+    server_at: datetime | None,
+    base: datetime | None,
+    recorded_at: datetime,
+    sent_at: datetime,
+    now: datetime,
+) -> tuple[bool, datetime]:
+    """Whether a position saved while offline may replace the server's, and when it was
+    recorded on the server's clock.
+
+    Online, the server keeps whichever write arrives last. A replay arrives late, so it is
+    judged by when it was recorded instead: it wins unless the server's position was saved
+    after the device last saw it (``base``) *and* after the replay was recorded. The device's
+    clock is corrected by the difference between its ``sent_at`` and the server's ``now``, and
+    a recording time in the future counts as now.
+    """
+    effective = min(now, recorded_at + (now - sent_at))
+    if server_at is None or (base is not None and server_at <= base):
+        return True, effective
+    return effective >= server_at, effective
+
+
 class ProgressError(Exception):
     def __init__(self, status: int, code: str) -> None:
         self.status, self.code = status, code

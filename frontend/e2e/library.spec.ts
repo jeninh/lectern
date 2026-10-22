@@ -2,7 +2,7 @@
 // seeded library of 360 books (e2e/seed.py): 6 columns at 1280×800, so 60 rows, of which only
 // the ones near the viewport are in the DOM.
 import { expect, test, type Page } from "@playwright/test";
-import { api, book, countText, focusedLabel, grid, idOf, library, selectedTitles, signIn, titles } from "./helpers";
+import { api, book, countText, focusedLabel, grid, idOf, library, selectedTitles, signIn, titles } from "./desktop-helpers";
 
 test.beforeEach(async ({ page }) => {
   await signIn(page);
