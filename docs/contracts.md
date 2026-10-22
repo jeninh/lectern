@@ -66,7 +66,7 @@ upper-case values. Timestamps are `UTCDateTime` (aware UTC in, aware UTC out).
 | `work_progress` | Canonical position per user and work | unique `(user_id, work_id)`; `sentence_n, sentence_offset >= 0`; `source ∈ {KOREADER, WEB, AUDIO}`; `raw` keeps what the device sent |
 | `reading_progress` | **unchanged**: KOReader's own record keyed by document hash | as before |
 | `invites` | Single-use sign-up links | unique `token_hash`; `role ∈ {MEMBER, READER}` (never OWNER); `used_at`/`used_by` both null or both set |
-| `shelves` | Named collections owned by a user | unique `(owner_id, name)`; `rule` JSON reserved for smart shelves (`NULL` = manual) |
+| `shelves` | Named collections owned by a user; nested folders | `parent_id` → `shelves` (CASCADE; `NULL` = top level; never a cycle, at most 8 deep, checked by the API); unique `(owner_id, coalesce(parent_id, 0), name)`: names are unique among one owner's siblings; `rule` JSON reserved for smart shelves (`NULL` = manual) |
 | `shelf_items` | Shelf membership | PK `(shelf_id, work_id)`; `position` for manual order |
 | `shelf_grants` | Reader access to a shelf | PK `(shelf_id, user_id)`; `permission ∈ {VIEW, EDIT}` |
 | `worker_credentials` | Hashed bearer keys for external workers | unique `key_hash`; `revoked_at` |
@@ -83,7 +83,9 @@ Deletion behaviour (all `ON DELETE` at the SQL level; `PRAGMA foreign_keys=ON` i
   who owns shelves. Their invites, credentials, and jobs survive with `created_by`/`used_by`
   set to NULL. The partial-upload file of a deleted user's session is removed by the sweeper
   (it finds `.part` files with no row).
-- Deleting a **shelf** removes its items and grants; works are untouched.
+- Deleting a **shelf** removes its items, grants, and sub-shelves; works are untouched. The API
+  first moves a non-empty shelf's contents up a level or trashes its works, as asked
+  (`DELETE /api/shelves/{id}?contents=`).
 - Deleting a **worker credential** is not offered; revoke it (`revoked_at`) so job history keeps
   `leased_by_id`.
 
@@ -419,25 +421,48 @@ wire format, and the ElevenLabs rules are in [`tts.md`](tts.md).
 
 ### Shelves — `/api/shelves`
 
+Shelves are the Library's folders. They nest (`parent_id`), a work can be on any number of
+shelves, and a work on none of the shelves a person sees is at their Library's root.
+Migration `0014_nested_shelves` (down `0013`) made every existing shelf a top-level shelf.
+
 Visibility rule, implemented by `lectern.access`:
 
 > Owners and members see the whole library. Readers see only works on shelves they hold a
-> grant for.
+> grant for, or on any shelf nested inside one: **a grant covers the shelf's whole subtree**.
 
-`visible_works(user)` is a SQL predicate that milestone 2 applies to `/api/library`,
-`/api/works/{id}`, `/api/continue`, covers, downloads, OPDS, and all routes in this document.
-A role change takes effect on the next request.
+A person's permission on a shelf is the strongest of: `owner` (the owner role, or they own
+this shelf or any shelf above it: rename, move, delete, share), and the grants they hold on it
+or any shelf above it (`edit`: add and remove works, make sub-shelves; `view`). Everything below
+a visible shelf is visible, so what a person sees is a forest: a shelf whose parent is hidden
+from them is one of their top-level shelves, with `parent_id: null` and a `path` that starts at
+it. Hidden shelves are `404` everywhere (exactly like missing ones), and no response names or
+counts them: `work_count` and `shelf_count` count what the caller sees, `ancestors` and `path`
+stop at the first hidden shelf, and `/api/library`'s `shelf_ids` list only visible shelves.
+
+`visible_works(user)` is a SQL predicate (a recursive CTE over `parent_id` for readers) applied
+to `/api/library`, `/api/works/{id}`, `/api/continue`, covers, downloads, OPDS, MCP, and all
+routes in this document. A role change takes effect on the next request.
 
 | Route | Who | Behaviour |
 | --- | --- | --- |
-| `GET /api/shelves` | any | Owner: all shelves. Member: shelves they own plus shelves granted to them. Reader: granted shelves only. Each with `work_count`, `permission` (`owner`, `edit`, `view`) |
-| `POST /api/shelves {name}` | owner, member | `201`; `409` on a duplicate name for that owner |
-| `PATCH /api/shelves/{id} {name}` / `DELETE` | shelf owner or the owner role | `DELETE` cascades items and grants, never works |
-| `GET /api/shelves/{id}` | anyone who can see it | shelf plus its works in `position` order (readers never see a shelf they are not granted) |
-| `PUT /api/shelves/{id}/items {work_ids: [...]}` | manager or `edit` grant | Replaces the whole ordered list; members may add any work, a reader with `edit` only works they can already see, and never to a shelf another reader is granted (`403 shelf_shared_with_readers`) |
-| `POST /api/shelves/{id}/items {work_id}` / `DELETE …/items/{work_id}` | manager or `edit` grant | Append / remove one |
-| `GET /api/shelves/{id}/grants` | manager | `[{user, permission, granted_by, created_at}]` |
+| `GET /api/shelves` | any | Every shelf the caller sees, depth-first (each level by name): `{id, name, parent_id, path: [names from their top level], owner, owner_id, permission, work_count, shelf_count, grant_count, smart}`, plus `can_create` |
+| `POST /api/shelves {name, parent_id?}` | owner, member; inside a shelf also `edit` there | `201`, owned by the creator. `409 duplicate_name` (same owner, same parent), `409 too_deep` (more than 8 levels), `404` for a hidden parent, `403` view-only parent. Names cannot contain `/` (`422`) |
+| `GET /api/shelves/{id}` | anyone who sees it | the shelf, `ancestors` (visible ones, top first: breadcrumbs), its sub-shelves (`shelves`), and its own works in `position` order |
+| `PATCH /api/shelves/{id} {name?, parent_id?}` | manager | Rename and/or move with its subtree (`parent_id: null`: top level). The destination needs `edit` (or, at the top level, owner/member). `409 shelf_cycle` into itself or below itself, `409 too_deep`, `409 duplicate_name`. `204` when the move takes the shelf out of everything the caller sees (they managed it only through a shelf above it). Creates, moves, and deletes run one at a time, so concurrent moves cannot make a cycle |
+| `DELETE /api/shelves/{id}?contents=move_up\|trash` | manager | Empty: `204`. Otherwise `contents` is required (`409 shelf_not_empty {shelves, works, direct_works, sub_shelves}`). `move_up`: sub-shelves and works go to the parent (at the top level, sub-shelves become top-level and works leave this shelf; a clashing name gets ` (2)`); `204`. `trash` (owner, member): every work in it or below goes to the Trash as one bulk batch (`Undo` restores them at the root), then the subtree is deleted: `200 {batch_id, results, deleted}`; nothing is deleted if any work could not be trashed |
+| `PUT /api/shelves/{id}/items {work_ids: [...]}` | manager or `edit` | Replaces the whole ordered list; members may add any work, a reader with `edit` only works they can already see, and never to a shelf another reader sees through a grant on it or above it (`403 shelf_shared_with_readers`) |
+| `POST /api/shelves/{id}/items {work_id}` / `DELETE …/items/{work_id}` | manager or `edit` | Append / remove one |
+| `GET /api/shelves/{id}/grants` | manager | `{grants: [{user, permission, granted_by, created_at}], inherited: [… + shelf]}`; `inherited` lists grants on shelves above that also reach this one, from the ancestors the caller manages |
 | `PUT /api/shelves/{id}/grants/{user_id} {permission}` / `DELETE` | manager | Upsert / revoke. Only the owner role may grant to a reader (`403 only_owner_grants_readers`). Granting to an owner or member is allowed but has no effect on visibility (it still lists the shelf for them) |
+
+`GET /api/library?shelf=&unshelved=` gives each work `shelf_ids` (the visible shelves it is
+directly on); `shelf` narrows to one shelf's own works (a hidden shelf is `404`), `unshelved`
+to the root (works on none of the caller's visible shelves).
+
+Moving books between folders is a bulk action, `move_to_shelf` (below): off `from_shelf_id`
+(`null`: from the root or the flat view, nothing to leave) and onto `to_shelf_id` (`null`: the
+root, that is off every shelf the caller can change). Their other shelves are kept; adding
+without leaving is `add_to_shelves`.
 
 Smart shelves: `rule` is reserved (JSON, `NULL` today). When implemented, a non-null rule is
 evaluated instead of `shelf_items`, and grants on a smart shelf expose whatever the rule
@@ -583,7 +608,7 @@ running for the work. Changing the primary EPUB, removing a format, or reorderin
 sentences and cancels or stales the alignment, which is re-queued with the same model.
 
 Bulk: `POST /api/works/bulk {work_ids[≤500] | selection, action: set_authors|set_series|add_tags|
-remove_tags|add_to_shelves|remove_from_shelves|trash, ...}` (+`Idempotency-Key`) → `{batch_id,
+remove_tags|add_to_shelves|remove_from_shelves|move_to_shelf|trash, ...}` (+`Idempotency-Key`) → `{batch_id,
 results: [{work_id, ok, error?}]}`; each work is its own transaction and revision. A failing
 work (including a filesystem error, `io_error`) is rolled back alone and reported; the others
 stand. `POST /api/works/bulk/{batch_id}/undo` reverts the batch the same way, per work
@@ -597,7 +622,7 @@ the batch as `work.bulk_undo` with the failures named.
 exactly one of `work_ids` or
 
 ```json
-{"selection": {"filter": {"q": "tolkien", "status": "unread", "shelf": 3},
+{"selection": {"filter": {"q": "tolkien", "status": "unread", "shelf": 3, "unshelved": false},
                "exclude_ids": [12], "view_token": "9f2c…", "expected_count": 211}}
 ```
 
@@ -605,8 +630,10 @@ which the server resolves (`lectern.routes.api.selection`) to the works the call
 view, in title order, minus `exclude_ids`. The filter is the Library's: `q` matches title,
 author, or ISBN after folding case and diacritics (NFKD, combining marks U+0300–U+036F
 dropped, lower case); `status` is `all|reading|unread|finished` from the caller's latest
-KOReader percentage (finished ≥ 98.5 %); `shelf` is shelf membership, and a shelf the caller
-may not see is `404` (as `GET /api/shelves/{id}`). `GET /api/library/count?q=&status=&shelf=`
+KOReader percentage (finished ≥ 98.5 %); `shelf` is direct membership of that shelf (the
+Folders view of it), and a shelf the caller may not see is `404` (as `GET /api/shelves/{id}`);
+`unshelved: true` is the root folder (works on none of the caller's visible shelves).
+`GET /api/library/count?q=&status=&shelf=&unshelved=`
 → `{"total", "view_token"}` counts a view the same way; `view_token` fingerprints exactly which
 works it holds (order-independent). A selection whose view no longer has that token (a work
 left or arrived, even if the count is unchanged), or whose resolved size is not

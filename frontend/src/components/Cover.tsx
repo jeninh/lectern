@@ -9,7 +9,9 @@ export function Cover({ work, className = "" }: { work: Pick<Work, "title" | "au
   return (
     <div className={`cover ${className}`} style={tintStyle(work)}>
       {work.cover_url ? (
-        <img src={work.cover_url} alt="" loading="lazy" decoding="async" />
+        // Not draggable on its own: dragging a book in the Library drags the book (lib/folders),
+        // and a dragged image would look like a file upload to the drop overlay.
+        <img src={work.cover_url} alt="" loading="lazy" decoding="async" draggable={false} />
       ) : (
         <div className="fallback">
           <strong>{work.title}</strong>

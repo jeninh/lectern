@@ -9,12 +9,13 @@ import { fuzzyScore } from "../lib/fuzzy";
 import { useStore } from "../lib/store";
 import type { Device, Work } from "../lib/types";
 import { Cover } from "./Cover";
+import { folderSummary } from "./Folders";
 import { usePlayer } from "../lib/player";
 import { bookFiles, readerPath } from "../lib/formats";
 import { Devices, Download, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
-type Group = "Actions" | "Pages" | "Books" | "Authors" | "Devices" | "Settings";
-const ORDER: Group[] = ["Actions", "Books", "Authors", "Devices", "Pages", "Settings"];
+type Group = "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings";
+const ORDER: Group[] = ["Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings"];
 
 interface Item {
   id: string;
@@ -30,7 +31,7 @@ interface Item {
 }
 
 export function CommandPalette() {
-  const { paletteOpen, setPaletteOpen, works, me, resolvedTheme, setTheme, setHelpOpen, canUpload, canEdit, pickBooks, pickFolder, imports, setReviewOpen, openEditor } = useStore();
+  const { paletteOpen, setPaletteOpen, works, shelves, me, resolvedTheme, setTheme, setHelpOpen, canUpload, canEdit, pickBooks, pickFolder, imports, setReviewOpen, openEditor } = useStore();
   const nav = useNavigate();
   const player = usePlayer();
   const [q, setQ] = useState("");
@@ -118,6 +119,16 @@ export function CommandPalette() {
       ...works.filter((w) => bookFiles(w).length > 0).map<Item>((w) => ({ id: `r${w.id}`, group: "Actions", label: `Read ${w.title}`, keywords: `open ${w.author} pdf comic`, icon: <Reader />, run: () => go(readerPath(w)) })),
       ...(canEdit ? works.map<Item>((w) => ({ id: `e${w.id}`, group: "Actions", label: `Edit ${w.title}`, keywords: `metadata cover tracks ${w.author}`, icon: <Pencil />, run: () => { close(); openEditor(w.id); } })) : []),
       ...works.filter((w) => w.audio).map<Item>((w) => ({ id: `l${w.id}`, group: "Actions", label: `Listen to ${w.title}`, keywords: `play audiobook ${w.author}`, icon: <Headphones />, run: () => { close(); player.open(w, { autoplay: true }); } })),
+      // Shelves by folder path: "kids/pic" finds Kids / Picture books.
+      ...shelves.map<Item>((s) => ({
+        id: `sh-${s.id}`,
+        group: "Shelves",
+        label: s.path.join(" / "),
+        keywords: `${s.path.join("/")} folder shelf`,
+        detail: folderSummary(s),
+        icon: <Folder />,
+        run: () => go(`/app/library?shelf=${s.id}`),
+      })),
       ...[...new Set(works.map((w) => w.author))].map<Item>((a) => {
         const n = works.filter((w) => w.author === a).length;
         return { id: `au-${a}`, group: "Authors", label: a, detail: `${n} ${n === 1 ? "book" : "books"}`, icon: <Person />, run: () => go(`/app/library?q=${encodeURIComponent(a)}`) };
@@ -160,7 +171,7 @@ export function CommandPalette() {
       .sort((a, b) => (needle ? b[1].best - a[1].best : 0) || ORDER.indexOf(a[0]) - ORDER.indexOf(b[0]))
       .map(([group, g]) => ({ group, items: g.items }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, works, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing]);
+  }, [q, works, shelves, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing]);
 
   const flat = groups.flatMap((g) => g.items);
 
@@ -198,7 +209,7 @@ export function CommandPalette() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={onKey}
-            placeholder="Search books, authors, devices, settings…"
+            placeholder="Search books, shelves, authors, devices, settings…"
             role="combobox"
             aria-expanded="true"
             aria-haspopup="listbox"

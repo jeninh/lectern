@@ -186,6 +186,7 @@ def test_root_lists_continue_up_next_and_this_devices_queue_first(home):
         "Continue reading",
         "Up next",
         "Queued for this device",
+        "Shelves",
         "All books",
         "Recently added",
     ]

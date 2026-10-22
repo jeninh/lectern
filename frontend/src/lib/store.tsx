@@ -5,7 +5,7 @@ import { bindOwner, checkFresh, clearDevice, listBooks, onChange as onOfflineCha
 import { finishSignOut, pendingSignOut } from "./offline/signout";
 import { flush, refreshSyncState, registerWorker } from "./offline/sync";
 import { useLocalStorage, useVisiblePolling } from "./hooks";
-import type { AppNotification, ImportInfo, Me, Preferences, Work } from "./types";
+import type { AppNotification, ImportInfo, Me, Preferences, Shelf, Work } from "./types";
 import { ACCEPT, filesFromDataTransfer, groupFiles, httpTransport, localStore, UploadManager, workerHasher, type PathedFile, type UploadItem } from "./uploads";
 
 type Theme = "light" | "dark" | "system";
@@ -26,7 +26,12 @@ interface Store {
   me: Me | null;
   works: Work[];
   worksLoaded: boolean;
+  /** Every shelf this person sees (lib/shelves), depth-first; reloaded with the library. */
+  shelves: Shelf[];
+  /** May make top-level shelves (owners and members). */
+  canCreateShelf: boolean;
   refreshMe: () => Promise<void>;
+  /** Reloads the books and the shelves (moving books changes both). */
   refreshLibrary: () => Promise<void>;
   theme: Theme;
   setTheme: (t: Theme) => void;
@@ -91,6 +96,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null);
   const [works, setWorks] = useState<Work[]>([]);
   const [worksLoaded, setWorksLoaded] = useState(false);
+  const [shelves, setShelves] = useState<Shelf[]>([]);
+  const [canCreateShelf, setCanCreateShelf] = useState(false);
   const [theme, setThemeRaw] = useLocalStorage<Theme>("lectern.theme", "system");
   const [sys, setSys] = useState(systemTheme);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -145,8 +152,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [expire]);
 
   const refreshLibrary = useCallback(async () => {
+    const tree = get<{ shelves: Shelf[]; can_create: boolean }>("/api/shelves")
+      .then((d) => {
+        setShelves(d.shelves);
+        setCanCreateShelf(d.can_create);
+      })
+      .catch(() => {});
     try {
       const data = await get<{ works: Work[] }>("/api/library");
+      await tree;
       setWorks(data.works);
     } catch (e) {
       if (!(e instanceof OfflineError)) throw e;
@@ -367,6 +381,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const drop = (e: DragEvent) => {
       depth = 0;
       setDragging(false);
+      // Books and shelves dragged inside the Library are not uploads (lib/dnd).
+      if (!hasFiles(e)) return;
       if (!e.dataTransfer?.files.length && !e.dataTransfer?.items.length) return;
       e.preventDefault();
       filesFromDataTransfer(e.dataTransfer).then(addFiles, () => addFiles(Array.from(e.dataTransfer?.files ?? [])));
@@ -388,6 +404,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       me,
       works,
       worksLoaded,
+      shelves,
+      canCreateShelf,
       refreshMe,
       refreshLibrary,
       theme,
@@ -425,7 +443,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       deviceName,
       setDeviceName,
     }),
-    [online, offlineBooks, me, works, worksLoaded, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, dismissToast, paletteOpen, helpOpen, now, canUpload, canEdit, pickBooks, pickFolder, addFiles, imports, refreshImports, reviewOpen, dragging, editWorkId, uploads, uploadManager, setPreference, notifications, unread, refreshNotifications, markAllRead, deviceName, setDeviceName],
+    [online, offlineBooks, me, works, worksLoaded, shelves, canCreateShelf, refreshMe, refreshLibrary, theme, setThemeRaw, resolvedTheme, toasts, toast, dismissToast, paletteOpen, helpOpen, now, canUpload, canEdit, pickBooks, pickFolder, addFiles, imports, refreshImports, reviewOpen, dragging, editWorkId, uploads, uploadManager, setPreference, notifications, unread, refreshNotifications, markAllRead, deviceName, setDeviceName],
   );
   return (
     <Ctx.Provider value={value}>

@@ -65,8 +65,8 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 | --- | --- | --- |
 | `upload` (default) | add books to Review before filing; owners and members only | `upload_book`, `list_pending_imports`, `cancel_import` |
 | `file` (default): “Can file books (confirm imports)” | file reviewed imports **this key uploaded** into the library; owners and members only | `confirm_import`, and auto-filing a certain match from `upload_book` |
-| `read` | search, book details, alignment status, your progress | `search_library`, `get_book`, `list_recent` |
-| `organize` | shelves, send to device, alignment, metadata | `add_to_shelf`, `remove_from_shelf`, `send_to_device`, `list_device_queue`, `start_alignment`, `job_status`, `edit_metadata` |
+| `read` | search, book details, alignment status, your progress, your shelves | `search_library`, `get_book`, `list_recent`, `list_shelves` |
+| `organize` | shelves, send to device, alignment, metadata | `add_to_shelf`, `remove_from_shelf`, `create_shelf`, `move_shelf`, `send_to_device`, `list_device_queue`, `start_alignment`, `job_status`, `edit_metadata` |
 
 - A key belongs to one person and acts **as them**: the same role and visibility checks as
   the web app. Readers only see books on shelves shared with them and cannot add books, so a
@@ -112,8 +112,11 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 
 ## Tools
 
-Book ids are numbers (`search_library` returns them). Shelves and devices are given by name
-or id. Errors come back as tool errors the AI app can read, for example
+Book ids are numbers (`search_library` returns them). Devices are given by name or id.
+Shelves are nested folders, given by id, by **path** from your top level
+(`Kids/Picture books`, case-insensitive), or by a name only one of your shelves has; an
+ambiguous or unknown shelf is an error that lists your shelves with their paths and ids.
+Errors come back as tool errors the AI app can read, for example
 `not_found (not found, or not visible to this person)` or
 `forbidden: needs file scope. This AI key does not have it; its owner can add it in Lectern
 under Devices → AI tools → Edit.`
@@ -137,8 +140,17 @@ under Devices → AI tools → Edit.`
 - `search_library`, `list_recent` (`added`, or what you `read` most recently), `get_book`
   (metadata, formats, audiobook length, alignment status and job, shelves, your progress).
   Formats are labelled `EPUB`, `PDF`, `CBZ`, or `audiobook`.
+- `list_shelves`: every shelf you see, with its path, parent, books directly on it,
+  sub-shelves, and your permission (`owner`, `edit`, `view`). A shelf shared with you appears
+  at your top level; shelves above it that are not shared with you are never named.
 - `add_to_shelf`, `remove_from_shelf`: shelves you may edit, with the shelf rules of the web
-  app (for example, a reader with an edit grant cannot widen another reader's library).
+  app (for example, a reader with an edit grant cannot widen another reader's library). A book
+  can be on several shelves; adding never takes it off another.
+- `create_shelf`: `path` such as `Kids/Picture books` makes the missing shelves along it
+  (top-level shelves need an owner or member; inside a shelf, edit permission there; at most 8
+  deep; names cannot contain `/`).
+- `move_shelf`: move a shelf with everything in it into another shelf (`to`: id or path) or to
+  the top level (`to: ""`). Needs the right to manage it; never into itself or below itself.
 - `send_to_device`, `list_device_queue`: the per-device queues from
   [device-queues.md](device-queues.md). Your own e-readers; the owner can also send to
   household devices, but only books that device's person can see.

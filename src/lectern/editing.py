@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from lectern.access import can_edit_shelf
+from lectern.access import shelf_perms, visible_path
 from lectern.config import Settings
 from lectern.fsops import checked, free_dir, move_dir, move_file, prune_empty_parents
 from lectern.ingest.library import safe_component
@@ -193,11 +193,10 @@ def _tracks_state(tracks: list[AudioTrack]) -> list[dict]:
 
 
 def editable_shelves(db: Session, user: User) -> list[Shelf]:
-    return [
-        s
-        for s in db.scalars(select(Shelf).order_by(Shelf.name))
-        if s.rule is None and can_edit_shelf(db, user, s)
-    ]
+    """Manual shelves ``user`` may add works to and remove them from, in folder order."""
+    shelves, perms = shelf_perms(db, user)
+    out = [shelves[sid] for sid, p in perms.items() if p != "view" and shelves[sid].rule is None]
+    return sorted(out, key=lambda s: [x.name.casefold() for x in visible_path(s, shelves, perms)])
 
 
 def bump_version(db: Session, work: Work, expected: int) -> int:
