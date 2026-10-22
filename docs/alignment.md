@@ -22,6 +22,10 @@ wire formats are in [`contracts.md`](contracts.md); this page is the implementat
 
 ## Turning it on
 
+A generated audiobook ([`tts.md`](tts.md)) never needs this: its sentence times come from
+the synthesis, so its read-along works as soon as the narration finishes and no `align` job is
+queued for it.
+
 Alignment starts by itself. Every 60 s (`LECTERN_TRACK_RESCAN_SECONDS`), and once at
 startup, the server looks in every work directory for audio files (`.mp3 .m4a .m4b .mp4 .ogg
 .oga .opus .flac`, in natural filename order, so `01 …`, `02 …`, `10 …` play in order),

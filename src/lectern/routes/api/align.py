@@ -81,7 +81,7 @@ def list_jobs(
     workers = _worker_names(db)
     speed = jobs.measured_speed(db, None)
     return {
-        "jobs": [jobs.job_json(db, j, workers) for j in rows],
+        "jobs": [_job_json(db, j, workers) for j in rows],
         "measured_speed": ({"speed": round(speed[0], 3), "samples": speed[1]} if speed else None),
     }
 
@@ -91,7 +91,15 @@ def job_detail(auth: JobViewer, db: DbDep, job_id: int) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    return jobs.job_json(db, job, _worker_names(db))
+    return _job_json(db, job, _worker_names(db))
+
+
+def _job_json(db: Session, job: Job, workers: dict[int, str]) -> dict:
+    from lectern.tts import jobs as tts_jobs
+
+    if job.kind == tts_jobs.KIND:
+        return tts_jobs.job_json(db, job, workers)
+    return jobs.job_json(db, job, workers)
 
 
 @router.post("/works/{work_id}/align")
@@ -244,7 +252,10 @@ def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    if jobs.cancel_job(db, job):
+    from lectern.tts import jobs as tts_jobs
+
+    cancelled = tts_jobs.cancel(db, job) if job.kind == tts_jobs.KIND else jobs.cancel_job(db, job)
+    if cancelled:
         audit.record(
             db,
             "job.cancel",
@@ -253,7 +264,7 @@ def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
             ip=client_ip(request),
         )
         db.commit()
-    return jobs.job_json(db, job, _worker_names(db))
+    return _job_json(db, job, _worker_names(db))
 
 
 def _retry_model(db: Session, work_id: int) -> str | None:

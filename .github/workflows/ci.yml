@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        extras: ["", "align"]
+        extras: ["", "align", "tts"]
     steps:
       - uses: actions/checkout@v4
       - run: docker build --build-arg LECTERN_EXTRAS=${{ matrix.extras }} -t lectern:ci .
@@ -100,6 +100,8 @@ jobs:
           docker run --rm lectern:ci lectern restore --help > /dev/null
           docker run --rm lectern:ci restic version
           docker run --rm lectern:ci python -c "from lectern.align.transcribe import transcription_available as t; print('faster-whisper:', t()); assert t() == ('${{ matrix.extras }}' == 'align')"
+      - name: Piper (generated audiobooks) is in the tts image only
+        run: docker run --rm lectern:ci python -c "from lectern.tts.engines import piper_installed as p; print('piper:', p()); assert p() == ('${{ matrix.extras }}' == 'tts')"
       - name: Generated covers render in the image (bundled fonts + Noto CJK)
         run: docker run --rm lectern:ci python -c "from lectern import covergen as c; assert c._cjk_font_files(); [c.render_jpeg(c.design_for(t, a)) for t, a in (('吾輩は猫である', '夏目漱石'), ('الكتاب المقدس', ''), ('ⲁⲓⲝⲟⲙ', ''))]"
   # The image a Raspberry Pi builds from deploy/tailscale/compose.yaml: default extras,

@@ -41,6 +41,17 @@ KOReader. With any other reverse proxy in front, set
 `LECTERN_TRUSTED_PROXIES` to its address so rate limits and the audit log see your readers'
 IPs instead of the proxy's. Lectern's own sign-in is always required, private network or not.
 
+## Make an audiobook
+
+A book with an EPUB and no audiobook can be narrated into one: **Make an audiobook…** in its
+Formats list. Pick the engine, voice, speed, and chapters, and play a sample first. The result
+is an ordinary chaptered audiobook edition with read-along from the synthesis timings. No
+alignment is needed. **Piper** runs on the server's CPU, a Raspberry Pi included
+(`LECTERN_EXTRAS=tts` plus a voice). **Kokoro** is preferred and runs on a capable worker such
+as a Mac. **ElevenLabs** is optional and uses your own key, which is encrypted and never shown
+again. It shows the cost, quota, and a spending cap before anything is sent, and the text goes
+only to `api.elevenlabs.io`, only when you confirm. See [`docs/tts.md`](docs/tts.md).
+
 ## Mac worker
 
 A Mac with Apple Silicon can do the heavy work for a Raspberry Pi server: aligning

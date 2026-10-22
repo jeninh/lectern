@@ -154,6 +154,19 @@ class Settings(BaseSettings):
     # Seconds between checks whether the nightly backup is due.
     maintenance_poll_seconds: float = 60.0
 
+    # Generated audiobooks (docs/tts.md). Piper voices are <voice>.onnx + .onnx.json files;
+    # unset = <data>/tts/piper. Kokoro runs in the server only with lectern[kokoro] and this
+    # switch on (it wants a fast machine); otherwise Kokoro jobs wait for a tts-kokoro worker.
+    piper_voices_dir: Path | None = Field(default=None)
+    tts_kokoro_local: bool = False
+    tts_audio_codec: str = Field(default="aac", pattern="^(aac|flac)$")
+    tts_audio_bitrate_kbps: int = Field(default=64, ge=24, le=256)
+    tts_local_runner: bool = True
+    # Local runners leave a capability's new jobs to an online worker that has it this long.
+    local_defer_seconds: float = Field(default=600.0, ge=0.0)
+    # Optional: what 1000 ElevenLabs credits cost you, to show a money estimate (0 = credits only).
+    elevenlabs_price_per_1000_credits: float = Field(default=0.0, ge=0.0)
+
     log_level: str = "INFO"
 
     @field_validator("base_url")
