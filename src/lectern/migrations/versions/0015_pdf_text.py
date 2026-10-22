@@ -1,7 +1,7 @@
 """PDF text layers: canonical PDF text, sentences with page and box maps (read-along on PDFs)
 
-Revision ID: 0014_pdf_text
-Revises: 0013
+Revision ID: 0015_pdf_text
+Revises: 0014_nested_shelves
 Create Date: 2026-10-22
 
 """
@@ -11,8 +11,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0014_pdf_text"
-down_revision = "0013"
+revision = "0015_pdf_text"
+down_revision = "0014_nested_shelves"
 branch_labels = None
 depends_on = None
 
