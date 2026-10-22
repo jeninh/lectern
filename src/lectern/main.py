@@ -20,7 +20,19 @@ from lectern.jobs import JobRunner, housekeeping
 from lectern.lookup import http_get as lookup_http_get
 from lectern.migrate import upgrade_to_head
 from lectern.readaloud.cache import ReadAloudBuilder
-from lectern.routes import api, auth, health, invites, koplugin, kosync, library, opds, setup, spa
+from lectern.routes import (
+    api,
+    auth,
+    health,
+    invites,
+    koplugin,
+    kosync,
+    library,
+    opds,
+    setup,
+    spa,
+    worker_install,
+)
 from lectern.security.deps import LoginRequired
 from lectern.security.ratelimit import SlidingWindowLimiter
 from lectern.security.webauthn import ChallengeStore
@@ -190,6 +202,8 @@ def create_app(
         "worker": SlidingWindowLimiter(
             limit=settings.worker_requests_per_minute, window_seconds=60
         ),
+        # failed enrollment codes per address (POST /api/worker/enroll)
+        "worker_enroll": SlidingWindowLimiter(limit=10, window_seconds=60),
         # KOReader plugin (lectern.koplugin): setup-secret exchanges and pairing-code tries per
         # address, tries per username (whatever the address), and codes shown per user.
         "koplugin": SlidingWindowLimiter(limit=10, window_seconds=60),
@@ -237,6 +251,7 @@ def create_app(
     app.include_router(opds.router)
     app.include_router(kosync.router)
     app.include_router(koplugin.router)
+    app.include_router(worker_install.router)
 
     @app.get("/library", include_in_schema=False)
     @app.get("/account", include_in_schema=False)

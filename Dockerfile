@@ -35,6 +35,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-no
  && mkdir -p /data /library /backups && chown lectern:lectern /data /library /backups
 WORKDIR /app
 COPY --from=build --chown=lectern:lectern /app /app
+# The commit this image was built from (docker build --build-arg LECTERN_COMMIT=$(git
+# rev-parse HEAD)): /worker/install.sh pins Mac workers to the same code. Empty = unpinned.
+ARG LECTERN_COMMIT=""
+ENV LECTERN_WORKER_INSTALL_REF=${LECTERN_COMMIT}
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     LECTERN_DATA_DIR=/data \

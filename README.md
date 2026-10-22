@@ -41,6 +41,15 @@ KOReader. With any other reverse proxy in front, set
 `LECTERN_TRUSTED_PROXIES` to its address so rate limits and the audit log see your readers'
 IPs instead of the proxy's. Lectern's own sign-in is always required, private network or not.
 
+## Mac worker
+
+A Mac with Apple Silicon can do the heavy work for a Raspberry Pi server: aligning
+audiobooks on the GPU (MLX Whisper, CPU fallback), generated audiobooks with Kokoro, and
+transcodes. **Admin → Workers → Add a worker** gives a one-line install command; a small
+menu-bar app switches it on and off, shows the current job, and pauses it on battery or off
+Wi-Fi. Its key can only run jobs and is revocable. When no worker is online the Pi runs what
+it can itself. See [`docs/mac-worker.md`](docs/mac-worker.md), including school/proxy mode.
+
 ## KOReader plugin
 
 **Devices → Add device** offers a per-device `lectern.koplugin.zip` for Kindle, Kobo, and

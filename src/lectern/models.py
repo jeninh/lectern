@@ -574,10 +574,45 @@ class WorkerCredential(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # Owner-set allowlist of capabilities this key may claim (lectern.queue); NULL = any
+    # capability that may leave the server.
+    capabilities: Mapped[list | None] = mapped_column(JSON, default=None)
+    # Presence, as last reported by the worker on claim or POST /api/worker/status:
+    # what it advertised, its state (ready, busy, paused, off), and why it is paused.
+    advertised: Mapped[list | None] = mapped_column(JSON, default=None)
+    state: Mapped[str | None] = mapped_column(String(16), default=None)
+    info: Mapped[dict | None] = mapped_column(JSON, default=None)
+    status_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
 
     @property
     def active(self) -> bool:
         return self.revoked_at is None
+
+
+class WorkerEnrollment(Base):
+    """One-time code that the worker installer exchanges for a worker credential.
+
+    Owner-issued, short-lived, single use, stored as SHA-256. It carries the label and the
+    capability allowlist the credential will get, so the installer needs no other secret.
+    """
+
+    __tablename__ = "worker_enrollments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(128))
+    capabilities: Mapped[list | None] = mapped_column(JSON, default=None)
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    used_ip: Mapped[str | None] = mapped_column(String(64), default=None)
+    credential_id: Mapped[int | None] = mapped_column(
+        ForeignKey("worker_credentials.id", ondelete="SET NULL"), default=None
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
 
 
 class JobStatus(enum.StrEnum):
@@ -589,6 +624,13 @@ class JobStatus(enum.StrEnum):
 
 
 JOB_ACTIVE_STATUSES = (JobStatus.QUEUED, JobStatus.LEASED)
+
+
+def _job_capability(context) -> str:
+    from lectern.queue import capability_for
+
+    params = context.get_current_parameters()
+    return capability_for(params.get("kind") or "", params.get("payload"))
 
 
 class Job(Base):
@@ -616,7 +658,10 @@ class Job(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(String(32), index=True)  # "align"
+    kind: Mapped[str] = mapped_column(String(32), index=True)  # "align", "transcode", "tts"
+    # What a worker must advertise to claim it (lectern.queue.capability_for): "align",
+    # "transcode", "tts-kokoro", ... Filled from kind and payload at insert.
+    capability: Mapped[str] = mapped_column(String(48), index=True, default=_job_capability)
     work_id: Mapped[int | None] = mapped_column(
         ForeignKey("works.id", ondelete="CASCADE"), default=None, index=True
     )
