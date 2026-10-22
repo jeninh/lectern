@@ -7,6 +7,7 @@ visible only to its uploader (``404`` otherwise). Writes that create or file acc
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -123,11 +124,24 @@ def update_import(
     return imports.import_json(db, settings, imp, refresh=False)
 
 
-def _file(request, auth, db, settings, imp: Import, decision: imports.Decision, *, auto: bool):
+# Checked inside the filing transaction (``allowed``): an AI key's ``file`` scope.
+Allowed = Callable[[], bool] | None
+
+
+def _file(
+    request, auth, db, settings, imp: Import, decision: imports.Decision, *, auto: bool,
+    allowed: Allowed = None,
+):  # fmt: skip
     journal = Journal()
     with LIBRARY_LOCK:
         try:
             work, report = imports.file(db, settings, auth.user, imp, decision, journal, auto=auto)
+            # Last, after filing wrote (so this transaction holds SQLite's write lock and
+            # no other writer can commit until it does): a scope removed at any point before
+            # this read stops the filing, files and rows rolled back together.
+            db.flush()
+            if allowed is not None and not report.get("already_filed") and not allowed():
+                raise imports.ImportError_(403, "needs_file_scope")
             if not report.get("already_filed"):
                 audit.record(
                     db,
@@ -159,6 +173,15 @@ def complete_import(
 ) -> dict:
     """All files are uploaded: detect metadata and propose a match. With the uploader's
     ``auto_file_imports`` preference, a certain match is filed in the same call."""
+    return complete(request, auth, db, settings, import_id)
+
+
+def complete(
+    request, auth, db, settings, import_id: str, *, auto_file=True, allowed: Allowed = None
+) -> dict:
+    """``complete_import``; ``auto_file=False`` never files. ``allowed`` is checked right
+    before an auto-filing commits (an AI key's ``file`` scope); when it says no, the import
+    stays ready for review."""
     imp = _owned(db, auth, import_id)
     try:
         imports.complete(db, settings, auth.user, imp)
@@ -166,9 +189,9 @@ def complete_import(
         db.rollback()
         _raise(exc)
     db.commit()
-    if imports.auto_file_eligible(db, auth.user, imp):
+    if auto_file and imports.auto_file_eligible(db, auth.user, imp):
         try:
-            _file(request, auth, db, settings, imp, imports.Decision(), auto=True)
+            _file(request, auth, db, settings, imp, imports.Decision(), auto=True, allowed=allowed)
         except HTTPException:
             pass  # stays ready for review; the reason shows when the person files it
     return imports.import_json(db, settings, imp)
@@ -184,13 +207,21 @@ def file_import(
     body: imports.Decision,
     key: IdemKey = None,
 ) -> dict:
+    return file_decision(request, auth, db, settings, import_id, body, key)
+
+
+def file_decision(
+    request, auth, db, settings, import_id: str, body: imports.Decision, key=None,
+    *, allowed: Allowed = None,
+) -> dict:  # fmt: skip
+    """``file_import``; ``allowed`` as in ``_file``."""
     scope = f"import.file:{import_id}"
     payload = body.model_dump(mode="json")
     replay = idempotency.lookup(db, auth.user.id, scope, key, payload)
     if replay is not None:
         return replay
     imp = _owned(db, auth, import_id)
-    work, report = _file(request, auth, db, settings, imp, body, auto=False)
+    work, report = _file(request, auth, db, settings, imp, body, auto=False, allowed=allowed)
     out = {
         "import": imports.import_json(db, settings, imp, refresh=False),
         "work_id": work.id,

@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from lectern.models import KnownDevice, Passkey, Session, utcnow
 from lectern.routes.api.serializers import iso, passkey_json, session_json
-from lectern.security import audit, downloads
+from lectern.security import audit, downloads, stepup
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 from lectern.security.passwords import hash_password, validate_password_strength, verify_password
 from lectern.security.sessions import client_ip, revoke_all_sessions
@@ -134,11 +134,29 @@ def totp_disable(request: Request, auth: AuthCsrf, db: DbDep, body: PasswordIn) 
     return {"ok": True}
 
 
+@router.post("/step-up/options")
+def step_up_options(request: Request, auth: AuthCsrf, db: DbDep, settings: SettingsDep):
+    """A passkey challenge to confirm a sensitive action (``lectern.security.stepup``)."""
+    return stepup.options(request, db, auth.user, settings)
+
+
 @router.post("/passkeys/options")
-def passkey_options(request: Request, auth: AuthCsrf, db: DbDep, settings: SettingsDep):
+def passkey_options(
+    request: Request,
+    auth: AuthCsrf,
+    db: DbDep,
+    settings: SettingsDep,
+    body: stepup.StepUpIn | None = None,
+):
+    # A new passkey is itself a step-up factor, so a session alone cannot add one.
+    stepup.require(
+        request, db, auth.user, settings, body or stepup.StepUpIn(),
+        failed_action="passkey.step_up_failed",
+    )  # fmt: skip
+    stepup.commit_or_busy(db)  # a passkey step-up updated that passkey's counter
     existing = db.scalars(select(Passkey).where(Passkey.user_id == auth.user.id)).all()
     options_json, challenge = registration_options(settings, auth.user, existing)
-    key = request.app.state.challenges.put(challenge, auth.user.id)
+    key = request.app.state.challenges.put(challenge, auth.user.id, "register")
     resp = JSONResponse({"publicKey": options_json})
     resp.set_cookie(
         WA_REG_COOKIE,
@@ -154,7 +172,7 @@ def passkey_options(request: Request, auth: AuthCsrf, db: DbDep, settings: Setti
 
 @router.post("/passkeys/verify")
 async def passkey_verify(request: Request, auth: AuthCsrf, db: DbDep, settings: SettingsDep):
-    pending = request.app.state.challenges.pop(request.cookies.get(WA_REG_COOKIE))
+    pending = request.app.state.challenges.pop(request.cookies.get(WA_REG_COOKIE), "register")
     body = await request.json()
     if pending is None or pending.user_id != auth.user.id or not isinstance(body, dict):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Challenge expired; try again")

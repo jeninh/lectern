@@ -3,7 +3,7 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cacheKeys, controlled, downloadBook, MAGI, shot, signIn, userOf, workId } from "./helpers";
+import { cacheKeys, controlled, downloadBook, MAGI, PASSWORD, shot, signIn, userOf, workId } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -112,12 +112,13 @@ test("passkey sign-in asks for the passkey straight from the tap", async ({ page
     await cdp.send("WebAuthn.addVirtualAuthenticator", {
       options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
     });
-    const registered = await page.evaluate(async () => {
+    // Registering a passkey needs a step-up (the account password) in the options request.
+    const registered = await page.evaluate(async (password) => {
       const b64 = (s: string) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
       const u = (buf: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       const csrf = (await (await fetch("/api/me")).json()).csrf_token;
       const h = { "content-type": "application/json", "x-csrf-token": csrf };
-      const pk = JSON.parse((await (await fetch("/api/security/passkeys/options", { method: "POST", headers: h, body: "{}" })).json()).publicKey);
+      const pk = JSON.parse((await (await fetch("/api/security/passkeys/options", { method: "POST", headers: h, body: JSON.stringify({ password }) })).json()).publicKey);
       pk.challenge = b64(pk.challenge);
       pk.user.id = b64(pk.user.id);
       pk.excludeCredentials = [];
@@ -125,7 +126,7 @@ test("passkey sign-in asks for the passkey straight from the tap", async ({ page
       const r = cred.response as AuthenticatorAttestationResponse;
       const body = { id: cred.id, rawId: u(cred.rawId), type: cred.type, clientExtensionResults: {}, response: { clientDataJSON: u(r.clientDataJSON), attestationObject: u(r.attestationObject), transports: ["internal"] }, label: "Phone" };
       return (await fetch("/api/security/passkeys/verify", { method: "POST", headers: h, body: JSON.stringify(body) })).status;
-    });
+    }, PASSWORD);
     expect(registered).toBe(200);
     await context.clearCookies();
     await page.goto("/login");

@@ -114,6 +114,11 @@ const MESSAGES: Record<string, string> = {
   selection_changed: "The books in this view changed since you selected them. Select them again.",
   selection_empty: "Nothing in this view is selected any more.",
   staging_failed: "The server could not store that file. Try again later.",
+  step_up_required: "Confirm it’s you to give this key more permissions.",
+  step_up_failed: "That password or passkey did not confirm it’s you. Try again.",
+  readers_cannot_upload: "Readers cannot let an AI app add or file books.",
+  revoked: "This key was revoked.",
+  busy: "The server is busy filing a book. Try again in a moment.",
 };
 
 /** Plain-language text for an API error code (the code itself when there is none). */

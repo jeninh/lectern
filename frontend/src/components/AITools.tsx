@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Check, Close, Sparkle } from "./Icons";
+import { Check, Close, Pencil, Sparkle } from "./Icons";
 import { OverflowMenu } from "./Menu";
 import { Sheet } from "./Sheet";
 import { CopyButton, Value } from "../pages/AddDevice";
-import { get, post } from "../lib/api";
+import { ApiError, get, post } from "../lib/api";
 import {
   SCOPE_TEXT,
+  addedScopes,
+  sameScopes,
   claudeCodeCommand,
   claudeCodeJson,
   claudeDesktopConfig,
@@ -14,7 +16,9 @@ import {
   type AIKeyList,
   type AIScope,
   type CreatedAIKey,
+  type StepUpMethod,
 } from "../lib/aitools";
+import { StepUpForm, needsStepUp, type StepUpProof } from "./StepUp";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useInterval, useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
@@ -25,6 +29,7 @@ export function AIToolsSection() {
   const [data, setData] = useState<AIKeyList | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [confirm, setConfirm] = useState<AIKey | null>(null);
+  const [editing, setEditing] = useState<AIKey | null>(null);
   const load = useCallback(async () => setData(await get<AIKeyList>("/api/ai-keys")), []);
   useEffect(() => {
     load().catch(() => {});
@@ -58,7 +63,7 @@ export function AIToolsSection() {
         <p className="ai-empty">No AI apps connected.</p>
       ) : (
         <ul className="ai-keys" aria-label="AI keys" aria-busy={!data}>
-          {active.map((k) => <KeyRow key={k.id} k={k} now={now} onRevoke={() => setConfirm(k)} />)}
+          {active.map((k) => <KeyRow key={k.id} k={k} now={now} onEdit={() => setEditing(k)} onRevoke={() => setConfirm(k)} />)}
         </ul>
       )}
       {revoked.length > 0 && (
@@ -71,6 +76,20 @@ export function AIToolsSection() {
       <Sheet open={connecting} onClose={() => (setConnecting(false), load().catch(() => {}))} title="Connect an AI app" labelledBy="ai-connect-title">
         {connecting && data && <ConnectFlow list={data} onDone={() => (setConnecting(false), load().catch(() => {}))} onCreated={() => load().catch(() => {})} />}
       </Sheet>
+      <Sheet open={!!editing} onClose={() => setEditing(null)} title={`Edit “${editing?.label}”`} labelledBy="ai-edit-title">
+        {editing && data && (
+          <EditKey
+            k={editing}
+            list={data}
+            onCancel={() => setEditing(null)}
+            onSaved={(k) => {
+              toast(`Updated “${k.label}”`);
+              setEditing(null);
+              load().catch(() => {});
+            }}
+          />
+        )}
+      </Sheet>
       <Sheet open={!!confirm} onClose={() => setConfirm(null)} title={`Revoke “${confirm?.label}”?`} variant="dialog" labelledBy="ai-revoke-title">
         <p style={{ marginTop: 0 }}>The AI app loses access immediately. Books it added stay in the library.</p>
         <div className="sheet-actions">
@@ -82,7 +101,7 @@ export function AIToolsSection() {
   );
 }
 
-function KeyRow({ k, now, onRevoke }: { k: AIKey; now: number; onRevoke?: () => void }) {
+function KeyRow({ k, now, onEdit, onRevoke }: { k: AIKey; now: number; onEdit?: () => void; onRevoke?: () => void }) {
   const used = k.last_used_at ? `Last used ${relativeTime(k.last_used_at, now)}${k.last_client ? ` · ${k.last_client}` : ""}` : "Never used";
   return (
     <li className="ai-key" data-revoked={k.revoked_at ? true : undefined}>
@@ -94,6 +113,7 @@ function KeyRow({ k, now, onRevoke }: { k: AIKey; now: number; onRevoke?: () => 
         </span>
         <span className="caps" aria-label="Scopes">{k.scopes.map((s) => <span key={s} className="cap">{SCOPE_TEXT[s].label}</span>)}</span>
       </span>
+      {onEdit && <button type="button" className="btn sm ghost" onClick={onEdit} aria-label={`Edit ${k.label}`}><Pencil /> Edit</button>}
       {onRevoke && <OverflowMenu label={`Actions for ${k.label}`} actions={[{ label: "Revoke key", icon: <Close />, danger: true, onSelect: onRevoke }]} />}
     </li>
   );
@@ -113,6 +133,8 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
   const [err, setErr] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedAIKey | null>(null);
   const [status, setStatus] = useState<AIKey | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [methods, setMethods] = useState<StepUpMethod[]>(list.step_up);
   const headRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (created) headRef.current?.focus();
@@ -149,16 +171,22 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
   };
   const toggle = (s: AIScope) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
 
-  const create = async () => {
+  // Scopes beyond the defaults need a fresh password or passkey (the server decides).
+  const create = async (proof: StepUpProof = {}) => {
     setBusy(true);
     setErr(null);
     try {
-      const out = await post<CreatedAIKey>("/api/ai-keys", { label: label.trim(), scopes });
+      const out = await post<CreatedAIKey>("/api/ai-keys", { label: label.trim(), scopes, ...proof });
       setCreated(out);
       setStatus(out.key);
+      setConfirming(false);
       onCreated();
     } catch (e) {
-      setErr((e as Error).message);
+      if (e instanceof ApiError && needsStepUp(e.code)) {
+        setMethods((e.data?.methods as StepUpMethod[]) ?? methods);
+        setConfirming(true);
+      }
+      setErr(e instanceof ApiError && e.code === "step_up_required" ? null : (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -173,6 +201,20 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
       ))}
     </div>
   );
+
+  if (!created && confirming) {
+    const extra = scopes.filter((s) => !list.default_scopes.includes(s));
+    return (
+      <StepUpForm
+        intro={<>Confirm it’s you to create “{label.trim()}” with more than the default permissions: {extra.map((s) => SCOPE_TEXT[s].label).join(", ")}.</>}
+        methods={methods}
+        err={err}
+        cta="Confirm and create"
+        onConfirm={create}
+        onBack={() => (setConfirming(false), setErr(null))}
+      />
+    );
+  }
 
   if (!created) {
     return (
@@ -193,7 +235,7 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
             </label>
           ))}
         </fieldset>
-        <p className="hint">Start small; you can create another key with more later. Never: downloading books or audio, users, invites, keys, or server settings.</p>
+        <p className="hint">Start small; you can change this later with Edit. More than the defaults asks you to confirm it’s you. Never: downloading books or audio, users, invites, keys, or server settings.</p>
         <div className="sheet-actions">
           <button type="button" className="btn ghost" onClick={onDone}>Cancel</button>
           <button className="btn primary" disabled={busy || !label.trim() || scopes.length === 0}>{busy ? "Creating…" : "Create key"}</button>
@@ -251,6 +293,78 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
         <button type="button" className={`btn ${connected ? "primary" : ""}`} onClick={onDone}>{connected ? "Done" : "Close; keep waiting in the background"}</button>
       </div>
     </div>
+  );
+}
+
+/**
+ * Change what a key may do. The key is never shown again or rotated, so the AI app keeps
+ * working; the change applies to its next request. Removing permissions saves at once; adding
+ * any asks for a fresh passkey or password first (the server enforces both).
+ */
+function EditKey({ k, list, onCancel, onSaved }: { k: AIKey; list: AIKeyList; onCancel: () => void; onSaved: (k: AIKey) => void }) {
+  const [scopes, setScopes] = useState<AIScope[]>(k.scopes);
+  const [stage, setStage] = useState<"edit" | "confirm">("edit");
+  const [methods, setMethods] = useState<StepUpMethod[]>(list.step_up);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const added = addedScopes(k.scopes, scopes);
+  const toggle = (s: AIScope) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
+
+  /** Narrowing saves directly; a step-up error moves to the confirm stage. */
+  const save = async (proof: StepUpProof = {}) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const out = await post<{ key: AIKey }>(`/api/ai-keys/${k.id}/scopes`, { scopes, ...proof });
+      onSaved(out.key);
+    } catch (e) {
+      if (e instanceof ApiError && needsStepUp(e.code)) {
+        setMethods((e.data?.methods as StepUpMethod[]) ?? methods);
+        setStage("confirm");
+      }
+      setErr(e instanceof ApiError && e.code === "step_up_required" ? null : (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (stage === "confirm") {
+    return (
+      <StepUpForm
+        intro={<>Confirm it’s you to give “{k.label}” more permissions: {added.map((s) => SCOPE_TEXT[s].label).join(", ")}.</>}
+        methods={methods}
+        err={err}
+        onConfirm={save}
+        onBack={() => (setStage("edit"), setErr(null))}
+      />
+    );
+  }
+
+  return (
+    <form className="step-body ai-edit" onSubmit={(e) => (e.preventDefault(), added.length ? (setErr(null), setStage("confirm")) : save())}>
+      <p className="hint" style={{ marginTop: 0 }}>
+        <code>{k.prefix}…</code> stays the same, so you don’t need to set the app up again. Changes apply to its next request.
+      </p>
+      {err && <div className="alert error" role="alert">{err}</div>}
+      <fieldset className="check-list">
+        <legend>What it may do</legend>
+        {list.scopes.map((s) => (
+          <label key={s}>
+            <input type="checkbox" checked={scopes.includes(s)} onChange={() => toggle(s)} data-scope={s} />
+            <span><strong>{SCOPE_TEXT[s].label}</strong><span className="hint">{SCOPE_TEXT[s].detail}</span></span>
+          </label>
+        ))}
+      </fieldset>
+      <p className="hint" role="status" aria-live="polite">
+        {added.length ? "Adding permissions asks you to confirm it’s you." : "Removing permissions takes effect immediately."}
+      </p>
+      <div className="sheet-actions">
+        <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
+        <button className="btn primary" disabled={busy || scopes.length === 0 || sameScopes(scopes, k.scopes)}>
+          {busy ? "Saving…" : added.length ? "Continue" : "Save"}
+        </button>
+      </div>
+    </form>
   );
 }
 
