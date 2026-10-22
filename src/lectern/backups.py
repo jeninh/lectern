@@ -27,11 +27,15 @@ and before the next one.
 ``restore`` (``lectern restore``) refuses while a server holds ``<data>/lectern.lock``, checks
 the database copy, stages everything next to its destination, then swaps it in. Every file it
 replaces, library files included, is moved into ``<data>/pre-restore-<time>/``; if any step
-fails the swap is rolled back. The server migrates the schema on its next start.
+fails the swap is rolled back. Its plan is journalled first (``<data>/restore-journal.json``),
+so a crash or power loss part-way through can be finished (``lectern restore --resume``) or
+undone (``--undo``); the server refuses to start while the journal exists. The server
+migrates the schema on its next start.
 """
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import filecmp
 import json
@@ -683,40 +687,265 @@ def _check_revision(revision: str | None) -> None:
         )
 
 
-class _Swap:
-    """Put staged files in place, moving what they replace aside, and undo it all on failure.
+# --- restore journal --------------------------------------------------------------------------
+#
+# A restore writes its whole plan to <data>/restore-journal.json (fsynced) before it stages a
+# single file, so a crash, power loss, or kill -9 at any point leaves enough behind to finish
+# it (``lectern restore --resume``) or put everything back (``--undo``). Progress is not
+# logged: each step's state is read back from the files themselves, because a rename is atomic
+# and survives a power cut as a whole, while a separate progress record could run ahead of it.
+# While the journal exists, neither the server nor another restore starts.
 
-    Each step is recorded only after it happened, so ``rollback`` reverses exactly what was
-    done: a staged file moved in goes back out, and the original comes back from the aside."""
+JOURNAL_NAME = "restore-journal.json"
+JOURNAL_FORMAT = 1
 
-    def __init__(self) -> None:
-        self.steps: list[tuple[Path, Path | None]] = []  # (destination, where its original went)
 
-    def put(self, staged: Path, dest: Path, side: Path) -> None:
-        saved = None
-        if dest.exists() or dest.is_symlink():
-            saved = side
-            saved.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(dest, saved)
-        self.steps.append((dest, saved))
+def journal_path(settings: Settings) -> Path:
+    return settings.data_dir / JOURNAL_NAME
+
+
+def interrupted_restore(settings: Settings) -> str | None:
+    """Why nothing may use the data directory yet, or None when no restore was interrupted."""
+    path = journal_path(settings)
+    if not _exists(path):
+        return None
+    return (
+        f"a restore was interrupted ({path} is still there). Finish it with "
+        "`lectern restore --resume`, or put everything back as it was before the restore with "
+        "`lectern restore --undo`; see docs/backups.md, 'If a restore is interrupted'"
+    )
+
+
+def _exists(p: Path) -> bool:
+    return p.exists() or p.is_symlink()
+
+
+def _fsync(p: Path) -> None:
+    fd = os.open(p, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(p: Path) -> None:
+    if p.is_symlink():
+        return
+    if not p.is_dir():
+        _fsync(p)
+        return
+    for here, _dirs, files in os.walk(p):
+        for name in files:
+            if not os.path.islink(os.path.join(here, name)):
+                _fsync(Path(here) / name)
+        _fsync(Path(here))
+
+
+def _write_journal(path: Path, journal: dict) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(journal, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    _fsync(path.parent)
+
+
+def _moving(p: Path) -> Path:
+    """Where a move between volumes copies to before renaming the copy to ``p``."""
+    return p.with_name(f".{p.name}.lectern-moving")
+
+
+def _move(src: Path, dst: Path) -> None:
+    """Rename ``src`` to ``dst`` (which must not exist). Between volumes (library files kept in
+    pre-restore-*/ on a Pi), copy to a temporary name, make the copy durable, rename it to
+    ``dst``, and only then delete ``src``: one complete copy always exists under a known name."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(src, dst)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    tmp = _moving(dst)
+    _discard(tmp)
+    if src.is_dir() and not src.is_symlink():
+        shutil.copytree(src, tmp, symlinks=True)
+    else:
+        shutil.copy2(src, tmp, follow_symlinks=False)
+    _fsync_tree(tmp)
+    os.rename(tmp, dst)
+    _fsync(dst.parent)
+    _discard(src)
+
+
+def _step_paths(step: dict) -> tuple[Path, Path, Path | None]:
+    return Path(step["dest"]), Path(step["side"]), Path(step["staged"]) if step["staged"] else None
+
+
+def _step_forward(step: dict) -> None:
+    """Do one swap step, or what is left of it: move the original (``had``) aside, then rename
+    the staged copy into place. A step without ``staged`` only moves the original aside (a WAL
+    the restored database must not see). Safe to repeat after a crash at any point."""
+    dest, side, staged = _step_paths(step)
+    if staged is not None and not _exists(staged):
+        return  # already in place
+    if step["had"]:
+        if _exists(side):
+            _discard(dest)  # what a move between volumes had not deleted yet
+        else:
+            _move(dest, side)
+    if staged is not None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staged, dest)
 
-    def remove(self, dest: Path, side: Path) -> None:
-        """Move ``dest`` aside without replacing it (a WAL the restored DB must not see)."""
-        side.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(dest, side)
-        self.steps.append((dest, side))
 
-    def rollback(self) -> None:
-        for dest, saved in reversed(self.steps):
-            if dest.is_dir() and not dest.is_symlink():
-                shutil.rmtree(dest)
-            else:
-                dest.unlink(missing_ok=True)
-            if saved is not None:
-                shutil.move(saved, dest)
-        self.steps.clear()
+def _step_back(step: dict) -> None:
+    """Undo one swap step, whatever part of it happened: the original comes back from the side,
+    and the staged or restored copy goes. Safe to repeat after a crash at any point."""
+    dest, side, staged = _step_paths(step)
+    _discard(_moving(dest))
+    _discard(_moving(side))
+    if step["had"]:
+        if _exists(side):
+            _discard(dest)
+            _move(side, dest)
+    elif staged is not None and not _exists(staged):
+        _discard(dest)  # the restored copy; nothing was there before
+    if staged is not None:
+        _discard(staged)
+
+
+def _load_journal(settings: Settings) -> dict:
+    """The journal, refusing one that names a path outside the data directory and library."""
+    path = journal_path(settings)
+    try:
+        journal = json.loads(path.read_text())
+        if journal.get("format") != JOURNAL_FORMAT:
+            raise BackupError(f"{path} has an unknown format {journal.get('format')!r}")
+        paths = [
+            journal["aside"],
+            *journal["created"],
+            *(p for s in journal["steps"] for p in (s["dest"], s["side"], s["staged"]) if p),
+        ]
+        roots = (settings.data_dir, settings.library_dir)
+        for p in map(Path, paths):
+            if not p.is_absolute() or not any(_inside(p.parent, r) for r in roots):
+                raise BackupError(
+                    f"{path} names {p}, outside the data directory and the library; refusing "
+                    "to touch it"
+                )
+        scratch = journal.get("scratch")
+        if scratch and (
+            not Path(scratch).name.startswith(".restore-")
+            or Path(scratch).parent.resolve()
+            not in {settings.backup_dir.resolve(), settings.data_dir.resolve()}
+        ):
+            raise BackupError(f"{path} names an unexpected scratch folder {scratch}")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise BackupError(f"cannot read the restore journal {path}: {exc}") from None
+    return journal
+
+
+def _close(journal: dict, path: Path) -> None:
+    """Make every change durable, then drop the scratch copy (plaintext) and the journal."""
+    if journal.get("scratch"):
+        _discard(Path(journal["scratch"]))
+    os.sync()
+    path.unlink()
+    _fsync(path.parent)
+
+
+def _undo(journal: dict, path: Path) -> None:
+    if journal["phase"] == "finishing":
+        raise BackupError(
+            "the restore had already swapped every file in and was tidying up, so it can no "
+            "longer be undone; run `lectern restore --resume` to finish it. The files it "
+            f"replaced are in {journal['aside']}"
+        )
+    if journal["phase"] != "undoing":
+        journal["phase"] = "undoing"
+        _write_journal(path, journal)
+    for step in reversed(journal["steps"]):
+        _step_back(step)
+    _remove_created([Path(d) for d in journal["created"]])
+    _remove_empty_tree(Path(journal["aside"]))
+    _close(journal, path)
+
+
+def _finish(journal: dict, path: Path, data: Path) -> None:
+    """After the swap: drop replaced library files nobody asked to keep, tidy up."""
+    if journal["phase"] != "finishing":
+        os.sync()  # every rename durable before anything replaced is deleted
+        journal["phase"] = "finishing"
+        _write_journal(path, journal)
+    for step in journal["steps"]:
+        if not step["keep"]:
+            _discard(Path(step["side"]))  # a file, or a folder that sat where a file belongs
+    _remove_empty_tree(Path(journal["aside"]))
+    for name in ("lectern.db", "secret_key", "restored-lectern.env"):
+        if (data / name).is_file():
+            _private(data / name)
+    _close(journal, path)
+
+
+def _report(journal: dict, data: Path, log_fn) -> dict:
+    s, aside = journal["summary"], Path(journal["aside"])
+    moved = aside.is_dir()
+    config_copy = data / "restored-lectern.env"
+    has_config = any(Path(step["dest"]) == config_copy for step in journal["steps"])
+    result = {
+        "created_at": s.get("created_at"),
+        "lectern_version": s.get("lectern_version"),
+        "schema_revision": s.get("schema_revision"),
+        "moved_aside": str(aside) if moved else None,
+        "library_files": s.get("library_files", 0),
+        "config_copy": str(config_copy) if has_config else None,
+    }
+    log_fn(
+        f"restored the backup from {result['created_at']} (Lectern {result['lectern_version']}); "
+        f"{result['library_files']} library file(s) restored."
+    )
+    if moved:
+        log_fn(f"the files it replaced are in {aside}")
+    if has_config:
+        log_fn(f"the LECTERN_* settings it ran with are in {config_copy}; compare with your .env")
+    return result
+
+
+def _server_running() -> BackupError:
+    return BackupError(
+        "Lectern is running on this data directory. Stop it first "
+        "(lectern-compose stop lectern), then run the restore again."
+    )
+
+
+def recover(settings: Settings, action: str, *, log_fn=print) -> dict | None:
+    """Finish (``resume``) or undo (``undo``) a restore that was interrupted. Undo puts back
+    exactly what was there before, byte for byte; resume returns the restore's result."""
+    path = journal_path(settings)
+    if not _exists(path):
+        raise BackupError(f"there is no interrupted restore to {action} (no {path})")
+    with _exclusive(settings.data_dir / "lectern.lock", _server_running()):
+        journal = _load_journal(settings)
+        if action == "undo":
+            _undo(journal, path)
+            log_fn("the interrupted restore was undone; everything is as it was before it.")
+            return None
+        if journal["phase"] == "staging":
+            raise BackupError(
+                "the restore was interrupted while copying files, before it changed anything; "
+                "run `lectern restore --undo` to clear what it left, then restore again"
+            )
+        if journal["phase"] == "undoing":
+            raise BackupError(
+                "undoing the restore was interrupted; run `lectern restore --undo` again"
+            )
+        for step in journal["steps"]:
+            _step_forward(step)
+        _finish(journal, path, settings.data_dir)
+        return _report(journal, settings.data_dir, log_fn)
 
 
 def _regular(p: Path) -> bool:
@@ -732,15 +961,18 @@ def _links_in(root: Path) -> list[Path]:
     return out
 
 
-def _mkparents(path: Path, created: list[Path]) -> None:
-    """``mkdir -p path``, recording each folder it creates (outermost first)."""
-    missing = []
-    for d in (path, *path.parents):
-        if d.exists():
-            break
-        missing.append(d)
-    path.mkdir(parents=True, exist_ok=True)
-    created += reversed(missing)
+def _missing_dirs(paths: list[Path]) -> list[Path]:
+    """Folders among ``paths`` and their parents that do not exist yet, outermost first: the
+    ones a restore creates, and removes again when it is undone."""
+    out: dict[Path, None] = {}
+    for path in paths:
+        missing = []
+        for d in (path, *path.parents):
+            if d.exists():
+                break
+            missing.append(d)
+        out.update(dict.fromkeys(reversed(missing)))
+    return list(out)
 
 
 def _remove_created(created: list[Path]) -> None:
@@ -764,11 +996,11 @@ def _remove_empty_tree(root: Path) -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def _stage_copy(src: Path, dest: Path, tag: str, created: list[Path]) -> Path:
-    """Copy ``src`` next to ``dest`` (same filesystem, so the swap is a rename). Folders are
-    copied file by file through ``_walk``: regular files only, symlinks never followed."""
-    _mkparents(dest.parent, created)
-    staged = dest.with_name(f".{dest.name}.{tag}")
+def _stage_copy(src: Path, staged: Path) -> None:
+    """Copy ``src`` to ``staged``, next to its destination (same filesystem, so the swap is a
+    rename). Folders are copied file by file through ``_walk``: regular files only, symlinks
+    never followed."""
+    staged.parent.mkdir(parents=True, exist_ok=True)
     if src.is_dir():
         staged.mkdir()
         for f in _walk(src):
@@ -777,7 +1009,6 @@ def _stage_copy(src: Path, dest: Path, tag: str, created: list[Path]) -> Path:
             shutil.copy2(f, target)
     else:
         shutil.copy2(src, staged)
-    return staged
 
 
 def _size(p: Path) -> int:
@@ -839,6 +1070,17 @@ def _check_space(items: list[tuple[Path, Path, Path, bool]]) -> None:
         )
 
 
+@contextmanager
+def _scratch(parent: Path) -> Iterator[Path]:
+    """A private scratch folder for the snapshot, removed afterwards (it holds plaintext). The
+    restore journal records it, so recovery removes it too after a crash."""
+    tmp = Path(tempfile.mkdtemp(prefix=".restore-", dir=parent))
+    try:
+        yield tmp
+    finally:
+        _discard(tmp)
+
+
 def restore(
     settings: Settings,
     source: str = "latest",
@@ -849,27 +1091,23 @@ def restore(
 ) -> dict:
     """Restore restic snapshot ``source`` (an id, ``latest``, or ``restic:<id>``).
 
-    Refuses while a server runs on this data directory, when the snapshot holds a symlink or a
-    path that would land outside the library, and when a volume lacks the free space.
-    Replaced data files go to ``<data>/pre-restore-<time>/``; replaced library files go to its
-    ``library/`` folder, or, with ``keep_replaced`` off (``LECTERN_RESTORE_KEEP_REPLACED``),
-    are deleted once the restore succeeded. Library files are never otherwise deleted. A
-    failure part-way through rolls everything back."""
+    Refuses while a server runs on this data directory, while an interrupted restore is
+    unresolved (``recover``), when the snapshot holds a symlink or a path that would land
+    outside the library, and when a volume lacks the free space. Replaced data files go to
+    ``<data>/pre-restore-<time>/``; replaced library files go to its ``library/`` folder, or,
+    with ``keep_replaced`` off (``LECTERN_RESTORE_KEEP_REPLACED``), are deleted once the
+    restore succeeded. Library files are never otherwise deleted. A failure part-way through
+    rolls everything back; a crash leaves the journal for ``recover``."""
     data, library = settings.data_dir, settings.library_dir
     if keep_replaced is None:
         keep_replaced = settings.restore_keep_replaced
     data.mkdir(parents=True, exist_ok=True)
     snap = source.removeprefix("restic:") or "latest"
-    with _exclusive(
-        data / "lectern.lock",
-        BackupError(
-            "Lectern is running on this data directory. Stop it first "
-            "(lectern-compose stop lectern), then run the restore again."
-        ),
-    ):
+    with _exclusive(data / "lectern.lock", _server_running()):
+        if pending := interrupted_restore(settings):
+            raise BackupError(pending)
         scratch_parent = settings.backup_dir if os.access(settings.backup_dir, os.W_OK) else data
-        with tempfile.TemporaryDirectory(prefix=".restore-", dir=scratch_parent) as tmp:
-            tmp_path = Path(tmp)
+        with _scratch(scratch_parent) as tmp_path:
             log_fn(f"restoring restic snapshot {snap} into scratch space…")
             _restic(
                 settings,
@@ -943,8 +1181,12 @@ def restore(
             for sub in DATA_SUBDIRS:
                 if (stage / "data" / sub).is_dir():
                     items.append((stage / "data" / sub, data / sub, aside / sub, True))
+            if _regular(stage / "config" / "lectern.env"):
+                env = data / "restored-lectern.env"
+                items.append((stage / "config" / "lectern.env", env, aside / env.name, True))
             library_files_n = 0
             if restore_library:
+                library.mkdir(parents=True, exist_ok=True)
                 seen: set[Path] = set()
                 for src_root in sources:
                     for f in _walk(src_root):
@@ -970,75 +1212,76 @@ def restore(
                         library_files_n += 1
             _check_space(items)
 
-            # 2. Stage everything next to its destination. Nothing existing changes yet, so a
-            #    full disk or a read error here leaves the server exactly as it was.
-            plan: list[tuple[Path, Path, Path, bool]] = []  # (staged, destination, side, keep)
-            created: list[Path] = []  # folders we made, removed again if the restore fails
+            # The swap's steps, in order: the WAL and shared memory the restored database must
+            # not see go aside first, then each staged copy replaces its destination.
+            steps = [
+                {
+                    "dest": str(data / n),
+                    "staged": None,
+                    "side": str(aside / n),
+                    "keep": True,
+                    "had": True,
+                }
+                for n in ("lectern.db-wal", "lectern.db-shm")
+                if _exists(data / n)
+            ]
+            for _src, dest, side, keep in items:
+                staged = dest.with_name(f".{dest.name}.{tag}")
+                steps.append(
+                    {
+                        "dest": str(dest),
+                        "staged": str(staged),
+                        "side": str(side),
+                        "keep": keep,
+                        "had": _exists(dest),
+                    }
+                )
+            journal = {
+                "format": JOURNAL_FORMAT,
+                "phase": "staging",
+                "aside": str(aside),
+                "scratch": str(tmp_path),
+                "created": [str(d) for d in _missing_dirs([d for _, d, _, _ in items])],
+                "steps": steps,
+                "summary": {
+                    "created_at": manifest.get("created_at"),
+                    "lectern_version": manifest.get("lectern_version"),
+                    "schema_revision": manifest.get("schema_revision"),
+                    "library_files": library_files_n,
+                },
+            }
+            jpath = journal_path(settings)
             try:
-                for src, dest, side, keep in items:
-                    plan.append((_stage_copy(src, dest, tag, created), dest, side, keep))
-            except BaseException:
-                for staged, *_ in plan:
-                    _discard(staged)
-                _remove_created(created)
-                raise
-
-            # 3. Swap: move originals aside and staged files in, rolling back on any failure.
-            swap = _Swap()
+                _write_journal(jpath, journal)
+            except OSError as exc:
+                for p in (jpath, jpath.with_name(f".{jpath.name}.tmp")):
+                    p.unlink(missing_ok=True)
+                raise BackupError(f"cannot write {jpath}; nothing was changed: {exc}") from exc
             try:
-                for name in ("lectern.db-wal", "lectern.db-shm"):
-                    if (data / name).exists():
-                        swap.remove(data / name, aside / name)
-                for staged, dest, side, _keep in plan:
-                    swap.put(staged, dest, side)
+                # 2. Stage everything next to its destination. Nothing existing changes yet,
+                #    so a full disk or a read error here leaves the server exactly as it was.
+                for (src, *_), step in zip(items, steps[-len(items) :], strict=True):
+                    _stage_copy(src, Path(step["staged"]))
+                os.sync()  # every staged copy durable before the first original moves
+                journal["phase"] = "swapping"
+                _write_journal(jpath, journal)
+                # 3. Swap: move originals aside and staged files in.
+                for step in steps:
+                    _step_forward(step)
             except BaseException as exc:
                 try:
-                    swap.rollback()
+                    _undo(journal, jpath)
                 except Exception as rb:  # noqa: BLE001
                     raise BackupError(
-                        f"restore failed ({exc}) and could not be fully undone ({rb}); the "
-                        f"original files are in {aside} (and next to library files as "
-                        f".<name>.replaced-{tag}); see docs/backups.md, 'If a restore is "
-                        "interrupted'"
+                        f"restore failed ({exc}) and could not be fully undone ({rb}); run "
+                        "`lectern restore --undo` to finish undoing it, see docs/backups.md, "
+                        "'If a restore is interrupted'"
                     ) from exc
-                finally:
-                    for staged, *_ in plan:
-                        _discard(staged)
-                _remove_created(created)
-                _remove_empty_tree(aside)
                 raise BackupError(f"restore failed and was undone; nothing changed: {exc}") from exc
-            for _staged, _dest, side, keep in plan:
-                if not keep:
-                    _discard(side)  # a file, or a folder that sat where a file is restored
-            _remove_empty_tree(aside)
-            _private(data / "lectern.db")
-            if (data / "secret_key").is_file():
-                _private(data / "secret_key")
 
             pw = restic_password_file(settings)
             if _regular(stage / "secrets" / "restic-password") and not pw.exists():
                 shutil.copy2(stage / "secrets" / "restic-password", pw)
                 _private(pw)
-            config_copy = None
-            if _regular(stage / "config" / "lectern.env"):
-                config_copy = data / "restored-lectern.env"
-                shutil.copy2(stage / "config" / "lectern.env", config_copy)
-                _private(config_copy)
-    moved = aside.is_dir()
-    result = {
-        "created_at": manifest.get("created_at"),
-        "lectern_version": manifest.get("lectern_version"),
-        "schema_revision": manifest.get("schema_revision"),
-        "moved_aside": str(aside) if moved else None,
-        "library_files": library_files_n,
-        "config_copy": str(config_copy) if config_copy else None,
-    }
-    log_fn(
-        f"restored the backup from {result['created_at']} (Lectern {result['lectern_version']}); "
-        f"{library_files_n} library file(s) restored."
-    )
-    if moved:
-        log_fn(f"the files it replaced are in {aside}")
-    if config_copy:
-        log_fn(f"the LECTERN_* settings it ran with are in {config_copy}; compare with your .env")
-    return result
+            _finish(journal, jpath, data)
+    return _report(journal, data, log_fn)

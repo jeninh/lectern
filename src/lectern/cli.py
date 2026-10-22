@@ -10,7 +10,8 @@
 - ``lectern align-bench EPUB AUDIO...``: run the whole alignment offline and print timing,
   coverage, memory, and hardware (docs/alignment.md, "Benchmark").
 - ``lectern backup [--list]``: back up now with the settings saved in Admin, or list backups.
-- ``lectern restore [SNAPSHOT]``: restore a backup with the server stopped (docs/backups.md).
+- ``lectern restore [SNAPSHOT]``: restore a backup with the server stopped; ``--resume`` or
+  ``--undo`` an interrupted one (docs/backups.md).
 """
 
 from __future__ import annotations
@@ -362,12 +363,19 @@ def restore(args: argparse.Namespace) -> None:
             update={"backup_restic_password_file": args.restic_password_file}
         )
     try:
-        backups.restore(
-            settings,
-            args.source,
-            restore_library=not args.no_library,
-            keep_replaced=False if args.no_pre_restore_copy else None,
-        )
+        if args.undo:
+            backups.recover(settings, "undo")
+            print("Start Lectern again.")
+            return
+        if args.resume:
+            backups.recover(settings, "resume")
+        else:
+            backups.restore(
+                settings,
+                args.source,
+                restore_library=not args.no_library,
+                keep_replaced=False if args.no_pre_restore_copy else None,
+            )
     except backups.BackupError as exc:
         sys.exit(f"restore failed: {exc}")
     print("done. Start Lectern again; it migrates the database on start if needed.")
@@ -490,7 +498,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="Restore a backup into LECTERN_DATA_DIR and LECTERN_LIBRARY_DIR. Refuses "
         "while a server runs on the data directory. Replaced files are moved to "
         "<data>/pre-restore-<time>/ (library files too); library files are never deleted. A "
-        "failure part-way through is rolled back.",
+        "failure part-way through is rolled back. After a crash or power loss part-way "
+        "through, Lectern will not start until you run --resume or --undo.",
+    )
+    recovery = r.add_mutually_exclusive_group()
+    recovery.add_argument(
+        "--resume", action="store_true", help="finish a restore that was interrupted"
+    )
+    recovery.add_argument(
+        "--undo",
+        action="store_true",
+        help="put back everything an interrupted restore had changed, exactly as it was",
     )
     r.add_argument(
         "source",

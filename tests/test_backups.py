@@ -515,15 +515,15 @@ def test_a_restore_that_fails_part_way_is_rolled_back(
     db_before = bsettings.db_path.read_bytes()
     secret_before = (bsettings.data_dir / "secret_key").read_bytes()
 
-    real_put, calls = backups._Swap.put, []
+    real_step, calls = backups._step_forward, []
 
-    def failing_put(self, staged, dest, aside_rel):
-        calls.append(dest)
-        if dest.name == "cover.jpg":  # the last file, after the DB, key, and book.json
+    def failing_step(step):
+        calls.append(step["dest"])
+        if step["dest"].endswith("cover.jpg"):  # the last file, after the DB, key, and book.json
             raise OSError(28, "No space left on device")
-        return real_put(self, staged, dest, aside_rel)
+        return real_step(step)
 
-    monkeypatch.setattr(backups._Swap, "put", failing_put)
+    monkeypatch.setattr(backups, "_step_forward", failing_step)
     with pytest.raises(SystemExit) as exc:
         _restore(bsettings, monkeypatch)
     assert "undone" in str(exc.value) and "No space left" in str(exc.value)
@@ -539,6 +539,185 @@ def test_a_restore_that_fails_part_way_is_rolled_back(
     assert not list(bsettings.data_dir.glob("pre-restore-*"))
     assert not list(bsettings.data_dir.glob(".*.restore-*"))
     assert not list(bsettings.library_dir.rglob(".*.restore-*"))
+    assert not backups.journal_path(bsettings).exists()
+
+
+# Run in a child process that SIGKILLs itself at one point of the swap: no finally blocks, no
+# rollback, exactly what a crash or `kill -9` leaves. "cross-volume" makes every rename between
+# the data directory and the library fail with EXDEV, like a Pi with the library on USB, and
+# dies after the original was copied to pre-restore-*/ but before it was deleted.
+_KILL_SCRIPT = """
+import errno, os, signal, sys
+from pathlib import Path
+from lectern import backups, cli, config
+
+settings = config.Settings.model_validate_json(sys.argv[1])
+victim, cross = Path(sys.argv[2]), sys.argv[3] == "cross-volume"
+config.get_settings = lambda: settings
+real_rename, real_move, real_discard = os.rename, backups._move, backups._discard
+
+
+def crosses(a, b):
+    sides = {Path(p).resolve().is_relative_to(settings.library_dir.resolve()) for p in (a, b)}
+    return len(sides) == 2
+
+
+def rename(src, dst, *a, **kw):
+    if cross and crosses(src, dst):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+    return real_rename(src, dst, *a, **kw)
+
+
+def move(src, dst):
+    real_move(src, dst)
+    if src == victim:  # the original is aside; its staged copy is not in place yet
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def discard(p):
+    if cross and p == victim:  # copied to the other volume, not yet deleted
+        os.kill(os.getpid(), signal.SIGKILL)
+    real_discard(p)
+
+
+os.rename, backups._move, backups._discard = rename, move, discard
+cli.main(["restore"])
+"""
+
+
+def _tree(*roots: Path) -> dict[str, bytes | str]:
+    """Everything under ``roots``: file bytes, and folders as such (empty ones too)."""
+    out: dict[str, bytes | str] = {}
+    for root in roots:
+        for p in sorted(root.rglob("*")):
+            key = str(p)
+            if p.is_symlink():
+                out[key] = f"link:{os.readlink(p)}"
+            elif p.is_dir():
+                out[key] = "dir"
+            elif p.name != "lectern.lock":
+                out[key] = p.read_bytes()
+    return out
+
+
+@pytest.mark.parametrize("volumes", ["same-volume", "cross-volume"])
+@pytest.mark.parametrize("action", ["undo", "resume"])
+def test_a_restore_killed_mid_swap_is_undone_byte_for_byte_or_resumed(
+    bclient, bowner, bsettings, monkeypatch, tmp_path, action, volumes
+):
+    """#16: kill -9 part-way through the swap. The server refuses to start until the restore is
+    resumed or undone; --undo brings back the exact pre-restore state, --resume finishes it."""
+    import subprocess
+    import sys
+
+    work = _add_book(bsettings, "Crash")
+    assert _run(bsettings)["last_result"] == "ok"
+    book_json_backup = (work / "book.json").read_bytes()
+    make_user(bclient, bowner["csrf"], "later", "member")
+    (work / "book.json").write_text('{"edited": "after the backup"}')
+    (work / "cover.jpg").unlink()  # restored after book.json, so not started at the kill
+    (bsettings.library_dir / "Empty shelf").mkdir()  # an empty folder must survive the undo
+    _stop(bclient)
+    before = _tree(bsettings.data_dir, bsettings.library_dir)
+
+    script = tmp_path / "kill_restore.py"
+    script.write_text(_KILL_SCRIPT)
+    proc = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            str(script),
+            bsettings.model_dump_json(),
+            str(work / "book.json"),
+            volumes,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert proc.returncode == -9, proc.stderr
+    journal = backups.journal_path(bsettings)
+    assert journal.is_file()
+    assert _usernames(bsettings) == {"owner"}  # the database was already swapped in
+    if volumes == "cross-volume":
+        assert (work / "book.json").is_file()  # copied aside, not yet deleted
+    else:
+        assert not (work / "book.json").exists()  # moved aside, staged copy not yet in
+    assert list(bsettings.library_dir.rglob(".*.restore-*"))  # staged copies left behind
+
+    # Nothing starts on a half-restored data directory.
+    with pytest.raises(RuntimeError, match="restore was interrupted"):
+        with TestClient(create_app(bsettings, start_watcher=False, start_background=False)):
+            pass
+    with pytest.raises(SystemExit, match="--resume"):
+        _restore(bsettings, monkeypatch)
+
+    if volumes == "cross-volume":
+        real_rename, library = os.rename, bsettings.library_dir.resolve()
+
+        def rename(src, dst, *a, **kw):
+            sides = {Path(p).resolve().is_relative_to(library) for p in (src, dst)}
+            if len(sides) == 2:
+                raise OSError(18, "Invalid cross-device link")
+            return real_rename(src, dst, *a, **kw)
+
+        monkeypatch.setattr(os, "rename", rename)
+    _restore(bsettings, monkeypatch, f"--{action}")
+    monkeypatch.undo()
+    assert not journal.exists()
+    assert not list(bsettings.backup_dir.glob(".restore-*"))  # the plaintext scratch copy
+    assert not list(bsettings.data_dir.glob(".restore-*"))
+
+    if action == "undo":
+        assert _tree(bsettings.data_dir, bsettings.library_dir) == before
+        expected_users = {"owner", "later"}
+    else:
+        assert (work / "book.json").read_bytes() == book_json_backup
+        assert (work / "cover.jpg").is_file()
+        assert not list(bsettings.library_dir.rglob(".*.restore-*"))
+        assert not list(bsettings.library_dir.rglob(".*.lectern-moving"))
+        aside = next(bsettings.data_dir.glob("pre-restore-*"))
+        rel = work.relative_to(bsettings.library_dir)
+        assert (aside / "library" / rel / "book.json").read_text() == (
+            '{"edited": "after the backup"}'
+        )
+        assert (aside / "lectern.db").read_bytes() == before[str(bsettings.db_path)]
+        expected_users = {"owner"}
+    with TestClient(create_app(bsettings, start_watcher=False, start_background=False)) as c:
+        login(c, "owner", OWNER_PASSWORD)
+    assert _usernames(bsettings) == expected_users
+
+
+def test_resume_and_undo_without_an_interrupted_restore(bsettings, monkeypatch):
+    for action in ("--resume", "--undo"):
+        with pytest.raises(SystemExit, match="no interrupted restore"):
+            _restore(bsettings, monkeypatch, action)
+
+
+def test_a_journal_naming_paths_outside_the_data_and_library_is_refused(
+    bclient, bsettings, monkeypatch, tmp_path
+):
+    _stop(bclient)
+    victim = tmp_path / "elsewhere" / "precious"
+    victim.parent.mkdir()
+    victim.write_text("keep me")
+    step = {"dest": str(victim), "staged": None, "side": str(victim) + ".x", "keep": True}
+    backups.journal_path(bsettings).write_text(
+        json.dumps(
+            {
+                "format": backups.JOURNAL_FORMAT,
+                "phase": "swapping",
+                "aside": str(bsettings.data_dir / "pre-restore-x"),
+                "scratch": None,
+                "created": [],
+                "steps": [step | {"had": True}],
+                "summary": {},
+            }
+        )
+    )
+    with pytest.raises(SystemExit, match="outside the data directory"):
+        _restore(bsettings, monkeypatch, "--undo")
+    assert victim.read_text() == "keep me"
 
 
 def test_restore_on_a_fresh_machine_needs_the_saved_password(

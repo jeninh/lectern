@@ -104,6 +104,9 @@ def create_app(
     async def lifespan(app: FastAPI):
         # `lectern restore` refuses while any server holds this (shared) lock.
         with backups.server_lock(settings):
+            if interrupted := backups.interrupted_restore(settings):
+                log.error("Lectern will not start: %s", interrupted)
+                raise RuntimeError(f"Lectern will not start: {interrupted}")
             async with _serve(app):
                 yield
 
