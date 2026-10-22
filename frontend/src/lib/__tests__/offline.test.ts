@@ -65,14 +65,14 @@ describe("parseRange", () => {
   });
 });
 
-function memoryQueue(results: SendResult[]) {
+function memoryQueue(results: (SendResult | Promise<SendResult>)[]) {
   const rows = new Map<string, QueuedPosition>();
-  const sent: { e: QueuedPosition; keep: boolean }[] = [];
+  const sent: { e: QueuedPosition; keep: boolean; expect?: string | null }[] = [];
   const synced: [string, string | null][] = [];
   const q = new PositionQueue(
     { all: async () => [...rows.values()], put: async (e) => void rows.set(e.key, e), del: async (k) => void rows.delete(k) },
-    async (e, { keep }) => {
-      sent.push({ e, keep });
+    async (e, { keep, expect }) => {
+      sent.push({ e, keep, expect });
       return results.shift() ?? { ok: false, conflict: false, retry: true };
     },
     (e, seenAt) => synced.push([e.key, seenAt]),
@@ -117,6 +117,8 @@ describe("offline position queue", () => {
     await a.q.flush();
     await a.q.resolve("work:7", "mine");
     expect(a.sent.map((s) => s.keep)).toEqual([false, true]);
+    // ...naming the server position the prompt showed, so the server can compare-and-set.
+    expect(a.sent[1].expect).toBe("2026-10-21T11:30:00Z");
     expect(a.rows.size).toBe(0);
 
     const b = memoryQueue([{ ok: false, conflict: true, server, recordedAt: null }]);
@@ -126,6 +128,60 @@ describe("offline position queue", () => {
     expect(b.rows.size).toBe(0);
     expect(b.sent).toHaveLength(1);
     expect(b.synced).toEqual([["work:7", "2026-10-21T11:30:00Z"]]);
+  });
+
+  it("'keep mine' that meets a save made after the prompt asks again with the newer position", async () => {
+    const shown = { device: "Kobo", received_at: "2026-10-21T11:30:00Z" };
+    const newer = { device: "Kobo", received_at: "2026-10-21T11:50:00Z" };
+    const { q, rows, sent } = memoryQueue([
+      { ok: false, conflict: true, server: shown, recordedAt: null },
+      { ok: false, conflict: true, server: newer, recordedAt: null },
+      { ok: true, seenAt: "2026-10-21T12:00:03Z", server: null },
+    ]);
+    await q.add(pos(9));
+    await q.flush();
+    await q.resolve("work:7", "mine");
+    expect(rows.get("work:7")?.conflict?.server).toEqual(newer);
+    await q.resolve("work:7", "mine");
+    expect(sent.map((s) => s.expect)).toEqual([undefined, shown.received_at, newer.received_at]);
+    expect(rows.size).toBe(0);
+  });
+
+  it("an online save during a flush is not undone when the flush's answer arrives", async () => {
+    // The flush has sent the queued position; the reader then saves online (dropping it), and
+    // only then does the server answer the flush with a conflict.
+    let answer!: (r: SendResult) => void;
+    const { q, rows } = memoryQueue([new Promise<SendResult>((r) => (answer = r))]);
+    await q.add(pos(3));
+    const flushing = q.flush();
+    await new Promise((r) => setTimeout(r, 0));
+    await q.drop("work", 7, "2026-10-21T11:59:00Z");
+    answer({ ok: false, conflict: true, server: { device: "Kobo", received_at: "2026-10-21T11:30:00Z" }, recordedAt: null });
+    const r = await flushing;
+    expect(rows.size).toBe(0);
+    expect(r.conflicts).toEqual([]);
+  });
+
+  it("a newer position queued during a flush survives the older one syncing", async () => {
+    let answer!: (r: SendResult) => void;
+    const { q, rows, synced } = memoryQueue([new Promise<SendResult>((r) => (answer = r))]);
+    await q.add(pos(3));
+    const flushing = q.flush();
+    await new Promise((r) => setTimeout(r, 0));
+    await q.add(pos(8, "2026-10-21T11:10:00Z"));
+    answer({ ok: true, seenAt: "2026-10-21T12:00:01Z", server: null });
+    expect((await flushing).pending).toBe(1);
+    expect(rows.get("work:7")?.body.sentence_n).toBe(8);
+    expect(synced).toEqual([]);
+  });
+
+  it("an online save keeps a position recorded after it", async () => {
+    const { q, rows } = memoryQueue([]);
+    await q.add(pos(8, "2026-10-21T11:10:00Z"));
+    await q.drop("work", 7, "2026-10-21T11:05:00Z");
+    expect(rows.size).toBe(1);
+    await q.drop("work", 7, "2026-10-21T11:10:00Z");
+    expect(rows.size).toBe(0);
   });
 
   it("stops at the first network failure and keeps the rest, but drops what the server will never take", async () => {

@@ -2,6 +2,7 @@
 // Origin header itself, which the server checks for same-site.
 
 import { isNetworkError, reportReachable, reportUnreachable } from "./offline/net";
+import { finishSignOut, markSignOut, signOutToken } from "./offline/signout";
 
 let csrfToken = "";
 let onUnauthorized: () => Promise<void> = async () => {};
@@ -214,21 +215,23 @@ export async function putChunk(id: string, offset: number, digest: string, body:
   throw new ApiError(res.status, `Unexpected ${res.status}`);
 }
 
-/** Sign out. `beforeLeave` deletes what the installed app keeps on this device first. */
-export async function logout(beforeLeave?: () => Promise<void>) {
+/**
+ * Sign out. `wipe` deletes what the installed app keeps on this device; it runs before the
+ * server is asked, so nothing is left behind even when the server cannot be reached. Then the
+ * server session ends, now or (offline) on the next start or reconnect (lib/offline/signout.ts).
+ */
+export async function logout(wipe: (opts: { keepWorker: boolean }) => Promise<void>) {
+  // Read the token before the wipe deletes the stored copy.
+  markSignOut(await signOutToken(csrfToken));
+  csrfToken = "";
   try {
-    await beforeLeave?.();
+    // Keep the app shell so an offline phone can still show that it is signing out.
+    await wipe({ keepWorker: true });
   } catch {
     /* the server's Clear-Site-Data still clears it */
   }
-  const form = document.createElement("form");
-  form.method = "post";
-  form.action = "/logout";
-  const input = document.createElement("input");
-  input.type = "hidden";
-  input.name = "csrf_token";
-  input.value = csrfToken;
-  form.appendChild(input);
-  document.body.appendChild(form);
-  form.submit();
+  if (await finishSignOut()) {
+    await wipe({ keepWorker: false }).catch(() => {});
+    window.location.assign("/login");
+  } else window.location.assign("/app");
 }

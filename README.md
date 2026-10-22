@@ -320,6 +320,7 @@ and bursts of calls raise alerts. Keep it private: no Funnel, no public exposure
 | `LECTERN_INSECURE_HTTP` | `0` | Drop the Secure cookie flag (development only) |
 | `LECTERN_SECRET_KEY` | generated | Signing key; persisted under the data dir if unset |
 | `LECTERN_SESSION_TTL_SECONDS` | 30 days | Browser session lifetime |
+| `LECTERN_OFFLINE_MAX_AGE_SECONDS` | 14 days | How long the installed app keeps downloads without reaching the server ([offline.md](docs/offline.md#signing-out)) |
 | `LECTERN_LOGIN_MAX_FAILURES` | 5 | Failures per account before lockout |
 | `LECTERN_LOGIN_LOCKOUT_SECONDS` | 900 | Lockout window |
 | `LECTERN_RATE_LIMIT_PER_MINUTE` | 60 | Per-IP limit on OPDS/sync auth attempts |

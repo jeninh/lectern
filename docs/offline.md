@@ -119,12 +119,21 @@ difference between the phone's and the server's time at sending):
   position wins: it is the latest.
 - If another device saved one **after** the queued position was recorded, Lectern asks:
   *"While this device was offline you were at page 5 in Field Notes (12 min ago). Later, Kobo
-  Libra saved page 2 (3 min ago)."* **Keep this device's** sends it again with `keep`;
-  **Use Kobo Libra's** drops it and moves the open reader or player there.
+  Libra saved page 2 (3 min ago)."* **Keep this device's** sends it again with `keep` and the
+  server time of the position the prompt showed; **Use Kobo Libra's** drops it and moves the
+  open reader or player there.
+- **Keep this device's** replaces only the position the prompt showed (compare-and-set). If
+  another device saved again while the prompt was open (or waiting under "decide later"), the
+  server refuses with a fresh conflict and the prompt asks again with the newer position:
+  nothing is overwritten unseen.
+- A position saved online replaces anything queued for that book that was recorded before it.
+  The queue applies each server answer only if the entry is still the one it sent, so a sync
+  answering after an online save never brings an older position back as a conflict.
 
 API: `PUT /api/works/{id}/progress` and `PUT /api/files/{id}/progress` accept
-`"offline": {"recorded_at", "sent_at", "base", "keep"}` (ISO 8601 with a time zone; `base` is
-the server time of the last position the phone had seen). A losing replay is
+`"offline": {"recorded_at", "sent_at", "base", "keep", "expect"}` (ISO 8601 with a time zone;
+`base` is the server time of the last position the phone had seen; `expect`, with `keep`, the
+server time of the position being replaced). A losing replay is
 `409 {"detail": "progress_conflict", "server": <the server's position>, "recorded_at": ...}`.
 
 ## 5. Updates, revocation, sign-out
@@ -138,13 +147,24 @@ the server time of the last position the phone had seen). A losing replay is
   shelf shared with you is **removed from the phone** ("Removed from this device, no longer
   available to you: …"). A book whose files, audio, alignment, or details changed is marked
   **Changed on the server** with an **Update** button; the old copy keeps working meanwhile.
-- **Sign-out** deletes everything the app keeps on the phone: downloaded files, read-along
-  data, queued positions, positions remembered per book, the app shell caches, and the service
-  worker. The server's sign-out response also sends `Clear-Site-Data: "cache", "storage"`.
-  A session that ends any other way (signed out from another device, revoked under Security,
-  expired) does the same the next time the app reaches the server. If someone else signs in on
-  the phone, the previous person's downloads are deleted first. On phones, **Sign out** is at
-  the top of Security and in the ⌘K palette.
+- <a id="signing-out"></a>**Sign-out** deletes everything the app keeps on the phone at once,
+  online or not: downloaded files, read-along data, queued positions, and positions remembered
+  per book. Then it asks the server to end the session; once the server answers, the app shell
+  caches and the service worker go too. The server's sign-out response also sends
+  `Clear-Site-Data: "cache", "storage"`. On phones, **Sign out** is at the top of Security and
+  in the ⌘K palette.
+- **Signing out offline.** The server session cannot end until the server hears about it. Until
+  then the app shows only **Signed out** (it never uses the session again) and retries on every
+  start, on reconnect, and every 20 s. Signing in on the phone, as anyone, also ends any session
+  the browser still holds, so the next person never inherits the previous one's account.
+- **Revoked or expired sessions.** A session that ends any other way (signed out from another
+  device, revoked under Security, expired) deletes everything the next time the app reaches
+  the server. A phone that stays offline cannot hear about a revoke, so downloads and the
+  signed-in identity are kept offline only until a deadline the server sets on every
+  successful check: the session's expiry, or `LECTERN_OFFLINE_MAX_AGE_SECONDS` (default
+  14 days) after the last time the app reached the server, whichever is sooner. Past it the app
+  deletes everything, even if it is left open. If someone else signs in on the phone, the
+  previous person's downloads are deleted first.
 
 ## Privacy: what is stored where
 
@@ -152,7 +172,8 @@ the server time of the last position the phone had seen). A losing replay is
 | --- | --- | --- |
 | App shell | Cache Storage `lectern-shell-<version>` | The public build (HTML, JS, CSS, fonts, icons); the same for everyone |
 | Book files | Cache Storage `lectern-books` | Only files you downloaded on purpose: EPUB, PDF, audio tracks, the cover |
-| Book details, read-along data, queued positions, who is signed in | IndexedDB `lectern-offline` | Written by the app on download; deleted on sign-out |
+| Book details, read-along data, queued positions, who is signed in (and until when offline) | IndexedDB `lectern-offline` | Written by the app on download; deleted on sign-out, on a 401, and past the offline deadline |
+| A sign-out still to reach the server | localStorage `lectern.signout` | That session's CSRF token, which `/logout` needs; deleted once the server answers |
 
 The service worker never stores a response it was not told to store. It answers only app pages
 (network first, the cached shell offline), public build files, and the book files the app

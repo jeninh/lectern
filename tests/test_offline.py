@@ -168,7 +168,7 @@ def online_position(client, owner, settings, tmp_path):
     return work_id, at
 
 
-def _replay(client, csrf, work_id, *, recorded, sent=None, base=None, keep=False, n=5):
+def _replay(client, csrf, work_id, *, recorded, sent=None, base=None, keep=False, expect=None, n=5):
     sent = sent or _now()
     body = {
         "source": "web",
@@ -179,6 +179,7 @@ def _replay(client, csrf, work_id, *, recorded, sent=None, base=None, keep=False
             "sent_at": _iso(sent),
             "base": _iso(base) if base else None,
             "keep": keep,
+            "expect": expect,
         },
     }
     return put_json(client, f"/api/works/{work_id}/progress", csrf, body)
@@ -193,10 +194,51 @@ def test_replay_recorded_before_another_devices_save_is_a_conflict(client, owner
     assert body["server"]["device"] == "Kobo" and body["server"]["source"] == "audio"
     # The server's position is untouched.
     assert client.get(f"/api/works/{work_id}/progress").json()["device"] == "Kobo"
-    # The person chose this device's position.
-    r = _replay(client, owner["csrf"], work_id, recorded=at - timedelta(minutes=10), keep=True)
+    # The person chose this device's position over the one the prompt showed.
+    shown = body["server"]["received_at"]
+    r = _replay(
+        client,
+        owner["csrf"],
+        work_id,
+        recorded=at - timedelta(minutes=10),
+        keep=True,
+        expect=shown,
+    )
     assert r.status_code == 200
     assert r.json()["device"] == "Safari on iPhone" and r.json()["position"]["sentence_n"] == 5
+
+
+def test_keep_never_overwrites_a_save_made_after_the_prompt(client, owner, online_position):
+    """Compare-and-set: "keep this device's" only replaces the position the prompt showed."""
+    work_id, at = online_position
+    recorded = at - timedelta(minutes=10)
+    r = _replay(client, owner["csrf"], work_id, recorded=recorded)
+    assert r.status_code == 409
+    shown = r.json()["server"]["received_at"]
+    # While the prompt is open, the Kobo reads on.
+    later = put_json(
+        client,
+        f"/api/works/{work_id}/progress",
+        owner["csrf"],
+        {"source": "audio", "device": "Kobo", "audio_s": 60.0},
+    )
+    assert later.status_code == 200
+    r = _replay(client, owner["csrf"], work_id, recorded=recorded, keep=True, expect=shown)
+    assert r.status_code == 409, r.text
+    assert r.json()["server"]["received_at"] == later.json()["received_at"] != shown
+    assert client.get(f"/api/works/{work_id}/progress").json()["audio_s"] == 60.0
+    # keep without saying what it replaces is refused too; asked again, it goes through.
+    r = _replay(client, owner["csrf"], work_id, recorded=recorded, keep=True)
+    assert r.status_code == 409
+    r = _replay(
+        client,
+        owner["csrf"],
+        work_id,
+        recorded=recorded,
+        keep=True,
+        expect=later.json()["received_at"],
+    )
+    assert r.status_code == 200 and r.json()["device"] == "Safari on iPhone"
 
 
 def test_replay_recorded_after_wins_like_an_online_write(client, owner, online_position):
@@ -272,9 +314,14 @@ def test_page_replay_conflict(client, owner, settings):
     old = {"recorded_at": _iso(at - timedelta(minutes=3)), "sent_at": _iso(_now())}
     r = put_json(client, url, owner["csrf"], {"page": 6, "pages": 8, "offline": old})
     assert r.status_code == 409 and r.json()["server"]["page"] == 2
-    r = put_json(
-        client, url, owner["csrf"], {"page": 6, "pages": 8, "offline": {**old, "keep": True}}
-    )
+    shown = r.json()["server"]["updated_at"]
+    # Another save lands while the prompt is open: keeping against the old one is a new 409.
+    newer = put_json(client, url, owner["csrf"], {"page": 3, "pages": 8, "device": "Kobo"})
+    keep = {**old, "keep": True, "expect": shown}
+    r = put_json(client, url, owner["csrf"], {"page": 6, "pages": 8, "offline": keep})
+    assert r.status_code == 409 and r.json()["server"]["page"] == 3
+    keep["expect"] = newer.json()["updated_at"]
+    r = put_json(client, url, owner["csrf"], {"page": 6, "pages": 8, "offline": keep})
     assert r.status_code == 200 and r.json()["page"] == 6
 
 
@@ -315,3 +362,30 @@ def test_sign_out_clears_site_data_and_book_frames_are_allowed(client, owner):
     )
     assert r.status_code == 303
     assert r.headers["clear-site-data"] == '"cache", "storage"'
+
+
+def test_signing_in_ends_the_session_already_on_this_browser(client, owner):
+    """A sign-out made offline never reached the server; the next person signing in on that
+    phone must not leave the previous session usable (docs/offline.md#signing-out)."""
+    from lectern.security.sessions import COOKIE_NAME  # noqa: PLC0415
+
+    reader = make_user(client, owner["csrf"], "guest", "reader")
+    previous = client.cookies.get(COOKIE_NAME)
+    login(client, "guest", reader["password"])
+    assert client.cookies.get(COOKIE_NAME) != previous
+    assert client.get("/api/me").json()["user"]["username"] == "guest"
+    client.cookies.set(COOKIE_NAME, previous)
+    assert client.get("/api/me").status_code == 401
+
+
+def test_me_bounds_how_long_the_app_works_offline(client, owner, settings):
+    me = client.get("/api/me").json()
+    now = datetime.fromisoformat(me["offline"]["now"].replace("Z", "+00:00"))
+    until = datetime.fromisoformat(me["offline"]["until"].replace("Z", "+00:00"))
+    assert abs((now - _now()).total_seconds()) < 60
+    assert until - now == timedelta(seconds=settings.offline_max_age_seconds)
+    # Never past the session itself.
+    settings.offline_max_age_seconds = settings.session_ttl_seconds * 2
+    me = client.get("/api/me").json()
+    until = datetime.fromisoformat(me["offline"]["until"].replace("Z", "+00:00"))
+    assert until - now <= timedelta(seconds=settings.session_ttl_seconds)

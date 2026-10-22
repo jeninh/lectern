@@ -150,7 +150,7 @@ def put_page(auth: AuthCsrf, db: DbDep, settings: SettingsDep, file_id: int, bod
             ReadingProgress.user_id == auth.user.id, ReadingProgress.document == book.partial_md5
         )
     )
-    if body.offline is not None and not body.offline.keep:
+    if body.offline is not None:
         wins, recorded = body.offline.judge(row.updated_at if row else None)
         if not wins:
             raise conflict(_progress(db, auth.user.id, book), recorded)

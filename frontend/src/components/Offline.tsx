@@ -114,7 +114,7 @@ export function ConflictPrompt() {
   const choose = async (c: "mine" | "theirs") => {
     setBusy(true);
     try {
-      await resolveConflict(e, c);
+      if ((await resolveConflict(e, c)) === "again") toast(`${theirs} saved a newer position meanwhile. Choose again.`, "info");
     } catch {
       toast("Could not reach Lectern. Try again when you are online.", "error");
     } finally {

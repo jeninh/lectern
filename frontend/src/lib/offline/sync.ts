@@ -4,7 +4,7 @@
 import { ApiError, csrf, OfflineError, put } from "../api";
 import { idb } from "./db";
 import { isOnline } from "./net";
-import { keyOf, type PositionKind, PositionQueue, type QueuedPosition, type SendResult, type ServerPosition } from "./queue";
+import { keyOf, serverTime, type PositionKind, PositionQueue, type QueuedPosition, type ServerPosition, type Transport } from "./queue";
 
 // --- positions -------------------------------------------------------------------------------
 
@@ -36,9 +36,10 @@ function patchMark(key: string, patch: Record<string, unknown>) {
   }
 }
 
-const send = async (e: QueuedPosition, { sentAt, keep }: { sentAt: string; keep: boolean }): Promise<SendResult> => {
+const send: Transport = async (e, { sentAt, keep, expect }) => {
   try {
-    const body = { ...e.body, offline: { recorded_at: e.recordedAt, sent_at: sentAt, base: e.base, keep } };
+    const offline = { recorded_at: e.recordedAt, sent_at: sentAt, base: e.base, ...(keep ? { keep, expect: expect ?? null } : {}) };
+    const body = { ...e.body, offline };
     const r = await put<ServerPosition>(URLS[e.kind](e.id), body);
     return { ok: true, seenAt: r.received_at ?? r.updated_at ?? null, server: r };
   } catch (err) {
@@ -84,11 +85,13 @@ export async function savePosition<T>(t: SaveTarget, body: Record<string, unknow
     return null;
   };
   if (!isOnline() || !csrf()) return enqueue();
+  const savedAt = new Date().toISOString();
   try {
     const r = await put<T>(URLS[t.kind](t.id), body, keepalive);
-    const queued = (await queue.list()).some((e) => e.key === keyOf(t.kind, t.id));
-    if (queued) {
-      await queue.drop(t.kind, t.id);
+    // The server took a newer position: anything queued before it is moot (compare-and-set, so
+    // a flush answering meanwhile cannot bring it back; lib/offline/queue.ts).
+    if ((await queue.list()).some((e) => e.key === keyOf(t.kind, t.id))) {
+      await queue.drop(t.kind, t.id, savedAt);
       emit();
     }
     return r;
@@ -100,8 +103,10 @@ export async function savePosition<T>(t: SaveTarget, body: Record<string, unknow
 
 /** A conflict answered with "use the other device's": move this device's mark there too, and
  * tell an open reader or player (event `lectern:position`). */
-export async function resolveConflict(e: QueuedPosition, choice: "mine" | "theirs"): Promise<void> {
+export async function resolveConflict(e: QueuedPosition, choice: "mine" | "theirs"): Promise<"done" | "again"> {
   const server = await queue.resolve(e.key, choice);
+  // "Keep mine" can meet a position saved after the prompt opened: the prompt asks again.
+  const again = (await queue.list()).some((x) => x.key === e.key && x.conflict && serverTime(x.conflict.server) !== serverTime(e.conflict?.server));
   if (choice === "theirs" && server) {
     const key = markKey(e.kind, e.id, e.body);
     if (e.kind === "page") patchMark(key, { page: server.page ?? 1 });
@@ -109,7 +114,8 @@ export async function resolveConflict(e: QueuedPosition, choice: "mine" | "their
     else patchMark(key, { cfi: server.source === "web" ? server.raw ?? "" : "" });
     window.dispatchEvent(new CustomEvent("lectern:position", { detail: { kind: e.kind, id: e.id, server } }));
   }
-  emit();
+  await emit();
+  return again ? "again" : "done";
 }
 
 // --- state for the UI ------------------------------------------------------------------------

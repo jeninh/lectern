@@ -53,16 +53,26 @@ class OfflineReplay(BaseModel):
 
     ``recorded_at`` and ``sent_at`` are the device's clock; ``base`` is the server time of the
     last position the device saw (wrote or accepted) for this book, ``None`` if it saw none.
-    ``keep`` is set after the person chose this device's position in a conflict prompt.
+    ``keep`` is set after the person chose this device's position in a conflict prompt, with
+    ``expect``: the server time of the position that prompt showed (``None`` if it showed none).
+    It replaces the server's position only if that is still the one shown: compare-and-set, so a
+    save another device made while the prompt was open is never overwritten unseen. Otherwise
+    the answer is a fresh 409 with the newer position.
     """
 
     recorded_at: AwareDatetime
     sent_at: AwareDatetime
     base: AwareDatetime | None = None
     keep: bool = False
+    expect: AwareDatetime | None = None
 
     def judge(self, server_at: datetime | None) -> tuple[bool, datetime]:
-        return replay_wins(server_at, self.base, self.recorded_at, self.sent_at, utcnow())
+        """Whether this replay may replace a position saved at ``server_at``, and when it was
+        recorded on the server's clock."""
+        wins, recorded = replay_wins(server_at, self.base, self.recorded_at, self.sent_at, utcnow())
+        if self.keep:
+            wins = server_at == self.expect
+        return wins, recorded
 
 
 def conflict(server: dict | None, recorded: datetime) -> HTTPException:

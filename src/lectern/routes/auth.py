@@ -113,6 +113,9 @@ def login_password(
     if user.password_hash and needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
     _record_attempt(db, username, True)
+    # A session already on this browser ends here, so the next person on a shared phone never
+    # inherits one (e.g. a sign-out made offline that has not reached the server yet).
+    revoke_session(db, request)
     token = create_session(db, user, request, settings)
     audit.record(db, "login.success", actor_user_id=user.id, ip=ip, detail="password")
     device_token = alerts.on_sign_in(db, request, user, "a password")
@@ -174,6 +177,7 @@ async def passkey_login_verify(request: Request, settings: SettingsDep, db: DbDe
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account disabled")
     passkey.sign_count = result.new_sign_count
     passkey.last_used_at = utcnow()
+    revoke_session(db, request)  # as for password sign-in
     token = create_session(db, user, request, settings)
     audit.record(db, "login.success", actor_user_id=user.id, ip=ip, detail="passkey")
     device_token = alerts.on_sign_in(db, request, user, "a passkey")
@@ -199,6 +203,9 @@ async def logout(request: Request, db: DbDep, settings: SettingsDep, auth: AuthO
     clear_session_cookie(response, settings)
     # The installed app keeps books, audio, and positions on the device (docs/offline.md). The
     # app deletes them itself before signing out; this also clears them where the browser
-    # supports it, and the HTTP cache, in case the app could not.
-    response.headers["Clear-Site-Data"] = '"cache", "storage"'
+    # supports it, and the HTTP cache, in case the app could not. Not on the app's own fetch
+    # (it has already wiped): WebKit never completes a fetch whose response clears storage
+    # under the service worker that is handling it.
+    if request.headers.get("x-lectern-app") != "signout":
+        response.headers["Clear-Site-Data"] = '"cache", "storage"'
     return response

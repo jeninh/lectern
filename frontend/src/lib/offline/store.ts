@@ -70,6 +70,11 @@ export interface OfflineReadAlong {
 export interface Owner {
   id: number;
   me: Omit<Me, "csrf_token"> & { csrf_token: "" };
+  /** Device clock (ms): past this, without reaching the server, everything here is deleted. */
+  until: number | null;
+  /** The session's CSRF token, kept only so a sign-out started offline can reach /logout
+   * (lib/offline/signout.ts). Never handed to the app as `me.csrf_token`. */
+  csrf: string;
 }
 
 export class DownloadError extends Error {}
@@ -110,14 +115,36 @@ export async function bindOwner(me: Me): Promise<boolean> {
       wiped = !!prev || (typeof caches !== "undefined" && (await caches.has(BOOKS_CACHE)));
       await clearDevice({ keepWorker: true });
     }
-    await idb.put("meta", "owner", { id: me.user.id, me: { ...me, csrf_token: "" } } satisfies Owner);
+    // The server's deadline, moved onto this device's clock.
+    const until = me.offline ? Date.now() + (Date.parse(me.offline.until) - Date.parse(me.offline.now)) : null;
+    await idb.put("meta", "owner", { id: me.user.id, me: { ...me, csrf_token: "" }, until, csrf: me.csrf_token } satisfies Owner);
     return wiped;
   } catch {
     return false; // private browsing without IndexedDB: offline features are simply off
   }
 }
 
+/**
+ * Whether what is stored here may still be used. Downloads and the signed-in identity last
+ * offline only until the deadline the server gave on the last successful /api/me (the session's
+ * expiry, or `offline_max_age_seconds` if sooner); a server-side revoke cannot reach a phone
+ * that stays offline, so this bounds it. Past the deadline, or with downloads nobody owns,
+ * everything is deleted and this returns false.
+ */
+export async function checkFresh(): Promise<boolean> {
+  let ok: boolean;
+  try {
+    const o = await idb.get<Owner>("meta", "owner");
+    ok = o ? o.until != null && Date.now() <= o.until : !(typeof caches !== "undefined" && (await caches.has(BOOKS_CACHE)));
+  } catch {
+    return true; // no IndexedDB: nothing was stored
+  }
+  if (!ok) await clearDevice({ keepWorker: true });
+  return ok;
+}
+
 export async function ownerSnapshot(): Promise<Owner | null> {
+  if (!(await checkFresh())) return null;
   try {
     return (await idb.get<Owner>("meta", "owner")) ?? null;
   } catch {
@@ -148,6 +175,7 @@ export async function clearDevice({ keepWorker = false } = {}): Promise<void> {
 // --- reading what is stored ------------------------------------------------------------------
 
 export async function listBooks(): Promise<OfflineBook[]> {
+  if (!(await checkFresh())) return [];
   try {
     return (await idb.all<OfflineBook>("books")).sort((a, b) => a.work.sort_title.localeCompare(b.work.sort_title));
   } catch {
@@ -156,6 +184,7 @@ export async function listBooks(): Promise<OfflineBook[]> {
 }
 
 export async function getBook(id: number): Promise<OfflineBook | null> {
+  if (!(await checkFresh())) return null;
   try {
     return (await idb.get<OfflineBook>("books", id)) ?? null;
   } catch {
@@ -164,6 +193,7 @@ export async function getBook(id: number): Promise<OfflineBook | null> {
 }
 
 export async function getReadAlong(id: number): Promise<OfflineReadAlong | null> {
+  if (!(await checkFresh())) return null;
   try {
     return (await idb.get<OfflineReadAlong>("readalong", id)) ?? null;
   } catch {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
@@ -26,6 +26,7 @@ from lectern.models import (
     User,
     Work,
     WorkProgress,
+    utcnow,
 )
 from lectern.reading_lists import continue_items
 from lectern.routes.api.serializers import iso, progress_json, user_json, work_json
@@ -36,6 +37,7 @@ router = APIRouter()
 
 @router.get("/me")
 def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
+    now = utcnow()
     counts = {
         "works": db.scalar(select(func.count()).select_from(Work).where(visible_works(auth.user)))
         or 0,
@@ -64,6 +66,17 @@ def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
         },
         "library_settings": instance.all_settings(db),
         "can_edit": can_edit_library(auth.user),
+        # The installed app keeps downloads and this identity offline until ``until`` (server
+        # clock; ``now`` lets it correct for its own), then deletes them (docs/offline.md).
+        "offline": {
+            "now": iso(now),
+            "until": iso(
+                min(
+                    auth.session.expires_at,
+                    now + timedelta(seconds=settings.offline_max_age_seconds),
+                )
+            ),
+        },
     }
 
 

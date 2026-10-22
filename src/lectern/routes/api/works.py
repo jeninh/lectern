@@ -229,7 +229,7 @@ def set_progress(auth: AuthCsrf, db: DbDep, work_id: int, body: ProgressIn) -> d
     _visible_work(db, auth.user, work_id)
     if body.source == "koreader":
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "koreader_source_reserved")
-    if body.offline is not None and not body.offline.keep:
+    if body.offline is not None:
         row = stored_progress(db, auth.user.id, work_id)
         wins, recorded = body.offline.judge(row.received_at if row else None)
         if not wins:

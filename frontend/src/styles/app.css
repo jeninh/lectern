@@ -5013,3 +5013,10 @@ table.compare td:first-child {
 .import-card[aria-selected] .import-head {
   padding-right: 34px;
 }
+
+/* A sign-out waiting to reach the server (lib/offline/signout.ts). */
+.signing-out {
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: calc(env(safe-area-inset-top) + 3rem) 1.5rem 2rem;
+}

@@ -906,10 +906,18 @@ Implemented in `lectern.routes.api.offline`; the app side and the rules are in
   and update time, primary file, book file hashes, track hashes, the alignment, and the
   sentence list.
 - `PUT /api/works/{id}/progress` and `PUT /api/files/{id}/progress` accept
-  `offline: {recorded_at, sent_at, base?, keep?}` (aware ISO 8601). Without `keep`, the replay
-  is refused with `409 {"detail": "progress_conflict", "server": <position>, "recorded_at"}`
+  `offline: {recorded_at, sent_at, base?, keep?, expect?}` (aware ISO 8601). Without `keep`, the
+  replay is refused with `409 {"detail": "progress_conflict", "server": <position>, "recorded_at"}`
   when the stored position is newer than `base` and newer than `recorded_at` corrected by
   `now - sent_at` (`lectern.progress.replay_wins`); otherwise it is written like any save.
+  With `keep`, it is written only if the stored position's time (`received_at` / `updated_at`)
+  equals `expect` (`null`: no stored position); otherwise the same 409 with the current one.
+- `GET /api/me` includes `offline: {now, until}`: how long the installed app may keep downloads
+  and the identity without reaching the server (the session expiry, or
+  `offline_max_age_seconds` from now, whichever is sooner).
+- Signing in (password or passkey) revokes the session the request's cookie still carries.
+- The `download.offline` audit row is advisory (the app sends it; a client could skip it). The
+  file fetches themselves are metered and audited like any download or stream.
 
 ## `lectern.positions` interface
 

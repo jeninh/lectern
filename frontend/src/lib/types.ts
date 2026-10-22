@@ -26,6 +26,9 @@ export interface Me {
   library_settings: LibrarySettings;
   /** Owners and members add, edit, and trash books; readers never do. */
   can_edit: boolean;
+  /** Server clock now, and until when the installed app may keep downloads and this identity
+   * without reaching the server (docs/offline.md#privacy). */
+  offline?: { now: string; until: string };
 }
 
 export interface BackupView {

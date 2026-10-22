@@ -178,7 +178,7 @@ export function Shell({ children }: { children: ReactNode }) {
                 <strong>{name}</strong>
                 <span>@{me.user.username} · {me.user.role}</span>
               </div>
-              <button className="icon-btn ghost sm" onClick={() => logout(() => clearDevice())} aria-label="Sign out" title="Sign out">
+              <button className="icon-btn ghost sm" onClick={() => logout(clearDevice)} aria-label="Sign out" title="Sign out">
                 <Logout />
               </button>
             </div>

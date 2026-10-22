@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { get, OfflineError, post, setCsrfToken, setUnauthorizedHandler } from "./api";
 import { isOnline, probe, subscribe as onNetwork } from "./offline/net";
-import { bindOwner, clearDevice, listBooks, onChange as onOfflineChange, ownerSnapshot, revalidate, type OfflineBook } from "./offline/store";
+import { bindOwner, checkFresh, clearDevice, listBooks, onChange as onOfflineChange, ownerSnapshot, revalidate, type OfflineBook } from "./offline/store";
+import { finishSignOut, pendingSignOut } from "./offline/signout";
 import { flush, refreshSyncState, registerWorker } from "./offline/sync";
 import { useLocalStorage, useVisiblePolling } from "./hooks";
 import type { AppNotification, ImportInfo, Me, Preferences, Work } from "./types";
@@ -108,13 +109,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [editWorkId, openEditor] = useState<number | null>(null);
   const [online, setOnline] = useState(isOnline);
   const [offlineBooks, setOfflineBooks] = useState<OfflineBook[]>([]);
+  // A sign-out that has not reached the server yet (lib/offline/signout.ts): the app shows
+  // only that, and never uses the session, until /logout gets through.
+  const [signingOut, setSigningOut] = useState(() => !!pendingSignOut());
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 20000);
     return () => window.clearInterval(id);
   }, []);
 
+  // What is kept offline expires (lib/offline/store.ts checkFresh): forget the identity too.
+  const expire = useCallback(() => {
+    setMe(null);
+    setOfflineBooks([]);
+    setWorks([]);
+  }, []);
+
   const refreshMe = useCallback(async () => {
+    if (pendingSignOut()) return;
     try {
       const data = await get<Me>("/api/me");
       setCsrfToken(data.csrf_token);
@@ -128,8 +140,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // so nothing is written to the server until it is reachable again.
       const snap = await ownerSnapshot();
       if (snap) setMe((m) => m ?? (snap.me as Me));
+      else expire();
     }
-  }, []);
+  }, [expire]);
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -171,9 +184,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (signingOut) return;
     refreshMe().then(() => refreshNotifications()).catch(() => {});
     refreshLibrary().catch(() => {});
-  }, [refreshMe, refreshLibrary, refreshNotifications]);
+  }, [signingOut, refreshMe, refreshLibrary, refreshNotifications]);
+
+  // Finish a pending sign-out on start and whenever the server may be reachable again.
+  useEffect(() => {
+    if (!signingOut) return;
+    let done = false;
+    const attempt = async () => {
+      if (done || !(await finishSignOut())) return;
+      done = true;
+      await clearDevice().catch(() => {});
+      setSigningOut(false);
+      window.location.assign("/login");
+    };
+    attempt();
+    const off = onNetwork((up) => up && attempt());
+    const id = window.setInterval(() => (isOnline() ? attempt() : probe()), 20000);
+    return () => {
+      off();
+      window.clearInterval(id);
+    };
+  }, [signingOut]);
+
+  // Offline for longer than the server allows: delete the downloads and the identity, even with
+  // the app left open.
+  useEffect(() => {
+    const id = window.setInterval(async () => {
+      if (!isOnline() && !(await checkFresh())) expire();
+    }, 60000);
+    return () => window.clearInterval(id);
+  }, [expire]);
   useVisiblePolling(() => me && online && refreshNotifications().catch(() => {}), 60000);
 
 
@@ -377,7 +420,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
   return (
     <Ctx.Provider value={value}>
-      {children}
+      {signingOut ? (
+        <main className="signing-out" data-testid="signing-out">
+          <h1>Signed out</h1>
+          <p>This device's downloads and positions are deleted. Lectern finishes signing out on the server as soon as it can reach it; until then nobody can use this account here.</p>
+        </main>
+      ) : (
+        children
+      )}
       {canUpload && (
         <input
           ref={fileInput}
