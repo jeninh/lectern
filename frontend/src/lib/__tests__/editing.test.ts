@@ -26,6 +26,7 @@ function state(over: Partial<EditorState> = {}): EditorState {
     metadata: meta(),
     playback_default: null,
     readalong_enabled: true,
+    data_saver_enabled: true,
     primary_file_id: 10,
     cover: {
       has_cover: true,

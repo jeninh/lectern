@@ -222,6 +222,49 @@ rendition. The contract leaves room for it without requiring it:
   the work timeline and do not depend on which rendition plays; the encoder must preserve
   duration (no trimming of leading silence).
 
+**Same timeline: the seek tolerance.** A rendition has the original's track boundaries
+(one rendition per track, `offset_s` is the original's) and its timestamps: ffmpeg encodes
+the first audio stream from 0 s with nothing trimmed or padded, and records the encoder's
+priming in the container (an MP4 edit list, the Ogg pre-skip), which players apply. Seeking
+to `t` in a rendition lands within **50 ms** of `t` in the original (in practice the same
+sample), and a rendition lasts as long as its original within 50 ms (a worker's upload is
+refused beyond 1 s or 1 %). Progress, alignment, and read-along therefore work whichever
+rendition plays. `tests/test_data_saver.py` checks both with a click at a known place in each
+track of a multi-track book, for AAC and Opus.
+
+**Scheduling** (issue #18). A connected worker that advertises `transcode` makes the copies;
+the server's own runner leaves new jobs to it for `LECTERN_LOCAL_DEFER_SECONDS` (it does not
+wait at all for a paused or offline worker), then runs them itself: one track at a time, at
+the lowest CPU priority (`nice` 19), on one ffmpeg thread, with ffmpeg's address space
+capped at `LECTERN_TRANSCODE_MEMORY_LIMIT_MB` (default 1024; `0` = no cap). A server without
+ffmpeg never claims a transcode. With neither, `POST /api/works/{id}/transcode` answers
+`503 no_transcoder` and queues nothing; a job queued while a worker was online that is
+still waiting after it left reports `transcode.message` (why it is not moving) in
+`GET …/tracks`.
+
+**Owner control and status.** `GET /api/works/{id}/tracks` also returns
+`data_saver: {off, unavailable, tracks_ready, original_bytes, low_bytes}` (`off` and
+`unavailable` are filled for owners and members only; `original_bytes` counts the tracks that
+have a copy). The owner turns copies off for the library with
+`PUT /api/library-settings {"data_saver_enabled": false}` (instance setting, on by default;
+cancels every live transcode job) and an owner or member for one work with
+`PATCH /api/works/{id} {"data_saver_enabled": false}` (migration 0015; cancels its job,
+undoable like any save). Either way `POST …/transcode` answers `409 data_saver_off` or
+`409 data_saver_off_for_work`, `LECTERN_AUDIO_LOW_AUTO` skips the work, and existing copies
+keep playing until deleted. `DELETE /api/works/{id}/transcode` (owner, member) cancels the
+work's job and deletes every rendition in its `derived/audio/` (stale ones of replaced tracks
+too), returning `{"deleted_bytes"}`; `POST` makes them again. `GET /api/admin/data-saver`
+(owner) sums it up for the library: the switch, `local_ffmpeg`, `worker_online`,
+`unavailable`, audiobooks with copies, bytes, and live jobs.
+
+**Who plays which.** `users.data_saver` (migration 0015, `POST /api/me/preferences
+{"data_saver": true}`, off by default) is the account's default. Each device may choose
+otherwise with the player's switch (kept in that browser); "Use account setting" follows the
+account again. With data saver in effect the player streams `variant=low` when the track has
+one and the original otherwise (and falls back mid-play if the copy disappears), keeping the
+place when the setting changes; offline downloads default to the data-saver copy under the
+same rule.
+
 ### Sentences — `GET /api/works/{work_id}/sentences`
 
 Query, exactly one of:

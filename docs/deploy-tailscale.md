@@ -336,8 +336,10 @@ KOReader plugin above is the route; tailscale_kual is Kindle-only.
   faster than any upload.
 - Finished books are stored under `~/lectern/library/<Author>/<Title>/`.
 - Listening away from home goes over your home upload bandwidth through Tailscale. Turn on
-  **Data saver** in the player: Lectern makes a ~64 kb/s copy once (under
-  `derived/audio/`, originals untouched) and streams that instead.
+  **Data saver** in the player (or for your account in Security): Lectern makes a ~64 kb/s
+  copy once (under `derived/audio/`, originals untouched) and streams that instead. A Mac
+  worker makes it when connected; otherwise the Pi does, one file at a time at the lowest
+  CPU priority so playback and sync stay responsive.
 
 ## Raspberry Pi 4
 

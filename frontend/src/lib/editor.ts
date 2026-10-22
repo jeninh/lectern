@@ -27,6 +27,7 @@ export interface Draft {
   primary_file_id: number | null;
   playback_default: PlaybackDefault;
   readalong_enabled: boolean;
+  data_saver_enabled: boolean;
   tracks: TrackDraft[];
   remove_file_ids: number[];
   remove_track_ids: number[];
@@ -40,6 +41,7 @@ export function initialDraft(s: EditorState): Draft {
     primary_file_id: s.primary_file_id,
     playback_default: s.playback_default,
     readalong_enabled: s.readalong_enabled,
+    data_saver_enabled: s.data_saver_enabled,
     tracks: s.tracks.map((t) => ({ id: t.id, title: t.title, chapters: t.chapters.map((c) => c.title) })),
     remove_file_ids: [],
     remove_track_ids: [],
@@ -54,6 +56,7 @@ export interface WorkPatchBody {
   primary_file_id?: number | null;
   playback_default?: PlaybackDefault;
   readalong_enabled?: boolean;
+  data_saver_enabled?: boolean;
   tracks?: { id: number; title?: string; chapters?: string[] }[];
   remove_file_ids?: number[];
   remove_track_ids?: number[];
@@ -70,6 +73,7 @@ export function changes(s: EditorState, d: Draft): string[] {
   if (d.primary_file_id !== base.primary_file_id) out.push("primary EPUB");
   if (d.playback_default !== base.playback_default) out.push("playback");
   if (d.readalong_enabled !== base.readalong_enabled) out.push("read-along");
+  if (d.data_saver_enabled !== base.data_saver_enabled) out.push("data saver");
   const kept = d.tracks.filter((t) => !d.remove_track_ids.includes(t.id));
   const baseKept = base.tracks.filter((t) => !d.remove_track_ids.includes(t.id));
   if (!same(kept.map((t) => t.id), baseKept.map((t) => t.id))) out.push("track order");
@@ -92,6 +96,7 @@ export function buildPatch(s: EditorState, d: Draft): WorkPatchBody {
   if (d.primary_file_id !== base.primary_file_id && !d.remove_file_ids.includes(d.primary_file_id ?? -1)) body.primary_file_id = d.primary_file_id;
   if (d.playback_default !== base.playback_default) body.playback_default = d.playback_default;
   if (d.readalong_enabled !== base.readalong_enabled) body.readalong_enabled = d.readalong_enabled;
+  if (d.data_saver_enabled !== base.data_saver_enabled) body.data_saver_enabled = d.data_saver_enabled;
   const kept = d.tracks.filter((t) => !d.remove_track_ids.includes(t.id));
   const baseById = new Map(base.tracks.map((t) => [t.id, t]));
   const reordered = !same(kept.map((t) => t.id), base.tracks.filter((t) => !d.remove_track_ids.includes(t.id)).map((t) => t.id));
@@ -131,6 +136,7 @@ export function rebase(oldBase: EditorState, fresh: EditorState, d: Draft): Draf
     primary_file_id: d.primary_file_id !== mine.primary_file_id ? d.primary_file_id : theirs.primary_file_id,
     playback_default: d.playback_default !== mine.playback_default ? d.playback_default : theirs.playback_default,
     readalong_enabled: d.readalong_enabled !== mine.readalong_enabled ? d.readalong_enabled : theirs.readalong_enabled,
+    data_saver_enabled: d.data_saver_enabled !== mine.data_saver_enabled ? d.data_saver_enabled : theirs.data_saver_enabled,
     // Track edits survive only when nobody else changed the tracks in the meantime.
     tracks: same(mine.tracks, theirs.tracks) ? d.tracks : theirs.tracks,
     remove_file_ids: d.remove_file_ids.filter((id) => fresh.files.some((f) => f.id === id)),
