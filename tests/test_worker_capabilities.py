@@ -587,3 +587,250 @@ def test_0012_backfills_capabilities_and_downgrades(tmp_path):
         command.downgrade(cfg, "0011")
         assert "capability" not in {c["name"] for c in sa.inspect(conn).get_columns("jobs")}
         assert "worker_enrollments" not in sa.inspect(conn).get_table_names()
+
+
+# --- review fixes: lease fencing, reserved names, bounded bodies -----------------------------
+
+
+def test_a_released_lease_is_seen_by_a_session_that_already_loaded_the_job(
+    client, owner, work_id, wc
+):
+    """verify_lease re-reads the row: a request that loaded the job before a release must not
+    keep acting on it (the in-flight upload case)."""
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "bitrate_kbps": 32, "tracks": []})
+    r = claim(wc, capabilities=["transcode"])
+    token = r.json()["lease"]["token"]
+    cred_id = (
+        r.json()["job"] and client.get("/api/worker-credentials").json()["credentials"][0]["id"]
+    )
+    with session_factory()() as stale:
+        held = jobs.verify_lease(stale, job_id, token, credential_id=cred_id)  # loads the row
+        wc.post(f"/api/worker/jobs/{job_id}/release", headers={"X-Lease-Token": token})
+        assert claim(wc, capabilities=["transcode"]).status_code == 200  # a new lease
+        with pytest.raises(jobs.LeaseLost):
+            jobs.verify_lease(stale, job_id, token, credential_id=cred_id)
+        assert held.id == job_id
+
+
+@needs_ffmpeg
+def test_a_stale_transcode_result_publishes_nothing_and_keeps_the_new_lease(
+    client, owner, work_id, wc, settings
+):
+    import hashlib
+
+    from lectern.jobs import _remote_result
+
+    with session_factory()() as db:
+        jobs.refresh_work(db, settings.library_dir, db.get(Work, work_id), auto_enqueue=False)
+        db.commit()
+    api_post(client, f"/api/works/{work_id}/transcode", owner["csrf"])
+    first = claim(wc, capabilities=["transcode"])
+    job_id = first.json()["job"]["id"]
+    track = first.json()["job"]["payload"]["tracks"][0]
+    body = b"not really audio"
+    digest = hashlib.sha256(body).hexdigest()
+    url = f"/api/worker/jobs/{job_id}/artifacts/r.m4a"
+    old = lease(first)
+    assert wc.put(url, content=body, headers={**old, "X-Content-SHA256": digest}).status_code == 201
+    result = json.dumps({"renditions": [{"track_id": track["track_id"], "sha256": track["sha256"],
+                                         "artifact": "r.m4a", "artifact_sha256": digest}]})  # fmt: skip
+    with session_factory()() as stale:
+        job = stale.get(Job, job_id)  # what the old lease's request holds
+        wc.post(f"/api/worker/jobs/{job_id}/release", headers=old)
+        new = lease(claim(wc, capabilities=["transcode"]))
+        with pytest.raises(jobs.LeaseLost):
+            _remote_result(stale, settings, job, result.encode(),
+                           queue.artifacts_dir(settings.data_dir, job_id))  # fmt: skip
+    with session_factory()() as db:
+        assert db.get(Job, job_id).status == JobStatus.LEASED
+        assert find_variant(settings.library_dir, db.get(Work, work_id), track["sha256"]) is None
+    # the current lease must name every track still lacking a rendition
+    empty = wc.put(f"/api/worker/jobs/{job_id}/result", content=b'{"renditions": []}',
+                   headers={**new, "Content-Type": "application/json"})  # fmt: skip
+    assert empty.status_code == 422 and empty.json()["detail"] == "missing_renditions"
+
+
+def test_checksum_sidecars_cannot_be_uploaded_or_poison_listings(
+    client, owner, work_id, wc, settings
+):
+    import hashlib
+
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "bitrate_kbps": 32, "tracks": []})
+    headers = lease(claim(wc, capabilities=["transcode"]))
+    base = f"/api/worker/jobs/{job_id}/artifacts"
+    body = b"x"
+    h = {**headers, "X-Content-SHA256": hashlib.sha256(body).hexdigest()}
+    assert wc.put(f"{base}/a.m4a", content=body, headers=h).status_code == 201
+    assert wc.put(f"{base}/a.m4a.sha256", content=body, headers=h).status_code == 400
+    assert wc.put(f"{base}/a.part", content=body, headers=h).status_code == 400
+    # a sidecar that is not a hash (however it got there) hides the artifact, unread
+    (queue.artifacts_dir(settings.data_dir, job_id) / "a.m4a.sha256").write_text("y" * 10_000)
+    assert wc.get(base, headers=headers).json() == {"artifacts": []}
+    assert wc.get(f"{base}/a.m4a", headers=headers).status_code == 404
+
+
+def test_artifacts_of_one_job_share_a_storage_budget(client, owner, work_id, wc, settings):
+    import hashlib
+
+    settings.worker_artifact_job_max_bytes = 3000
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "bitrate_kbps": 32, "tracks": []})
+    headers = lease(claim(wc, capabilities=["transcode"]))
+    body = b"z" * 1500
+
+    def put(name):
+        return wc.put(f"/api/worker/jobs/{job_id}/artifacts/{name}", content=body,
+                      headers={**headers, "X-Content-SHA256": hashlib.sha256(body).hexdigest()})  # fmt: skip
+
+    assert put("a").status_code == 201
+    assert put("b").status_code == 413  # 1500 stored (+ its checksum) + 1500 > 3000
+    no_length = wc.put(f"/api/worker/jobs/{job_id}/artifacts/c", content=iter([b"x"]),
+                       headers={**headers, "X-Content-SHA256": "0" * 64})  # fmt: skip
+    assert no_length.status_code == 411
+
+
+def test_enrollment_refuses_large_bodies_and_limited_addresses_before_reading(app):
+    anon = TestClient(app)
+    big = b'{"code": "' + b"a" * 200_000 + b'"}'
+    r = anon.post("/api/worker/enroll", content=big, headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+    for _ in range(app.state.settings.rate_limit_per_minute):
+        anon.post("/api/worker/enroll", json={"code": "lwe_wrongwrongwrong"})
+    assert anon.post("/api/worker/enroll", content=big).status_code == 429
+
+
+def test_a_local_transcode_claim_does_not_inherit_a_remote_holder(client, owner, work_id, wc):
+    from lectern.jobs import claim as local_claim
+
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "bitrate_kbps": 32, "tracks": []})
+    headers = lease(claim(wc, capabilities=["transcode"]))
+    wc.post(f"/api/worker/jobs/{job_id}/release", headers=headers)
+    wc.post("/api/worker/status", json={"state": "paused"})  # the Pi need not wait
+    with session_factory()() as db:
+        got = local_claim(db, defer_s=600)
+        assert got is not None and got[0].id == job_id and got[0].leased_by_id is None
+        assert jobs.reclaim_expired(db) == 0  # the next sweep leaves the Pi's run alone
+
+
+def test_supervised_commands_are_killed_when_the_worker_pauses():
+    import time
+
+    from lectern.align.worker import WorkerStopping
+    from lectern.worker.runners import run_supervised
+
+    started = time.monotonic()
+    calls = {"n": 0}
+
+    def check():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise WorkerStopping()
+
+    with pytest.raises(WorkerStopping):
+        run_supervised(["sleep", "30"], check, poll_s=0.1)
+    assert time.monotonic() - started < 5
+
+
+def test_an_open_worker_home_is_made_private(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir(mode=0o755)
+    wcfg.save_key("lw_x", home)
+    assert home.stat().st_mode & 0o077 == 0
+
+
+@pytest.fixture
+def remote_transcode(client, owner, work_id, wc, settings):
+    """A claimed transcode job with one uploaded rendition; returns what the tests need."""
+    import hashlib
+
+    with session_factory()() as db:
+        jobs.refresh_work(db, settings.library_dir, db.get(Work, work_id), auto_enqueue=False)
+        db.commit()
+    api_post(client, f"/api/works/{work_id}/transcode", owner["csrf"])
+    r = claim(wc, capabilities=["transcode"])
+    job_id, track = r.json()["job"]["id"], r.json()["job"]["payload"]["tracks"][0]
+    headers = lease(r)
+    body = b"the real rendition"
+    digest = hashlib.sha256(body).hexdigest()
+    wc.put(f"/api/worker/jobs/{job_id}/artifacts/r.m4a", content=body,
+           headers={**headers, "X-Content-SHA256": digest})  # fmt: skip
+    result = json.dumps({"renditions": [{"track_id": track["track_id"], "sha256": track["sha256"],
+                                         "artifact": "r.m4a", "artifact_sha256": digest}]})  # fmt: skip
+
+    def put_result():
+        return wc.put(f"/api/worker/jobs/{job_id}/result", content=result,
+                      headers={**headers, "Content-Type": "application/json"})  # fmt: skip
+
+    def published():
+        with session_factory()() as db:
+            found = find_variant(settings.library_dir, db.get(Work, work_id), track["sha256"])
+            return found[0].read_bytes() if found else None
+
+    return types.SimpleNamespace(job_id=job_id, body=body, put_result=put_result,
+                                 published=published)  # fmt: skip
+
+
+@needs_ffmpeg
+def test_a_replacement_after_the_check_does_not_change_what_is_published(
+    remote_transcode, settings, monkeypatch
+):
+    real = queue.hold_lease
+
+    def overwrite_then_hold(*a, **kw):  # a stale upload lands after the hash check
+        art = queue.artifacts_dir(settings.data_dir, remote_transcode.job_id) / "r.m4a"
+        art.write_bytes(b"something else entirely")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(queue, "hold_lease", overwrite_then_hold)
+    assert remote_transcode.put_result().status_code == 200
+    assert remote_transcode.published() == remote_transcode.body
+
+
+@needs_ffmpeg
+def test_a_sweep_before_publication_cannot_leave_a_success_without_output(
+    remote_transcode, settings, monkeypatch
+):
+    import lectern.jobs as jmod
+
+    real = jmod._place
+
+    def sweep_then_publish(*a, **kw):
+        with session_factory()() as other:  # to the sweep the job is not finished yet
+            assert other.get(Job, remote_transcode.job_id).status == JobStatus.LEASED
+            assert queue.sweep_artifacts(other, settings.data_dir) == 0
+        return real(*a, **kw)
+
+    monkeypatch.setattr(jmod, "_place", sweep_then_publish)
+    assert remote_transcode.put_result().status_code == 200
+    assert remote_transcode.published() == remote_transcode.body
+
+
+@needs_ffmpeg
+def test_a_failed_publication_rolls_back_and_the_retry_succeeds(remote_transcode, monkeypatch):
+    import lectern.jobs as jmod
+
+    real = jmod._place
+
+    def disk_full(*a, **kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(jmod, "_place", disk_full)
+    with pytest.raises(OSError):  # the test client re-raises; a real worker sees a 500
+        remote_transcode.put_result()
+    with session_factory()() as db:
+        assert db.get(Job, remote_transcode.job_id).status == JobStatus.LEASED
+    assert remote_transcode.published() is None
+    monkeypatch.setattr(jmod, "_place", real)
+    assert remote_transcode.put_result().status_code == 200
+    assert remote_transcode.published() == remote_transcode.body
+
+
+def test_hold_lease_refuses_a_released_or_expired_lease(client, owner, work_id, wc):
+    job_id = add_job(work_id, "transcode", {"codec": "aac", "bitrate_kbps": 32, "tracks": []})
+    headers = lease(claim(wc, capabilities=["transcode"]))
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        assert queue.hold_lease(db, job)
+        db.commit()
+        assert not queue.hold_lease(db, job, now=job.lease_expires_at + timedelta(seconds=1))
+        wc.post(f"/api/worker/jobs/{job_id}/release", headers=headers)
+        assert not queue.hold_lease(db, job)

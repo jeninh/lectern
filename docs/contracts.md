@@ -856,7 +856,7 @@ external worker, whatever it advertises: the job needs a secret only the server 
   is shown once, stored as SHA-256, valid `LECTERN_WORKER_ENROLLMENT_TTL_SECONDS` (default
   3600), single use. `GET /api/worker-enrollments`, `DELETE /api/worker-enrollments/{id}`.
   `POST /api/worker/enroll {code, name}` (no auth; failures share the per-address limit of bad
-  worker keys) → `201 {credential_id, label, secret: "lw_…", capabilities, server}`; the code
+  worker keys, which is checked before the body is read; body capped at 64 KiB) → `201 {credential_id, label, secret: "lw_…", capabilities, server}`; the code
   is claimed with one conditional `UPDATE`, so it yields at most one credential. Audited
   `worker_credential.enroll`. `GET /worker/install.sh` serves the installer with this
   server's `LECTERN_BASE_URL` filled in; it holds no secret.
@@ -880,7 +880,7 @@ All with `Authorization: Bearer lw_…` and `X-Lease-Token`:
 | Route | |
 | --- | --- |
 | `GET /api/worker/jobs/{id}/inputs/{name}` | A named input from the kind's `inputs` (Range, `ETag`, `X-Content-SHA256`). |
-| `PUT /api/worker/jobs/{id}/artifacts/{name}` | Raw streamed body with `X-Content-SHA256` (required; `422 checksum_mismatch`). `name` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, at most `LECTERN_WORKER_ARTIFACT_MAX_BYTES` (default 2 GiB, `413`), 5000 per job. Written to a temporary file, then renamed into `<data>/jobs/<id>/artifacts/`; re-uploading a name replaces it. `201 {name, size, sha256}`. |
+| `PUT /api/worker/jobs/{id}/artifacts/{name}` | Raw streamed body with `X-Content-SHA256` (required; `422 checksum_mismatch`). `name` `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, not ending in `.sha256` or `.part` (reserved, `400`). At most `LECTERN_WORKER_ARTIFACT_MAX_BYTES` per file (default 2 GiB) and `LECTERN_WORKER_ARTIFACT_JOB_MAX_BYTES` for the whole job, uploads in flight included (default 8 GiB), `413`; 5000 files and 4 concurrent uploads per job (`429`). The lease is re-read after the body arrives. Written to a temporary file, then renamed into `<data>/jobs/<id>/artifacts/`; re-uploading a name replaces it. `201 {name, size, sha256}`. |
 | `GET /api/worker/jobs/{id}/artifacts` | `{artifacts: [{name, size, sha256}]}`: what this or an earlier attempt uploaded. |
 | `GET /api/worker/jobs/{id}/artifacts/{name}` | Download one back (resume). |
 | `POST /api/worker/jobs/{id}/release` | Give the job back without spending an attempt (worker paused or switched off): `queued` at once. `{status: "queued"}`. |
@@ -904,7 +904,7 @@ The "alignment cannot run" notice uses the same test.
 Inputs `track-<track_id>` for each payload track that is still the same file. Each rendition
 is uploaded as an artifact (`<original sha256>.<m4a|opus>`), then the result
 `{"renditions": [{"track_id", "sha256", "artifact", "artifact_sha256"}]}`; the server checks
-every artifact's hash and publishes it under `derived/audio/` exactly as the local runner does.
+every artifact's hash, requires one rendition (no duplicates) for every payload track that is still current and has none yet (`422 missing_renditions`), takes the job's success with a conditional update on the uploading lease (a released or reassigned lease gets `409 lease_lost` and publishes nothing), then publishes under `derived/audio/` as the local runner does.
 `max_attempts` is now 3 (an expired remote lease is retried).
 
 ### Generated audiobooks: the `tts` kind

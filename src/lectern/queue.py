@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -240,3 +241,75 @@ def sweep_artifacts(db: Session, data_dir: Path) -> int:
             shutil.rmtree(d, ignore_errors=True)
             removed += 1
     return removed
+
+
+def hold_lease(db: Session, job: Job, now: datetime | None = None) -> bool:
+    """Write-lock the job row while it is still exactly ``job``'s unexpired lease.
+
+    A conditional ``UPDATE`` on id, status, token hash, holder, and expiry; on SQLite it holds
+    the database write lock until the caller commits or rolls back, so no release, claim, or
+    reclaim can change the lease in between. Returns ``False`` (nothing held) when the lease
+    is gone. The caller does its filesystem step, then commits."""
+    from sqlalchemy import update
+
+    from lectern.models import Job, JobStatus, utcnow
+
+    now = now or utcnow()
+    held = db.execute(
+        update(Job)
+        .where(
+            Job.id == job.id,
+            Job.status == JobStatus.LEASED,
+            Job.lease_token_hash == job.lease_token_hash,
+            Job.leased_by_id.is_(None)
+            if job.leased_by_id is None
+            else Job.leased_by_id == job.leased_by_id,
+            Job.lease_expires_at > now,
+        )
+        .values(updated_at=now)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if held != 1:
+        db.rollback()
+        return False
+    # The UPDATE may have waited for the write lock; the lease must still be unexpired now.
+    from sqlalchemy import select
+
+    expires = db.scalar(select(Job.lease_expires_at).where(Job.id == job.id))
+    if expires is None or expires <= utcnow():
+        db.rollback()
+        return False
+    return True
+
+
+class ArtifactBudget:
+    """In-process reservations for artifact uploads in flight: bytes and slots per job, taken
+    atomically before the body is read and given back when the request ends (a crash of the
+    server drops them with the process)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._bytes: dict[int, int] = {}
+        self._slots: dict[int, int] = {}
+
+    def reserve(self, job_id: int, size: int, on_disk: int, budget: int, slots: int) -> str | None:
+        """``None`` when reserved, else why not (``too_large`` / ``too_many_uploads``)."""
+        with self._lock:
+            if self._slots.get(job_id, 0) >= slots:
+                return "too_many_uploads"
+            if on_disk + self._bytes.get(job_id, 0) + size > budget:
+                return "too_large"
+            self._slots[job_id] = self._slots.get(job_id, 0) + 1
+            self._bytes[job_id] = self._bytes.get(job_id, 0) + size
+            return None
+
+    def release(self, job_id: int, size: int) -> None:
+        with self._lock:
+            self._slots[job_id] -= 1
+            self._bytes[job_id] -= size
+            if self._slots[job_id] <= 0:
+                self._slots.pop(job_id, None)
+                self._bytes.pop(job_id, None)
+
+
+ARTIFACT_BUDGET = ArtifactBudget()

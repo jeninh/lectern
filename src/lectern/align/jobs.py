@@ -529,8 +529,9 @@ def verify_lease(
     ``credential_id`` (``None`` = the in-process worker); ``LeaseLost`` otherwise. A token is
     a secret, but binding it to the credential that claimed means a leaked token is useless
     with any other worker key. With ``allow_succeeded`` a finished job whose last lease
-    matches is returned too (idempotent result upload)."""
-    job = db.get(Job, job_id)
+    matches is returned too (idempotent result upload). The row is always re-read: sessions
+    keep loaded objects, and a lease may have been released or reassigned since."""
+    job = db.get(Job, job_id, populate_existing=True)
     if job is None or not token or job.lease_token_hash is None:
         raise LeaseLost()
     if job.leased_by_id != credential_id:

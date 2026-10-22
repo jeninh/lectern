@@ -240,16 +240,29 @@ def worker_status(cred: WorkerAuth, db: DbDep, body: StatusIn = small_json(Statu
     return {"state": cred.state, "capabilities": queue.claimable(cred.advertised or [], cred)}
 
 
+async def _enroll_body(request: Request) -> EnrollIn:
+    """Unauthenticated: an address over the failure limit is refused before its body is
+    read, and the body is read with the small-body cap before it is parsed."""
+    ip_key = f"worker:{client_ip(request) or '?'}"
+    if request.app.state.limiters["worker_fail"].exhausted(ip_key):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
+    raw = await read_capped(request, SMALL_BODY_MAX_BYTES)
+    try:
+        return EnrollIn.model_validate_json(raw)
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid request") from exc
+
+
 @router.post("/enroll", status_code=status.HTTP_201_CREATED)
-def enroll(request: Request, db: DbDep, settings: SettingsDep, body: EnrollIn) -> dict:
+def enroll(
+    request: Request, db: DbDep, settings: SettingsDep, body: EnrollIn = Depends(_enroll_body)
+) -> dict:
     """Exchange a one-time enrollment code (``POST /api/worker-enrollments``, owner) for a
     worker credential. The code is used up atomically; failures share the per-address limit
     of bad worker keys."""
     limiters = request.app.state.limiters
     ip = client_ip(request) or "?"
     ip_key = f"worker:{ip}"
-    if limiters["worker_fail"].exhausted(ip_key):
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
     now = utcnow()
     row = db.query(WorkerEnrollment).filter_by(code_hash=sha256_hex(body.code.strip())).first()
     claimed = 0
@@ -403,10 +416,28 @@ def release(cred: WorkerAuth, db: DbDep, job_id: int, x_lease_token: LeaseToken 
 ARTIFACTS_MAX = 5000
 
 
+# Uploads in flight per job at once (lectern.queue.ARTIFACT_BUDGET); more is a misbehaving
+# worker, not a faster one.
+ARTIFACT_UPLOADS_MAX = 4
+# The server's own bookkeeping next to each artifact; workers cannot address these names.
+RESERVED_SUFFIXES = (".sha256", ".part")
+
+
 def _artifact_path(settings, job: Job, name: str):
-    if not queue.ARTIFACT_NAME_RE.match(name) or name.endswith(".part"):
+    if not queue.ARTIFACT_NAME_RE.match(name) or name.endswith(RESERVED_SUFFIXES):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_name")
     return queue.artifacts_dir(settings.data_dir, job.id) / name
+
+
+def _sidecar(path) -> str | None:
+    """The recorded SHA-256 of an artifact: 64 hex characters, read with a hard bound."""
+    try:
+        with path.with_name(path.name + ".sha256").open("rb") as fh:
+            raw = fh.read(65)
+    except OSError:
+        return None
+    text = raw.decode("ascii", "replace").strip()
+    return text if len(text) == 64 and all(c in "0123456789abcdef" for c in text) else None
 
 
 def _artifact_list(settings, job: Job) -> list[dict]:
@@ -415,10 +446,11 @@ def _artifact_list(settings, job: Job) -> list[dict]:
         return []
     out = []
     for p in sorted(root.iterdir()):
-        side = p.with_name(p.name + ".sha256")
-        if p.suffix in (".sha256", ".part") or not p.is_file() or not side.is_file():
+        if p.name.endswith(RESERVED_SUFFIXES) or p.name.startswith(".") or not p.is_file():
             continue
-        out.append({"name": p.name, "size": p.stat().st_size, "sha256": side.read_text().strip()})
+        digest = _sidecar(p)
+        if digest is not None:
+            out.append({"name": p.name, "size": p.stat().st_size, "sha256": digest})
     return out
 
 
@@ -447,10 +479,10 @@ def get_artifact(
     """What an earlier attempt uploaded, so a resumed attempt can pick up from it."""
     job = _leased(db, cred, job_id, x_lease_token)
     path = _artifact_path(settings, job, name)
-    side = path.with_name(path.name + ".sha256")
-    if not path.is_file() or not side.is_file():
+    digest = _sidecar(path) if path.is_file() else None
+    if digest is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    return _input(request, path, "application/octet-stream", side.read_text().strip())
+    return _input(request, path, "application/octet-stream", digest)
 
 
 @router.put("/jobs/{job_id}/artifacts/{name}", status_code=status.HTTP_201_CREATED)
@@ -465,41 +497,72 @@ async def put_artifact(
     x_content_sha256: Annotated[str | None, Header(alias="X-Content-SHA256", max_length=64)] = None,
 ) -> dict:
     """Stream one output file (a generated chapter, a rendition) into the job's artifact
-    directory. The body must hash to ``X-Content-SHA256``; it is written to a temporary file
-    and renamed, so a half upload never shows. Re-uploading a name replaces it."""
+    directory. ``Content-Length`` is required: those bytes are reserved against the job's
+    budget before anything is read. The body must hash to ``X-Content-SHA256``; it goes to a
+    temporary file that is renamed into place only while the uploading lease is still the
+    job's current one (``queue.hold_lease``). Re-uploading a name replaces it."""
     job = await run_in_threadpool(_leased, db, cred, job_id, x_lease_token)
     expected = (x_content_sha256 or "").lower()
     if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "sha256_required")
     dest = _artifact_path(settings, job, name)
-    limit = settings.worker_artifact_max_bytes
     declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > limit:
+    if not declared.isdigit():
+        raise HTTPException(status.HTTP_411_LENGTH_REQUIRED, "length_required")
+    size = int(declared)
+    if size > settings.worker_artifact_max_bytes:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "too_large")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    existing = [p for p in dest.parent.iterdir() if p.suffix == ".sha256"]
-    if len(existing) >= ARTIFACTS_MAX and not dest.exists():
+    files = [p for p in dest.parent.iterdir() if p.is_file() and not p.name.endswith(".part")]
+    if sum(p.name.endswith(".sha256") for p in files) >= ARTIFACTS_MAX and not dest.exists():
         raise HTTPException(status.HTTP_409_CONFLICT, "too_many_artifacts")
+    # Files already stored count in full (a replaced one too: both exist until the rename).
+    refused = queue.ARTIFACT_BUDGET.reserve(
+        job.id,
+        size,
+        sum(p.stat().st_size for p in files),
+        settings.worker_artifact_job_max_bytes,
+        ARTIFACT_UPLOADS_MAX,
+    )
+    if refused == "too_many_uploads":
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, refused)
+    if refused:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, refused)
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{new_secret()[:8]}.part")
     digest = hashlib.sha256()
-    size = 0
+    got = 0
     try:
         with tmp.open("wb") as fh:
             async for chunk in request.stream():
-                size += len(chunk)
-                if size > limit:
+                got += len(chunk)
+                if got > size:
                     raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "too_large")
                 digest.update(chunk)
                 await run_in_threadpool(fh.write, chunk)
+        if got != size:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "incomplete")
         if digest.hexdigest() != expected:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "checksum_mismatch")
-        # the lease may have been lost while the body streamed in
-        await run_in_threadpool(_leased, db, cred, job_id, x_lease_token)
-        os.replace(tmp, dest)
-        dest.with_name(dest.name + ".sha256").write_text(expected)
+        await run_in_threadpool(_finish_artifact, db, cred, job_id, x_lease_token, tmp, dest,
+                                expected)  # fmt: skip
     finally:
         tmp.unlink(missing_ok=True)
-    return {"name": name, "size": size, "sha256": expected}
+        queue.ARTIFACT_BUDGET.release(job.id, size)
+    return {"name": name, "size": got, "sha256": expected}
+
+
+def _finish_artifact(db, cred, job_id: int, token, tmp, dest, digest: str) -> None:
+    """Rename the upload into place under the write lock of its still-current lease."""
+    job = _leased(db, cred, job_id, token)  # re-reads the row
+    if not queue.hold_lease(db, job):
+        raise _lease_lost()
+    try:
+        os.replace(tmp, dest)
+        dest.with_name(dest.name + ".sha256").write_text(digest)
+    except BaseException:
+        db.rollback()
+        raise
+    db.commit()
 
 
 @router.put("/jobs/{job_id}/result")

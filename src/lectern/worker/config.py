@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -94,10 +95,22 @@ def load_config(home: Path | None = None) -> AgentConfig:
         return AgentConfig()
 
 
+def _private_dir(d: Path) -> None:
+    """The worker's home: a real directory owned by this user, mode 0700 (tightened if an
+    earlier run or another tool left it more open)."""
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    st = os.lstat(d)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise PermissionError(f"{d} must be a directory owned by you, not a link")
+    if st.st_mode & 0o077:
+        os.chmod(d, 0o700)
+
+
 def _write_private(path: Path, text: str, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    _private_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp")
+    # O_EXCL | O_NOFOLLOW: never write through a file or link someone placed there.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)

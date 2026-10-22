@@ -129,6 +129,8 @@ class Settings(BaseSettings):
     # Largest single artifact (a chapter of a generated audiobook, a rendition) a worker may
     # upload to PUT /api/worker/jobs/{id}/artifacts/{name}.
     worker_artifact_max_bytes: int = Field(default=2 * 1024**3, ge=1024)
+    # Everything one job's artifacts may occupy, uploads in flight included.
+    worker_artifact_job_max_bytes: int = Field(default=8 * 1024**3, ge=1024)
     # Where /worker/install.sh installs the worker from (a pip requirement URL). A private
     # repository needs git access on the Mac (docs/mac-worker.md, "Installing").
     worker_install_source: str = "git+https://github.com/jeninh/lectern"

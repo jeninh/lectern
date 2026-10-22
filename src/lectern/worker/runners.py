@@ -223,6 +223,34 @@ class KokoroRunner:
         ctx.submit(json.dumps(result).encode())
 
 
+def run_supervised(argv: list[str], check: Callable[[], None], poll_s: float = 1.0,
+                   timeout_s: float = 6 * 3600) -> None:  # fmt: skip
+    """Run a command, calling ``check`` every ``poll_s`` (it raises when the worker pauses,
+    stops, or loses the lease); the process is killed and reaped before that propagates."""
+    import tempfile
+    import time
+
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=err)  # noqa: S603
+        deadline = time.monotonic() + timeout_s
+        try:
+            while proc.poll() is None:
+                check()
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"{argv[0]} timed out")
+                try:
+                    proc.wait(timeout=poll_s)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if proc.returncode != 0:
+            err.seek(0)
+            raise RuntimeError(err.read()[-500:].decode(errors="replace") or "ffmpeg failed")
+
+
 class TranscodeRunner:
     """``transcode`` jobs: one data-saver rendition per payload track (lectern.jobs)."""
 
@@ -252,12 +280,7 @@ class TranscodeRunner:
                 ctx.progress(i / max(1, len(tracks)), f"track {i + 1} of {len(tracks)}")
                 src = ctx.input(name)
                 dest = ctx.tmp / out
-                res = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                    _ffmpeg_args(self.ffmpeg, src, dest, codec, kbps),
-                    capture_output=True, timeout=6 * 3600, check=False,
-                )  # fmt: skip
-                if res.returncode != 0:
-                    raise RuntimeError(res.stderr.decode(errors="replace")[-500:])
+                run_supervised(_ffmpeg_args(self.ffmpeg, src, dest, codec, kbps), ctx.check)
                 digest = ctx.upload_artifact(out, dest)
                 src.unlink(missing_ok=True)
                 dest.unlink(missing_ok=True)
