@@ -134,7 +134,14 @@ class Pdf:
         path.write_bytes(bytes(out))
 
 
-WIN = {"\u2018": 0x91, "\u2019": 0x92, "\u201c": 0x93, "\u201d": 0x94, "\u2014": 0x97, "\u00b7": 0xB7}
+WIN = {
+    "\u2018": 0x91,
+    "\u2019": 0x92,
+    "\u201c": 0x93,
+    "\u201d": 0x94,
+    "\u2014": 0x97,
+    "\u00b7": 0xB7,
+}
 
 
 def encode(text: str, ligatures: bool) -> bytes:
@@ -226,7 +233,9 @@ def outline(pdf: Pdf, entries: list[tuple[str, int]], page_ids: list[int]) -> in
         if i + 1 < len(ids):
             links += f" /Next {ids[i + 1]} 0 R"
         pdf.add(f"<< /Title ({title}) {links} >>", oid)
-    pdf.add(f"<< /Type /Outlines /First {ids[0]} 0 R /Last {ids[-1]} 0 R /Count {len(ids)} >>", root)
+    pdf.add(
+        f"<< /Type /Outlines /First {ids[0]} 0 R /Last {ids[-1]} 0 R /Count {len(ids)} >>", root
+    )
     return root
 
 
@@ -251,7 +260,9 @@ def finish(pdf: Pdf, path: Path, contents: list[bytes], resources: str, size, ex
     if outline_entries:
         cat += f" /Outlines {outline(pdf, outline_entries, page_ids)} 0 R /PageMode /UseOutlines"
     root = pdf.add(cat + extra + " >>")
-    info = pdf.add(f"<< /Title ({TITLE if 'two' in path.name else path.stem}) /Author ({AUTHOR}) >>")
+    info = pdf.add(
+        f"<< /Title ({TITLE if 'two' in path.name else path.stem}) /Author ({AUTHOR}) >>"
+    )
     pdf.write(path, root, info)
 
 
@@ -388,9 +399,7 @@ def main() -> None:
     }
     expected = {
         "title": TITLE,
-        "chapters": [
-            {"title": h, "paragraphs": [p for p in ps]} for h, ps in CHAPTERS
-        ],
+        "chapters": [{"title": h, "paragraphs": [p for p in ps]} for h, ps in CHAPTERS],
         "field_notes": FIELD_NOTES,
         "facts": facts,
     }
