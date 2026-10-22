@@ -545,7 +545,7 @@ def test_a_restore_that_fails_part_way_is_rolled_back(
 # Run in a child process that SIGKILLs itself at one point of the swap: no finally blocks, no
 # rollback, exactly what a crash or `kill -9` leaves. "cross-volume" makes every rename between
 # the data directory and the library fail with EXDEV, like a Pi with the library on USB, and
-# dies after the original was copied to pre-restore-*/ but before it was deleted.
+# dies after the original was copied to pre-restore-*/, while it is being deleted.
 _KILL_SCRIPT = """
 import errno, os, signal, sys
 from pathlib import Path
@@ -575,7 +575,7 @@ def move(src, dst):
 
 
 def discard(p):
-    if cross and p == victim:  # copied to the other volume, not yet deleted
+    if cross and p == backups._deleting(victim) and p.exists():  # copied over, being deleted
         os.kill(os.getpid(), signal.SIGKILL)
     real_discard(p)
 
@@ -640,7 +640,7 @@ def test_a_restore_killed_mid_swap_is_undone_byte_for_byte_or_resumed(
     assert journal.is_file()
     assert _usernames(bsettings) == {"owner"}  # the database was already swapped in
     if volumes == "cross-volume":
-        assert (work / "book.json").is_file()  # copied aside, not yet deleted
+        assert (work / ".book.json.lectern-deleting").is_file()  # copied aside, being deleted
     else:
         assert not (work / "book.json").exists()  # moved aside, staged copy not yet in
     assert list(bsettings.library_dir.rglob(".*.restore-*"))  # staged copies left behind
@@ -694,23 +694,40 @@ def test_resume_and_undo_without_an_interrupted_restore(bsettings, monkeypatch):
             _restore(bsettings, monkeypatch, action)
 
 
+@pytest.mark.parametrize("escape", ["outside", "staged-dotdot", "aside-dotdot"])
 def test_a_journal_naming_paths_outside_the_data_and_library_is_refused(
-    bclient, bsettings, monkeypatch, tmp_path
+    bclient, bsettings, monkeypatch, tmp_path, escape
 ):
+    """A tampered journal must not make --undo delete anything outside the two roots: neither a
+    path elsewhere nor "<library>/..", whose parent is inside the library."""
     _stop(bclient)
-    victim = tmp_path / "elsewhere" / "precious"
-    victim.parent.mkdir()
+    data, library = bsettings.data_dir, bsettings.library_dir
+    library.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "precious"
     victim.write_text("keep me")
-    step = {"dest": str(victim), "staged": None, "side": str(victim) + ".x", "keep": True}
+    step = {
+        "dest": str(library / "x"),
+        "staged": str(library / ".x.restore-x"),
+        "side": str(data / "pre-restore-x" / "x"),
+        "keep": True,
+        "had": False,
+    }
+    aside = str(data / "pre-restore-x")
+    if escape == "outside":
+        step |= {"dest": str(victim), "staged": None, "side": str(victim) + ".x", "had": True}
+    elif escape == "staged-dotdot":
+        step["staged"] = str(library / "..")
+    else:
+        aside = str(data / "..")
     backups.journal_path(bsettings).write_text(
         json.dumps(
             {
                 "format": backups.JOURNAL_FORMAT,
                 "phase": "swapping",
-                "aside": str(bsettings.data_dir / "pre-restore-x"),
+                "aside": aside,
                 "scratch": None,
                 "created": [],
-                "steps": [step | {"had": True}],
+                "steps": [step],
                 "summary": {},
             }
         )
@@ -718,6 +735,55 @@ def test_a_journal_naming_paths_outside_the_data_and_library_is_refused(
     with pytest.raises(SystemExit, match="outside the data directory"):
         _restore(bsettings, monkeypatch, "--undo")
     assert victim.read_text() == "keep me"
+    assert library.is_dir() and bsettings.db_path.is_file()
+
+
+def test_an_undo_interrupted_while_deleting_a_folder_across_volumes_loses_nothing(
+    settings, monkeypatch
+):
+    """Review: a folder sat where a library file is restored, with the library on another
+    volume. An undo that dies half-way through deleting the folder's copy in pre-restore-*/
+    must not, when run again, put that half-deleted copy back over the complete original."""
+    data, library = settings.data_dir, settings.library_dir
+    dest = library / "Book" / "cover.jpg"
+    dest.mkdir(parents=True)
+    (dest / "a").write_text("a")
+    (dest / "b").write_text("b")
+    staged = dest.with_name(".cover.jpg.restore-x")
+    staged.write_text("restored cover")
+    step = {
+        "dest": str(dest),
+        "staged": str(staged),
+        "side": str(data / "pre-restore-x" / "library" / "Book" / "cover.jpg"),
+        "keep": True,
+        "had": True,
+    }
+    real_rename, real_rmtree = os.rename, shutil.rmtree
+
+    def rename(src, dst, *a, **kw):  # data and library on different volumes
+        if len({Path(p).resolve().is_relative_to(library.resolve()) for p in (src, dst)}) == 2:
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(src, dst, *a, **kw)
+
+    class Crash(BaseException):
+        pass
+
+    def crashing_rmtree(path, *a, **kw):  # dies after deleting one file in the data volume
+        if Path(path).resolve().is_relative_to(data.resolve()):
+            (Path(path) / "a").unlink()
+            raise Crash
+        return real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr(os, "rename", rename)
+    backups._step_forward(step)
+    assert dest.read_text() == "restored cover"
+    monkeypatch.setattr(shutil, "rmtree", crashing_rmtree)
+    with pytest.raises(Crash):
+        backups._step_back(step)
+    monkeypatch.setattr(shutil, "rmtree", real_rmtree)
+    backups._step_back(step)  # --undo again
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["cover.jpg"]
+    assert {p.name: p.read_text() for p in dest.iterdir()} == {"a": "a", "b": "b"}
 
 
 def test_restore_on_a_fresh_machine_needs_the_saved_password(

@@ -757,10 +757,24 @@ def _moving(p: Path) -> Path:
     return p.with_name(f".{p.name}.lectern-moving")
 
 
+def _deleting(p: Path) -> Path:
+    """Where a move between volumes renames ``p`` once copied, before deleting it."""
+    return p.with_name(f".{p.name}.lectern-deleting")
+
+
+def _discard_leftovers(*paths: Path) -> None:
+    """Remove what an interrupted move between volumes left next to ``paths``."""
+    for p in paths:
+        _discard(_moving(p))
+        _discard(_deleting(p))
+
+
 def _move(src: Path, dst: Path) -> None:
     """Rename ``src`` to ``dst`` (which must not exist). Between volumes (library files kept in
     pre-restore-*/ on a Pi), copy to a temporary name, make the copy durable, rename it to
-    ``dst``, and only then delete ``src``: one complete copy always exists under a known name."""
+    ``dst``, and only then delete ``src``: one complete copy always exists under a known name.
+    ``src`` is renamed out of the way before it is deleted, so a folder half-deleted by a crash
+    is never mistaken for the original."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.rename(src, dst)
@@ -777,7 +791,11 @@ def _move(src: Path, dst: Path) -> None:
     _fsync_tree(tmp)
     os.rename(tmp, dst)
     _fsync(dst.parent)
-    _discard(src)
+    tomb = _deleting(src)
+    _discard(tomb)
+    os.rename(src, tomb)
+    _fsync(src.parent)
+    _discard(tomb)
 
 
 def _step_paths(step: dict) -> tuple[Path, Path, Path | None]:
@@ -789,6 +807,7 @@ def _step_forward(step: dict) -> None:
     the staged copy into place. A step without ``staged`` only moves the original aside (a WAL
     the restored database must not see). Safe to repeat after a crash at any point."""
     dest, side, staged = _step_paths(step)
+    _discard_leftovers(dest, side)
     if staged is not None and not _exists(staged):
         return  # already in place
     if step["had"]:
@@ -805,8 +824,7 @@ def _step_back(step: dict) -> None:
     """Undo one swap step, whatever part of it happened: the original comes back from the side,
     and the staged or restored copy goes. Safe to repeat after a crash at any point."""
     dest, side, staged = _step_paths(step)
-    _discard(_moving(dest))
-    _discard(_moving(side))
+    _discard_leftovers(dest, side)
     if step["had"]:
         if _exists(side):
             _discard(dest)
@@ -831,7 +849,12 @@ def _load_journal(settings: Settings) -> dict:
         ]
         roots = (settings.data_dir, settings.library_dir)
         for p in map(Path, paths):
-            if not p.is_absolute() or not any(_inside(p.parent, r) for r in roots):
+            # Strictly below a root: "<library>/.." has a parent inside the library too.
+            if (
+                not p.is_absolute()
+                or ".." in p.parts
+                or not any(_inside(p.parent, r) for r in roots)
+            ):
                 raise BackupError(
                     f"{path} names {p}, outside the data directory and the library; refusing "
                     "to touch it"
@@ -1250,6 +1273,11 @@ def restore(
                     "library_files": library_files_n,
                 },
             }
+            # Outside the journal: a copy the restore needs no matter how it ends.
+            pw = restic_password_file(settings)
+            if _regular(stage / "secrets" / "restic-password") and not pw.exists():
+                shutil.copy2(stage / "secrets" / "restic-password", pw)
+                _private(pw)
             jpath = journal_path(settings)
             try:
                 _write_journal(jpath, journal)
@@ -1279,9 +1307,5 @@ def restore(
                     ) from exc
                 raise BackupError(f"restore failed and was undone; nothing changed: {exc}") from exc
 
-            pw = restic_password_file(settings)
-            if _regular(stage / "secrets" / "restic-password") and not pw.exists():
-                shutil.copy2(stage / "secrets" / "restic-password", pw)
-                _private(pw)
             _finish(journal, jpath, data)
     return _report(journal, data, log_fn)
