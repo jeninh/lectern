@@ -6,6 +6,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Usually ~10 min; a stuck apt mirror otherwise holds the job for GitHub's 6 h default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,6 +22,7 @@ jobs:
       - run: npm test
         working-directory: frontend
       - name: Install ffmpeg (audio ingest, transcode, and range tests), Noto CJK (generated covers), LuaJIT with LuaSocket/cjson (KOReader plugin), and restic (backups)
+        timeout-minutes: 10
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-cjk luajit lua-socket lua-cjson restic
       - uses: actions/setup-java@v4
         with:
@@ -66,6 +69,7 @@ jobs:
       - run: npm run build
         working-directory: frontend
       - name: Install ffmpeg (the seeded audiobook's data-saver copy)
+        timeout-minutes: 10
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
@@ -88,6 +92,7 @@ jobs:
           retention-days: 14
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         extras: ["", "align", "tts"]

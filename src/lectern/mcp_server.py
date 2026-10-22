@@ -934,6 +934,8 @@ def move_shelf(
         dest = None if not _segments(to) else _shelf(c, to)
         body = shelves_api.PatchIn(parent_id=dest["id"] if dest else None)
         moved = shelves_api.update_shelf(c.request, c.auth, c.db, s["id"], body)
+        if not isinstance(moved, dict):  # moved out of everything this key may see
+            return {"shelf": {"id": s["id"]}, "parent": None, "visible": False}
         return {"shelf": _shelf_ref(moved), "parent": _shelf_ref(dest) if dest else None}
 
 

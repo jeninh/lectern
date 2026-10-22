@@ -500,6 +500,8 @@ class Shelf(Base):
     Names are unique among one owner's siblings (checked in ``routes.api.shelves``)."""
 
     __tablename__ = "shelves"
+    # SQLite reflection skips expression indexes, so a later batch_alter_table("shelves")
+    # rebuild silently drops this one: such a migration must create it again.
     __table_args__ = (
         Index(
             "uq_shelf_sibling_name",

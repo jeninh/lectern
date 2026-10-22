@@ -12,6 +12,9 @@ they may see. Hidden shelves are ``404``, exactly like shelves that do not exist
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
@@ -220,6 +223,21 @@ def _target_parent(db, user: User, parent_id: int | None) -> Shelf | None:
     return parent
 
 
+# Create, move, and delete check the tree and then change it. Two at once could each pass
+# their checks against the old tree and together make a cycle or exceed MAX_DEPTH, so they
+# run one at a time (Lectern is one process) from their first tree read to their commit.
+_tree_lock = threading.Lock()
+
+
+@contextmanager
+def _tree_change(db: Session) -> Iterator[None]:
+    with _tree_lock:
+        for obj in list(db.identity_map.values()):  # loaded before the lock: maybe stale
+            if isinstance(obj, Shelf):
+                db.expire(obj)
+        yield
+
+
 def _too_deep() -> HTTPException:
     return HTTPException(
         status.HTTP_409_CONFLICT,
@@ -231,18 +249,19 @@ def _too_deep() -> HTTPException:
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_shelf(request: Request, auth: AuthCsrf, db: DbDep, body: CreateIn) -> dict:
     """A new shelf in ``parent_id`` (``null``: top level), owned by its creator."""
-    parent = _target_parent(db, auth.user, body.parent_id)
-    if parent is not None and depth_of(parent) + 1 > MAX_DEPTH:
-        raise _too_deep()
-    if _clash(db, auth.user.id, body.parent_id, body.name) is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
-    shelf = Shelf(owner_id=auth.user.id, name=body.name, parent=parent)
-    db.add(shelf)
-    db.flush()
-    where = f"in shelf:{parent.id}" if parent else None
-    _audit(db, request, auth, "shelf.create", body.name, where)
-    db.commit()
-    return _shelf_json(db, shelf, auth.user)
+    with _tree_change(db):
+        parent = _target_parent(db, auth.user, body.parent_id)
+        if parent is not None and depth_of(parent) + 1 > MAX_DEPTH:
+            raise _too_deep()
+        if _clash(db, auth.user.id, body.parent_id, body.name) is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
+        shelf = Shelf(owner_id=auth.user.id, name=body.name, parent=parent)
+        db.add(shelf)
+        db.flush()
+        where = f"in shelf:{parent.id}" if parent else None
+        _audit(db, request, auth, "shelf.create", body.name, where)
+        db.commit()
+        return _shelf_json(db, shelf, auth.user)
 
 
 @router.get("/{shelf_id}")
@@ -267,39 +286,47 @@ def get_shelf(auth: Auth, db: DbDep, shelf_id: int) -> dict:
     }
 
 
-@router.patch("/{shelf_id}")
-def update_shelf(request: Request, auth: AuthCsrf, db: DbDep, shelf_id: int, body: PatchIn) -> dict:
+@router.patch("/{shelf_id}", response_model=None)
+def update_shelf(
+    request: Request, auth: AuthCsrf, db: DbDep, shelf_id: int, body: PatchIn
+) -> Response | dict:
     """Rename and/or move a shelf with everything in it. Moving needs the right to manage
     the shelf and to put shelves in the destination; a shelf never moves into itself or
-    below itself (``409 shelf_cycle``) or deeper than ``MAX_DEPTH`` (``409 too_deep``)."""
-    shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
-    if perm != "owner":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the shelf's owner can change it")
-    moving = "parent_id" in body.model_fields_set and body.parent_id != shelf.parent_id
-    name = body.name if body.name is not None else shelf.name
-    parent_id = body.parent_id if moving else shelf.parent_id
-    if moving:
-        parent = _target_parent(db, auth.user, body.parent_id)
-        if parent is not None:
-            if shelf in lineage(parent):
-                raise HTTPException(status.HTTP_409_CONFLICT, "shelf_cycle")
-            shelves = {s.id: s for s in db.scalars(select(Shelf))}
-            if depth_of(parent) + depth_below(shelf.id, shelves) > MAX_DEPTH:
-                raise _too_deep()
-    if _clash(db, shelf.owner_id, parent_id, name, shelf.id) is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
-    if name != shelf.name:
-        _audit(db, request, auth, "shelf.rename", name, shelf.name)
-        shelf.name = name
-    if moving:
-        _audit(
-            db, request, auth, "shelf.move", shelf.name,
-            f"shelf:{shelf.parent_id or 'top'} -> shelf:{body.parent_id or 'top'}",
-        )  # fmt: skip
-        shelf.parent = parent
-    db.commit()
-    db.expire_all()
-    return _shelf_json(db, db.get(Shelf, shelf.id), auth.user)
+    below itself (``409 shelf_cycle``) or deeper than ``MAX_DEPTH`` (``409 too_deep``).
+    A move that takes the shelf out of everything the caller may see (they managed it only
+    through a shelf above it) is ``204``: it moved, but they no longer see it."""
+    with _tree_change(db):
+        shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
+        if perm != "owner":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the shelf's owner can change it")
+        moving = "parent_id" in body.model_fields_set and body.parent_id != shelf.parent_id
+        name = body.name if body.name is not None else shelf.name
+        parent_id = body.parent_id if moving else shelf.parent_id
+        if moving:
+            parent = _target_parent(db, auth.user, body.parent_id)
+            if parent is not None:
+                if shelf in lineage(parent):
+                    raise HTTPException(status.HTTP_409_CONFLICT, "shelf_cycle")
+                shelves = {s.id: s for s in db.scalars(select(Shelf))}
+                if depth_of(parent) + depth_below(shelf.id, shelves) > MAX_DEPTH:
+                    raise _too_deep()
+        if _clash(db, shelf.owner_id, parent_id, name, shelf.id) is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
+        if name != shelf.name:
+            _audit(db, request, auth, "shelf.rename", name, shelf.name)
+            shelf.name = name
+        if moving:
+            _audit(
+                db, request, auth, "shelf.move", shelf.name,
+                f"shelf:{shelf.parent_id or 'top'} -> shelf:{body.parent_id or 'top'}",
+            )  # fmt: skip
+            shelf.parent = parent
+        db.commit()
+        db.expire_all()
+        tree = Tree(db, auth.user)
+        if shelf.id not in tree.perms:
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        return tree.json(db.get(Shelf, shelf.id), _owners(db))
 
 
 def _subtree(shelf: Shelf) -> list[Shelf]:
@@ -333,87 +360,91 @@ def delete_shelf(
 
     Without ``contents`` a non-empty shelf is ``409 shelf_not_empty`` with the counts.
     """
-    shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
-    if perm != "owner":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the shelf's owner can delete it")
-    subtree = _subtree(shelf)
-    ids = [s.id for s in subtree]
-    work_ids = list(
-        db.scalars(
-            select(ShelfItem.work_id)
-            .join(Work, Work.id == ShelfItem.work_id)
-            .where(ShelfItem.shelf_id.in_(ids), visible_works(auth.user))
-            .distinct()
+    with _tree_change(db):
+        shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
+        if perm != "owner":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the shelf's owner can delete it")
+        subtree = _subtree(shelf)
+        ids = [s.id for s in subtree]
+        work_ids = list(
+            db.scalars(
+                select(ShelfItem.work_id)
+                .join(Work, Work.id == ShelfItem.work_id)
+                .where(ShelfItem.shelf_id.in_(ids), visible_works(auth.user))
+                .distinct()
+            )
         )
-    )
-    direct_works = db.scalar(
-        select(func.count())
-        .select_from(ShelfItem)
-        .join(Work, Work.id == ShelfItem.work_id)
-        .where(ShelfItem.shelf_id == shelf.id, visible_works(auth.user))
-    )
-    if (shelf.children or direct_works) and contents is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            {"detail": "shelf_not_empty", "shelves": len(subtree) - 1, "works": len(work_ids),
-             "direct_works": direct_works or 0, "sub_shelves": len(shelf.children)},
-        )  # fmt: skip
-
-    if contents == "trash":
-        from lectern.routes.api import editor
-
-        if not can_edit_library(auth.user):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
-        if len(work_ids) > editor.BULK_MAX:
+        direct_works = db.scalar(
+            select(func.count())
+            .select_from(ShelfItem)
+            .join(Work, Work.id == ShelfItem.work_id)
+            .where(ShelfItem.shelf_id == shelf.id, visible_works(auth.user))
+        )
+        if (shelf.children or direct_works) and contents is None:
             raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                {"detail": "selection_too_large", "limit": editor.BULK_MAX},
-            )
-        name = shelf.name
-        out: dict = {"batch_id": None, "results": [], "deleted": True}
-        if work_ids:
-            out = editor.bulk_edit(
-                request, auth, db, settings,
-                editor.BulkIn(work_ids=work_ids, action="trash"),
+                status.HTTP_409_CONFLICT,
+                {"detail": "shelf_not_empty", "shelves": len(subtree) - 1, "works": len(work_ids),
+                 "direct_works": direct_works or 0, "sub_shelves": len(shelf.children)},
             )  # fmt: skip
-            out["deleted"] = all(r["ok"] for r in out["results"])
-        if out["deleted"]:
-            shelf = db.get(Shelf, shelf_id)
-            _audit(db, request, auth, "shelf.delete", name,
-                   f"with {len(ids) - 1} sub-shelves; {len(work_ids)} works trashed")  # fmt: skip
-            db.delete(shelf)
-            db.commit()
-        return out
 
-    if contents == "move_up" and (shelf.children or direct_works):
-        parent = shelf.parent
-        if parent is None:
-            if shelf.children and not can_create_shelf(auth.user):
+        if contents == "trash":
+            from lectern.routes.api import editor
+
+            if not can_edit_library(auth.user):
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
-        elif _permission(db, auth.user, parent) not in ("owner", "edit"):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "parent_not_editable")
-        for child in list(shelf.children):
-            child.name = _free_name(db, child.owner_id, shelf.parent_id, child.name, child.id)
-            child.parent = parent
+            if len(work_ids) > editor.BULK_MAX:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    {"detail": "selection_too_large", "limit": editor.BULK_MAX},
+                )
+            name = shelf.name
+            out: dict = {"batch_id": None, "results": [], "deleted": True}
+            if work_ids:
+                out = editor.bulk_edit(
+                    request, auth, db, settings,
+                    editor.BulkIn(work_ids=work_ids, action="trash"),
+                )  # fmt: skip
+                out["deleted"] = all(r["ok"] for r in out["results"])
+            if out["deleted"]:
+                shelf = db.get(Shelf, shelf_id)
+                _audit(db, request, auth, "shelf.delete", name,
+                       f"with {len(ids) - 1} sub-shelves; {len(work_ids)} works trashed")  # fmt: skip
+                db.delete(shelf)
+                db.commit()
+            return out
+
+        if contents == "move_up" and (shelf.children or direct_works):
+            parent = shelf.parent
+            if parent is not None and _permission(db, auth.user, parent) is None:
+                parent = None  # a parent they cannot see is their top level, not a 403
+            if parent is None:
+                if shelf.children and not can_create_shelf(auth.user):
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
+            elif _permission(db, auth.user, parent) not in ("owner", "edit"):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "parent_not_editable")
+            for child in list(shelf.children):
+                pid = parent.id if parent else None
+                child.name = _free_name(db, child.owner_id, pid, child.name, child.id)
+                child.parent = parent
+                db.flush()
+            if parent is not None:
+                on_parent = set(
+                    db.scalars(select(ShelfItem.work_id).where(ShelfItem.shelf_id == parent.id))
+                )
+                last = db.scalar(
+                    select(func.max(ShelfItem.position)).where(ShelfItem.shelf_id == parent.id)
+                )
+                for item in shelf.items:  # trashed works too: a restore finds them there
+                    if item.work_id not in on_parent:
+                        last = (last or 0) + 1
+                        db.add(ShelfItem(shelf_id=parent.id, work_id=item.work_id, position=last))
             db.flush()
-        if parent is not None:
-            on_parent = set(
-                db.scalars(select(ShelfItem.work_id).where(ShelfItem.shelf_id == parent.id))
-            )
-            last = db.scalar(
-                select(func.max(ShelfItem.position)).where(ShelfItem.shelf_id == parent.id)
-            )
-            for item in shelf.items:  # trashed works too: a restore finds them there
-                if item.work_id not in on_parent:
-                    last = (last or 0) + 1
-                    db.add(ShelfItem(shelf_id=parent.id, work_id=item.work_id, position=last))
-        db.flush()
-        db.expire(shelf)
-    _audit(db, request, auth, "shelf.delete", shelf.name,
-           "contents moved up" if contents == "move_up" else None)  # fmt: skip
-    db.delete(shelf)
-    db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+            db.expire(shelf)
+        _audit(db, request, auth, "shelf.delete", shelf.name,
+               "contents moved up" if contents == "move_up" else None)  # fmt: skip
+        db.delete(shelf)
+        db.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _editable(db, auth, shelf_id: int) -> Shelf:

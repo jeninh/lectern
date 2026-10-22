@@ -87,8 +87,10 @@ export function useFolderOps() {
         await refreshLibrary().catch(() => {});
       };
       if (parts.length) {
-        const verb = mode === "add" ? "Added" : to === null && !movedShelves.length ? "Took" : "Moved";
-        const tail = mode === "add" ? `to ${where}` : to === null && !movedShelves.length ? "off their shelves" : `to ${where}`;
+        // From Everything there is no current folder to leave, so a move onto a shelf adds.
+        const adds = mode === "add" || (items.from === "all" && to !== null && !movedShelves.length);
+        const verb = adds ? "Added" : to === null && !movedShelves.length ? "Took" : "Moved";
+        const tail = adds ? `to ${where}` : to === null && !movedShelves.length ? "off their shelves" : `to ${where}`;
         toast(`${verb} ${parts.join(" and ")} ${tail}.${errors.length ? ` ${errors.join("; ")}` : ""}`, errors.length ? "error" : "info", { label: "Undo", run: undo });
       } else if (errors.length) toast(errors.join("; "), "error");
       await refreshLibrary().catch(() => {});
