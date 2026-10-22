@@ -268,9 +268,8 @@ def ensure_pdf_sentences(db: Session, library: Path, work: Work) -> int:
 
     Positions move with the list. Returns the sentences written. Caller commits."""
     from lectern.ingest.sentences import epub_sentences, replace_sentences
-    from lectern.models import Alignment
 
-    if db.scalar(select(Alignment.id).where(Alignment.work_id == work.id)) is not None:
+    if _installed_alignment(db, work.id) is not None:
         return 0
     found = work_text(db, library, work)
     if found is None:
@@ -346,12 +345,24 @@ def is_self(db: Session, work: Work, row: PdfText) -> bool:
     """Whether the work's sentences are this PDF's: installed from it (and not replaced
     since), or the sentence map of an alignment of its text. A count is not enough: an EPUB's
     list can happen to have as many sentences."""
-    from lectern.models import Alignment
-
-    alignment = db.scalar(select(Alignment).where(Alignment.work_id == work.id))
+    alignment = _installed_alignment(db, work.id)
     if alignment is not None:
         return bool(row.text_sha256) and alignment.epub_sha256 == row.text_sha256
     return row.projected_key is not None and row.projected_key == self_key(db, work.id, row)
+
+
+def _installed_alignment(db: Session, work_id: int):
+    """The work's alignment when its result is what the sentence list holds (succeeded, or
+    succeeded and since gone stale). A queued, running, or failed one has installed nothing:
+    its ``epub_sha256`` is only what it was asked to read."""
+    from lectern.models import Alignment, AlignmentStatus
+
+    return db.scalar(
+        select(Alignment).where(
+            Alignment.work_id == work_id,
+            Alignment.status.in_([AlignmentStatus.SUCCEEDED, AlignmentStatus.STALE]),
+        )
+    )
 
 
 def _proportional(old: int, new: int):
@@ -372,12 +383,17 @@ def _through(epub_n: list[int | None], fallback):
 
 
 def sentences_key(db: Session, work_id: int, source_sha: str) -> str:
-    """Changes whenever the work's sentence list is replaced (rows are deleted and inserted
-    again, so the largest id moves) or its text source changes."""
-    count, top = db.execute(
-        select(func.count(Sentence.id), func.max(Sentence.id)).where(Sentence.work_id == work_id)
-    ).one()
-    return hashlib.sha256(f"{source_sha}:{count}:{top}".encode()).hexdigest()
+    """A digest of the work's sentence list (every sentence's span) and its text source, so it
+    changes whenever the boundaries do. Row ids are not enough: SQLite reuses them after the
+    list is deleted and inserted again, so a same-size list would keep its old key."""
+    h = hashlib.sha256(f"{source_sha}:".encode())
+    for n, si, a, b in db.execute(
+        select(Sentence.n, Sentence.spine_index, Sentence.char_start, Sentence.char_end)
+        .where(Sentence.work_id == work_id)
+        .order_by(Sentence.n)
+    ):
+        h.update(f"{n},{si},{a},{b};".encode())
+    return h.hexdigest()
 
 
 def refresh_projection(

@@ -189,11 +189,16 @@ def put_page(auth: AuthCsrf, db: DbDep, settings: SettingsDep, file_id: int, bod
             ReadingProgress.user_id == auth.user.id, ReadingProgress.document == book.partial_md5
         )
     )
-    recorded = None
     if body.offline is not None:
-        wins, recorded = body.offline.judge(row.updated_at if row else None)
+        # The position to beat is the newer of this file's page record and the work's position
+        # (audio, EPUB, KOReader), shown as a page: an older offline page turn replaces neither.
+        shown, server_at = _progress(db, auth.user.id, book), row.updated_at if row else None
+        canon = _work_position_as_page(db, settings, auth.user.id, book, body.pages)
+        if canon and canon[1] != page and (server_at is None or canon[0]["at"] > server_at):
+            shown, server_at = canon[0]["json"], canon[0]["at"]
+        wins, recorded = body.offline.judge(server_at)
         if not wins:
-            raise conflict(_progress(db, auth.user.id, book), recorded)
+            raise conflict(shown, recorded)
     now = int(time.time())
     if row is None:
         row = ReadingProgress(user_id=auth.user.id, document=book.partial_md5, timestamp=now)
@@ -204,19 +209,32 @@ def put_page(auth: AuthCsrf, db: DbDep, settings: SettingsDep, file_id: int, bod
     row.device_id = WEB_DEVICE_ID
     row.timestamp = now
     row.sync_key_id = None
-    _project_page(db, settings, auth.user.id, book, page, row.device, recorded)
+    _project_page(db, settings, auth.user.id, book, page, row.device)
     db.commit()
     return _progress(db, auth.user.id, book)
 
 
-def _project_page(
-    db, settings, user_id: int, book: BookFile, page: int, device: str, recorded=None
-) -> None:
+def _work_position_as_page(db, settings, user_id: int, book: BookFile, pages: int):
+    """The work's position as a page of this text PDF: (``{"at", "json"}``, page), the json
+    shaped like a page record, or None without a sentence map or a position."""
+    from lectern.pdftext.positions import pdf_map
+    from lectern.progress import get_progress
+
+    m = pdf_map(db, settings.library_dir, book)
+    wp = get_progress(db, user_id, book.work_id) if m else None
+    page = m.page_of(wp.sentence_n) if wp is not None else None
+    if page is None:
+        return None
+    return {"at": wp.updated_at, "json": {
+        "page": page + 1, "percentage": round(min(1.0, (page + 1) / pages), 4),
+        "device": wp.device or "Lectern", "from_web": False, "updated_at": iso(wp.updated_at),
+    }}, page + 1  # fmt: skip
+
+
+def _project_page(db, settings, user_id: int, book: BookFile, page: int, device: str) -> None:
     """Move the work's canonical position to the first sentence on ``page`` (1-based) of a
     text PDF, unless it is on that page already (reading a page must not rewind the audio to
-    the page's first sentence), or the page was turned offline (``recorded``, server clock)
-    before the canonical position last moved: the audiobook, the EPUB, or KOReader got there
-    later, and the viewer offers that position instead of losing it."""
+    the page's first sentence)."""
     from lectern.models import ProgressSource
     from lectern.pdftext.positions import pdf_map
     from lectern.positions import SentencePos
@@ -230,8 +248,6 @@ def _project_page(
         return
     wp = get_progress(db, user_id, book.work_id)
     if wp is not None and m.page_of(wp.sentence_n) == page - 1:
-        return
-    if recorded is not None and wp is not None and wp.received_at and wp.received_at > recorded:
         return
     set_progress(
         db,

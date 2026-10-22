@@ -624,10 +624,19 @@ def test_an_older_offline_page_turn_does_not_rewind_a_newer_audio_position(clien
     assert r.status_code == 200, r.text
     r = put_json(client, f"/api/files/{fid}/progress", csrf, {"page": 3, "pages": 3, "offline": {
         "recorded_at": iso(turned), "sent_at": iso(turned + timedelta(seconds=1))}})  # fmt: skip
-    assert r.status_code == 200, r.text  # the page record is this device's own
+    # Neither record moves: the device is told about the newer place, as a page.
+    assert r.status_code == 409, r.text
+    assert r.json()["server"]["page"] == 1, r.json()
     with session_factory()() as db:
         wp = db.scalar(select(WorkProgress).where(WorkProgress.work_id == work.id))
         assert (wp.sentence_n, wp.source.value) == (3, "audio")
+    info = client.get(f"/api/files/{fid}/pages").json()
+    assert info["progress"] is None and info["position"]["page"] == 1
+    key = api_post(client, "/api/devices", csrf, {"label": "Kobo"}).json()["sync_secret"]
+    with session_factory()() as db:
+        md5 = db.get(BookFile, fid).partial_md5
+    got = client.get(f"/syncs/progress/{md5}", headers=ko_headers("owner", key)).json()
+    assert got["progress"] == "1", got
     # A page turned now (online) still moves the work there.
     assert (
         put_json(client, f"/api/files/{fid}/progress", csrf, {"page": 3, "pages": 3}).status_code
@@ -636,3 +645,57 @@ def test_an_older_offline_page_turn_does_not_rewind_a_newer_audio_position(clien
     with session_factory()() as db:
         wp = db.scalar(select(WorkProgress).where(WorkProgress.work_id == work.id))
         assert wp.raw == "page:3"
+
+
+def test_a_same_size_sentence_list_with_new_boundaries_needs_a_new_projection(
+    client, owner, settings
+):
+    from lectern.ingest.sentences import replace_sentences
+
+    work_id, fid = _epub_and_pdf_work(settings)
+    sweep(session_factory(), settings.library_dir)
+    assert client.get(f"/api/files/{fid}/sentences").status_code == 200
+    with session_factory()() as db:
+        rows = db.scalars(
+            select(Sentence).where(Sentence.work_id == work_id).order_by(Sentence.n)
+        ).all()
+        entries = [{"n": r.n, "spine_index": r.spine_index, "char_start": r.char_start, "char_end": r.char_end}
+                   for r in rows]  # fmt: skip
+        # Move one boundary: same count, so (in this one-work database) the same row ids.
+        i = next(
+            k
+            for k in range(len(entries) - 1)
+            if entries[k]["spine_index"] == entries[k + 1]["spine_index"]
+        )
+        entries[i]["char_end"] -= 1
+        entries[i + 1]["char_start"] -= 1
+        replace_sentences(db, work_id, entries)
+        db.commit()
+    assert client.get(f"/api/files/{fid}/sentences").status_code == 409
+    sweep(session_factory(), settings.library_dir)
+    assert client.get(f"/api/files/{fid}/sentences").status_code == 200
+
+
+def test_a_queued_alignment_does_not_make_a_stale_list_the_pdfs(client, owner, settings):
+    from lectern.models import Alignment, AlignmentStatus
+
+    work_id, fid = _epub_and_pdf_work(settings)
+    sweep(session_factory(), settings.library_dir)  # the list is the EPUB's
+    with session_factory()() as db:
+        db.delete(db.scalar(select(BookFile).where(BookFile.work_id == work_id,
+                                                   BookFile.media_type == "application/epub+zip")))  # fmt: skip
+        text_sha = db.scalar(select(PdfText.text_sha256).where(PdfText.file_id == fid))
+        # An alignment of the PDF's text is asked for before the sweep repairs the list.
+        db.add(Alignment(work_id=work_id, model="m", status=AlignmentStatus.PENDING,
+                         epub_sha256=text_sha, audio_fingerprint="x"))  # fmt: skip
+        db.commit()
+    assert client.get(f"/api/files/{fid}/sentences").status_code == 409
+    sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/files/{fid}/text").json()
+    assert (st["text_source"], st["map"]) == ("pdf", "self")
+    with session_factory()() as db:
+        assert set(db.scalars(select(Sentence.spine_index).where(Sentence.work_id == work_id))) == {
+            0,
+            1,
+            2,
+        }
