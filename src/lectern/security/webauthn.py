@@ -34,6 +34,7 @@ class PendingChallenge:
     challenge: bytes
     user_id: int | None
     expires: float
+    purpose: str = ""
 
 
 class ChallengeStore:
@@ -43,21 +44,23 @@ class ChallengeStore:
         self._items: dict[str, PendingChallenge] = {}
         self._lock = threading.Lock()
 
-    def put(self, challenge: bytes, user_id: int | None) -> str:
+    def put(self, challenge: bytes, user_id: int | None, purpose: str) -> str:
         key = secrets.token_urlsafe(24)
         with self._lock:
             self._prune()
             self._items[key] = PendingChallenge(
-                challenge, user_id, time.monotonic() + CHALLENGE_TTL
+                challenge, user_id, time.monotonic() + CHALLENGE_TTL, purpose
             )
         return key
 
-    def pop(self, key: str | None) -> PendingChallenge | None:
+    def pop(self, key: str | None, purpose: str) -> PendingChallenge | None:
+        """The challenge, once, and only for the ceremony it was issued for (a sign-in
+        challenge never confirms a step-up, and the other way round)."""
         if not key:
             return None
         with self._lock:
             item = self._items.pop(key, None)
-        if item is None or item.expires < time.monotonic():
+        if item is None or item.expires < time.monotonic() or item.purpose != purpose:
             return None
         return item
 
@@ -95,18 +98,24 @@ def verify_registration(settings: Settings, body: dict, challenge: bytes):
     )
 
 
-def authentication_options(settings: Settings, allow: list[Passkey] | None) -> tuple[str, bytes]:
+def authentication_options(
+    settings: Settings, allow: list[Passkey] | None, *, require_uv: bool = False
+) -> tuple[str, bytes]:
     opts = generate_authentication_options(
         rp_id=settings.rp_id,
         allow_credentials=[PublicKeyCredentialDescriptor(id=p.credential_id) for p in allow]
         if allow
         else None,
-        user_verification=UserVerificationRequirement.PREFERRED,
+        user_verification=UserVerificationRequirement.REQUIRED
+        if require_uv
+        else UserVerificationRequirement.PREFERRED,
     )
     return options_to_json(opts), opts.challenge
 
 
-def verify_authentication(settings: Settings, body: dict, challenge: bytes, passkey: Passkey):
+def verify_authentication(
+    settings: Settings, body: dict, challenge: bytes, passkey: Passkey, *, require_uv=False
+):
     return verify_authentication_response(
         credential=body,
         expected_challenge=challenge,
@@ -114,7 +123,7 @@ def verify_authentication(settings: Settings, body: dict, challenge: bytes, pass
         expected_origin=settings.base_url,
         credential_public_key=passkey.public_key,
         credential_current_sign_count=passkey.sign_count,
-        require_user_verification=False,
+        require_user_verification=require_uv,
     )
 
 

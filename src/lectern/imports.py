@@ -68,7 +68,13 @@ from lectern.models import (
     utcnow,
 )
 from lectern.uploads import media_suffix
-from lectern.workmeta import Metadata, apply_metadata, strip_controls, write_book_json
+from lectern.workmeta import (
+    BOOK_JSON,
+    Metadata,
+    apply_metadata,
+    strip_controls,
+    write_book_json,
+)
 
 log = logging.getLogger("lectern.imports")
 
@@ -728,9 +734,27 @@ def file(
     imp.target = {"action": "new" if created else "join", "work_id": work.id}
     _touch(imp)
     db.flush()
+    journal.add(_restore_file(work_dir / BOOK_JSON))
     write_book_json(db, library, work)
     report["skipped_duplicates"] = [f.filename for f in imp.files if f.status == "duplicate"]
     return work, report
+
+
+def _restore_file(path: Path):
+    """Undo for rewriting ``path``: put the old bytes back, or remove it if it was new. Filing
+    can still be refused after this (an AI key's ``file`` scope is checked last), and the
+    sidecar must then describe the book as it was, not files that were moved back out."""
+    old = path.read_bytes() if path.is_file() else None
+
+    def undo() -> None:
+        if old is None:
+            path.unlink(missing_ok=True)
+        else:
+            tmp = path.with_name(path.name + ".restore")
+            tmp.write_bytes(old)
+            tmp.replace(path)
+
+    return undo
 
 
 def _rmdir_if_empty(d: Path):

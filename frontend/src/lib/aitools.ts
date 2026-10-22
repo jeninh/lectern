@@ -1,6 +1,9 @@
 // AI tools (MCP): key scopes and the exact config each AI app needs (docs/mcp.md).
 
-export type AIScope = "upload" | "read" | "organize";
+export type AIScope = "upload" | "file" | "read" | "organize";
+
+/** How a person confirms a sensitive action such as adding scopes to a key. */
+export type StepUpMethod = "passkey" | "password";
 
 export interface AIKey {
   id: number;
@@ -18,6 +21,7 @@ export interface AIKeyList {
   keys: AIKey[];
   scopes: AIScope[];
   default_scopes: AIScope[];
+  step_up: StepUpMethod[];
   endpoint: string;
 }
 
@@ -28,7 +32,8 @@ export interface CreatedAIKey {
 }
 
 export const SCOPE_TEXT: Record<AIScope, { label: string; detail: string }> = {
-  upload: { label: "Add books", detail: "Upload books and audiobooks and file them after review." },
+  upload: { label: "Add books", detail: "Upload books and audiobooks into Review before filing." },
+  file: { label: "Can file books (confirm imports)", detail: "File reviewed uploads into the library. Without it, uploads wait in Review before filing for you." },
   read: { label: "Read the library", detail: "Search, book details, alignment status, and your progress." },
   organize: { label: "Organize", detail: "Shelves, send to device, start alignment, and edit metadata." },
 };
@@ -73,3 +78,19 @@ export function claudeCodeJson(endpoint: string, secret: string): string {
   );
 }
 
+
+/** The display order of scopes (the server's order). */
+export const SCOPE_ORDER: AIScope[] = ["upload", "file", "read", "organize"];
+
+/**
+ * Scopes ``after`` adds to ``before``, in display order. Removing scopes applies at once;
+ * adding any needs a fresh passkey or password (``POST /api/ai-keys/{id}/scopes``).
+ */
+export function addedScopes(before: AIScope[], after: AIScope[]): AIScope[] {
+  return SCOPE_ORDER.filter((s) => after.includes(s) && !before.includes(s));
+}
+
+/** Whether two scope lists grant the same thing, whatever their order. */
+export function sameScopes(a: AIScope[], b: AIScope[]): boolean {
+  return SCOPE_ORDER.every((s) => a.includes(s) === b.includes(s));
+}
