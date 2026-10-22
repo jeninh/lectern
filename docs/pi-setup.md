@@ -280,8 +280,9 @@ proxy cannot reach a tailnet address, so with Lectern only on the tailnet:
 - If Tailscale connects on that network, set `"proxy": "none"` in `config.json` so the worker
   talks to Lectern directly over Tailscale. The agent reads it only at start: run
   `lectern worker-service install` afterwards to restart it (add `--no-login` if you installed
-  with it), or pass `--proxy none` to the installer. Model downloads then go direct too, so **download the models at home
-  first** (run one job there; they are cached in `~/.cache/huggingface`).
+  with it), or pass `--proxy none` to the installer. Model downloads then go direct too, so
+  **download the models at home first** (run one job there; they are cached in
+  `~/.cache/huggingface`).
 - If the network forces everything through its proxy and blocks Tailscale, the worker cannot
   reach Lectern from there. Nothing breaks: jobs wait until the Mac is home.
 - `--ca-bundle /path/school-ca.pem` (or `ca_bundle`) matters only for a network that inspects
