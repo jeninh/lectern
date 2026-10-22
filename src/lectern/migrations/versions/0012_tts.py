@@ -47,6 +47,8 @@ def upgrade() -> None:
         sa.Column("user_id", sa.Integer(), nullable=True),
         sa.Column("characters", sa.Integer(), nullable=False),
         sa.Column("credits", sa.Float(), nullable=False),
+        sa.Column("request_key", sa.String(length=64), nullable=True),
+        sa.Column("state", sa.String(length=16), nullable=False, server_default="billed"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["job_id"], ["jobs.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["work_id"], ["works.id"], ondelete="SET NULL"),

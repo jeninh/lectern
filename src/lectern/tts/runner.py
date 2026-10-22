@@ -22,7 +22,7 @@ from lectern import integrations, queue
 from lectern.align.jobs import LeaseLost, ResultError, verify_lease
 from lectern.align.worker import MAX_HEARTBEAT_S, JobAbandoned, WorkerStopping, _Heartbeat
 from lectern.config import Settings
-from lectern.models import Job, Work, utcnow
+from lectern.models import IntegrationUsage, Job, Work, utcnow
 from lectern.security import audit
 from lectern.tts import elevenlabs as el
 from lectern.tts import engines as eng
@@ -189,7 +189,12 @@ class TTSRunner:
         except LeaseLost:
             self._fail(job_id, token, "the book's text changed; queue it again", retryable=False)
             return True
-        except (eng.EngineUnavailable, synth.SpendingCapReached, integrations.Undecryptable) as exc:
+        except (
+            eng.EngineUnavailable,
+            synth.SpendingCapReached,
+            synth.UncertainCharge,
+            integrations.Undecryptable,
+        ) as exc:
             self._fail(job_id, token, _text(exc), retryable=False)
             return True
         except el.ElevenLabsError as exc:
@@ -206,9 +211,19 @@ class TTSRunner:
         return True
 
     def _eleven_plan(self, db, job_id: int, payload: dict) -> synth.ElevenLabsPlan:
-        key = integrations.secret(db, self.settings, integrations.ELEVENLABS)
-        if key is None:
+        if integrations.secret(db, self.settings, integrations.ELEVENLABS) is None:
             raise eng.EngineUnavailable("the ElevenLabs key was removed; add it again to continue")
+
+        def key() -> str:
+            # Read before every request: removing the key stops the next one, retries included.
+            with self.session_factory() as s:
+                current = integrations.secret(s, self.settings, integrations.ELEVENLABS)
+            if current is None:
+                raise el.ElevenLabsError(
+                    "key_removed", "the ElevenLabs key was removed; add it again to continue"
+                )
+            return current
+
         client = el.Client(
             key,
             self.eleven_transport,
@@ -220,24 +235,41 @@ class TTSRunner:
             with self.session_factory() as s:
                 return tj.spent_credits(s, group)
 
-        def bill(characters: int, credits: float) -> None:
+        cap = float(payload.get("cap_credits") or 0.0)
+
+        def reserve(request_key: str, characters: int, credits: float) -> int:
             with self.session_factory() as s:
-                job = s.get(Job, job_id)
-                tj.record_usage(s, provider=integrations.ELEVENLABS, kind="tts",
-                                characters=characters, credits=credits, job=job)  # fmt: skip
-                row = integrations.active(s, integrations.ELEVENLABS)
-                if row is not None:
-                    row.last_used_at = utcnow()
+                return tj.reserve_chunk(
+                    s, s.get(Job, job_id), request_key, characters, credits, cap
+                )
+
+        def settle(row_id: int, state: str) -> None:
+            with self.session_factory() as s:
+                usage = s.get(IntegrationUsage, row_id)
+                if usage is not None:
+                    usage.state = state
+                key_row = integrations.active(s, integrations.ELEVENLABS)
+                if key_row is not None:
+                    key_row.last_used_at = utcnow()
                 s.commit()
+
+        def release(row_id: int) -> None:
+            with self.session_factory() as s:
+                usage = s.get(IntegrationUsage, row_id)
+                if usage is not None and usage.state == "pending":
+                    s.delete(usage)
+                    s.commit()
 
         return synth.ElevenLabsPlan(
             client=client,
             model=str(payload.get("model") or el.DEFAULT_MODEL),
             voice_settings=payload.get("voice_settings") or None,
             credits_per_character=float(payload.get("credits_per_character") or 1.0),
-            cap_credits=float(payload.get("cap_credits") or 0.0),
+            cap_credits=cap,
             spent=spent,
-            bill=bill,
+            reserve=reserve,
+            settle=settle,
+            release=release,
             cache_dir=self.settings.data_dir / "tts" / "cache" / "elevenlabs",
         )
 

@@ -103,22 +103,31 @@ class Speech:
 class Client:
     def __init__(
         self,
-        key: str,
+        key: str | Callable[[], str],
         transport: Transport | None = None,
         *,
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
     ) -> None:
-        self._key = key
+        # A callable is asked before every attempt, so a key removed mid-narration stops the
+        # next request (and any retry) instead of living on in this client.
+        self._key = key if callable(key) else (lambda: key)
         self._transport = transport or https_transport
         self._sleep = sleep
         self._rng = rng or random.Random()  # noqa: S311 - jitter, not security
 
     # -- transport with retries ---------------------------------------------------------------
 
-    def _request(self, method: str, path: str, body: dict | None = None, *, retries=RETRIES):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        *,
+        retries=RETRIES,
+        retry_if: Callable[[ElevenLabsError], bool] | None = None,
+    ):
         headers = {
-            "xi-api-key": self._key,
             "Accept": "application/json",
             "User-Agent": f"Lectern/{__version__} (self-hosted reading server)",
         }
@@ -129,6 +138,7 @@ class Client:
         attempt = 0
         while True:
             rheaders: dict = {}
+            headers["xi-api-key"] = self._key()
             try:
                 status, rheaders, data = self._transport(method, path, headers, raw)
                 if 200 <= status < 300:
@@ -136,7 +146,7 @@ class Client:
                 err = _error(status, data)
             except ElevenLabsError as exc:
                 err = exc
-            if not err.retryable or attempt >= retries:
+            if not err.retryable or attempt >= retries or (retry_if and not retry_if(err)):
                 raise err
             attempt += 1
             self._sleep(self._delay(attempt, rheaders))
@@ -241,7 +251,9 @@ class Client:
             f"/v1/text-to-speech/{urllib.parse.quote(voice_id, safe='')}/with-timestamps"
             f"?output_format={OUTPUT_FORMAT}"
         )
-        headers, data = self._request("POST", path, body)
+        # Speech is billed. Only a 429 (rate limited, nothing generated) is retried here; any
+        # other failure may have been charged, and the caller decides (docs/tts.md).
+        headers, data = self._request("POST", path, body, retry_if=lambda e: e.status == 429)
         try:
             doc = json.loads(data)
             pcm = base64.b64decode(doc["audio_base64"])
@@ -249,13 +261,11 @@ class Client:
             starts = [float(x) for x in align.get("character_start_times_seconds") or []]
             ends = [float(x) for x in align.get("character_end_times_seconds") or []]
         except (ValueError, KeyError, TypeError) as exc:
-            raise ElevenLabsError(
-                "bad_response", "ElevenLabs sent no audio", retryable=True
-            ) from exc
+            raise ElevenLabsError("bad_response", "ElevenLabs sent no audio", status=200) from exc
         if len(starts) != len(text) or len(ends) != len(text):
             # The timestamps index the request text; anything else cannot be placed.
             raise ElevenLabsError(
-                "bad_alignment", "ElevenLabs timings do not match the text", retryable=True
+                "bad_alignment", "ElevenLabs timings do not match the text", status=200
             )
         rid = {k.lower(): v for k, v in headers.items()}.get("request-id")
         return Speech(pcm[: len(pcm) - len(pcm) % 2], starts, ends, rid)

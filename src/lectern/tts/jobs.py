@@ -21,19 +21,21 @@ import json
 import logging
 import math
 import os
+import shutil
 import statistics
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from lectern import queue
 from lectern.align.jobs import LeaseLost, ResultError, backoff_s
 from lectern.align.tracks import sync_tracks, work_epub, work_tracks
 from lectern.config import Settings
-from lectern.ingest.hashing import sha256_file
 from lectern.ingest.library import safe_component
 from lectern.ingest.sentences import replace_sentences
 from lectern.models import (
@@ -306,6 +308,9 @@ def reclaim(db: Session, now: datetime | None = None, *, orphaned_local: bool = 
                 Job.id == job.id,
                 Job.status == JobStatus.LEASED,
                 Job.lease_token_hash == job.lease_token_hash,
+                Job.heartbeat_at.is_(None)
+                if job.heartbeat_at is None
+                else Job.heartbeat_at == job.heartbeat_at,  # a heartbeat meanwhile extended it
             )  # fmt: skip
             .values(**values)
             .execution_options(synchronize_session=False)
@@ -378,21 +383,57 @@ def spent_credits(db: Session, cap_group: int | None) -> float:
 def record_usage(
     db: Session, *, provider: str, kind: str, characters: int, credits: float,
     job: Job | None = None, work_id: int | None = None, user_id: int | None = None,
-) -> None:  # fmt: skip
-    db.add(
-        IntegrationUsage(
-            provider=provider,
-            kind=kind,
-            cap_group=(job.payload or {}).get("cap_group") if job is not None else None,
-            job_id=job.id if job is not None else None,
-            work_id=work_id if work_id is not None else (job.work_id if job is not None else None),
-            user_id=user_id
-            if user_id is not None
-            else (job.created_by if job is not None else None),
-            characters=characters,
-            credits=round(credits, 3),
+    request_key: str | None = None, state: str = "billed",
+) -> IntegrationUsage:  # fmt: skip
+    row = IntegrationUsage(
+        provider=provider,
+        kind=kind,
+        cap_group=(job.payload or {}).get("cap_group") if job is not None else None,
+        job_id=job.id if job is not None else None,
+        work_id=work_id if work_id is not None else (job.work_id if job is not None else None),
+        user_id=user_id if user_id is not None else (job.created_by if job is not None else None),
+        characters=characters,
+        credits=round(credits, 3),
+        request_key=request_key,
+        state=state,
+    )
+    db.add(row)
+    return row
+
+
+def reserve_chunk(
+    db: Session, job: Job, request_key: str, characters: int, credits: float, cap: float
+) -> int:
+    """Record an ElevenLabs narration request as ``pending`` before it is sent, after checking
+    the job's cap against everything billed or reserved in its cap group. A request this same
+    job already sent without a known outcome (a crash, a lost response) is not sent again by
+    an automatic retry of the job: only a new job (the owner's Retry) may resend it."""
+    from lectern.tts.synth import SpendingCapReached, UncertainCharge
+
+    unsettled = db.scalar(
+        select(IntegrationUsage.id).where(
+            IntegrationUsage.job_id == job.id,
+            IntegrationUsage.request_key == request_key,
+            IntegrationUsage.state.in_(("pending", "uncertain")),
         )
     )
+    if unsettled is not None:
+        raise UncertainCharge(
+            "an earlier attempt of this job sent the same ElevenLabs request and its outcome is "
+            "unknown (it may have been charged). It is not sent again automatically; check your "
+            "ElevenLabs usage, then Retry (it still counts against the cap)"
+        )
+    group = (job.payload or {}).get("cap_group") or job.id
+    spent = spent_credits(db, group)
+    if spent + credits > cap + 1e-6:
+        raise SpendingCapReached(
+            f"the next request ({credits:.0f} credits) would pass the job's cap of "
+            f"{cap:.0f} credits ({spent:.0f} already used)"
+        )
+    row = record_usage(db, provider="elevenlabs", kind=KIND, characters=characters,
+                       credits=credits, job=job, request_key=request_key, state="pending")  # fmt: skip
+    db.commit()
+    return row.id
 
 
 # --- result --------------------------------------------------------------------------------------
@@ -441,10 +482,10 @@ def load_job_script(data_dir: Path, payload: dict) -> dict:
     return json.loads(data)
 
 
-def check_result(result: TTSResult, payload: dict, script: dict, artifacts: Path) -> None:
+def check_result(result: TTSResult, payload: dict, script: dict) -> None:
     """Contract checks: same engine/voice/codec, every script sentence exactly once in its
-    chapter and in order, times monotone inside each chapter's duration, artifacts present
-    with the declared hashes. Raises :class:`ResultError` (422)."""
+    chapter and in order, times monotone inside each chapter's duration. Raises
+    :class:`ResultError` (422). The artifacts are checked when they are pinned."""
     errors: list[str] = []
     codec = (payload.get("audio") or {}).get("codec")
     if result.engine != payload.get("engine") or result.voice != payload.get("voice"):
@@ -480,11 +521,6 @@ def check_result(result: TTSResult, payload: dict, script: dict, artifacts: Path
                 errors.append(f"{where}: sentence {s.n} ends after the audio")
                 break
             last = s.start_s
-        path = artifacts / got.artifact
-        if not path.is_file():
-            errors.append(f"{where}: artifact {got.artifact} was not uploaded")
-        elif sha256_file(path) != got.sha256:
-            errors.append(f"{where}: artifact {got.artifact} does not match its sha256")
         if len(errors) > 50:
             break
     if errors:
@@ -503,10 +539,40 @@ def apply_result(db: Session, settings: Settings, job: Job, body: bytes, artifac
         raise ResultError(
             400, "invalid_result", [str(e.get("msg")) for e in exc.errors()[:20]]
         ) from exc
+    # The lease that submitted this result, as it is now: publication is fenced by exactly it.
+    lease = SimpleNamespace(id=job.id, lease_token_hash=job.lease_token_hash,
+                            leased_by_id=job.leased_by_id)  # fmt: skip
     payload = job.payload or {}
     script = load_job_script(settings.data_dir, payload)
-    check_result(result, payload, script, artifacts)
-    return publish(db, settings, job, result, script, artifacts)
+    check_result(result, payload, script)
+    stage = queue.staging_dir(settings.library_dir, job.id, new_secret()[:8])
+    try:
+        stage.mkdir(parents=True)
+        staged = [_pin_chapter(artifacts, stage, ch) for ch in result.chapters]
+        return publish(db, settings, job, lease, result, script, staged)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _pin_chapter(artifacts: Path, stage: Path, ch: ResultChapter) -> Path:
+    """Copy a chapter artifact into staging, hashing that same read, and probe the copy: the
+    bytes checked are the bytes published, and they must be audio as long as declared."""
+    from lectern.align.tracks import probe
+    from lectern.jobs import _pin
+
+    copy = stage / ch.artifact
+    try:
+        digest = _pin(artifacts / ch.artifact, copy)
+    except FileNotFoundError:
+        digest = None
+    if digest != ch.sha256:
+        raise ResultError(422, "missing_artifact", [ch.artifact])
+    duration = probe(copy)[0]
+    if duration <= 0 or abs(duration - ch.duration_s) > max(0.5, 0.01 * ch.duration_s):
+        raise ResultError(
+            422, "bad_audio", [f"{ch.artifact}: {duration:.2f} s, declared {ch.duration_s:.2f} s"]
+        )
+    return copy
 
 
 def _current_inputs(db: Session, settings: Settings, job: Job) -> tuple[Work, Path]:
@@ -523,18 +589,25 @@ def _current_inputs(db: Session, settings: Settings, job: Job) -> tuple[Work, Pa
 
 
 def publish(
-    db: Session, settings: Settings, job: Job, result: TTSResult, script: dict, artifacts: Path
+    db: Session,
+    settings: Settings,
+    job: Job,
+    lease: SimpleNamespace,
+    result: TTSResult,
+    script: dict,
+    staged: list[Path],
 ) -> dict:
-    """Move the chapter files into the work's ``audio/`` folder, make them tracks, and
-    install the synthesis timings as the work's sentence map, all under the library lock and
-    in one transaction (files are removed again if it fails)."""
+    """Copy the pinned chapter files into the work's ``audio/`` folder, make them tracks, and
+    install the synthesis timings as the work's sentence map, all under the library lock,
+    holding ``lease`` (``queue.hold_lease``: the database write lock on that exact, unexpired
+    lease), in one transaction (files are removed again if it fails). A lease released,
+    reclaimed, revoked, or cancelled meanwhile publishes nothing (``LeaseLost``)."""
     from lectern.align.text import iter_spine_items, segment_items
     from lectern.fsops import LIBRARY_LOCK, unique_name
 
     payload = job.payload or {}
     with LIBRARY_LOCK:
-        db.refresh(job)
-        if job.status not in JOB_ACTIVE_STATUSES:
+        if not queue.hold_lease(db, lease):
             raise LeaseLost()
         work, epub = _current_inputs(db, settings, job)
         sentences = segment_items(iter_spine_items(epub))
@@ -547,7 +620,7 @@ def publish(
         placed: list[Path] = []
         try:
             taken: list[str] = []
-            for i, ch in enumerate(result.chapters):
+            for i, (ch, pinned) in enumerate(zip(result.chapters, staged, strict=True)):
                 stem = safe_component(
                     ch.title or script["chapters"][i]["title"], f"Chapter {i + 1}"
                 )
@@ -555,7 +628,7 @@ def publish(
                 taken.append(name)
                 dest = audio_dir / name
                 tmp = dest.with_name(f".{name}.tmp")
-                with (artifacts / ch.artifact).open("rb") as src, tmp.open("wb") as out:
+                with pinned.open("rb") as src, tmp.open("wb") as out:
                     while block := src.read(1 << 20):
                         out.write(block)
                 os.replace(tmp, dest)
@@ -814,5 +887,6 @@ register(
         inputs=worker_inputs,
         apply_result=apply_result,
         stats=validated_stats,
+        keeps_artifacts=True,  # Retry within a week resumes from finished chapters (sweep())
     )
 )

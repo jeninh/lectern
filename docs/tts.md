@@ -78,8 +78,9 @@ Voices: the Kokoro v1.0 set (`af_heart`, `bm_george`, …); the first letter is 
   from the server's secret key (`LECTERN_SECRET_KEY`, else `<data>/secret_key`). A copy of
   `lectern.db` alone does not reveal it. If the secret key changes, the stored key cannot be
   decrypted any more; the page says so and asks for it again.
-- **Remove key** deletes the ciphertext at once. Queued ElevenLabs narrations then fail at
-  their next request.
+- **Remove key** deletes the ciphertext at once. The key is read again before every request
+  (retries included), so a running or queued ElevenLabs narration sends nothing more and fails.
+  A request already in flight cannot be recalled.
 - **Audit.** `integration.elevenlabs.set`, `.test`, `.revoke`, `.preview`, `.use` (credits per
   narration), and `tts.request` / `tts.retry` (engine, chapters, characters, estimate, cap).
   The page shows the last 30 days' characters and credits (`integration_usage`).
@@ -109,8 +110,9 @@ a money estimate. Then you must:
 The server refuses the request (`409 confirmation_required`) without the tick, with
 `409 estimate_changed` if the characters or price differ from what you saw, `400
 cap_below_estimate`, or `409 quota_insufficient`. While it runs, each request is checked
-against the cap **before** it is sent; the job stops (failed, not retried) rather than pass it.
-The cap is shared by the job and its retries.
+against the cap **before** it is sent and recorded as reserved (`pending`) in the usage ledger
+in the same step; the job stops (failed, not retried) rather than pass it. The cap is shared by
+the job and its retries, and counts reserved and uncertain requests as spent.
 
 ### Chunks, retries, resume
 
@@ -118,11 +120,17 @@ Sentences are grouped into requests of at most 2,000 characters, ending at a par
 half full; a sentence is never split. `POST /v1/text-to-speech/{voice}/with-timestamps`
 (`pcm_24000`) returns the audio and a start and end time for every character; a sentence's
 time is its first character's start to its last character's end, shifted by the piece's
-place in the chapter. 429, 5xx, and network errors are retried up to 5 times with exponential
-backoff (1 s doubling to 60 s, ± 20 %), honouring `Retry-After`; a rejected key, exhausted
-quota, or refused request is not. Each paid piece is cached under
-`<data>/tts/cache/elevenlabs/` (keyed by model, voice, settings, text, and context; kept 30
-days), so a retry, a restart, or a resumed job never pays for the same piece twice.
+place in the chapter. A `429` (rate limited: nothing was generated) is retried up to 5 times
+with exponential backoff (1 s doubling to 60 s, ± 20 %), honouring `Retry-After`; a rejected
+key, exhausted quota, or other `4xx` is not, and its reservation is released. A request whose
+outcome is unknown, because the response was lost (network error), ElevenLabs answered `5xx`,
+the answer was unusable, or the server stopped mid-request, may have been billed: it is
+marked `uncertain`, stays counted against the cap, and is **never re-sent automatically**,
+not by the client and not by an automatic re-run of the same job. The job fails with a
+message saying so; **Retry** (a new job) is the owner's decision to send it again. Each paid
+piece is cached under `<data>/tts/cache/elevenlabs/` (keyed by model, voice, settings, text,
+and context; kept 30 days) before its request is marked `billed`, so a retry, a restart, or a
+resumed job never pays again for a piece whose audio arrived.
 
 ## Jobs, progress, cancel, retry
 
@@ -190,12 +198,17 @@ the same text is in [`contracts.md`](contracts.md).
   "chapters": [{"index", "title", "artifact", "sha256", "duration_s", "sentences": [{"n",
   "start_s", "end_s"}]}]}`, times relative to the chapter file. The server checks: same engine,
   voice, and codec as the job; the chapters and sentence numbers exactly the script's, in order;
-  starts non-decreasing and ends within the chapter's duration (+ 0.05 s); every artifact
-  uploaded with the declared SHA-256. Then, under the library lock and in one transaction, it
-  moves the files into `audio/`, makes them tracks, writes the sentence map
+  starts non-decreasing and ends within the chapter's duration (+ 0.05 s). Each artifact is
+  copied into `<library>/.lectern-staging/` and hashed from that same read (it must match the
+  declared SHA-256), then probed: it must be audio whose measured length is the declared
+  `duration_s` (within 0.5 s or 1 %); those staged bytes are what gets published. Then, under
+  the library lock, holding the exact lease that submitted the result (`queue.hold_lease`; a
+  lease released, reclaimed, revoked, or cancelled meanwhile publishes nothing), and in one
+  transaction, it copies the files into `audio/`, makes them tracks, writes the sentence map
   (`model = "tts-<engine>-<voice>"`; sentences of chapters not narrated stay unmatched, with no
-  time), and marks the alignment `succeeded`. `422 invalid_result` / `input_mismatch` otherwise;
-  `409 lease_lost` if the work changed.
+  time), and marks the alignment `succeeded`. `422 invalid_result` / `input_mismatch` /
+  `missing_artifact` / `bad_audio` otherwise; `409 lease_lost` if the work or the lease changed.
+  A job's artifacts are kept for 7 days after it finishes, so **Retry** resumes from them.
 - heartbeat `progress` = sentences done / total; `stats`
   `{engine, voice, sentences_done, characters_done, audio_s, elapsed_s, chars_per_second,
   credits, chapters_resumed}`, unknown keys dropped.

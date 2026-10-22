@@ -885,11 +885,13 @@ external worker, whatever it advertises: the job needs a secret only the server 
 A kind external workers may run registers `queue.KindHandler(kind, capability(payload),
 remote=True, inputs(db, settings, job) -> {name: InputFile(path, media_type, sha256)} | None,
 apply_result(db, settings, job, body, artifacts_dir) -> dict, on_fail(db, job, terminal),
-stats(raw) -> dict | None)`. `inputs` returning `None` means the work changed (`409
+stats(raw) -> dict | None, keeps_artifacts=False)`. `keeps_artifacts` keeps a finished
+job's artifacts out of the generic sweep (the kind's own housekeeping removes them; `tts` keeps
+them 7 days so Retry resumes). `inputs` returning `None` means the work changed (`409
 lease_lost`). `apply_result` raises `lectern.align.jobs.ResultError` (status, code, errors)
 for a bad result and `LeaseLost` for a stale one, and returns the same body when called again
 for a job it already finished (idempotent replay). Registered today: `align` (its own routes
-and result path) and `transcode`. Lease rules (claim, heartbeat, backoff, reclaim, revocation)
+and result path), `transcode`, and `tts`. Lease rules (claim, heartbeat, backoff, reclaim, revocation)
 are the same for every kind; the `alignments` side effects apply to `align` only.
 
 ### Inputs, artifacts, release

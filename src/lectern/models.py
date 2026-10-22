@@ -1164,6 +1164,11 @@ class IntegrationUsage(Base):
     )
     characters: Mapped[int] = mapped_column(Integer, default=0)
     credits: Mapped[float] = mapped_column(Float, default=0.0)
+    # A narration chunk's request: ``pending`` while it is in flight (reserved against the
+    # cap), ``billed`` once its audio is cached, ``uncertain`` when the outcome is unknown
+    # (a lost response, a crash). Previews are recorded ``billed``.
+    request_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    state: Mapped[str] = mapped_column(String(16), default="billed")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 

@@ -506,6 +506,86 @@ def test_elevenlabs_needs_confirmation_and_stops_at_the_cap_then_resumes_without
         assert "integration.elevenlabs.use" in [a.action for a in db.scalars(select(AuditLog))]
 
 
+def _confirmed_eleven_job(client, owner, settings, work_id) -> tuple[int, int]:
+    req = {"engine": "elevenlabs", "voice": "v1"}
+    est = api_post(client, f"/api/works/{work_id}/audiobook/estimate", owner["csrf"], req).json()
+    chars = est["characters"]
+    confirm = {"characters": chars, "credits": chars, "cap_credits": chars, "send_text": True}
+    r = api_post(
+        client, f"/api/works/{work_id}/audiobook", owner["csrf"], {**req, "confirm": confirm}
+    )
+    assert r.status_code == 202, r.text
+    return r.json()["id"], chars
+
+
+def test_elevenlabs_lost_response_is_never_resent_automatically(client, owner, settings, tmp_path):
+    class LostFirst(FakeEleven):
+        lost = 1
+
+        def __call__(self, method, path, headers, body):
+            out = super().__call__(method, path, headers, body)
+            if "/with-timestamps" in path and self.lost:
+                self.lost -= 1
+                raise el.ElevenLabsError("network", "connection reset", retryable=True)
+            return out  # (processed and billed by the service, response lost)
+
+    fake = LostFirst()
+    _eleven(client, owner, fake)
+    work_id = _work(settings, owner, client, tmp_path)
+    job_id, chars = _confirmed_eleven_job(client, owner, settings, work_id)
+    _runner(settings, {"elevenlabs"}, transport=fake).run_once()
+    assert len(fake.speech_texts()) == 1  # not retried by the client
+    first_chunk = fake.speech_texts()[0]
+    with session_factory()() as db:
+        j = db.get(Job, job_id)
+        assert j.status == JobStatus.FAILED and "may have charged" in j.error
+        (row,) = db.scalars(select(IntegrationUsage)).all()
+        assert row.state == "uncertain" and tj.spent_credits(db, job_id) == len(first_chunk)
+        # an automatic re-run of the same job (a crash, a reclaim) does not send it again
+        j.status, j.finished_at, j.attempts = JobStatus.QUEUED, None, 0
+        db.commit()
+    fake.requests.clear()
+    _runner(settings, {"elevenlabs"}, transport=fake).run_once()
+    assert fake.speech_texts() == []
+    with session_factory()() as db:
+        assert db.get(Job, job_id).status == JobStatus.FAILED
+        j = db.get(Job, job_id)  # the owner raises the cap for the possible double charge
+        j.payload = {**j.payload, "cap_credits": chars + len(first_chunk)}
+        db.commit()
+    # the owner's Retry is the explicit decision to send it again, within the cap
+    r = api_post(client, f"/api/works/{work_id}/audiobook/retry", owner["csrf"])
+    assert r.status_code == 202, r.text
+    _runner(settings, {"elevenlabs"}, transport=fake).run_once()
+    with session_factory()() as db:
+        assert db.get(Job, r.json()["id"]).status == JobStatus.SUCCEEDED
+        assert tj.spent_credits(db, job_id) == pytest.approx(chars + len(first_chunk))
+    assert fake.speech_texts()[0] == first_chunk
+
+
+def test_removing_the_key_stops_a_running_narration(client, owner, settings, tmp_path):
+    from lectern import integrations
+
+    class RevokeAfterFirst(FakeEleven):
+        def __call__(self, method, path, headers, body):
+            out = super().__call__(method, path, headers, body)
+            if "/with-timestamps" in path:
+                with session_factory()() as db:  # the owner removes the key meanwhile
+                    integrations.revoke(db, integrations.ELEVENLABS)
+                    db.commit()
+            return out
+
+    fake = RevokeAfterFirst()
+    _eleven(client, owner, fake)
+    work_id = _work(settings, owner, client, tmp_path)
+    job_id, _chars = _confirmed_eleven_job(client, owner, settings, work_id)
+    _runner(settings, {"elevenlabs"}, transport=fake).run_once()
+    assert len(fake.speech_texts()) == 1  # the first chunk only
+    with session_factory()() as db:
+        j = db.get(Job, job_id)
+        assert j.status == JobStatus.FAILED and "removed" in j.error
+        assert [u.state for u in db.scalars(select(IntegrationUsage))] == ["billed"]
+
+
 def test_member_cannot_use_elevenlabs(client, owner, settings, tmp_path):
     _eleven(client, owner, FakeEleven())
     work_id = _work(settings, owner, client, tmp_path)
@@ -534,35 +614,69 @@ def test_preview_is_billed_and_audited(client, owner, settings, tmp_path):
         assert u.characters == len("Hello there.")
 
 
-def test_result_validation_rejects_wrong_sentences_and_hashes(client, owner, settings, tmp_path):
+@needs_ffmpeg
+def test_result_is_validated_pinned_and_fenced_by_its_lease(client, owner, settings, tmp_path):
+    from lectern.align.jobs import LeaseLost, ResultError
+    from lectern.tts import audio as tts_audio
+
     work_id = _work(settings, owner, client, tmp_path)
     job_id = api_post(client, f"/api/works/{work_id}/audiobook", owner["csrf"],
                       {"engine": "kokoro", "voice": "af_heart", "chapters": [1]}).json()["id"]  # fmt: skip
-    with session_factory()() as db:
-        job = db.get(Job, job_id)
-        script = tj.load_job_script(settings.data_dir, job.payload)
-        n = script["chapters"][0]["sentences"][0]["n"]
-        art = queue.artifacts_dir(settings.data_dir, job_id)
-        art.mkdir(parents=True)
-        (art / "chapter-0000.m4a").write_bytes(b"audio")
-        import hashlib
+    art = queue.artifacts_dir(settings.data_dir, job_id)
+    art.mkdir(parents=True)
+    pcm = tmp_path / "five.pcm"
+    pcm.write_bytes(b"\x10\x00" * SR * 5)  # 5 s
+    good = tts_audio.encode("ffmpeg", pcm, art / "chapter-0000.m4a", sample_rate=SR,
+                            codec="aac", bitrate_kbps=32, tags={})  # fmt: skip
+    (art / "chapter-0099.m4a").write_bytes(b"not audio at all")
+    import hashlib
 
-        good = hashlib.sha256(b"audio").hexdigest()
+    junk = hashlib.sha256(b"not audio at all").hexdigest()
+    with session_factory()() as db:
+        job, _token = tj.claim_local(db, {"kokoro"})
+        script = tj.load_job_script(settings.data_dir, job.payload)
+        ns = [x["n"] for x in script["chapters"][0]["sentences"]]
+        every = [{"n": m, "start_s": i * 0.5, "end_s": i * 0.5 + 0.4} for i, m in enumerate(ns)]
 
         def body(**over):
             ch = {"index": 0, "title": "x", "artifact": "chapter-0000.m4a", "sha256": good,
-                  "duration_s": 5.0, "sentences": [{"n": n, "start_s": 0.0, "end_s": 1.0}]}  # fmt: skip
+                  "duration_s": 5.0, "sentences": every}  # fmt: skip
             ch.update(over)
             return json.dumps({"version": 1, "engine": "kokoro", "voice": "af_heart", "codec": "aac",
                                "chapters": [ch]}).encode()  # fmt: skip
 
-        from lectern.align.jobs import ResultError
-
-        for bad in (body(sha256="0" * 64), body(sentences=[{"n": n + 1, "start_s": 0, "end_s": 1}]),
-                    body(sentences=[{"n": n, "start_s": 0, "end_s": 9}])):  # fmt: skip
+        bad = {
+            "missing_artifact": body(sha256="0" * 64),
+            "invalid_result": body(sentences=every[:-1]),
+            "bad_audio": body(artifact="chapter-0099.m4a", sha256=junk),  # hash right, not audio
+        }
+        for code, b in {**bad, "too_long": body(sentences=[*every[:-1], {**every[-1], "end_s": 9}]),
+                        "duration": body(duration_s=9.0)}.items():  # fmt: skip
             with pytest.raises(ResultError) as exc:
-                tj.apply_result(db, settings, job, bad, art)
-            assert exc.value.status == 422
+                tj.apply_result(db, settings, job, b, art)
+            assert exc.value.status == 422, code
+            if code in bad:
+                assert exc.value.code == code
+
+        # The lease is reclaimed and claimed again while this result is in flight: the stale
+        # result must publish nothing, even though the job is active again.
+        held = job.lease_token_hash
+        with session_factory()() as other:
+            other.query(Job).filter(Job.id == job_id).update({"lease_token_hash": "f" * 64})
+            other.commit()
+        with pytest.raises(LeaseLost):
+            tj.apply_result(db, settings, job, body(), art)
+        db.rollback()
+        assert not db.scalars(select(AudioTrack).where(AudioTrack.work_id == work_id)).all()
+        assert not list((settings.library_dir / ".lectern-staging").glob("*/*"))
+
+        # The holder of the lease publishes the bytes it uploaded.
+        db.query(Job).filter(Job.id == job_id).update({"lease_token_hash": held})
+        db.commit()
+        job = db.get(Job, job_id)
+        assert tj.apply_result(db, settings, job, body(), art)["status"] == "succeeded"
+        (track,) = db.scalars(select(AudioTrack).where(AudioTrack.work_id == work_id)).all()
+        assert track.sha256 == good and abs(track.duration_s - 5.0) < 0.1
 
 
 def test_elevenlabs_client_retries_with_backoff_and_does_not_retry_bad_keys():

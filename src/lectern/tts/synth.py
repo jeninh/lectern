@@ -39,6 +39,12 @@ class SpendingCapReached(Exception):
     """The next ElevenLabs request would take the job past its confirmed cap."""
 
 
+class UncertainCharge(Exception):
+    """An ElevenLabs request may have been billed but its audio was not received (a lost
+    response, a server error, a crash). It is never re-sent automatically: only the owner's
+    Retry sends it again, still counted against the cap."""
+
+
 @dataclass
 class ElevenLabsPlan:
     client: el.Client
@@ -46,8 +52,12 @@ class ElevenLabsPlan:
     voice_settings: dict | None
     credits_per_character: float
     cap_credits: float
-    spent: Callable[[], float]  # credits already billed for this job (and its retries)
-    bill: Callable[[int, float], None]  # record a billed request (characters, credits)
+    spent: Callable[[], float]  # credits billed or reserved for this job (and its retries)
+    # reserve(request_key, characters, credits) -> ledger row id: checks the cap and records the
+    # request as pending before it is sent (raises SpendingCapReached / UncertainCharge)
+    reserve: Callable[[str, int, float], int]
+    settle: Callable[[int, str], None]  # (row, "billed" | "uncertain")
+    release: Callable[[int], None]  # the request was refused before anything was generated
     cache_dir: Path
 
 
@@ -203,22 +213,34 @@ def _eleven_chapter(plan: ElevenLabsPlan, voice: str, ch: dict, out, step) -> li
                 raise ValueError("cache entry damaged")
         except (OSError, ValueError):
             cost = len(text) * plan.credits_per_character
-            if plan.spent() + cost > plan.cap_credits + 1e-6:
-                raise SpendingCapReached(
-                    f"the next request ({cost:.0f} credits) would pass the job's cap of "
-                    f"{plan.cap_credits:.0f} credits ({plan.spent():.0f} already used)"
-                ) from None
-            speech = plan.client.speech(voice, text, model_id=plan.model,
-                                        voice_settings=plan.voice_settings,
-                                        previous_text=prev, next_text=nxt)  # fmt: skip
-            plan.bill(len(text), cost)
-            pcm = speech.pcm
-            meta = {"sha256": hashlib.sha256(pcm).hexdigest(), "starts": speech.char_start_s,
-                    "ends": speech.char_end_s, "request_id": speech.request_id}  # fmt: skip
-            tmp = pcm_file.with_suffix(".pcm.tmp")
-            tmp.write_bytes(pcm)
-            os.replace(tmp, pcm_file)
-            meta_file.write_text(json.dumps(meta))
+            row = plan.reserve(key, len(text), cost)  # committed before anything is sent
+            try:
+                speech = plan.client.speech(voice, text, model_id=plan.model,
+                                            voice_settings=plan.voice_settings,
+                                            previous_text=prev, next_text=nxt)  # fmt: skip
+                pcm = speech.pcm
+                meta = {"sha256": hashlib.sha256(pcm).hexdigest(), "starts": speech.char_start_s,
+                        "ends": speech.char_end_s, "request_id": speech.request_id}  # fmt: skip
+                for path, data in ((pcm_file, pcm), (meta_file, json.dumps(meta).encode())):
+                    tmp = path.with_name(path.name + ".tmp")
+                    tmp.write_bytes(data)
+                    os.replace(tmp, path)
+            except el.ElevenLabsError as exc:
+                if exc.code == "key_removed" or (
+                    exc.status is not None and 400 <= exc.status < 500
+                ):
+                    plan.release(row)  # refused up front (bad key, quota, 429s used up)
+                    raise
+                plan.settle(row, "uncertain")
+                raise UncertainCharge(
+                    f"ElevenLabs may have charged {cost:.0f} credits for a request whose audio "
+                    f"never arrived ({exc.message}). It is not sent again automatically; check "
+                    "your ElevenLabs usage, then Retry (it still counts against the cap)"
+                ) from exc
+            except BaseException:
+                plan.settle(row, "uncertain")
+                raise
+            plan.settle(row, "billed")
         base = pos / sr
         offset = 0
         n_samples = len(pcm) // 2
