@@ -29,6 +29,7 @@ jobs:
           for i in 1 2 3; do
             apt update -q && apt install -y -q --no-install-recommends ffmpeg fonts-noto-cjk luajit lua-socket lua-cjson restic && exit 0
             echo "apt attempt $i failed; retrying"; sleep 10
+            sudo dpkg --configure -a || true  # a killed install leaves dpkg interrupted
           done
           exit 1
       - uses: actions/setup-java@v4
@@ -83,6 +84,7 @@ jobs:
           for i in 1 2 3; do
             apt update -q && apt install -y -q --no-install-recommends ffmpeg && exit 0
             echo "apt attempt $i failed; retrying"; sleep 10
+            sudo dpkg --configure -a || true  # a killed install leaves dpkg interrupted
           done
           exit 1
       - uses: astral-sh/setup-uv@v5
