@@ -365,17 +365,28 @@ What we recommend, and what we have and have not measured:
   the SD card and the library on the SSD, set `LECTERN_LIBRARY_PATH` (and optionally
   `LECTERN_DATA_PATH`) in `.env` to absolute paths on the SSD, created and owned by your
   user. Never keep backups on the SD card: see [SD-card wear](backups.md#sd-card-wear).
-- **Image:** keep the default image (`LECTERN_EXTRAS` empty). Do **not** build the `align`
-  image on a Pi.
+- **Image:** `LECTERN_EXTRAS` in `.env` picks the engines built in, as a space- or
+  comma-separated list. Leave it empty for the default image if another computer always does
+  the alignment. With a Mac worker that is sometimes off, a Pi 4 or 5 with at least 4 GB can
+  be the fallback: set `LECTERN_EXTRAS="align tts"` and rebuild (`docker compose … up -d
+  --build`). The Pi can then align with faster-whisper, slowly, while the Mac is off, and
+  narrate with Piper at any time (Piper always runs on the server). While the Mac is online
+  it gets each new alignment job first, for 10 minutes, and runs every Kokoro narration (see
+  [What it runs](mac-worker.md#what-it-runs)). The image is about 0.6 GB larger with `align`,
+  and the first build takes longer. On a Pi also set `LECTERN_ALIGN_MODEL=base` and
+  `LECTERN_ALIGN_THREADS=4` (the core count) in `.env`; see
+  [Where to run it](alignment.md#where-to-run-it-raspberry-pi-nas-laptop).
 
 ### Aligning audiobooks from a Mac or another computer
 
-A Pi is too small to transcribe audiobooks well, so the default image does not try: new
-alignment jobs wait in a queue until an external worker takes them. On a Mac, install the
-worker with one command from **Admin → Workers → Add a worker**; it connects out to Lectern's
-HTTPS address with its own worker key, so it needs nothing opened anywhere. See
-[The Mac worker](mac-worker.md), or [External workers](alignment.md#external-workers) for
-Linux and Windows computers. Nothing breaks while it is off; jobs just wait.
+A Pi transcribes audiobooks slowly at best, and the default image does not try: new
+alignment jobs wait in a queue until an external worker takes them (an image built with
+`align` also runs them on the Pi when no worker is online, or after 10 minutes; see
+**Image** above). On a Mac, install the worker with one command from **Admin → Workers → Add
+a worker**; it connects out to Lectern's HTTPS address with its own worker key, so it needs
+nothing opened anywhere. See [The Mac worker](mac-worker.md), or
+[External workers](alignment.md#external-workers) for Linux and Windows computers. Nothing
+breaks while it is off; jobs just wait.
 
 ## Cloning a private repository with a deploy key
 

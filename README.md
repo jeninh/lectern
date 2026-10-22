@@ -348,11 +348,11 @@ not grow with the length of a file: a 10-hour single-file audiobook needs no mor
 chapter. The server runs each alignment in a separate, lower-priority process with a memory
 cap, so running out of memory or a crash fails that job (with the log kept) and never takes
 the server down. The default image does not transcribe; either build with
-`--build-arg LECTERN_EXTRAS=align`, or keep the server small (`LECTERN_ALIGN_LOCAL_WORKER=0`)
-and run `lectern worker --server https://lectern.example` on a laptop or GPU box with an
-owner-issued worker key. Setup, settings, memory and benchmark numbers, failure handling, and
-how matching handles intros and missing or abridged chapters are in
-[`docs/alignment.md`](docs/alignment.md).
+`--build-arg LECTERN_EXTRAS=align` (`"align tts"` adds Piper as well), or keep the server
+small (`LECTERN_ALIGN_LOCAL_WORKER=0`) and run `lectern worker --server
+https://lectern.example` on a laptop or GPU box with an owner-issued worker key. Setup,
+settings, memory and benchmark numbers, failure handling, and how matching handles intros and
+missing or abridged chapters are in [`docs/alignment.md`](docs/alignment.md).
 
 ## AI apps (MCP)
 
