@@ -327,7 +327,7 @@ function MakeAudiobookSheet({ work, state, onClose, onQueued }: { work: Work; st
         </div>
 
         <div className="row" style={{ gap: 8 }}>
-          <button className="btn sm" onClick={playSample} disabled={busy || !voice || !canPreview} title={canPreview ? undefined : "No sample for this voice"}>
+          <button className="btn sm" onClick={playSample} disabled={busy || !voice || !canPreview} title={canPreview ? undefined : "Samples need the engine on this server"}>
             <Play /> Play a sample
           </button>
           <span className="hint">

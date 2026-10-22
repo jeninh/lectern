@@ -85,7 +85,7 @@ not a worker is online, and says it is a standard sample, not the book's text or
 speed. When Kokoro runs on this server, the sample is made here from the book's text, as for
 Piper.
 
-Regenerate the clips when `KOKORO_VOICES` changes (needs ffmpeg; downloads the weights from
+Regenerate the clips when `KOKORO_VOICES` changes (needs ffmpeg, and espeak-ng for Spanish, French, Hindi, Italian, and Portuguese; downloads the weights from
 Hugging Face on first use):
 
 ```sh

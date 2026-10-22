@@ -127,9 +127,9 @@ KOKORO_SAMPLES = Path(__file__).resolve().parents[1] / "static" / "voice-samples
 def _kokoro_samples() -> dict:
     try:
         voices = json.loads((KOKORO_SAMPLES / "manifest.json").read_text())["voices"]
-    except (OSError, ValueError, KeyError):
+        return {v: s for v, s in voices.items() if (KOKORO_SAMPLES / s["file"]).is_file()}
+    except (OSError, ValueError, KeyError, TypeError):
         return {}
-    return {v: s for v, s in voices.items() if (KOKORO_SAMPLES / s["file"]).is_file()}
 
 
 def kokoro_sample(voice: str) -> dict | None:

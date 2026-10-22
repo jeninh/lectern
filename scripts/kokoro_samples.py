@@ -7,7 +7,7 @@ the Make an audiobook voice picker. Run it again when the voice list changes:
 
     uv run --with "kokoro>=0.9" --with "misaki[en,ja,zh]" python scripts/kokoro_samples.py
 
-Needs ffmpeg. Kokoro downloads its weights from Hugging Face on first use.
+Needs ffmpeg, and espeak-ng for Spanish, French, Hindi, Italian, and Portuguese. Kokoro downloads its weights from Hugging Face on first use.
 """
 
 from __future__ import annotations
@@ -46,6 +46,8 @@ def main() -> None:
     from kokoro import KModel, KPipeline
 
     OUT.mkdir(parents=True, exist_ok=True)
+    for old in OUT.glob("*.m4a"):  # voices dropped from KOKORO_VOICES stop shipping
+        old.unlink()
     model = KModel(repo_id=REPO).eval()  # one copy of the weights for every language
     pipe, manifest = None, {"speed": 1.0, "codec": "aac", "voices": {}}
     for voice in KOKORO_VOICES:
