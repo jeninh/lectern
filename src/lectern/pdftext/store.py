@@ -275,6 +275,7 @@ def ensure_pdf_sentences(db: Session, library: Path, work: Work) -> int:
     if found is None:
         return 0
     old_count = db.scalar(select(func.count(Sentence.id)).where(Sentence.work_id == work.id))
+    before = sentences_key(db, work.id, "")
     source, path = found
     if source.kind == "pdf":
         row = pdf_text_of(db, source.file.id)
@@ -287,6 +288,8 @@ def ensure_pdf_sentences(db: Session, library: Path, work: Work) -> int:
             {"n": r.n, "spine_index": r.section, "char_start": r.char_start, "char_end": r.char_end}
             for r in rows
         ]
+        if not _still_ours(db, work.id, before):
+            return 0
         if old_count:
             replace_sentences(db, work.id, entries, move=_proportional(old_count, len(entries)))
         else:
@@ -328,6 +331,8 @@ def ensure_pdf_sentences(db: Session, library: Path, work: Work) -> int:
             work_texts, [sections[r.section]["text"][r.char_start : r.char_end] for r in pdf_rows]
         )
         move = _through(epub_n, move)
+    if not _still_ours(db, work.id, before):
+        return 0
     replace_sentences(db, work.id, entries, move=move)
     was.projected_key = None
     return len(entries)
@@ -349,6 +354,21 @@ def is_self(db: Session, work: Work, row: PdfText) -> bool:
     if alignment is not None:
         return bool(row.text_sha256) and alignment.epub_sha256 == row.text_sha256
     return row.projected_key is not None and row.projected_key == self_key(db, work.id, row)
+
+
+def _still_ours(db: Session, work_id: int, before: str) -> bool:
+    """Take the database's write lock, then check nothing replaced the sentence list while the
+    new one was computed (an alignment or a narration publishing its result): from here until
+    the caller commits, nobody else can. When something did, back off and leave its list."""
+    from sqlalchemy import text
+
+    # A write starts the transaction (pysqlite begins one lazily, before the first write), so
+    # the reads below see everything committed until now, and nothing commits after them.
+    db.execute(text("UPDATE works SET id = id WHERE id = :id"), {"id": work_id})
+    if _installed_alignment(db, work_id) is None and sentences_key(db, work_id, "") == before:
+        return True
+    db.rollback()
+    return False
 
 
 def _installed_alignment(db: Session, work_id: int):

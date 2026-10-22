@@ -699,3 +699,39 @@ def test_a_queued_alignment_does_not_make_a_stale_list_the_pdfs(client, owner, s
             1,
             2,
         }
+
+
+def test_a_repair_never_overwrites_an_alignment_published_while_it_ran(
+    client, owner, settings, monkeypatch
+):
+    """The sweep moves a PDF-only work's list to an EPUB added later; if an alignment of that
+    EPUB publishes its timed sentences meanwhile, the alignment's list stays."""
+    from lectern.ingest import sentences as ingest_sentences
+    from lectern.ingest.sentences import replace_sentences
+    from lectern.models import Alignment, AlignmentStatus
+
+    fid = _file(settings, "two-column.pdf")
+    work_id = _work_of(fid).id
+    sweep(session_factory(), settings.library_dir)
+    _epub_of_the_story(settings.inbox_path / "keeper.epub")
+    drain_inbox(settings)
+    real = ingest_sentences.epub_sentences
+
+    def published_meanwhile(path):
+        entries = real(path)
+        with session_factory()() as other:  # the alignment worker, in its own session
+            replace_sentences(other, work_id, [
+                {**e, "audio_start_s": float(i), "audio_end_s": i + 1.0, "matched": True}
+                for i, e in enumerate(entries)])  # fmt: skip
+            sha = other.scalar(select(BookFile.sha256).where(
+                BookFile.work_id == work_id, BookFile.media_type == "application/epub+zip"))  # fmt: skip
+            other.add(Alignment(work_id=work_id, model="m", status=AlignmentStatus.SUCCEEDED,
+                                epub_sha256=sha, audio_fingerprint="x"))  # fmt: skip
+            other.commit()
+        return entries
+
+    monkeypatch.setattr(ingest_sentences, "epub_sentences", published_meanwhile)
+    sweep(session_factory(), settings.library_dir)
+    with session_factory()() as db:
+        rows = db.scalars(select(Sentence).where(Sentence.work_id == work_id)).all()
+    assert rows and all(r.matched and r.audio_start_s is not None for r in rows)
