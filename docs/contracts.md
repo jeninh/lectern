@@ -571,13 +571,46 @@ removed. Paths are checked against traversal. A move is deferred while a read-al
 running for the work. Changing the primary EPUB, removing a format, or reordering tracks rebuilds
 sentences and cancels or stales the alignment, which is re-queued with the same model.
 
-Bulk: `POST /api/works/bulk {work_ids[≤500], action: set_authors|set_series|add_tags|
+Bulk: `POST /api/works/bulk {work_ids[≤500] | selection, action: set_authors|set_series|add_tags|
 remove_tags|add_to_shelves|remove_from_shelves|trash, ...}` (+`Idempotency-Key`) → `{batch_id,
 results: [{work_id, ok, error?}]}`; each work is its own transaction and revision. A failing
 work (including a filesystem error, `io_error`) is rolled back alone and reported; the others
 stand. `POST /api/works/bulk/{batch_id}/undo` reverts the batch the same way, per work
 (`{batch_id, results: [{work_id, ok, error?}]}`), auditing each undone work as `work.undo` and
 the batch as `work.bulk_undo` with the failures named.
+
+### Selections — `GET /api/library/count`, `selection` on bulk requests
+
+`⌘/Ctrl A` in the Library selects the whole view without listing it. Bulk requests
+(`POST /api/works/bulk`, `POST /api/device-queues/{id}/items`, `POST /api/works/align`) take
+exactly one of `work_ids` or
+
+```json
+{"selection": {"filter": {"q": "tolkien", "status": "unread", "shelf": 3},
+               "exclude_ids": [12], "view_token": "9f2c…", "expected_count": 211}}
+```
+
+which the server resolves (`lectern.routes.api.selection`) to the works the caller sees in that
+view, in title order, minus `exclude_ids`. The filter is the Library's: `q` matches title,
+author, or ISBN after folding case and diacritics (NFKD, combining marks U+0300–U+036F
+dropped, lower case); `status` is `all|reading|unread|finished` from the caller's latest
+KOReader percentage (finished ≥ 98.5 %); `shelf` is shelf membership, and a shelf the caller
+may not see is `404` (as `GET /api/shelves/{id}`). `GET /api/library/count?q=&status=&shelf=`
+→ `{"total", "view_token"}` counts a view the same way; `view_token` fingerprints exactly which
+works it holds (order-independent). A selection whose view no longer has that token (a work
+left or arrived, even if the count is unchanged), or whose resolved size is not
+`expected_count`, is `409 selection_changed`; an empty one `422 selection_empty`; both or
+neither of `work_ids` and `selection`, `422 work_ids_or_selection`. Each endpoint caps a
+selection as it caps `work_ids`: bulk edit 500, send to device 200, align 50 (`422
+{"detail": "selection_too_large", "limit"}`).
+
+`POST /api/works/align {work_ids[≤50] | selection, model?}` (owner and member; the web app asks
+for confirmation first) queues alignment for each work and never forces or re-runs: one result
+per work, `{work_id, status: queued|already_queued|already_aligned|no_inputs|
+out_of_memory_choose_model|not_found, job_id?}`. A work with an active job is skipped before
+its files are checked. Like `POST /api/works/{id}/align`, a
+retry uses the smaller model a failure chose, and a work whose last run ran out of memory is
+not rerun without a named `model`.
 
 ### Trash — `/api/trash`
 

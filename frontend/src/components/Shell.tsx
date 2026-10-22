@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { logout } from "../lib/api";
 import { initials } from "../lib/format";
-import { useHotkeys, useLocalStorage } from "../lib/hooks";
+import { MOD, useHotkeys, useLocalStorage } from "../lib/hooks";
 import { useStore } from "../lib/store";
 import { usePlayer } from "../lib/player";
 import { CommandPalette } from "./CommandPalette";
@@ -37,8 +37,6 @@ const MANAGE: NavEntry[] = [
 const ADMIN: NavEntry = { to: "/app/admin", label: "Admin", icon: <Gear />, keys: "g u" };
 const TRASH: NavEntry = { to: "/app/trash", label: "Trash", icon: <Trash /> };
 
-export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
-export const MOD = isMac ? "⌘" : "Ctrl";
 
 const TitleSlot = createContext<HTMLElement | null>(null);
 
@@ -235,7 +233,18 @@ export function Shell({ children }: { children: ReactNode }) {
           {isOwner && <><dt><kbd>G</kbd> then <kbd>U</kbd></dt><dd>Admin</dd></>}
           <dt><kbd>T</kbd></dt><dd>Toggle light / dark</dd>
           <dt><kbd>[</kbd></dt><dd>Collapse or expand the sidebar</dd>
-          <dt><kbd>Esc</kbd></dt><dd>Close a sheet, menu, or the palette</dd>
+          <dt><kbd>Esc</kbd></dt><dd>Clear the selection; close a sheet, menu, or the palette</dd>
+        </dl>
+        <h3 className="detail-h">Selecting books, uploads, and trash</h3>
+        <dl className="shortcut-list">
+          <dt>Click</dt><dd>Select one (double-click or <kbd>Enter</kbd> opens it)</dd>
+          <dt><kbd>{MOD}</kbd> click</dt><dd>Add or remove one</dd>
+          <dt><kbd>Shift</kbd> click</dt><dd>Select a range; with <kbd>{MOD}</kbd>, add the range</dd>
+          <dt><kbd>{MOD}</kbd><kbd>A</kbd></dt><dd>Select everything in this view, loaded or not</dd>
+          <dt><kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd></dt><dd>Move; with <kbd>Shift</kbd>, extend the selection</dd>
+          <dt><kbd>Home</kbd> <kbd>End</kbd></dt><dd>Start or end of the row; with <kbd>{MOD}</kbd> (or <kbd>{MOD}</kbd> + arrows), of everything</dd>
+          <dt><kbd>Space</kbd></dt><dd>Select or deselect the focused one</dd>
+          <dt>Long press</dt><dd>On a touch screen: start selecting, then tap to add</dd>
           <dt><kbd>?</kbd></dt><dd>This list</dd>
         </dl>
       </Sheet>
