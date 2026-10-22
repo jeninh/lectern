@@ -462,7 +462,12 @@ def test_concurrent_create_and_move_cannot_exceed_the_depth_cap(client, lib, mon
     )  # fmt: skip
     assert sorted([rm.status_code, rc.status_code]) in ([200, 409], [201, 409]), (rm.text, rc.text)
     assert (rm if rm.status_code == 409 else rc).json()["detail"] == "too_deep"
-    assert max(depths(client).values()) == 8
+    # Whichever ran first wins: Y moved under X6 (8 deep, no New), or New made in Y2 and the
+    # move refused (X stays 6 deep).
+    if rm.status_code == 200:
+        assert max(depths(client).values()) == 8 and "New" not in str(list(tree(client)))
+    else:
+        assert depths(client)["Y1/Y2/New"] == 3 and max(depths(client).values()) == 6
 
 
 def test_moving_someone_elses_sub_shelf_out_of_view_is_204(client, lib):
