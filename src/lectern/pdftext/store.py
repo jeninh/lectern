@@ -211,6 +211,10 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
             row.attempts = 0
         row.work_id, row.pdf_sha256, row.version = work_id, sha, DOCUMENT_VERSION
         row.attempts = (row.attempts or 0) + 1
+        # Read again with the same result (a regenerated document): the work's list is still
+        # this PDF's when it was before. An EPUB projection is redone (epub_n is rewritten).
+        was_self = row.status == READY and row.text_sha256 and is_self(db, work, row)
+        old_text = row.text_sha256
         row.projected_key = None
         db.execute(delete(PdfSentence).where(PdfSentence.file_id == file_id))
         if doc is None:
@@ -233,6 +237,9 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
         db.add_all(PdfSentence(file_id=file_id, **s) for s in sentences)
         row.status, row.text_sha256 = READY, sha256_of(data)
         row.sentence_count = len(sentences)
+        if was_self and old_text == row.text_sha256:
+            db.flush()
+            row.projected_key = self_key(db, work_id, row)
         row.sections = [
             {
                 "title": s["title"],
@@ -465,7 +472,7 @@ def sweep(session_factory: sessionmaker, library: Path, *, limit: int = 20) -> i
     """One pass over the library's PDFs (see the module docstring). Returns PDFs read."""
     with session_factory() as db:
         books = db.execute(
-            select(BookFile.id, BookFile.sha256, PdfText)
+            select(BookFile.id, BookFile.sha256, PdfText, Work.dir_path)
             .join(Work, Work.id == BookFile.work_id)
             .outerjoin(PdfText, PdfText.file_id == BookFile.id)
             .where(
@@ -475,8 +482,15 @@ def sweep(session_factory: sessionmaker, library: Path, *, limit: int = 20) -> i
             )
             .order_by(BookFile.id)
         ).all()
-        todo = [fid for fid, sha, row in books if stale(row, sha)]
-        ready = [fid for fid, _sha, row in books if row is not None and row.status == READY]
+        root = library.resolve()
+        # A READY row whose document is gone (a library restored from a backup, which leaves
+        # out derived/) is read again: the same PDF gives the same document and sentences.
+        todo = [
+            fid for fid, sha, row, d in books
+            if stale(row, sha)
+            or (row.status == READY and not (root / d / document_rel(sha)).is_file())
+        ]  # fmt: skip
+        ready = [fid for fid, _sha, row, _d in books if row is not None and row.status == READY]
     read = 0
     for file_id in todo[:limit]:
         if refresh_file(session_factory, library, file_id) is not None:

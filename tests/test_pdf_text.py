@@ -764,3 +764,32 @@ def test_other_writers_never_wait_for_a_projection(client, owner, settings, monk
     assert writes
     st = client.get(f"/api/files/{fid}/text").json()
     assert (st["text_source"], st["map"]) == ("epub", "epub")
+
+
+def test_a_restored_library_without_derived_files_reads_its_pdfs_again(client, owner, settings):
+    """Backups leave out derived/: after a restore the database says READY but the canonical
+    document is gone. The sweep reads the PDF again, and the work keeps its list and place."""
+    from lectern.pdftext.store import document_rel
+
+    csrf = owner["csrf"]
+    fid = _file(settings, "two-column.pdf")
+    work = _work_of(fid)
+    sweep(session_factory(), settings.library_dir)
+    assert (
+        put_json(client, f"/api/files/{fid}/progress", csrf, {"page": 3, "pages": 3}).status_code
+        == 200
+    )
+    with session_factory()() as db:
+        sha = db.get(BookFile, fid).sha256
+        before = db.scalar(select(WorkProgress.sentence_n).where(WorkProgress.work_id == work.id))
+    doc = settings.library_dir / work.dir_path / document_rel(sha)
+    doc.unlink()
+    assert client.get(f"/api/files/{fid}/text").json()["text_source"] is None
+    assert sweep(session_factory(), settings.library_dir) == 1
+    assert doc.is_file()
+    st = client.get(f"/api/files/{fid}/text").json()
+    assert (st["status"], st["text_source"], st["map"]) == ("ready", "pdf", "self")
+    sweep(session_factory(), settings.library_dir)  # settles: nothing to read, place unchanged
+    with session_factory()() as db:
+        after = db.scalar(select(WorkProgress.sentence_n).where(WorkProgress.work_id == work.id))
+    assert after == before
