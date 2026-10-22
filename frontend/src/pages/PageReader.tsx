@@ -7,18 +7,38 @@
 // pdf.js runs here without its viewer layer: only the canvas renderer, with no annotation or
 // form layer and no scripting sandbox (pdf.sandbox is never loaded), so nothing in a PDF runs.
 // pdf.js 6 has no eval-based code path, and the CSP keeps scripts same-origin.
+//
+// Read-along on PDF pages (docs/pdf-read-along.md): when the work has aligned (or generated)
+// audio and Lectern read this PDF's text layer, a player plays the work's audio and the current
+// sentence is highlighted over the canvas from the boxes the server sends; the pages follow the
+// narration (toggle with F), and clicking a sentence plays from it. Downloaded books keep the
+// boxes on the device, so this works offline too.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Chevron } from "../components/Icons";
+import { ArrowLeft, Chevron, Follow, NextSentence, Pause, Play, PrevSentence } from "../components/Icons";
 import { ApiError, get } from "../lib/api";
 import { getPdfInfo, orOffline } from "../lib/offline/store";
 import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
 import { useLocalStorage } from "../lib/hooks";
+import {
+  type Affine,
+  boxesFor,
+  buildTimeline,
+  hit,
+  loadPdfReadAlong,
+  pageOf,
+  type PdfReadAlongData,
+  startOf,
+  toPdfPoint,
+  toRect,
+  workSentenceAt,
+} from "../lib/pdfreadalong";
+import { formatClock, locate, saveProgress, spokenDuration } from "../lib/readalong";
 import { clampPage, type Fit, fitScale, pageLabel, spreadOf, stepZoom, turn } from "../lib/pages";
 import { useStore } from "../lib/store";
-import type { PagesInfo } from "../lib/types";
+import type { PagesInfo, PdfBox } from "../lib/types";
 
 interface ViewSettings {
   fit: Fit;
@@ -51,8 +71,14 @@ function writeMark(fileId: number, m: Mark) {
 
 /* Minimal pdf.js surface (the package ships types, but loading it lazily keeps them out). */
 interface PdfPage {
-  getViewport(o: { scale: number }): { width: number; height: number };
-  render(o: { canvas: HTMLCanvasElement; canvasContext: CanvasRenderingContext2D; viewport: unknown; transform?: number[] }): { promise: Promise<void>; cancel(): void };
+  getViewport(o: { scale: number }): { width: number; height: number; transform: number[] };
+  render(o: {
+    canvas: HTMLCanvasElement;
+    canvasContext: CanvasRenderingContext2D;
+    viewport: unknown;
+    transform?: number[];
+    pageColors?: { background: string; foreground: string };
+  }): { promise: Promise<void>; cancel(): void };
 }
 interface PdfDoc {
   numPages: number;
@@ -79,6 +105,9 @@ async function openPdf(url: string): Promise<PdfTask> {
   });
   return task as unknown as PdfTask;
 }
+
+const SAVE_EVERY_MS = 15000;
+const SOURCES = { web: "Lectern", audio: "the audiobook", koreader: "KOReader" } as const;
 
 export function PageReader({ workId, fileId }: { workId: number; fileId: number }) {
   const nav = useNavigate();
@@ -128,6 +157,12 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
         setPage(start);
         if (mark && server?.page && server.page !== start && server.updated_at && (!mark.seenAt || server.updated_at > mark.seenAt)) setHandoff(server);
         if (!mark && server?.updated_at) writeMark(fileId, { page: start, seenAt: server.updated_at });
+        // Newer than anything on the page record: listening, the EPUB, or KOReader moved on.
+        const pos = i.position;
+        const seen = mark?.seenAt ?? server?.updated_at ?? null;
+        if (pos && pos.page !== start && pos.updated_at && (!seen || pos.updated_at > seen)) {
+          setHandoff({ page: pos.page, percentage: 0, device: pos.device || SOURCES[pos.source], from_web: false, updated_at: pos.updated_at });
+        }
         setLoading(false);
       } catch (e) {
         if (!cancelled) {
@@ -204,6 +239,176 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
   const left = rtl ? forward : back;
   const right = rtl ? back : forward;
 
+  // --- read-along on the pages -------------------------------------------------------------
+  const [ra, setRa] = useState<PdfReadAlongData | null>(null);
+  const tl = useMemo(() => (ra ? buildTimeline(ra.sentences, ra.pdf.sentences) : null), [ra]);
+  const [follow, setFollow] = useLocalStorage<boolean>("lectern.pdf.follow", true);
+  const audio = useRef<HTMLAudioElement>(null);
+  const trackIndex = useRef(0);
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [current, setCurrent] = useState(-1);
+  const currentRef = useRef(-1);
+  const lastSave = useRef({ at: 0, n: -1 });
+  const followRef = useRef(follow);
+  followRef.current = follow;
+  const readalong = !!(info?.text?.readalong && tl && tl.matched.length);
+  const tracks = ra?.tracks.tracks ?? [];
+  const duration = ra?.tracks.total_duration_s ?? 0;
+
+  // Only once the document is open: opening sets the starting page, which would undo a turn.
+  useEffect(() => {
+    if (!info?.text?.readalong || loading || error) return;
+    let cancelled = false;
+    loadPdfReadAlong(workId, fileId)
+      .then((d) => !cancelled && d.tracks.tracks.length && setRa(d))
+      .catch(() => {}); // no read-along: the pages still read
+    return () => {
+      cancelled = true;
+    };
+  }, [info?.text?.readalong, loading, error, workId, fileId]);
+
+  const clock = () => (audio.current && tracks.length ? tracks[trackIndex.current].offset_s + audio.current.currentTime : 0);
+
+  const saveAudio = useCallback((keepalive = false) => {
+    const n = currentRef.current;
+    if (n < 0) return;
+    lastSave.current = { at: Date.now(), n };
+    saveProgress(workId, "audio", { sentence_n: n }, keepalive, info?.title).catch(() => {});
+  }, [workId, info?.title]);
+
+  /** Light up work sentence `n` and, when following, turn to its page. */
+  const mark = useCallback((n: number, turnPage: boolean) => {
+    if (n === currentRef.current || !tl) return;
+    currentRef.current = n;
+    setCurrent(n);
+    const p = turnPage ? pageOf(tl, n) : null;
+    const { page: at, total: count } = latest.current;
+    if (p && !spreadOf(at, count, view.spread).includes(p)) go(p);
+  }, [tl, go, view.spread]);
+
+  const seek = useCallback((t: number, play?: boolean) => {
+    const a = audio.current;
+    if (!a || !tracks.length || !tl) return;
+    const { index, local } = locate(tracks, Math.max(0, Math.min(t, duration - 0.05)));
+    const start = () => {
+      a.currentTime = local;
+      if (play) a.play().catch(() => {});
+    };
+    if (index !== trackIndex.current || !a.src) {
+      trackIndex.current = index;
+      a.src = tracks[index].stream_url;
+      a.addEventListener("loadedmetadata", start, { once: true });
+      a.load();
+    } else start();
+    setTime(t);
+    mark(workSentenceAt(tl, t), followRef.current);
+  }, [tracks, duration, tl, mark]);
+
+  const playSentence = useCallback((n: number) => {
+    const t = tl ? startOf(tl, n) : null;
+    if (t != null) seek(t + 0.001, true);
+  }, [tl, seek]);
+
+  const step = useCallback((delta: 1 | -1) => {
+    if (!tl) return;
+    const i = Math.max(0, tl.matched.findIndex((s) => s.n >= currentRef.current));
+    const next = tl.matched[Math.max(0, Math.min(tl.matched.length - 1, (currentRef.current < 0 ? -1 : i) + delta))];
+    if (next) seek((next.audio_start_s as number) + 0.001, !audio.current?.paused);
+  }, [tl, seek]);
+
+  const toggle = useCallback(() => {
+    const a = audio.current;
+    if (!a) return;
+    if (a.paused) {
+      if (!a.src) seek(time, true);
+      else a.play().catch(() => {});
+      // Playing again brings the narration back into view.
+      if (followRef.current && tl && currentRef.current >= 0) {
+        const p = pageOf(tl, currentRef.current);
+        if (p && !spreadOf(latest.current.page, latest.current.total, view.spread).includes(p)) go(p);
+      }
+    } else a.pause();
+  }, [seek, time, tl, go, view.spread]);
+
+  // Where the audio was left (no autoplay, and no page jump: the page record decides that).
+  useEffect(() => {
+    if (!ra || !tl || !audio.current) return;
+    const p = ra.progress;
+    const n = p?.position?.sentence_n ?? -1;
+    const t = p?.audio_s ?? (n >= 0 ? startOf(tl, n) : null) ?? tl.starts[0] ?? 0;
+    const { index, local } = locate(ra.tracks.tracks, t);
+    const a = audio.current;
+    trackIndex.current = index;
+    a.src = ra.tracks.tracks[index].stream_url;
+    a.addEventListener("loadedmetadata", () => (a.currentTime = local), { once: true });
+    setTime(t);
+    mark(workSentenceAt(tl, t), false);
+  }, [ra]);
+
+  // Follow the audio clock every frame while playing.
+  useEffect(() => {
+    if (!playing || !tl) return;
+    let raf = 0;
+    let lastUi = 0;
+    const tick = (ts: number) => {
+      const t = clock();
+      mark(workSentenceAt(tl, t), followRef.current);
+      if (ts - lastUi > 250) {
+        lastUi = ts;
+        setTime(t);
+      }
+      if (Date.now() - lastSave.current.at > SAVE_EVERY_MS && lastSave.current.n !== currentRef.current) saveAudio();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, tl, mark, saveAudio]);
+
+  const onEnded = () => {
+    const a = audio.current;
+    if (!a) return;
+    if (trackIndex.current < tracks.length - 1) {
+      trackIndex.current += 1;
+      a.src = tracks[trackIndex.current].stream_url;
+      a.play().catch(() => {});
+    } else {
+      setPlaying(false);
+      saveAudio();
+    }
+  };
+
+  const toggleFollow = useCallback(() => {
+    const next = !followRef.current;
+    setFollow(next);
+    if (next && tl && currentRef.current >= 0) {
+      const p = pageOf(tl, currentRef.current);
+      if (p && !spreadOf(latest.current.page, latest.current.total, view.spread).includes(p)) go(p);
+    }
+  }, [setFollow, tl, go, view.spread]);
+
+  // Following: keep the highlight in view when a zoomed or fit-width page is taller than the stage.
+  // Called by a page once it has drawn the highlight (pages render asynchronously).
+  const keepInView = useCallback((marks: HTMLElement) => {
+    const el = stage.current;
+    const rects = [...marks.children].map((c) => c.getBoundingClientRect());
+    if (!el || !followRef.current || !rects.length) return;
+    const box = el.getBoundingClientRect();
+    const r = { top: Math.min(...rects.map((x) => x.top)), bottom: Math.max(...rects.map((x) => x.bottom)) };
+    if (r.top >= box.top + 16 && r.bottom <= box.bottom - 16) return;
+    el.scrollTo({ top: el.scrollTop + r.top - box.top - box.height * 0.3, behavior: "smooth" });
+  }, []);
+
+  /** The highlight on page `n` (1-based). */
+  const marksOn = (n: number): PdfBox[] => (readalong && tl && current >= 0 ? boxesFor(tl, current).filter((b) => b[0] === n - 1) : []);
+  const pick = useCallback((n: number, x: number, y: number) => {
+    if (!tl) return false;
+    const w = hit(tl, n, x, y);
+    if (w == null) return false;
+    playSentence(w);
+    return true;
+  }, [tl, playSentence]);
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (document.querySelector('[aria-modal="true"]') || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -211,7 +416,8 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
       if (t?.closest?.("input, select, textarea")) return;
       if (e.key === "Escape") return nav(`/app/library/${workId}`);
       const map: Record<string, () => void> = {
-        ArrowLeft: left, ArrowRight: right, PageUp: back, PageDown: forward, " ": forward,
+        ArrowLeft: left, ArrowRight: right, PageUp: back, PageDown: forward, " ": readalong ? toggle : forward,
+        ...(readalong ? { f: toggleFollow, F: toggleFollow, ",": () => step(-1), ".": () => step(1) } : {}),
         Home: () => go(1), End: () => go(latest.current.total),
         "+": () => setView({ zoom: stepZoom(view.zoom, 1) }), "=": () => setView({ zoom: stepZoom(view.zoom, 1) }),
         "-": () => setView({ zoom: stepZoom(view.zoom, -1) }), "0": () => setView({ zoom: 1 }),
@@ -281,7 +487,7 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
             <div className="pages-spread" data-count={display.length} dir="ltr">
               {display.map((n) =>
                 info?.url ? (
-                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} />
+                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} onPick={readalong ? pick : undefined} onMarked={keepInView} />
                 ) : (
                   <ComicPage key={n} fileId={fileId} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} />
                 ),
@@ -297,6 +503,38 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
           </div>
         )}
       </div>
+
+      {readalong && (
+        <div className="pdf-ra-bar" role="region" aria-label="Read-along player" data-sentence={current}>
+          <button className="icon-btn ghost" onClick={() => step(-1)} aria-label="Previous sentence" title="Previous sentence (,)"><PrevSentence /></button>
+          <button className="ra-play sm" onClick={toggle} aria-label={playing ? "Pause" : "Play"} title={`${playing ? "Pause" : "Play"} (Space)`}>{playing ? <Pause /> : <Play />}</button>
+          <button className="icon-btn ghost" onClick={() => step(1)} aria-label="Next sentence" title="Next sentence (.)"><NextSentence /></button>
+          <span className="ra-time tabular" aria-hidden="true">{formatClock(time)}</span>
+          <input
+            type="range"
+            min={0}
+            max={duration}
+            step={0.1}
+            value={Math.min(time, duration)}
+            onChange={(e) => seek(Number(e.target.value), playing)}
+            aria-label="Narration position"
+            aria-valuetext={`${spokenDuration(time)} of ${spokenDuration(duration)}`}
+          />
+          <span className="ra-time tabular" aria-hidden="true">{formatClock(duration)}</span>
+          <button className="icon-btn ghost" aria-pressed={follow} onClick={toggleFollow} aria-label="Follow the narration" title="Turn pages with the narration (F)"><Follow /></button>
+          <span className="sr-only">Click a sentence on the page to play from it.</span>
+        </div>
+      )}
+      {ra && (
+        <audio
+          ref={audio}
+          preload="metadata"
+          onPlay={() => setPlaying(true)}
+          onPause={() => (setPlaying(false), setTime(clock()), saveAudio())}
+          onEnded={onEnded}
+          onSeeked={() => setTime(clock())}
+        />
+      )}
 
       <footer className="reader-foot pages-foot">
         <input
@@ -329,9 +567,25 @@ interface PageProps {
   stage: { w: number; h: number };
 }
 
-function PdfCanvas({ doc, n, count, fit, zoom, stage }: PageProps & { doc: PdfDoc }) {
+interface PdfCanvasProps extends PageProps {
+  doc: PdfDoc;
+  dark: boolean;
+  /** Read-along: the current sentence's boxes on this page. */
+  marks: PdfBox[];
+  /** Read-along: a click at PDF point (x, y) on page n; true when it hit a sentence. */
+  onPick?: (n: number, x: number, y: number) => boolean;
+  /** Read-along: the highlight is drawn (the element holding its rectangles). */
+  onMarked?: (marks: HTMLElement) => void;
+}
+
+function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked }: PdfCanvasProps) {
   const canvas = useRef<HTMLCanvasElement>(null);
-  const [css, setCss] = useState<{ w: number; h: number } | null>(null);
+  const markLayer = useRef<HTMLDivElement>(null);
+  const [css, setCss] = useState<{ w: number; h: number; t: Affine } | null>(null);
+  const marked = marks.map((m) => m.join()).join(";");
+  useEffect(() => {
+    if (css && markLayer.current) onMarked?.(markLayer.current);
+  }, [css, marked]);
   useEffect(() => {
     let cancelled = false;
     let task: { cancel(): void } | null = null;
@@ -345,8 +599,15 @@ function PdfCanvas({ doc, n, count, fit, zoom, stage }: PageProps & { doc: PdfDo
       const c = canvas.current;
       c.width = Math.floor(vp.width * dpr);
       c.height = Math.floor(vp.height * dpr);
-      setCss({ w: vp.width, h: vp.height });
-      const r = page.render({ canvas: c, canvasContext: c.getContext("2d")!, viewport: vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined });
+      setCss({ w: vp.width, h: vp.height, t: vp.transform as Affine });
+      const r = page.render({
+        canvas: c,
+        canvasContext: c.getContext("2d")!,
+        viewport: vp,
+        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
+        // Dark mode: light text on a dark page (images keep their colours).
+        pageColors: dark ? { background: "#1f1b16", foreground: "#e6dccb" } : undefined,
+      });
       task = r;
       await r.promise.catch(() => {});
     })().catch(() => {});
@@ -354,8 +615,26 @@ function PdfCanvas({ doc, n, count, fit, zoom, stage }: PageProps & { doc: PdfDo
       cancelled = true;
       task?.cancel();
     };
-  }, [doc, n, count, fit, zoom, stage.w, stage.h]);
-  return <canvas ref={canvas} className="pages-page" role="img" aria-label={`Page ${n}`} style={css ? { width: css.w, height: css.h } : undefined} />;
+  }, [doc, n, count, fit, zoom, stage.w, stage.h, dark]);
+  const click = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onPick || !css || window.getSelection()?.toString()) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const [x, y] = toPdfPoint(css.t, e.clientX - r.left, e.clientY - r.top);
+    if (onPick(n, x, y)) e.stopPropagation();
+  };
+  return (
+    <div className="pdf-page-wrap" data-pickable={onPick ? "" : undefined} onClick={click} style={css ? { width: css.w, height: css.h } : undefined}>
+      <canvas ref={canvas} className="pages-page" role="img" aria-label={`Page ${n}`} style={css ? { width: css.w, height: css.h } : undefined} />
+      {css && marks.length > 0 && (
+        <div className="pdf-ra-marks" aria-hidden="true" ref={markLayer}>
+          {marks.map((b, i) => {
+            const r = toRect(css.t, b);
+            return <span key={i} className="pdf-ra-mark" style={{ left: r.left, top: r.top, width: r.width, height: r.height }} />;
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ComicPage({ fileId, n, count, fit, zoom, stage }: PageProps & { fileId: number }) {

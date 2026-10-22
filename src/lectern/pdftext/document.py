@@ -1,6 +1,6 @@
 """The canonical text of a PDF: what alignment, narration, and read-along read.
 
-One JSON document per PDF file (``<data>/pdftext/<pdf sha256>.json``), built by
+One JSON document per PDF file (``<work dir>/derived/pdf-text-<sha256 prefix>.json``), built by
 :func:`build_document` from the words :mod:`lectern.pdftext.extract` read and the reading
 order :mod:`lectern.pdftext.layout` found. It is deterministic: the same PDF and the same
 :data:`DOCUMENT_VERSION` give the same bytes, and its SHA-256 (``text_sha256``) is what jobs,

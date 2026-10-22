@@ -363,7 +363,7 @@ function MakeAudiobookSheet({ work, state, onClose, onQueued }: { work: Work; st
                       setChosen(next);
                     }}
                   />
-                  <span><strong>{c.title}</strong> <span className="hint">{c.characters.toLocaleString()} characters · {c.preview}</span></span>
+                  <span><strong>{c.title}</strong> <span className="hint">{c.pages && !/^Pages? \d/.test(c.title) ? `${c.pages[0] === c.pages[1] ? `Page ${c.pages[0]}` : `Pages ${c.pages[0]}–${c.pages[1]}`} · ` : ""}{c.characters.toLocaleString()} characters · {c.preview}</span></span>
                 </label>
               </li>
             ))}

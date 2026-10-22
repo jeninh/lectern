@@ -177,8 +177,14 @@ with no JavaScript, and refuses zip bombs. It reads PDF Info/XMP metadata and co
 `ComicInfo.xml`, and uses the first page as the cover. PDFs and comics open in a page viewer
 (pdf.js for PDFs) with fit width, fit page, zoom, and two-page spreads, are served over OPDS
 with their own media types, can be sent to devices, and sync pages with KOReader. **CBR is not
-supported**; convert it to CBZ. Read-along, alignment, and the read-aloud export need an EPUB
-edition. Details: [`docs/pdf-comics.md`](docs/pdf-comics.md).
+supported**; convert it to CBZ. Details: [`docs/pdf-comics.md`](docs/pdf-comics.md).
+
+A **text PDF** is a book Lectern can read: its text layer is extracted in a sandbox (running
+heads, page numbers, hyphenation and columns sorted out) into sentences with their boxes on the
+pages, so alignment, **Make an audiobook**, and **read-along on the PDF's pages** (highlight,
+page following, click to play, dark mode, offline) work on it. Scanned PDFs are marked *needs
+OCR*; the narrated EPUB export stays EPUB-only. Details:
+[`docs/pdf-read-along.md`](docs/pdf-read-along.md).
 
 ## Kindle books
 

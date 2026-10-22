@@ -50,4 +50,4 @@ export function positionLabel(progress: string): string {
   return m ? `Section ${m[1]}` : progress.length > 24 ? `${progress.slice(0, 24)}…` : progress;
 }
 
-export const READALONG_NEEDS_EPUB = "Read-along needs an EPUB edition";
+export const READALONG_NEEDS_EPUB = "Read-along needs an EPUB or a text PDF";
