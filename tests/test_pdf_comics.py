@@ -563,12 +563,12 @@ def test_pdf_parsers_are_bounded_and_a_busy_finalize_can_be_retried(
 ):
     csrf = owner["csrf"]
     path = make_pdf(tmp_path / "rivers.pdf")
-    # Six parses at once: never more than MAX_CONCURRENT children.
+    # Six parses at once: never more than MAX_PARSERS children.
     gate = _Gate(pdf_ingest._probe_pdf, hold=0.1)
     monkeypatch.setattr(pdf_ingest, "_probe_pdf", gate)
     with ThreadPoolExecutor(6) as pool:
         probes = list(pool.map(lambda _: formats.probe(path, PDF), range(6)))
-    assert gate.peak == pdf_ingest.MAX_CONCURRENT == 2 and len(probes) == 6
+    assert gate.peak == formats.MAX_PARSERS == 2 and len(probes) == 6
 
     # Both slots held: a finalize waits BUSY_WAIT_S, then says 503 pdf_busy and keeps the upload.
     held = _Gate(pdf_ingest._probe_pdf)

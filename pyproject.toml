@@ -29,6 +29,9 @@ dependencies = [
     "pypdfium2>=4.30",
     # Encrypts integration keys at rest (lectern.integrations).
     "cryptography>=42",
+    # KindleUnpack (pure Python, GPL-3.0): unpacks DRM-free MOBI/AZW3 for EPUB conversion,
+    # in a resource-limited child process (lectern.ingest.kindle).
+    "mobi>=0.4.1",
 ]
 
 [project.optional-dependencies]

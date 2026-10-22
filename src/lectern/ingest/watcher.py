@@ -1,5 +1,5 @@
-"""Inbox watcher: polls the inbox folder and ingests books (EPUB, PDF, CBZ) and audio once they
-stop changing.
+"""Inbox watcher: polls the inbox folder and ingests books (EPUB, PDF, CBZ; MOBI and AZW3 are
+converted to EPUB first) and audio once they stop changing.
 
 Files may sit directly in the inbox or in sub-folders (an audiobook folder of MP3s, copied in
 one go). Every supported file is ingested on its own once its size and mtime have been stable
@@ -12,13 +12,14 @@ in-progress copies).
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 from pathlib import Path
 
 from sqlalchemy.orm import sessionmaker
 
 from lectern.fsops import LIBRARY_LOCK
-from lectern.ingest import formats
+from lectern.ingest import formats, kindle
 from lectern.ingest.audio import AudioError, ingest_audio, is_audio, probe
 from lectern.ingest.hashing import partial_md5, sha256_file
 from lectern.ingest.library import ingest_book
@@ -45,6 +46,7 @@ class InboxWatcher:
         self.poll = poll_seconds
         self.settings = settings
         self._seen: dict[Path, tuple[int, float, int]] = {}  # size, mtime, stable_count
+        self._refused: dict[Path, tuple[int, float]] = {}  # DRM-protected: size, mtime
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -159,6 +161,8 @@ class InboxWatcher:
                 self._prune_dirs(path.parent)
         for gone in [p for p in self._seen if p not in present]:
             self._seen.pop(gone, None)
+        for gone in [p for p in self._refused if p not in present]:
+            self._refused.pop(gone, None)
         return ingested
 
     def _prune_dirs(self, d: Path) -> None:
@@ -173,15 +177,53 @@ class InboxWatcher:
         if is_audio(path):
             return self._ingest_audio(path)
         media_type = formats.media_type_for(path)
+        if not formats.is_kindle(media_type):
+            return self._ingest_book(path, media_type, path)
+        # MOBI/AZW3: converted next to the original under a dot-name the scan skips; the EPUB is
+        # what gets filed, and the original goes once it is (docs/kindle.md).
+        try:
+            stamp = (path.stat().st_size, path.stat().st_mtime)
+        except OSError:
+            return False
+        if self._refused.get(path) == stamp:
+            return False  # DRM-protected, already said so; it stays until someone moves it
+        converted = path.with_name(f".converting-{secrets.token_hex(4)}.epub")
+        try:
+            formats.to_epub(path, media_type, converted)
+        except formats.ProbeBusy:
+            log.info("deferring %s: converter busy", path.name)
+            return False
+        except formats.FormatError as exc:
+            converted.unlink(missing_ok=True)
+            if exc.code == "drm_protected":
+                # Left where it is, as .cbr files are: nothing here can or will read it.
+                log.warning("leaving %s in the inbox: %s", path.name, kindle.DRM_MESSAGE)
+                self._refused[path] = stamp
+                return False
+            log.warning("rejecting %s: %s (%s)", path.name, exc.code, exc)
+            self._reject(path)
+            return False
+        try:
+            done = self._ingest_book(converted, formats.EPUB, path)
+        finally:
+            converted.unlink(missing_ok=True)  # still here unless it was filed
+        if done:
+            path.unlink(missing_ok=True)
+            self._prune_dirs(path.parent)
+        return done
+
+    def _ingest_book(self, path: Path, media_type: str, original: Path) -> bool:
+        """File ``path``; ``original`` is the inbox file it came from (itself, or the MOBI or
+        AZW3 it was converted from), which is what a refusal moves to ``_rejected``."""
         try:
             probed = formats.probe(path, media_type)
         except formats.ProbeBusy:
             # The PDF parser slots are all taken; the file is fine. Leave it for a later poll.
-            log.info("deferring %s: PDF parser busy", path.name)
+            log.info("deferring %s: PDF parser busy", original.name)
             return False
         except formats.FormatError as exc:
-            log.warning("rejecting %s: %s (%s)", path.name, exc.code, exc)
-            self._reject(path)
+            log.warning("rejecting %s: %s (%s)", original.name, exc.code, exc)
+            self._reject(original)
             return False
         sha = sha256_file(path)
         pmd5 = partial_md5(path)
@@ -195,16 +237,16 @@ class InboxWatcher:
                 write_book_json(db, self.library, work)
                 db.commit()
             except FileExistsError:
-                log.warning("rejecting %s: duplicate of an existing file", path.name)
+                log.warning("rejecting %s: duplicate of an existing file", original.name)
                 db.rollback()
-                self._reject(path)
+                self._reject(original)
                 return False
             except Exception:
                 db.rollback()
                 raise
         log.info(
             "ingested %s -> %s (%s work #%d, pmd5=%s)",
-            path.name,
+            original.name,
             work.dir_path,
             "new" if created else "existing",
             work.id,

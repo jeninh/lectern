@@ -14,6 +14,11 @@ Comic       ``application/vnd.comicbook+zip``    ``.cbz``   zip local header ``P
 The declared media type picks the parser; the magic bytes must agree before any parser runs,
 so a renamed file is refused in plain words instead of reaching the wrong parser.
 
+Kindle books are taken but not stored: a DRM-free MOBI or AZW3 (PalmDB header with
+``BOOKMOBI`` at offset 60) is converted to EPUB at ingest (:func:`to_epub`,
+lectern.ingest.kindle) and filed as that EPUB; a DRM-protected one is refused
+(``drm_protected``). KFX, Topaz, and other Kindle containers are not MOBI files.
+
 Only EPUB has text. Everything built on text (sentences, alignment, read-along, the read-aloud
 export, KOReader xpointer projection) uses EPUB files only; PDF and comics are page-based, and
 KOReader syncs them as page numbers (``lectern.routes.api.pages``).
@@ -25,6 +30,7 @@ CBR to CBZ (unpack and zip the images) before adding it.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,11 +45,17 @@ DOCUMENTS: dict[str, tuple[str, str, str]] = {
     CBZ: (".cbz", "CBZ", "not_comic"),
 }
 PAGED = frozenset({PDF, CBZ})
-BY_SUFFIX = {ext: mt for mt, (ext, _label, _code) in DOCUMENTS.items()}
+MOBI = "application/x-mobipocket-ebook"
+AZW3 = "application/vnd.amazon.mobi8-ebook"
+#: Kindle formats converted to EPUB at ingest: media type -> (extension, label).
+KINDLE: dict[str, tuple[str, str]] = {MOBI: (".mobi", "MOBI"), AZW3: (".azw3", "AZW3")}
+BY_SUFFIX = {ext: mt for mt, (ext, _label, _code) in DOCUMENTS.items()} | {
+    ext: mt for mt, (ext, _label) in KINDLE.items()
+}
 #: One line for upload menus, error messages, and the MCP upload tool's description.
 FORMATS_SUMMARY = (
-    "EPUB, PDF, or CBZ comics (CBR is not supported: convert it to CBZ), and M4B/M4A, MP3, "
-    "OGG/Opus, or FLAC audiobooks"
+    "EPUB, PDF, or CBZ comics (CBR is not supported: convert it to CBZ), DRM-free MOBI or AZW3 "
+    "(converted to EPUB), and M4B/M4A, MP3, OGG/Opus, or FLAC audiobooks"
 )
 
 _ZIP_MAGIC = b"PK\x03\x04"
@@ -59,14 +71,37 @@ class FormatError(ValueError):
 
 
 class ProbeBusy(Exception):
-    """Every PDF parser slot stayed taken while we waited (``lectern.ingest.pdf``). The file is
-    not at fault: callers keep it and ask to retry (HTTP 503 ``pdf_busy``) instead of refusing it."""
+    """Every parser slot stayed taken while we waited (a PDF in ``lectern.ingest.pdf``, a MOBI
+    conversion in ``lectern.ingest.kindle``). The file is not at fault: callers keep it and ask
+    to retry (HTTP 503 ``pdf_busy`` or ``convert_busy``) instead of refusing it."""
 
-    code = "pdf_busy"
+    def __init__(self, code: str = "pdf_busy") -> None:
+        super().__init__(code)
+        self.code = code
+
+
+#: Codes of :class:`ProbeBusy`: retry later, the file is fine.
+BUSY_CODES = frozenset({"pdf_busy", "convert_busy"})
+# At most this many parser children at once in this server process (PDF reads and MOBI/AZW3
+# conversions together: uploads, imports, inbox, the editor's "use the book's own cover"), each
+# limited in memory and time. A caller that cannot get a slot in time gets ProbeBusy.
+MAX_PARSERS = 2
+PARSER_SLOTS = threading.BoundedSemaphore(MAX_PARSERS)
 
 
 def is_document(media_type: str | None) -> bool:
+    """A format Lectern stores (EPUB, PDF, CBZ)."""
     return media_type in DOCUMENTS
+
+
+def is_kindle(media_type: str | None) -> bool:
+    """MOBI or AZW3: converted to EPUB before anything else reads it."""
+    return media_type in KINDLE
+
+
+def is_book(media_type: str | None) -> bool:
+    """A book file (as opposed to audio) that ingest accepts."""
+    return is_document(media_type) or is_kindle(media_type)
 
 
 def suffix_of(media_type: str) -> str:
@@ -74,11 +109,13 @@ def suffix_of(media_type: str) -> str:
 
 
 def label_of(media_type: str) -> str:
+    if media_type in KINDLE:
+        return KINDLE[media_type][1]
     return DOCUMENTS.get(media_type, (None, "file", None))[1]
 
 
 def wrong_format_code(media_type: str) -> str:
-    return DOCUMENTS[media_type][2]
+    return "not_mobi" if media_type in KINDLE else DOCUMENTS[media_type][2]
 
 
 def media_type_for(path: Path) -> str | None:
@@ -92,10 +129,12 @@ def magic_ok(media_type: str, head: bytes) -> bool:
         return head.startswith(b"%PDF-")
     if media_type in (EPUB, CBZ):
         return head.startswith(_ZIP_MAGIC)
+    if media_type in KINDLE:
+        return head[60:68] == b"BOOKMOBI"
     return False
 
 
-def read_head(path: Path, n: int = 8) -> bytes:
+def read_head(path: Path, n: int = 68) -> bytes:
     with path.open("rb") as fh:
         return fh.read(n)
 
@@ -109,6 +148,21 @@ class Probe:
     meta: object  # lectern.ingest.epub.EpubMetadata
     cover: bytes | None = None
     pages: int | None = None
+
+
+def to_epub(path: Path, media_type: str, dest: Path) -> None:
+    """Convert a MOBI or AZW3 to an EPUB at ``dest`` after checking its magic bytes; raises
+    :class:`FormatError` (``not_mobi``, ``drm_protected``, ``mobi_too_complex``) or
+    :class:`ProbeBusy` (``convert_busy``). The original is left where it is."""
+    from lectern.ingest.kindle import to_epub as convert
+
+    try:
+        head = read_head(path)
+    except OSError as exc:
+        raise FormatError("not_mobi") from exc
+    if not magic_ok(media_type, head):
+        raise FormatError("not_mobi", "magic bytes do not match")
+    convert(path, dest)
 
 
 def probe(path: Path, media_type: str) -> Probe:

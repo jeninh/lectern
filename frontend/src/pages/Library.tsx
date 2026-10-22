@@ -264,7 +264,7 @@ export function LibraryPage() {
                   className="btn primary split-more"
                   trigger={<Down />}
                   actions={[
-                    { label: "Choose files (EPUB, PDF, CBZ, M4B, MP3)…", onSelect: pickBooks },
+                    { label: "Choose files (EPUB, PDF, CBZ, MOBI, M4B, MP3)…", onSelect: pickBooks },
                     { label: "Choose a folder (one audiobook)…", onSelect: pickFolder },
                     ...(readyImports ? [{ label: `Review ${readyImports} waiting`, onSelect: () => setReviewOpen(true) }] : []),
                   ]}

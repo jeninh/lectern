@@ -45,7 +45,7 @@ from lectern.ingest import formats
 from lectern.ingest.audio import AudioError, _natural, _save_cover, probe
 from lectern.ingest.cover import dominant_tint
 from lectern.ingest.epub import extract_cover
-from lectern.ingest.hashing import partial_md5
+from lectern.ingest.hashing import partial_md5, sha256_file
 from lectern.ingest.library import (
     book_file_name,
     new_work,
@@ -262,7 +262,7 @@ def stage_upload(
         return existing
     if len(imp.files) >= MAX_FILES:
         raise ImportError_(413, "too_many_files")
-    book = formats.is_document(upload.media_type)
+    book = formats.is_book(upload.media_type)
     kind = FileKind.EBOOK if book else FileKind.AUDIO
     folder = staging_dir(settings, imp)
     folder.mkdir(parents=True, exist_ok=True)
@@ -271,10 +271,32 @@ def stage_upload(
     rel = unique_name(folder, f"{len(imp.files) + 1:04d} {stem}{suffix}")
     dest = checked(folder, rel)
     move_file(part, dest)
+    media_type, size, sha256 = upload.media_type, upload.size, upload.sha256
     cover = None
     try:
+        if formats.is_kindle(media_type):
+            # Converted here and staged as the EPUB; the original is not kept (docs/kindle.md).
+            source_label = formats.label_of(media_type)
+            epub_rel = unique_name(folder, f"{Path(rel).stem}.epub")
+            epub = checked(folder, epub_rel)
+            formats.to_epub(dest, media_type, epub)
+            dest.unlink(missing_ok=True)
+            rel, dest, media_type = epub_rel, epub, formats.EPUB
+            size, sha256 = dest.stat().st_size, sha256_file(dest)
+            existing = db.scalar(
+                select(ImportFile).where(
+                    ImportFile.import_id == imp.id, ImportFile.sha256 == sha256
+                )
+            )
+            if existing is not None:  # the same book again (conversion is deterministic)
+                dest.unlink(missing_ok=True)
+                return existing
+        else:
+            source_label = None
         if book:
-            meta, cover = _probe_book(dest, upload.media_type)
+            meta, cover = _probe_book(dest, media_type)
+            if source_label:
+                meta["converted_from"] = source_label
             pmd5 = partial_md5(dest)  # KOReader's document id, for progress sync
         else:
             meta, cover = _probe_audio(dest, settings.ffprobe_path)
@@ -288,17 +310,17 @@ def stage_upload(
         raise ImportError_(422, exc.code) from exc
     except (AudioError, OSError) as exc:
         dest.unlink(missing_ok=True)
-        code = formats.wrong_format_code(upload.media_type) if book else "not_audio"
+        code = formats.wrong_format_code(media_type) if book else "not_audio"
         raise ImportError_(422, code) from exc
-    dup = _duplicate_of(db, upload.sha256)
+    dup = _duplicate_of(db, sha256)
     row = ImportFile(
         import_id=imp.id,
         kind=kind,
         filename=upload.filename[:600],
         rel_path=rel,
-        media_type=upload.media_type,
-        size=upload.size,
-        sha256=upload.sha256,
+        media_type=media_type,
+        size=size,
+        sha256=sha256,
         partial_md5=pmd5,
         status="duplicate" if dup is not None else "ok",
         duplicate_work_id=dup,
@@ -897,6 +919,7 @@ def import_json(db: Session, settings: Settings, imp: Import, *, refresh: bool =
                 "disc_no": (f.probe or {}).get("disc_no"),
                 "chapters": len((f.probe or {}).get("chapters") or []),
                 "pages": (f.probe or {}).get("pages"),
+                "converted_from": (f.probe or {}).get("converted_from"),
             }
             for f in imp.files
         ],

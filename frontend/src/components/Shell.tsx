@@ -215,7 +215,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <div>
             <Upload />
             <strong>Drop to add books</strong>
-            <span>EPUB, PDF, CBZ comics, M4B, MP3 — or a whole audiobook folder. You review before anything is filed.</span>
+            <span>EPUB, PDF, CBZ comics, MOBI/AZW3, M4B, MP3 — or a whole audiobook folder. You review before anything is filed.</span>
           </div>
         </div>
       )}

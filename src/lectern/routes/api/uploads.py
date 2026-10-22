@@ -394,7 +394,8 @@ def _finalize(public_id, request, auth, db, settings, body) -> dict:
     part = part_path(settings, public_id)
     if not part.is_file() or sha256_file(part) != expected:
         raise _fail(db, request, auth, settings, row, 422, "checksum_mismatch")
-    document = formats.is_document(row.media_type)
+    kindle = formats.is_kindle(row.media_type)
+    document = formats.is_document(row.media_type) or kindle
     # The declared type picks the parser; the first bytes must agree before any parser runs.
     if document and not formats.magic_ok(row.media_type, formats.read_head(part)):
         raise _fail(
@@ -403,14 +404,29 @@ def _finalize(public_id, request, auth, db, settings, body) -> dict:
     if row.import_id is not None:
         return _finalize_into_import(db, request, auth, settings, row, part, expected, None)
     title = None
+    media_type = row.media_type
+    if kindle:
+        # A plain upload reaches the inbox as the converted EPUB, so a DRM-protected or broken
+        # MOBI/AZW3 is refused here, where the person sees why.
+        epub = part.with_name(f"{public_id}.epub.part")  # swept like any orphan .part
+        try:
+            formats.to_epub(part, row.media_type, epub)
+        except formats.ProbeBusy as exc:
+            raise _err(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code) from None
+        except formats.FormatError as exc:
+            epub.unlink(missing_ok=True)
+            raise _fail(db, request, auth, settings, row, 422, exc.code) from None
+        part.unlink(missing_ok=True)
+        part, media_type = epub, formats.EPUB
     if document:
         try:
-            meta = formats.probe(part, row.media_type).meta
+            meta = formats.probe(part, media_type).meta
             title = None if meta.title == part.stem else meta.title.strip()[:200] or None
         except formats.ProbeBusy:
             # The file is fine; keep the session and its bytes so finalize can be retried.
             raise _err(status.HTTP_503_SERVICE_UNAVAILABLE, "pdf_busy") from None
         except formats.FormatError as exc:
+            part.unlink(missing_ok=True)
             raise _fail(db, request, auth, settings, row, 422, exc.code) from None
     else:
         title = _title(part, row.media_type, settings)
@@ -420,6 +436,8 @@ def _finalize(public_id, request, auth, db, settings, body) -> dict:
             except AudioError:
                 raise _fail(db, request, auth, settings, row, 422, "not_audio") from None
     name = inbox_name_for(row.filename, row.media_type)
+    if kindle:
+        name = f"{Path(name).stem}.epub"
     move_into_inbox(settings, part, name)
     row.sha256 = expected
     row.status = UploadStatus.COMPLETED
@@ -448,7 +466,7 @@ def _finalize_into_import(db, request, auth, settings, row, part, expected, titl
             staged = imports.stage_upload(db, settings, imp, row, part)
     except imports.ImportError_ as exc:
         db.rollback()
-        if exc.code == "pdf_busy":  # retryable: the session and its .part stay as they were
+        if exc.code in formats.BUSY_CODES:  # retryable: the session and its .part stay as is
             raise _err(exc.status, exc.code) from None
         # Every other staging refusal is final (unreadable, import closed or full): fail the
         # session and drop its bytes rather than leave it active with a stuck part.
