@@ -279,8 +279,8 @@ proxy cannot reach a tailnet address, so with Lectern only on the tailnet:
 
 - If Tailscale connects on that network, set `"proxy": "none"` in `config.json` so the worker
   talks to Lectern directly over Tailscale. The agent reads it only at start: run
-  `lectern worker-service install` afterwards to restart it (or pass `--proxy none` to the
-  installer). Model downloads then go direct too, so **download the models at home
+  `lectern worker-service install` afterwards to restart it (add `--no-login` if you installed
+  with it), or pass `--proxy none` to the installer. Model downloads then go direct too, so **download the models at home
   first** (run one job there; they are cached in `~/.cache/huggingface`).
 - If the network forces everything through its proxy and blocks Tailscale, the worker cannot
   reach Lectern from there. Nothing breaks: jobs wait until the Mac is home.
@@ -386,7 +386,9 @@ lectern-compose start lectern
 ```
 
 **On a new Pi:** do steps 1, 2, and 3.1–3.4 of this guide, **not** the first run (no new owner
-account), and write `.env` with the **same** `LECTERN_BASE_URL` (passkeys are bound to it).
+account). Restore your saved `.env`, or write one with the **same** `LECTERN_BASE_URL`
+(passkeys are bound to it) and `LECTERN_BACKUP_PATH` set to the drive's backup folder;
+without it the restore looks in the empty default `backups/` and finds nothing.
 Then mount the drive, put the saved password in `data/lectern/backup-restic-password`
 (mode 600), and restore the Tailscale state
 ([as root](deploy-tailscale.md#backups-and-restore)). The restore container runs inside the
@@ -402,7 +404,8 @@ lectern-compose up -d
 ```
 
 Without the Tailscale state, remove the old `lectern` machine on the Machines page first and
-put a fresh auth key in `.env`, or the new one is named `lectern-1`. Details, and what to do if a restore is interrupted:
+put a fresh auth key in `.env`, or the new one is named `lectern-1`. Details, and what to do
+if a restore is interrupted:
 [Restore](backups.md#restore) and [Backups and restore](deploy-tailscale.md#backups-and-restore).
 
 ## 11. Troubleshooting
