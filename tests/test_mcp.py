@@ -1111,7 +1111,7 @@ def test_migration_0013_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
     cfg = alembic_config(str(engine.url))
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.upgrade(cfg, "0012_worker_capabilities")
+        command.upgrade(cfg, "0012_tts")
 
     def insert(keys: dict) -> None:
         with engine.begin() as conn:
@@ -1151,7 +1151,7 @@ def test_migration_0013_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
             "file-only": ["file"], "file-read": ["file", "read"]})  # fmt: skip
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.downgrade(cfg, "0012_worker_capabilities")
+        command.downgrade(cfg, "0012_tts")
     # Before 0013 upload meant filing too: a downgrade drops it rather than re-enabling
     # filing, drops file, and revokes a key left with nothing.
     assert state() == {

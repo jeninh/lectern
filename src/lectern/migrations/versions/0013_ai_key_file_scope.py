@@ -14,7 +14,7 @@ exist, so:
 - a key left with no scopes is revoked (the old code never created an empty key).
 
 Revision ID: 0013
-Revises: 0012_worker_capabilities
+Revises: 0012_tts
 Create Date: 2026-10-21
 
 """
@@ -27,7 +27,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0013"
-down_revision = "0012_worker_capabilities"
+down_revision = "0012_tts"
 branch_labels = None
 depends_on = None
 
