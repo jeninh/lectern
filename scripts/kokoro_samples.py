@@ -7,7 +7,8 @@ the Make an audiobook voice picker. Run it again when the voice list changes:
 
     uv run --with "kokoro>=0.9" --with "misaki[en,ja,zh]" python scripts/kokoro_samples.py
 
-Needs ffmpeg, and espeak-ng for Spanish, French, Hindi, Italian, and Portuguese. Kokoro downloads its weights from Hugging Face on first use.
+Needs ffmpeg, and espeak-ng for Spanish, French, Hindi, Italian, and Portuguese. Kokoro
+downloads its weights from Hugging Face on first use.
 """
 
 from __future__ import annotations
@@ -46,8 +47,6 @@ def main() -> None:
     from kokoro import KModel, KPipeline
 
     OUT.mkdir(parents=True, exist_ok=True)
-    for old in OUT.glob("*.m4a"):  # voices dropped from KOKORO_VOICES stop shipping
-        old.unlink()
     model = KModel(repo_id=REPO).eval()  # one copy of the weights for every language
     pipe, manifest = None, {"speed": 1.0, "codec": "aac", "voices": {}}
     for voice in KOKORO_VOICES:
@@ -60,8 +59,8 @@ def main() -> None:
         pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
         dest = OUT / f"{voice}.m4a"
         subprocess.run(  # noqa: S603 - a fixed ffmpeg command line
-            [shutil.which("ffmpeg") or "ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "s16le", "-ar",
-             str(KOKORO_SAMPLE_RATE), "-ac", "1", "-i", "-", "-c:a", "aac", "-b:a", f"{KBPS}k",
+            [shutil.which("ffmpeg") or "ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "s16le",
+             "-ar", str(KOKORO_SAMPLE_RATE), "-ac", "1", "-i", "-", "-c:a", "aac", "-b:a", f"{KBPS}k",
              "-map_metadata", "-1", "-fflags", "+bitexact", "-movflags", "+faststart", str(dest)],
             input=pcm, check=True,
         )  # fmt: skip
@@ -73,6 +72,9 @@ def main() -> None:
             "bytes": dest.stat().st_size,
         }
         print(f"{voice}: {manifest['voices'][voice]['duration_s']} s, {dest.stat().st_size} bytes")
+    for stale in OUT.glob("*.m4a"):  # voices dropped from KOKORO_VOICES stop shipping
+        if stale.stem not in manifest["voices"]:
+            stale.unlink()
     (OUT / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n")
     total = sum(v["bytes"] for v in manifest["voices"].values())
     print(f"{len(manifest['voices'])} samples, {total / 1024:.0f} KiB")
