@@ -12,7 +12,8 @@ its scopes:
 
 Its owner can change a key's scopes later (``routes/api/ai_keys.py``) without seeing or
 rotating the secret. Every tool call reads the scopes from the database again, so a change
-applies to the key's next request; adding a scope needs a fresh password or passkey.
+applies to the key's next request. Adding a scope, or creating a key with more than
+the defaults, needs a fresh password or passkey (``security/stepup.py``).
 
 A key never reaches anything else. Only ``/mcp`` accepts it, and no tool manages users,
 invites, keys, or server settings, or returns a book file or audio.

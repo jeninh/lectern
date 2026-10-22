@@ -64,7 +64,7 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 | Scope | Lets the app | Tools |
 | --- | --- | --- |
 | `upload` (default) | add books to Review before filing; owners and members only | `upload_book`, `list_pending_imports`, `cancel_import` |
-| `file` (default): “Can file books (confirm imports)” | file reviewed imports into the library; owners and members only | `confirm_import`, and auto-filing a certain match from `upload_book` |
+| `file` (default): “Can file books (confirm imports)” | file reviewed imports **this key uploaded** into the library; owners and members only | `confirm_import`, and auto-filing a certain match from `upload_book` |
 | `read` | search, book details, alignment status, your progress | `search_library`, `get_book`, `list_recent` |
 | `organize` | shelves, send to device, alignment, metadata | `add_to_shelf`, `remove_from_shelf`, `send_to_device`, `list_device_queue`, `start_alignment`, `job_status`, `edit_metadata` |
 
@@ -74,20 +74,35 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 - `file` is on by default for new keys; untick it and the app's uploads wait in **Review
   before filing** for you. Without `file`, `upload_book` never files a book, even with your
   “file certain matches automatically” preference on. Keys created before `file` existed kept
-  their ability to file: every key that had `upload` was given `file` too (migration `0012`). Editing metadata and alignment
+  their ability to file: every key that had `upload` was given `file` too (migration `0012`).
+  A key files only imports it opened itself with `upload_book`. Uploads you started in the web
+  app, or that another key uploaded, are yours to file in the review sheet, even if the key
+  has `file` and knows the import id.
+- **API callers**: a script that creates keys with explicit `{"scopes": ["upload"]}` now gets
+  a key that uploads but cannot file. Add `"file"` to keep the old behaviour. Editing metadata and alignment
   need an owner or member, as in the web app.
 - Keys are shown once and stored as SHA-256 hashes (prefix `lak_`, 256 bits of randomness).
   Devices lists each key with its first characters, its scopes, and when, from where, and by
   which app it was last used. Revoking takes effect on the next request.
-- **Editing a key.** Devices → AI tools → a key's menu → **Edit permissions** changes its
-  scopes. The key is not shown again and not rotated, so the app keeps working. Every tool call
-  reads the key's scopes from the database (nothing caches them), so the change applies to the
-  app's next request; an upload in progress is checked again when its last chunk is finalized,
-  and before it auto-files. Removing a scope is immediate. Adding one is a sensitive action:
-  confirm it with a passkey or your password, as when turning off two-factor codes. Activity
-  shows `ai_key.scopes_change` with the scopes before and after (and `ai_key.step_up_failed`
-  for a wrong confirmation). Only the person who owns a key can edit it, not even the household
-  owner.
+- **Editing a key.** Devices → AI tools → a key's **Edit** changes its scopes. The key is not
+  shown again and not rotated, so the app keeps working. Every tool call reads the key's scopes
+  from the database (nothing caches them), so the change applies to the app's next request. An
+  upload in progress is checked again for `upload` just before its last chunk is finalized,
+  and for `file` inside the filing transaction, after the book's rows are written and just
+  before they commit, so a `file` removed at any moment before then stops the filing. Only
+  the person who owns a key can edit it, not even the household owner.
+- **Removing scopes** applies immediately and is always allowed, even for a person who was
+  demoted to reader and whose key still holds `upload` or `file` from before.
+- **Step-up.** Anything that gives an AI app more access needs a fresh confirmation in the
+  same request: your password, or a passkey (with its PIN or biometric) against a single-use
+  challenge. That covers adding scopes to a key, creating a key with more than the default
+  scopes, and **registering a passkey** (otherwise someone holding only your signed-in
+  session could add a passkey of their own and confirm with it). A session alone (a stolen
+  cookie, an unlocked browser) is therefore not enough. Activity shows `ai_key.scopes_change`
+  with the scopes before and after and how it was confirmed, and `ai_key.step_up_failed` /
+  `passkey.step_up_failed` for wrong confirmations (rate limited like sign-in).
+- If the server is busy writing (an AI app filing a book holds SQLite's write lock), an edit
+  answers `503 busy` with `Retry-After` and changes nothing; try again.
 - A key is accepted **only** at `/mcp`. It cannot open `/api`, `/library`, or `/opds`, so it
   cannot download book files, audio, covers, or read-aloud EPUBs. No tool returns file
   contents or download links. No tool manages users, invites, keys, or server settings.

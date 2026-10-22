@@ -118,6 +118,7 @@ const MESSAGES: Record<string, string> = {
   step_up_failed: "That password or passkey did not confirm it’s you. Try again.",
   readers_cannot_upload: "Readers cannot let an AI app add or file books.",
   revoked: "This key was revoked.",
+  busy: "The server is busy filing a book. Try again in a moment.",
 };
 
 /** Plain-language text for an API error code (the code itself when there is none). */

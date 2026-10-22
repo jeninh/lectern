@@ -887,6 +887,10 @@ class Import(Base):
         ForeignKey("works.id", ondelete="SET NULL"), default=None
     )
     auto_filed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The AI key whose upload_book opened this import: only that key may file it (MCP).
+    ai_key_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ai_keys.id", ondelete="SET NULL"), default=None
+    )
     version: Mapped[int] = mapped_column(Integer, default=1)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

@@ -88,7 +88,7 @@ You act as one person, with only their permissions and only the scopes their AI 
 
 - Add a book: upload_book (small files in one call; larger ones in chunks), then look at the
   detected metadata and the proposed match, and confirm_import (accept, edit fields, join an
-  existing book, or file as new; needs the file scope) or cancel_import. Ask the person when
+  existing book, or file as new; needs the file scope, and only for imports you uploaded) or cancel_import. Ask the person when
   the match is not certain.
 - Find books with search_library / list_recent and inspect one with get_book. Book ids are
   numbers; use them for every other tool.
@@ -212,6 +212,12 @@ class Call:
     def require_scope(self, scope: str) -> None:
         if not self.has_scope(scope):
             raise ToolError(_needs(scope))
+
+    def may_file(self, imp: Import) -> bool:
+        """Checked inside the filing transaction, right before it commits: the key still has
+        ``file``, and this key uploaded the import (a key never files what the person, or
+        another key, put into review)."""
+        return imp.ai_key_id == self.key.id and self.has_scope("file")
 
 
 def _needs(scope: str) -> str:
@@ -486,6 +492,7 @@ def upload_book(
                 # Not committed here: start_session commits it together with the upload
                 # session, so a refused upload (too_large, quota, ...) leaves no import.
                 imp, created = imports.create(c.db, c.user, Path(filename).stem[:256], None)
+                imp.ai_key_id = c.key.id
             else:
                 imp, created = imports.get_owned(c.db, c.user, import_id), False
             row, _ = uploads_api.start_session(
@@ -541,8 +548,9 @@ def upload_book(
                     "next": "upload more files with this import_id",
                 }
             result = imports_api.complete(
-                c.request, c.auth, c.db, c.settings, imp.public_id, auto_file=c.has_scope("file")
-            )
+                c.request, c.auth, c.db, c.settings, imp.public_id,
+                allowed=lambda: c.may_file(imp),
+            )  # fmt: skip
             return _import_summary(result)
         except Exception:
             if created:
@@ -591,12 +599,18 @@ def confirm_import(
         ),
     ] = False,
 ) -> dict:
-    """File a pending import into the library, as reviewed. Scope: file."""
+    """File a pending import into the library, as reviewed. Only imports this AI key uploaded
+    with upload_book; others are filed by the person in Lectern. Scope: file."""
     from lectern.routes.api import imports as imports_api
 
     with _call(ctx, "confirm_import", "file") as c:
         c.require_editor("add books")
         imp = imports.get_owned(c.db, c.user, import_id)
+        if imp.ai_key_id != c.key.id:
+            raise ToolError(
+                "forbidden: this import was not uploaded by this AI key. Only the person can "
+                "file it, in Lectern's review sheet."
+            )
         if imp.status == ImportStatus.UPLOADING:
             imports_api.complete(c.request, c.auth, c.db, c.settings, import_id, auto_file=False)
             c.db.refresh(imp)
@@ -613,7 +627,15 @@ def confirm_import(
             use_cover=use_cover,
             audio="append" if add_audio_tracks else "refuse",
         )
-        out = imports_api.file_import(c.request, c.auth, c.db, c.settings, import_id, decision)
+        try:
+            out = imports_api.file_decision(
+                c.request, c.auth, c.db, c.settings, import_id, decision,
+                allowed=lambda: c.may_file(imp),
+            )  # fmt: skip
+        except HTTPException as exc:
+            if isinstance(exc.detail, dict) and exc.detail.get("detail") == "needs_file_scope":
+                raise ToolError(_needs("file")) from None
+            raise
         work = _visible(c.db, c.user, out["work_id"])
         return {
             "book": _summary(work),

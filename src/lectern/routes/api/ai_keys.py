@@ -1,49 +1,46 @@
 """AI keys for MCP clients (``lectern.ai_keys``; docs/mcp.md).
 
 - ``GET  /api/ai-keys``: the caller's keys, the scopes they may grant, and the endpoint URL.
-- ``POST /api/ai-keys {"label", "scopes"}``: create one; the secret is in this response only.
+- ``POST /api/ai-keys {"label", "scopes", "password" | "passkey"}``: create one; the secret is
+  in this response only. Scopes beyond the person's defaults need a step-up.
 - ``GET  /api/ai-keys/{id}``: one key; polled by "Connect an AI app" to show the first use.
 - ``POST /api/ai-keys/{id}/scopes {"scopes", "password" | "passkey"}``: change what a key
   may do. The secret is neither shown nor rotated, so the AI app keeps working; tools read the
   scopes again on every call, so the change applies to its next request. Removing scopes is
-  immediate. Adding any scope is a sensitive action: like disabling two-factor codes, it needs
-  the person's password in the same request, or a passkey assertion against a challenge from
-  ``POST /api/ai-keys/step-up/options``. Without one it answers 403 ``step_up_required``.
+  immediate and always allowed. Adding any scope needs a step-up.
 - ``POST /api/ai-keys/{id}/revoke``.
 
+Step-up (``lectern.security.stepup``) means a fresh password or passkey in the same request,
+so a stolen session alone cannot give an AI app more access: not by widening a key, not by
+creating a wider one, and not by registering a passkey of its own to confirm with (that needs
+a step-up too).
+
 Session + CSRF like the rest of ``/api``: an AI key itself can never list, create, edit, or
-revoke keys (``/api`` does not accept it). Someone else's key id answers 404.
+revoke keys (``/api`` does not accept it). Someone else's key id answers 404. If SQLite is
+busy (an AI tool filing a book holds the write lock), a write answers 503 ``busy`` with
+``Retry-After`` instead of failing.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from lectern import ai_keys
-from lectern.models import AIKey, Passkey, utcnow
+from lectern.models import AIKey, utcnow
 from lectern.routes.api.serializers import iso
-from lectern.security import audit
+from lectern.security import audit, stepup
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
-from lectern.security.passwords import verify_password
 from lectern.security.sessions import client_ip
-from lectern.security.webauthn import (
-    authentication_options,
-    credential_id_from_body,
-    verify_authentication,
-)
 from lectern.workmeta import NoControls
 
-log = logging.getLogger("lectern.security")
 router = APIRouter(prefix="/ai-keys")
 
 MAX_ACTIVE_KEYS = 50
-STEP_UP_COOKIE = "lectern_wa_ai_key"
 Scope = Literal["upload", "file", "read", "organize"]
 
 
@@ -61,12 +58,18 @@ def key_json(k: AIKey) -> dict:
     }
 
 
-def _step_up_methods(db, auth, settings) -> list[str]:
-    """How this person can confirm a sensitive action: ``passkey`` and/or ``password``."""
-    has_passkey = settings.is_https and db.scalar(
-        select(Passkey.id).where(Passkey.user_id == auth.user.id).limit(1)
-    )
-    return (["passkey"] if has_passkey else []) + (["password"] if auth.user.password_hash else [])
+def _commit(db) -> None:
+    """Commit, or 503 ``busy`` while another request holds SQLite's write lock past its
+    busy timeout (nothing was changed; the client can simply try again)."""
+    try:
+        db.commit()
+    except OperationalError as exc:
+        db.rollback()
+        if "locked" not in str(exc) and "busy" not in str(exc):
+            raise
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "busy", headers={"Retry-After": "2"}
+        ) from None
 
 
 def _owned(db, auth, key_id: int) -> AIKey:
@@ -85,12 +88,12 @@ def list_keys(auth: Auth, db: DbDep, settings: SettingsDep) -> dict:
         "keys": [key_json(k) for k in rows],
         "scopes": ai_keys.allowed_scopes(auth.user),
         "default_scopes": ai_keys.default_scopes(auth.user),
-        "step_up": _step_up_methods(db, auth, settings),
+        "step_up": stepup.methods(db, auth.user, settings),
         "endpoint": f"{settings.base_url}/mcp",
     }
 
 
-class CreateIn(BaseModel):
+class CreateIn(stepup.StepUpIn):
     model_config = ConfigDict(extra="forbid")
 
     label: Annotated[str, NoControls] = Field(min_length=1, max_length=128)
@@ -104,8 +107,15 @@ def create_key(
     label = body.label.strip()
     if not label:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "label_required")
-    scopes = list(dict.fromkeys(body.scopes or ai_keys.default_scopes(auth.user)))
+    scopes = ai_keys.ordered(body.scopes or ai_keys.default_scopes(auth.user))
     _check_allowed(auth, scopes)
+    beyond = [s for s in scopes if s not in ai_keys.default_scopes(auth.user)]
+    method = None
+    if beyond:
+        method = stepup.require(
+            request, db, auth.user, settings, body, failed_action="ai_key.step_up_failed",
+            target=label, detail=f"creating with {','.join(beyond)}",
+        )  # fmt: skip
     active = db.scalars(
         select(AIKey.id).where(AIKey.user_id == auth.user.id, AIKey.revoked_at.is_(None))
     ).all()
@@ -120,9 +130,9 @@ def create_key(
         actor_user_id=auth.user.id,
         target=label,
         ip=client_ip(request),
-        detail=",".join(row.scopes),
+        detail=",".join(row.scopes) + (f"; confirmed with {method}" if method else ""),
     )
-    db.commit()
+    _commit(db)
     return {"key": key_json(row), "secret": secret, "endpoint": f"{settings.base_url}/mcp"}
 
 
@@ -131,58 +141,10 @@ def _check_allowed(auth, scopes) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "readers_cannot_upload")
 
 
-@router.post("/step-up/options")
-def step_up_options(request: Request, auth: AuthCsrf, db: DbDep, settings: SettingsDep):
-    """A passkey challenge for adding scopes to a key (single use, five minutes)."""
-    if "passkey" not in _step_up_methods(db, auth, settings):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "no_passkey")
-    mine = db.scalars(select(Passkey).where(Passkey.user_id == auth.user.id)).all()
-    options_json, challenge = authentication_options(settings, list(mine))
-    resp = JSONResponse({"publicKey": options_json})
-    resp.set_cookie(
-        STEP_UP_COOKIE,
-        request.app.state.challenges.put(challenge, auth.user.id),
-        max_age=300,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="strict",
-        path="/api/ai-keys",
-    )
-    return resp
-
-
-class ScopesIn(BaseModel):
+class ScopesIn(stepup.StepUpIn):
     model_config = ConfigDict(extra="forbid")
 
     scopes: list[Scope] = Field(min_length=1, max_length=4)
-    # Step-up for adding scopes: one of these, fresh in this request.
-    password: str | None = Field(default=None, max_length=256)
-    passkey: dict | None = None
-
-
-def _step_up(request: Request, auth, db, settings, body: ScopesIn) -> str | None:
-    """The method that confirmed it is the person (``password``/``passkey``), or None."""
-    if body.passkey is not None:
-        pending = request.app.state.challenges.pop(request.cookies.get(STEP_UP_COOKIE))
-        if pending is None or pending.user_id != auth.user.id:
-            return None
-        cred_id = credential_id_from_body(body.passkey)
-        passkey = cred_id and db.scalar(
-            select(Passkey).where(Passkey.credential_id == cred_id, Passkey.user_id == auth.user.id)
-        )
-        if not passkey:
-            return None
-        try:
-            result = verify_authentication(settings, body.passkey, pending.challenge, passkey)
-        except Exception as exc:  # noqa: BLE001 - the library raises many subclasses
-            log.info("AI key step-up passkey failed: %s", exc)
-            return None
-        passkey.sign_count = result.new_sign_count
-        passkey.last_used_at = utcnow()
-        return "passkey"
-    if body.password and verify_password(auth.user.password_hash, body.password):
-        return "password"
-    return None
 
 
 @router.post("/{key_id}/scopes")
@@ -198,36 +160,19 @@ def change_scopes(
     if row.revoked_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "revoked")
     after = ai_keys.ordered(body.scopes)
-    _check_allowed(auth, after)
     before = list(row.scopes or [])
     if after == before:
         return {"key": key_json(row), "changed": False}
     added = [s for s in after if s not in before]
+    # Only what is added must be allowed: a person demoted to reader can still narrow a key
+    # that kept upload/file from before (MCP refuses those to readers anyway).
+    _check_allowed(auth, added)
     method = None
     if added:
-        if body.password is None and body.passkey is None:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                {"detail": "step_up_required", "methods": _step_up_methods(db, auth, settings)},
-            )
-        ip = client_ip(request)
-        if not request.app.state.limiters["login"].allow(f"step_up:{auth.user.id}"):
-            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests")
-        method = _step_up(request, auth, db, settings, body)
-        if method is None:
-            audit.record(
-                db,
-                "ai_key.step_up_failed",
-                actor_user_id=auth.user.id,
-                target=row.label,
-                ip=ip,
-                detail=f"adding {','.join(added)}",
-            )
-            db.commit()
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                {"detail": "step_up_failed", "methods": _step_up_methods(db, auth, settings)},
-            )
+        method = stepup.require(
+            request, db, auth.user, settings, body, failed_action="ai_key.step_up_failed",
+            target=row.label, detail=f"adding {','.join(added)}",
+        )  # fmt: skip
     row.scopes = after
     audit.record(
         db,
@@ -240,11 +185,8 @@ def change_scopes(
             + (f"; confirmed with {method}" if method else "")
         ),
     )
-    db.commit()
-    resp = JSONResponse({"key": key_json(row), "changed": True})
-    if body.passkey is not None:
-        resp.delete_cookie(STEP_UP_COOKIE, path="/api/ai-keys")
-    return resp
+    _commit(db)
+    return {"key": key_json(row), "changed": True}
 
 
 @router.get("/{key_id}")
@@ -261,5 +203,5 @@ def revoke_key(request: Request, auth: AuthCsrf, db: DbDep, key_id: int) -> dict
         audit.record(
             db, "ai_key.revoke", actor_user_id=auth.user.id, target=row.label, ip=client_ip(request)
         )
-        db.commit()
+        _commit(db)
     return {"key": key_json(row)}

@@ -133,7 +133,7 @@ def passkey_login_options(request: Request, response: Response, settings: Settin
     if not setup_completed(db):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Setup incomplete")
     options_json, challenge = authentication_options(settings, None)
-    key = request.app.state.challenges.put(challenge, None)
+    key = request.app.state.challenges.put(challenge, None, "login")
     resp = JSONResponse({"publicKey": options_json})
     resp.set_cookie(
         WA_COOKIE,
@@ -150,7 +150,7 @@ def passkey_login_options(request: Request, response: Response, settings: Settin
 @router.post("/login/passkey/verify", include_in_schema=False)
 async def passkey_login_verify(request: Request, settings: SettingsDep, db: DbDep):
     _rate_limit(request, "webauthn")
-    pending = request.app.state.challenges.pop(request.cookies.get(WA_COOKIE))
+    pending = request.app.state.challenges.pop(request.cookies.get(WA_COOKIE), "login")
     body = await request.json()
     ip = client_ip(request)
     if pending is None or not isinstance(body, dict):

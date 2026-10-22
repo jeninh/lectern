@@ -79,10 +79,14 @@ class Person:
     def __init__(self, app, username: str, password: str):
         self.http = TestClient(app)
         self.username = username
+        self.password = password
         self.csrf = login(self.http, username, password)
 
     def key(self, *scopes: str, label: str = "Claude") -> str:
+        """A new key; scopes beyond the defaults are confirmed with the password."""
         body = {"label": label, **({"scopes": list(scopes)} if scopes else {})}
+        if scopes:
+            body["password"] = self.password
         r = api_post(self.http, "/api/ai-keys", self.csrf, body)
         assert r.status_code == 201, r.text
         return r.json()["secret"]
@@ -641,7 +645,9 @@ def live(app, setup_token, settings):
     ingest(settings, "Alpha")
     h = {"x-csrf-token": csrf}
     r = web.post(
-        "/api/ai-keys", json={"label": "SDK", "scopes": ["upload", "file", "read"]}, headers=h
+        "/api/ai-keys",
+        json={"label": "SDK", "scopes": ["upload", "file", "read"], "password": OWNER_PASSWORD},
+        headers=h,
     )
     assert r.status_code == 201, r.text
     try:
@@ -802,60 +808,202 @@ def test_an_ai_key_cannot_edit_keys(app, home):
     assert _key_row(secret).scopes == ["read"]
 
 
-def test_widening_with_a_passkey_needs_this_persons_fresh_challenge(app, home, monkeypatch):
+def _with_passkeys(home, monkeypatch) -> list[str]:
+    """Owner and mia each have a passkey; the signature check is stubbed (records who signed,
+    and that user verification was required)."""
     from lectern.models import Passkey
-    from lectern.routes.api import ai_keys as ai_keys_api
+    from lectern.security import stepup
 
     monkeypatch.setattr(Settings, "is_https", property(lambda self: True))
-    owner, mia = home["owner"], home["mia"]
     with session_factory()() as db:
-        ids = {u: home[u].http.get("/api/me").json()["user"]["id"] for u in ("owner", "mia")}
-        for name, cred in (("owner", b"owner-cred"), ("mia", b"mia-cred")):
-            db.add(Passkey(user_id=ids[name], credential_id=cred, public_key=b"k", sign_count=0,
-                           label=name))  # fmt: skip
+        for name in ("owner", "mia"):
+            uid = home[name].http.get("/api/me").json()["user"]["id"]
+            db.add(Passkey(user_id=uid, credential_id=f"{name}-cred".encode(), public_key=b"k",
+                           sign_count=0, label=name))  # fmt: skip
         db.commit()
-    verified = []
+    verified: list[str] = []
 
     class Result:
         new_sign_count = 7
 
-    def fake_verify(settings, body, challenge, passkey):  # the signature check itself
+    def fake_verify(settings, body, challenge, passkey, *, require_uv=False):
+        assert require_uv  # a step-up needs a PIN or biometric, not just the authenticator
         verified.append(passkey.label)
         if body.get("signature_ok") is False:
             raise ValueError("bad signature")
         return Result()
 
-    monkeypatch.setattr(ai_keys_api, "verify_authentication", fake_verify)
-    b64 = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")  # noqa: E731
-    secret = owner.key("read")
-    key_id = _key_row(secret).id
+    monkeypatch.setattr(stepup, "verify_authentication", fake_verify)
+    return verified
+
+
+def _cred(name: str) -> dict:
+    return {"rawId": base64.urlsafe_b64encode(f"{name}-cred".encode()).decode().rstrip("=")}
+
+
+def _challenge(person: Person) -> None:
+    assert api_post(person.http, "/api/security/step-up/options", person.csrf).status_code == 200
+
+
+def test_widening_with_a_passkey_needs_this_persons_fresh_challenge(app, home, monkeypatch):
+    verified = _with_passkeys(home, monkeypatch)
+    owner, mia = home["owner"], home["mia"]
+    key_id = _key_row(owner.key("read")).id
     assert owner.http.get("/api/ai-keys").json()["step_up"] == ["passkey", "password"]
 
     # No challenge issued: refused.
-    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    r = _edit(owner, key_id, ["read", "organize"], passkey=_cred("owner"))
     assert r.json()["detail"] == "step_up_failed" and verified == []
     # Someone else's passkey, even with this person's challenge: refused.
-    assert api_post(owner.http, "/api/ai-keys/step-up/options", owner.csrf).status_code == 200
-    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"mia-cred")})
+    _challenge(owner)
+    r = _edit(owner, key_id, ["read", "organize"], passkey=_cred("mia"))
     assert r.json()["detail"] == "step_up_failed" and verified == []
     # A failing signature: refused.
-    api_post(owner.http, "/api/ai-keys/step-up/options", owner.csrf)
-    r = _edit(owner, key_id, ["read", "organize"],
-              passkey={"rawId": b64(b"owner-cred"), "signature_ok": False})  # fmt: skip
+    _challenge(owner)
+    r = _edit(
+        owner, key_id, ["read", "organize"], passkey={**_cred("owner"), "signature_ok": False}
+    )
     assert r.json()["detail"] == "step_up_failed" and verified == ["owner"]
     # Mia's challenge cookie does not work in the owner's session.
-    api_post(mia.http, "/api/ai-keys/step-up/options", mia.csrf)
-    owner.http.cookies.set("lectern_wa_ai_key", mia.http.cookies.get("lectern_wa_ai_key"))
-    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    _challenge(mia)
+    owner.http.cookies.set("lectern_step_up", mia.http.cookies.get("lectern_step_up"))
+    r = _edit(owner, key_id, ["read", "organize"], passkey=_cred("owner"))
     assert r.json()["detail"] == "step_up_failed"
+    # A sign-in challenge is not a step-up challenge (challenges are tagged by purpose).
+    anon = TestClient(app)
+    assert anon.post("/login/passkey/options", headers={"origin": ORIGIN}).status_code == 200
+    owner.http.cookies.set("lectern_step_up", anon.cookies.get("lectern_wa"))
+    r = _edit(owner, key_id, ["read", "organize"], passkey=_cred("owner"))
+    assert r.json()["detail"] == "step_up_failed"
+    assert verified == ["owner"]  # none of these reached the signature check
     # This person's fresh challenge and passkey: allowed, once.
-    owner.http.cookies.delete("lectern_wa_ai_key")
-    api_post(owner.http, "/api/ai-keys/step-up/options", owner.csrf)
-    r = _edit(owner, key_id, ["read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    owner.http.cookies.delete("lectern_step_up")
+    _challenge(owner)
+    r = _edit(owner, key_id, ["read", "organize"], passkey=_cred("owner"))
     assert r.status_code == 200 and r.json()["key"]["scopes"] == ["read", "organize"]
     assert audit_rows("ai_key.scopes_change")[0].detail.endswith("confirmed with passkey")
-    r = _edit(owner, key_id, ["upload", "read", "organize"], passkey={"rawId": b64(b"owner-cred")})
+    r = _edit(owner, key_id, ["upload", "read", "organize"], passkey=_cred("owner"))
     assert r.json()["detail"] == "step_up_failed"  # the challenge was used up
+
+
+def test_a_session_alone_cannot_get_a_wider_key(app, home, monkeypatch):
+    """Review finding: a stolen session (no password, no passkey) used to get full scopes by
+    creating a new key, or by registering its own passkey and stepping up with it."""
+    _with_passkeys(home, monkeypatch)
+    owner = home["owner"]
+    everything = ["upload", "file", "read", "organize"]
+    # 1. Creating a key wider than the defaults needs the step-up too.
+    for scopes in (everything, ["read"], ["upload", "file", "organize"]):
+        r = api_post(owner.http, "/api/ai-keys", owner.csrf, {"label": "evil", "scopes": scopes})
+        assert r.status_code == 403 and r.json()["detail"] == "step_up_required", scopes
+    r = api_post(owner.http, "/api/ai-keys", owner.csrf,
+                 {"label": "evil", "scopes": everything, "password": "guess"})  # fmt: skip
+    assert r.json()["detail"] == "step_up_failed"
+    with session_factory()() as db:
+        assert db.scalar(select(AIKey)) is None
+    assert [a.detail for a in audit_rows("ai_key.step_up_failed")] == [
+        "creating with read,organize"
+    ]
+    # The defaults (adding and filing books) need nothing extra, as before.
+    r = api_post(owner.http, "/api/ai-keys", owner.csrf, {"label": "plain"})
+    assert r.status_code == 201 and r.json()["key"]["scopes"] == ["upload", "file"]
+    r = api_post(owner.http, "/api/ai-keys", owner.csrf,
+                 {"label": "ok", "scopes": everything, "password": OWNER_PASSWORD})  # fmt: skip
+    assert r.status_code == 201 and r.json()["key"]["scopes"] == everything
+    assert audit_rows("ai_key.create")[-1].detail == (
+        "upload,file,read,organize; confirmed with password"
+    )
+    # 2. Registering a passkey (a new step-up factor) needs a step-up itself.
+    r = api_post(owner.http, "/api/security/passkeys/options", owner.csrf)
+    assert r.status_code == 403 and r.json()["detail"] == "step_up_required"
+    r = api_post(owner.http, "/api/security/passkeys/options", owner.csrf, {"password": "guess"})
+    assert r.json()["detail"] == "step_up_failed"
+    assert len(audit_rows("passkey.step_up_failed")) == 1
+    assert "lectern_wa_reg" not in owner.http.cookies  # no registration challenge was issued
+    r = api_post(owner.http, "/api/security/passkeys/options", owner.csrf,
+                 {"password": OWNER_PASSWORD})  # fmt: skip
+    assert r.status_code == 200 and "publicKey" in r.json()
+    _challenge(owner)  # or with a passkey the person already has
+    r = api_post(owner.http, "/api/security/passkeys/options", owner.csrf,
+                 {"passkey": _cred("owner")})  # fmt: skip
+    assert r.status_code == 200
+
+
+def test_a_demoted_reader_can_still_narrow_a_legacy_key(app, home):
+    from lectern.models import Role, User
+
+    mia = home["mia"]
+    key_id = _key_row(mia.key("upload", "file", "read", "organize")).id
+    with session_factory()() as db:
+        db.scalar(select(User).where(User.username == "mia")).role = Role.READER
+        db.commit()
+    # Narrowing never needs to be allowed: it keeps upload/file but removes organize.
+    r = _edit(mia, key_id, ["upload", "file", "read"])
+    assert r.status_code == 200, r.text
+    assert r.json()["key"]["scopes"] == ["upload", "file", "read"]
+    # Adding back organize is fine for a reader (with the step-up) ...
+    r = _edit(mia, key_id, ["upload", "file", "read", "organize"], password=mia.password)
+    assert r.status_code == 200, r.text
+    # ... but adding upload or file is not, whatever else the edit does.
+    r = _edit(mia, key_id, ["read"])
+    assert r.status_code == 200
+    for scopes in (["read", "upload"], ["file"]):
+        r = _edit(mia, key_id, scopes, password=mia.password)
+        assert r.status_code == 403 and r.json()["detail"] == "readers_cannot_upload"
+    assert _key_row(_key_row_prefix(key_id)).scopes == ["read"]
+
+
+def _key_row_prefix(key_id: int) -> str:
+    with session_factory()() as db:
+        return db.get(AIKey, key_id).prefix
+
+
+def test_a_scope_edit_during_a_write_is_busy_not_an_error(app, home, settings):
+    """While another writer (an AI tool filing a book) holds SQLite's write lock past the busy
+    timeout, an edit answers 503 busy with Retry-After, changes nothing, and works on retry."""
+    import sqlite3
+
+    owner = home["owner"]
+    secret = owner.key("upload", "file", "read")
+    key_id = _key_row(secret).id
+    writer = sqlite3.connect(settings.db_path, timeout=0)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        r = _edit(owner, key_id, ["read"])
+        assert r.status_code == 503 and r.json()["detail"] == "busy", r.text
+        assert r.headers["retry-after"] == "2"
+    finally:
+        writer.rollback()
+        writer.close()
+    assert _key_row(secret).scopes == ["upload", "file", "read"]
+    assert _edit(owner, key_id, ["read"]).status_code == 200
+    assert _key_row(secret).scopes == ["read"]
+
+
+def test_a_key_files_only_imports_it_uploaded(app, home, settings):
+    """Review finding: a file-only key could confirm any of the person's pending imports."""
+    owner = home["owner"]
+    uploader = MCP(app, owner.key("upload", label="uploader"))
+    filer = MCP(app, owner.key("file", label="filer"))
+    data = make_epub(settings.data_dir / "K.epub", title="Kilo").read_bytes()
+    pending = uploader.ok("upload_book", filename="K.epub",
+                          content_base64=base64.b64encode(data).decode())  # fmt: skip
+    ok, err = filer.call("confirm_import", import_id=pending["import_id"])
+    assert not ok and "not uploaded by this AI key" in err
+    # Nor one the person started in the web app.
+    r = api_post(owner.http, "/api/imports", owner.csrf, {"label": "web"})
+    assert r.status_code == 201, r.text
+    ok, err = filer.call("confirm_import", import_id=r.json()["id"])
+    assert not ok and "not uploaded by this AI key" in err
+    with session_factory()() as db:
+        assert db.scalar(select(Work).where(Work.title == "Kilo")) is None
+    # The uploading key files its own once it has file.
+    _set_scopes(_secret_of(uploader), ["upload", "file"])
+    assert uploader.ok("confirm_import", import_id=pending["import_id"])["created"]
+
+
+def _secret_of(mcp: MCP) -> str:
+    return mcp.key
 
 
 def _chunked(mcp: MCP, data: bytes, on_last_chunk, monkeypatch) -> tuple[bool, object]:
@@ -926,49 +1074,94 @@ def test_an_in_flight_upload_rechecks_file_before_auto_filing(
         assert result["proposal"]["action"] == "join"  # waits for the person's review
 
 
-def test_migration_0012_gives_existing_upload_keys_file(tmp_path):
+def test_file_is_rechecked_right_before_auto_filing(app, home, settings, monkeypatch):
+    """Review finding: ``file`` was read before detection, so removing it while the upload
+    was being analysed still auto-filed the book."""
+    owner = home["owner"]
+    assert api_post(owner.http, "/api/me/preferences", owner.csrf,
+                    {"auto_file_imports": True}).status_code == 200  # fmt: skip
+    secret = owner.key("upload", "file")
+    eligible = imports.auto_file_eligible
+
+    def after_detection(db, user, imp):  # detection is committed; filing comes next
+        _set_scopes(secret, ["upload"])
+        return eligible(db, user, imp)
+
+    monkeypatch.setattr(imports, "auto_file_eligible", after_detection)
+    data = make_epub(settings.data_dir / "A.epub", title="Alpha", authors=["Author Alpha"],
+                     padding=777).read_bytes()  # fmt: skip
+    out = MCP(app, secret).ok("upload_book", filename="A.epub",
+                              content_base64=base64.b64encode(data).decode())  # fmt: skip
+    assert out["status"] == "ready" and not out["auto_filed"]
+    assert out["proposal"]["action"] == "join"
+    assert not audit_rows("import.auto_file")
+
+
+def test_migration_0012_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
     import sqlalchemy as sa
     from alembic import command
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
 
     from lectern.db import make_engine
     from lectern.migrate import alembic_config, upgrade_to_head
+    from lectern.models import Base
 
     engine = make_engine(f"sqlite:///{tmp_path / 'm12.db'}")
     cfg = alembic_config(str(engine.url))
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
         command.upgrade(cfg, "0011")
-    old = {
-        "uploader": ["upload"],
-        "everything": ["upload", "read", "organize"],
-        "reader": ["read"],
-        "organizer": ["read", "organize"],
-    }
-    with engine.begin() as conn:
-        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
-        for i, (label, scopes) in enumerate(old.items()):
-            conn.execute(
-                sa.text(
-                    "INSERT INTO ai_keys (user_id, label, key_hash, prefix, scopes, created_at)"
-                    " VALUES (1, :label, :hash, 'lak_x', :scopes, '2026-10-20')"
-                ),
-                {"label": label, "hash": f"{i:064d}", "scopes": json.dumps(scopes)},
-            )
 
-    def scopes() -> dict:
+    def insert(keys: dict) -> None:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            for label, scopes in keys.items():
+                conn.execute(
+                    sa.text(
+                        "INSERT INTO ai_keys (user_id, label, key_hash, prefix, scopes,"
+                        " created_at) VALUES (1, :label, :hash, 'lak_x', :scopes, '2026-10-20')"
+                    ),
+                    {"label": label, "hash": hashlib.sha256(label.encode()).hexdigest(),
+                     "scopes": json.dumps(scopes)},
+                )  # fmt: skip
+
+    def state() -> dict:
         with engine.connect() as conn:
-            rows = conn.execute(sa.text("SELECT label, scopes, key_hash FROM ai_keys")).all()
-        assert [r[2] for r in rows] == [f"{i:064d}" for i in range(len(old))]  # untouched
-        return {r[0]: json.loads(r[1]) for r in rows}
+            rows = conn.execute(
+                sa.text("SELECT label, scopes, key_hash, revoked_at FROM ai_keys")
+            ).all()
+        for r in rows:
+            assert r[2] == hashlib.sha256(r[0].encode()).hexdigest()  # never rotated
+        return {r[0]: (json.loads(r[1]), r[3] is not None) for r in rows}
 
+    insert({"uploader": ["upload"], "everything": ["upload", "read", "organize"],
+            "reader": ["read"], "organizer": ["read", "organize"]})  # fmt: skip
     upgrade_to_head(engine)
-    assert scopes() == {
-        "uploader": ["upload", "file"],
-        "everything": ["upload", "file", "read", "organize"],
-        "reader": ["read"],
-        "organizer": ["read", "organize"],
+    assert state() == {
+        "uploader": (["upload", "file"], False),
+        "everything": (["upload", "file", "read", "organize"], False),
+        "reader": (["read"], False),
+        "organizer": (["read", "organize"], False),
     }
+    with engine.connect() as conn:
+        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+    # Keys edited after 0012: filing turned off, or file without upload.
+    insert({"no-filing": ["upload", "read"], "upload-only": ["upload"],
+            "file-only": ["file"], "file-read": ["file", "read"]})  # fmt: skip
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
         command.downgrade(cfg, "0011")
-    assert scopes() == old
+    # Before 0012 upload meant filing too: a downgrade drops it rather than re-enabling
+    # filing, drops file, and revokes a key left with nothing.
+    assert state() == {
+        "uploader": (["upload"], False),
+        "everything": (["upload", "read", "organize"], False),
+        "reader": (["read"], False),
+        "organizer": (["read", "organize"], False),
+        "no-filing": (["read"], False),
+        "upload-only": ([], True),
+        "file-only": ([], True),
+        "file-read": (["read"], False),
+    }
+    assert "ai_key_id" not in {c["name"] for c in sa.inspect(engine).get_columns("imports")}

@@ -18,7 +18,7 @@ import {
   type CreatedAIKey,
   type StepUpMethod,
 } from "../lib/aitools";
-import { passkeyAssertion, passkeysSupported } from "../lib/webauthn";
+import { StepUpForm, needsStepUp, type StepUpProof } from "./StepUp";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useInterval, useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
@@ -133,6 +133,8 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
   const [err, setErr] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedAIKey | null>(null);
   const [status, setStatus] = useState<AIKey | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [methods, setMethods] = useState<StepUpMethod[]>(list.step_up);
   const headRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (created) headRef.current?.focus();
@@ -169,16 +171,22 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
   };
   const toggle = (s: AIScope) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
 
-  const create = async () => {
+  // Scopes beyond the defaults need a fresh password or passkey (the server decides).
+  const create = async (proof: StepUpProof = {}) => {
     setBusy(true);
     setErr(null);
     try {
-      const out = await post<CreatedAIKey>("/api/ai-keys", { label: label.trim(), scopes });
+      const out = await post<CreatedAIKey>("/api/ai-keys", { label: label.trim(), scopes, ...proof });
       setCreated(out);
       setStatus(out.key);
+      setConfirming(false);
       onCreated();
     } catch (e) {
-      setErr((e as Error).message);
+      if (e instanceof ApiError && needsStepUp(e.code)) {
+        setMethods((e.data?.methods as StepUpMethod[]) ?? methods);
+        setConfirming(true);
+      }
+      setErr(e instanceof ApiError && e.code === "step_up_required" ? null : (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -193,6 +201,20 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
       ))}
     </div>
   );
+
+  if (!created && confirming) {
+    const extra = scopes.filter((s) => !list.default_scopes.includes(s));
+    return (
+      <StepUpForm
+        intro={<>Confirm it’s you to create “{label.trim()}” with more than the default permissions: {extra.map((s) => SCOPE_TEXT[s].label).join(", ")}.</>}
+        methods={methods}
+        err={err}
+        cta="Confirm and create"
+        onConfirm={create}
+        onBack={() => (setConfirming(false), setErr(null))}
+      />
+    );
+  }
 
   if (!created) {
     return (
@@ -213,7 +235,7 @@ function ConnectFlow({ list, onDone, onCreated }: { list: AIKeyList; onDone: () 
             </label>
           ))}
         </fieldset>
-        <p className="hint">Start small; you can change this later with Edit. Never: downloading books or audio, users, invites, keys, or server settings.</p>
+        <p className="hint">Start small; you can change this later with Edit. More than the defaults asks you to confirm it’s you. Never: downloading books or audio, users, invites, keys, or server settings.</p>
         <div className="sheet-actions">
           <button type="button" className="btn ghost" onClick={onDone}>Cancel</button>
           <button className="btn primary" disabled={busy || !label.trim() || scopes.length === 0}>{busy ? "Creating…" : "Create key"}</button>
@@ -283,62 +305,38 @@ function EditKey({ k, list, onCancel, onSaved }: { k: AIKey; list: AIKeyList; on
   const [scopes, setScopes] = useState<AIScope[]>(k.scopes);
   const [stage, setStage] = useState<"edit" | "confirm">("edit");
   const [methods, setMethods] = useState<StepUpMethod[]>(list.step_up);
-  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const added = addedScopes(k.scopes, scopes);
   const toggle = (s: AIScope) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
 
-  const save = async (stepUp: { password?: string; passkey?: Record<string, unknown> } = {}) => {
+  /** Narrowing saves directly; a step-up error moves to the confirm stage. */
+  const save = async (proof: StepUpProof = {}) => {
     setBusy(true);
     setErr(null);
     try {
-      const out = await post<{ key: AIKey }>(`/api/ai-keys/${k.id}/scopes`, { scopes, ...stepUp });
+      const out = await post<{ key: AIKey }>(`/api/ai-keys/${k.id}/scopes`, { scopes, ...proof });
       onSaved(out.key);
     } catch (e) {
-      if (e instanceof ApiError && (e.code === "step_up_required" || e.code === "step_up_failed")) {
-        setMethods(((e.data?.methods as StepUpMethod[]) ?? methods));
+      if (e instanceof ApiError && needsStepUp(e.code)) {
+        setMethods((e.data?.methods as StepUpMethod[]) ?? methods);
         setStage("confirm");
       }
-      setErr((e as Error).message);
+      setErr(e instanceof ApiError && e.code === "step_up_required" ? null : (e as Error).message);
     } finally {
       setBusy(false);
     }
   };
-  const withPasskey = async () => {
-    setErr(null);
-    try {
-      await save({ passkey: await passkeyAssertion("/api/ai-keys/step-up/options") });
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-  };
 
   if (stage === "confirm") {
-    const canPasskey = methods.includes("passkey") && passkeysSupported();
     return (
-      <form className="step-body ai-edit" onSubmit={(e) => (e.preventDefault(), save({ password }))}>
-        <p className="lede" style={{ marginTop: 0 }}>
-          Confirm it’s you to give “{k.label}” more permissions: {added.map((s) => SCOPE_TEXT[s].label).join(", ")}.
-        </p>
-        {err && <div className="alert error" role="alert">{err}</div>}
-        {canPasskey && (
-          <button type="button" className="btn primary" onClick={withPasskey} disabled={busy} data-autofocus>Use a passkey</button>
-        )}
-        {methods.includes("password") && (
-          <label className="field">
-            <span>{canPasskey ? "Or confirm with your password" : "Confirm with your password"}</span>
-            <input className="input" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required {...(canPasskey ? {} : { "data-autofocus": true })} />
-          </label>
-        )}
-        {!canPasskey && !methods.includes("password") && (
-          <p className="hint">Add a passkey under Security first; giving a key more permissions needs one.</p>
-        )}
-        <div className="sheet-actions">
-          <button type="button" className="btn ghost" onClick={() => (setStage("edit"), setErr(null))}>Back</button>
-          {methods.includes("password") && <button className={`btn ${canPasskey ? "" : "primary"}`} disabled={busy || !password}>{busy ? "Saving…" : "Confirm and save"}</button>}
-        </div>
-      </form>
+      <StepUpForm
+        intro={<>Confirm it’s you to give “{k.label}” more permissions: {added.map((s) => SCOPE_TEXT[s].label).join(", ")}.</>}
+        methods={methods}
+        err={err}
+        onConfirm={save}
+        onBack={() => (setStage("edit"), setErr(null))}
+      />
     );
   }
 

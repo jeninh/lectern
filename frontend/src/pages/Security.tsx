@@ -4,7 +4,9 @@ import { useLocation } from "react-router-dom";
 import { Check, Key, Logout, Shield } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
-import { get, logout, post } from "../lib/api";
+import { StepUpForm, needsStepUp } from "../components/StepUp";
+import { ApiError, get, logout, post } from "../lib/api";
+import type { StepUpMethod } from "../lib/aitools";
 import { clearDevice } from "../lib/offline/store";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
@@ -233,7 +235,10 @@ export function SecurityPage() {
         <PasswordConfirm path="/api/security/totp/disable" cta="Disable" onDone={() => done("Two-factor codes disabled")} />
       </Sheet>
       <Sheet open={dialog === "passkey"} onClose={() => setDialog(null)} title="Add a passkey" variant="dialog" labelledBy="pk-dialog">
-        <PasskeyEnroll onDone={(label) => done(`Passkey “${label}” added`)} />
+        <PasskeyEnroll
+          methods={[...(sec.passkeys_possible && sec.passkeys.length ? (["passkey"] as const) : []), ...(sec.has_password ? (["password"] as const) : [])]}
+          onDone={(label) => done(`Passkey “${label}” added`)}
+        />
       </Sheet>
     </>
   );
@@ -354,37 +359,73 @@ function TotpEnroll({ onDone }: { onDone: () => void }) {
   );
 }
 
-function PasskeyEnroll({ onDone }: { onDone: (label: string) => void }) {
+/** Adding a passkey adds a way to confirm sensitive actions, so it needs one itself: name it,
+ * confirm it's you (which also fetches the registration options), then tap Create so the
+ * browser's passkey sheet opens inside that tap (Safari requires it). */
+function PasskeyEnroll({ methods, onDone }: { methods: StepUpMethod[]; onDone: (label: string) => void }) {
   const [label, setLabel] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [stage, setStage] = useState<"label" | "confirm" | "create">("label");
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    preparePasskey();
-    const id = window.setInterval(preparePasskey, 4 * 60 * 1000);
-    return () => window.clearInterval(id);
-  }, []);
+  const name = label.trim() || "Passkey";
+  if (stage === "confirm") {
+    return (
+      <StepUpForm
+        intro="Confirm it’s you before adding a passkey."
+        methods={methods}
+        err={err}
+        cta="Confirm and continue"
+        onBack={() => (setStage("label"), setErr(null))}
+        onConfirm={async (proof) => {
+          setErr(null);
+          try {
+            await preparePasskey(proof);
+            setStage("create");
+          } catch (ex) {
+            setErr((ex as Error).message);
+          }
+        }}
+      />
+    );
+  }
+  if (stage === "create") {
+    return (
+      <div>
+        {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
+        <p className="hint">Your browser will prompt for Face ID, Touch ID, a PIN, or a security key.</p>
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button
+            className="btn primary"
+            disabled={busy}
+            data-autofocus
+            onClick={async () => {
+              setBusy(true);
+              setErr(null);
+              try {
+                await registerPasskey(name);
+                onDone(name);
+              } catch (ex) {
+                // The options were used up or went stale: confirm again for fresh ones.
+                if (ex instanceof ApiError && needsStepUp(ex.code)) setStage("confirm");
+                setErr((ex as Error).message);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "Waiting for browser…" : `Create passkey “${name}”`}
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
-    <form
-      onSubmit={async (e) => {
-        e.preventDefault();
-        setBusy(true);
-        setErr(null);
-        try {
-          await registerPasskey(label.trim() || "Passkey");
-          onDone(label.trim() || "Passkey");
-        } catch (ex) {
-          setErr((ex as Error).message);
-          preparePasskey();
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
+    <form onSubmit={(e) => (e.preventDefault(), setErr(null), setStage("confirm"))}>
       {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
       <label className="field"><span>Label</span><input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="MacBook Touch ID, YubiKey…" maxLength={128} data-autofocus /></label>
-      <p className="hint">Your browser will prompt for Face ID, Touch ID, a PIN, or a security key.</p>
+      <p className="hint">You’ll confirm it’s you, then your browser will prompt for Face ID, Touch ID, a PIN, or a security key.</p>
       <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button className="btn primary" disabled={busy}>{busy ? "Waiting for browser…" : "Create passkey"}</button>
+        <button className="btn primary">Continue</button>
       </div>
     </form>
   );
