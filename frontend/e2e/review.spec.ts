@@ -32,16 +32,21 @@ test("select uploads, Esc clears without closing, file some and discard the rest
   await expect(sheet).toBeVisible();
   await expect(sheet.getByTestId("selection-bar")).toHaveCount(0);
 
-  const cards = sheet.getByRole("gridcell");
+  const cards = sheet.locator("[role=gridcell][data-sel-key]"); // selectable (ready) uploads
   const names = await cards.evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+  // A card where the person picked another book (not saved) is never filed in bulk.
+  await card(names[2]!).getByLabel("Or add it to another book you have").selectOption({ label: "Book 010 — Author 10" });
   await cards.nth(0).locator(".import-title").click();
   await cards.nth(1).locator(".pick").click(); // the check circle adds, like Ctrl+click
-  await expect(countText(page)).toHaveText("2 selected");
-  await sheet.getByRole("button", { name: "File 2" }).click();
-  await expect(page.locator(".toast").filter({ hasText: "Filed 2 books" })).toBeVisible();
+  await cards.nth(2).locator(".pick").click();
+  await expect(countText(page)).toHaveText("3 selected");
+  await sheet.getByRole("button", { name: "File 3" }).click();
+  await expect(page.locator(".toast").filter({ hasText: `Filed 2 books · left ${names[2]} (unsaved changes` })).toBeVisible();
   await expect(sheet.getByRole("gridcell")).toHaveCount(1);
   const titles = (await library(page)).map((w) => w.title);
   expect(titles).toEqual(expect.arrayContaining([names[0], names[1]]));
+  expect(titles).not.toContain(names[2]);
+  expect((await library(page)).filter((w) => w.title === "Book 010")).toHaveLength(1);
 
   await sheet.getByRole("gridcell").first().locator(".import-title").click();
   await sheet.getByRole("button", { name: "Discard", exact: true }).last().click();

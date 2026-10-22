@@ -137,6 +137,24 @@ test("virtualized: keyboard reaches unrendered books and Ctrl+A selects the whol
   await expect(book(page, "Book 001")).toHaveAttribute("aria-selected", "true");
 });
 
+test("virtualized: focus survives its row scrolling away, and the grid keeps a tab stop", async ({ page }) => {
+  // Scrolled away without focusing the grid: the first rendered cell is the tab stop.
+  await page.mouse.wheel(0, 6000);
+  await expect(book(page, "Book 001")).toHaveCount(0);
+  await expect(page.locator('[role="gridcell"][tabindex="0"]')).toHaveCount(1);
+  await page.evaluate(() => window.scrollTo(0, 0));
+
+  await book(page, "Book 001").click();
+  await page.mouse.wheel(0, 6000);
+  await expect(book(page, "Book 001")).toHaveCount(0);
+  // Focus stays on the grid (not <body>), so keys still drive the selection.
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("grid");
+  await page.keyboard.press("ArrowDown");
+  await expect(book(page, "Book 007")).toBeFocused();
+  await page.keyboard.press("Shift+ArrowRight");
+  expect(await selectedTitles(page)).toEqual(["Book 001", "Book 007", "Book 008"]);
+});
+
 test("list view: one column, arrows by one, Shift+End to the end", async ({ page }) => {
   await page.getByRole("button", { name: "List" }).click();
   expect(await cols(page)).toBe(1);
@@ -175,7 +193,7 @@ test("filtered view: Ctrl+A sends a server-side selection for books never loaded
   const res = await sent.response(); // waits for all 60 works
   expect(res?.status()).toBe(200);
   const excluded = await idOf(page, "Book 301");
-  expect(body.selection).toEqual({ filter: { q: "Book 3", status: "all", shelf: null }, exclude_ids: [excluded], expected_count: 60 });
+  expect(body.selection).toEqual({ filter: { q: "Book 3", status: "all", shelf: null }, exclude_ids: [excluded], view_token: expect.stringMatching(/^[0-9a-f]{32}$/), expected_count: 60 });
   expect(body.work_ids).toBeUndefined();
   await expect(page.locator(".toast").filter({ hasText: "Tagged" })).toBeVisible();
 
@@ -217,7 +235,7 @@ test("shelves: add the selection to a shelf, then select all on that shelf", asy
   await expect(countText(page)).toHaveText("All 3 selected");
 });
 
-test("selection bar: send to a device and align", async ({ page }) => {
+test("selection bar: send to a device and align (after a confirmation)", async ({ page }) => {
   const a = await api(page);
   await a.post("/api/devices", { label: "E2E Kobo" });
   await book(page, "Book 001").click();
@@ -229,8 +247,24 @@ test("selection bar: send to a device and align", async ({ page }) => {
 
   await book(page, "Book 001").click();
   await book(page, "Book 002").click({ modifiers: ["Shift"] });
+  // Declining the confirmation sends nothing.
+  let asked = "";
+  let sent = 0;
+  page.on("request", (r) => r.url().endsWith("/api/works/align") && sent++);
+  page.once("dialog", (d) => ((asked = d.message()), d.dismiss()));
+  await page.getByRole("button", { name: "Align" }).click();
+  await expect.poll(() => asked).toContain("Queue alignment for 2 books?");
+  await page.waitForTimeout(300);
+  expect(sent).toBe(0);
+  page.once("dialog", (d) => d.accept());
   await page.getByRole("button", { name: "Align" }).click();
   await expect(page.locator(".toast").filter({ hasText: "2 books without both an EPUB and audio" })).toBeVisible();
+  expect(sent).toBe(1);
+  // Over the cap for alignment (50), Align is off; Ctrl+A over 360 books.
+  await page.keyboard.press("Control+a");
+  await expect(countText(page)).toHaveText("All 360 selected");
+  await expect(page.getByRole("button", { name: "Align" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
 });
 
 test("selection bar: trash, then Undo", async ({ page }) => {

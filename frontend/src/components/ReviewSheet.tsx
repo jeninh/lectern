@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { bulkPlan, proposedTarget, type Choice } from "../lib/reviewBulk";
 import { useSelection, type CellProps } from "../lib/useSelection";
 import { SelectionBar } from "./BulkBar";
 import { ApiError, del, post } from "../lib/api";
@@ -33,6 +34,12 @@ export function ReviewSheet() {
   const keys = useMemo(() => ready.map((i) => i.id), [ready]);
   const s = useSelection<string>({ scope, keys, global: true });
   const [busy, setBusy] = useState(false);
+  const unsaved = useRef(new Map<string, boolean>());
+  const markers = useMemo(() => new Map<string, (u: boolean) => void>(), []);
+  const marker = (id: string) => {
+    if (!markers.has(id)) markers.set(id, (u) => unsaved.current.set(id, u));
+    return markers.get(id)!;
+  };
 
   const bulk = async (verb: "file" | "discard") => {
     const picked = ready.filter((i) => s.isSelected(i.id));
@@ -40,15 +47,18 @@ export function ReviewSheet() {
     setBusy(true);
     let ok = 0;
     const failed: string[] = [];
+    const skipped: Record<"unsaved" | "uncertain" | "details", string[]> = { unsaved: [], uncertain: [], details: [] };
     for (const imp of picked) {
       const name = imp.metadata?.title || imp.detected?.title || imp.label;
       try {
         if (verb === "discard") await del(`/api/imports/${imp.id}`);
         else {
-          // Filed as shown: the detected details and the proposed match. Unsaved edits on a
-          // card stay with that card; file it on its own to keep them.
-          if (!imp.metadata || Object.keys(validate(imp.metadata)).length) throw new Error("needs details");
-          await post(`/api/imports/${imp.id}/file`, { version: imp.version, metadata: clean(imp.metadata), target: proposedTarget(imp), use_cover: imp.use_cover ?? true, audio: "refuse" }, { "idempotency-key": uuid() });
+          const plan = bulkPlan(imp, !!unsaved.current.get(imp.id));
+          if ("skip" in plan) {
+            skipped[plan.skip].push(name);
+            continue;
+          }
+          await post(`/api/imports/${imp.id}/file`, { version: imp.version, metadata: clean(imp.metadata!), target: plan.target, use_cover: imp.use_cover ?? true, audio: "refuse" }, { "idempotency-key": uuid() });
         }
         ok += 1;
       } catch {
@@ -56,10 +66,15 @@ export function ReviewSheet() {
       }
     }
     setBusy(false);
-    toast(
-      `${verb === "file" ? "Filed" : "Discarded"} ${ok} ${ok === 1 ? "book" : "books"}${failed.length ? ` · ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? ` and ${failed.length - 3} more` : ""} need${failed.length === 1 ? "s" : ""} a look` : ""}.`,
-      failed.length && !ok ? "error" : "info",
-    );
+    const list = (xs: string[]) => `${xs.slice(0, 3).join(", ")}${xs.length > 3 ? ` and ${xs.length - 3} more` : ""}`;
+    const notes = [
+      skipped.unsaved.length && `left ${list(skipped.unsaved)} (unsaved changes: file ${skipped.unsaved.length === 1 ? "it" : "them"} from the card)`,
+      skipped.uncertain.length && `left ${list(skipped.uncertain)} (not a certain match: choose where ${skipped.uncertain.length === 1 ? "it goes" : "they go"})`,
+      skipped.details.length && `left ${list(skipped.details)} (details need fixing)`,
+      failed.length && `could not file ${list(failed)}`,
+    ].filter(Boolean);
+    const left = failed.length + skipped.unsaved.length + skipped.uncertain.length + skipped.details.length;
+    toast(`${verb === "file" ? "Filed" : "Discarded"} ${ok} ${ok === 1 ? "book" : "books"}${notes.length ? ` · ${notes.join(" · ")}` : ""}.`, left && !ok ? "error" : "info");
     s.exit();
     await Promise.all([refreshImports(), refreshLibrary()]).catch(() => {});
   };
@@ -95,13 +110,13 @@ export function ReviewSheet() {
           <div className="import-list" role="grid" aria-label="Uploads waiting" aria-multiselectable="true" aria-rowcount={open.length} ref={setScope} {...s.scopeProps}>
             {open.map((imp, i) => (
               <div role="row" key={imp.id} aria-rowindex={i + 1}>
-                <ImportCard imp={imp} siblings={open.filter((o) => o.id !== imp.id && o.status === "ready")} cell={imp.status === "ready" ? s.cellProps(imp.id) : undefined} />
+                <ImportCard imp={imp} siblings={open.filter((o) => o.id !== imp.id && o.status === "ready")} cell={imp.status === "ready" ? s.cellProps(imp.id) : undefined} onUnsaved={marker(imp.id)} />
               </div>
             ))}
           </div>
         )}
-        {(s.count > 0 || s.selecting) && (
-          <SelectionBar count={s.count} all={s.allSelected} total={keys.length} onSelectAll={s.selectAll} onClear={s.exit} label="Selected uploads">
+        {(
+          <SelectionBar open={s.count > 0 || s.selecting} count={s.count} all={s.allSelected} total={keys.length} onSelectAll={s.selectAll} onClear={s.exit} label="Selected uploads">
             <button className="btn sm ghost" disabled={busy || !s.count} onClick={() => bulk("discard")}><Close /> Discard</button>
             <button className="btn sm primary" disabled={busy || !s.count} onClick={() => bulk("file")}>File {s.count}</button>
           </SelectionBar>
@@ -111,15 +126,7 @@ export function ReviewSheet() {
   );
 }
 
-type Choice = { action: "new" } | { action: "join"; work_id: number };
-
-/** Where an upload goes unless the person picks otherwise: its saved target, else the proposal. */
-function proposedTarget(imp: ImportInfo): Choice {
-  const proposal = imp.proposal;
-  return imp.target?.action === "join" && imp.target.work_id ? { action: "join", work_id: imp.target.work_id } : proposal?.action === "join" && proposal.work_id ? { action: "join", work_id: proposal.work_id } : { action: "new" };
-}
-
-function ImportCard({ imp, siblings, cell }: { imp: ImportInfo; siblings: ImportInfo[]; cell?: CellProps }) {
+function ImportCard({ imp, siblings, cell, onUnsaved }: { imp: ImportInfo; siblings: ImportInfo[]; cell?: CellProps; onUnsaved?: (unsaved: boolean) => void }) {
   const { works, toast, refreshImports, refreshLibrary, openEditor, setReviewOpen } = useStore();
   const proposal = imp.proposal;
   const [choice, setChoice] = useState<Choice>(() => proposedTarget(imp));
@@ -132,6 +139,11 @@ function ImportCard({ imp, siblings, cell }: { imp: ImportInfo; siblings: Import
   const [needsAppend, setNeedsAppend] = useState(false);
   const [other, setOther] = useState("");
   const idem = useRef(uuid());
+  // Choices made on this card and not filed yet: bulk filing leaves the card alone.
+  const unsaved = JSON.stringify(choice) !== JSON.stringify(proposedTarget(imp)) || useCover !== (imp.use_cover ?? true) || append || JSON.stringify(meta) !== JSON.stringify(imp.metadata);
+  useEffect(() => {
+    onUnsaved?.(unsaved);
+  }, [unsaved, onUnsaved]);
   useEffect(() => {
     // Server-side changes (combined files, re-detection) replace an untouched draft.
     if (!editing) setMeta(imp.metadata);
@@ -202,7 +214,7 @@ function ImportCard({ imp, siblings, cell }: { imp: ImportInfo; siblings: Import
 
   if (imp.status === "uploading") {
     return (
-      <div className="card import-card" role="gridcell" aria-busy="true">
+      <div className="card import-card" role="gridcell" aria-selected={false} aria-disabled="true" aria-busy="true">
         <strong>{imp.label}</strong>
         <span className="hint">{imp.uploads_active ? `Uploading ${imp.uploads_active} more ${imp.uploads_active === 1 ? "file" : "files"}…` : "Waiting for files…"}</span>
         <div className="row" style={{ justifyContent: "flex-end" }}>
@@ -214,7 +226,7 @@ function ImportCard({ imp, siblings, cell }: { imp: ImportInfo; siblings: Import
   if (imp.status === "failed") {
     const dup = imp.files.find((f) => f.duplicate_of)?.duplicate_of;
     return (
-      <div className="card import-card" role="gridcell">
+      <div className="card import-card" role="gridcell" aria-selected={false} aria-disabled="true">
         <strong className="import-title">{imp.detected?.title || imp.label}</strong>
         <div className={`alert ${imp.error === "all_duplicates" ? "warn" : "error"}`}>
           {imp.error === "all_duplicates"

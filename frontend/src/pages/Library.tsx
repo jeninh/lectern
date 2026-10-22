@@ -147,7 +147,11 @@ export function LibraryPage() {
   const rowGap = grid ? 26 : 2;
   const win = useWindowRows(scope, { count: keys.length, columns, gap: rowGap, estimate: grid ? 280 : 58, width });
   const viewFilter = useMemo(() => ({ q: q.trim(), status, shelf: shelfId ? Number(shelfId) : null }), [q, status, shelfId]);
-  const [viewTotal, setViewTotal] = useState<number | null>(null);
+  // The view as the server counted it when everything was selected: its size and which works
+  // they are. Kept as the user saw it ("All N selected"); the server refuses the action if the
+  // view no longer holds exactly those works.
+  const [viewInfo, setViewInfo] = useState<{ total: number; view_token: string } | null>(null);
+  const viewTotal = viewInfo?.total ?? null;
   const s = useSelection<number>({
     scope,
     keys,
@@ -155,27 +159,28 @@ export function LibraryPage() {
     total: viewTotal ?? keys.length,
     onOpen: (id) => nav(`/app/library/${id}${loc.search}`),
     reveal: win.reveal,
+    rendered: [win.start * columns, Math.min(keys.length, win.end * columns)],
     resetOn: JSON.stringify(viewFilter),
     global: true,
     marquee: true,
   });
   // "All N selected" counts the view on the server: it may hold more than the client loaded.
   useEffect(() => {
-    if (!s.sel.all) return setViewTotal(null);
+    if (!s.sel.all) return setViewInfo(null);
     const p = new URLSearchParams({ q: viewFilter.q, status: viewFilter.status });
     if (viewFilter.shelf !== null) p.set("shelf", String(viewFilter.shelf));
     let stale = false;
-    get<{ total: number }>(`/api/library/count?${p}`).then((d) => !stale && setViewTotal(d.total)).catch(() => {});
+    get<{ total: number; view_token: string }>(`/api/library/count?${p}`).then((d) => !stale && setViewInfo(d)).catch((e) => toast((e as Error).message, "error"));
     return () => {
       stale = true;
     };
-  }, [s.sel.all, viewFilter, works]);
-  const target = (): BulkTarget => {
-    const explicit = s.selectedKeys();
-    // Over the send limit, or everything: let the server resolve the view.
-    if (!s.sel.all && explicit.length <= 200) return { work_ids: explicit };
-    const exclude = s.sel.all ? [...s.sel.set] : keys.filter((k) => !s.isSelected(k));
-    return { selection: { filter: viewFilter, exclude_ids: exclude, expected_count: s.count } };
+  }, [s.sel.all, viewFilter, toast]);
+  /** Explicit ids, or for "all" the view the user saw minus what they deselected; null while
+   * that view is still being counted. */
+  const target = (): BulkTarget | null => {
+    if (!s.sel.all) return { work_ids: s.selectedKeys() };
+    if (!viewInfo) return null;
+    return { selection: { filter: viewFilter, exclude_ids: [...s.sel.set], view_token: viewInfo.view_token, expected_count: s.count } };
   };
   const pickedTitles = useMemo(() => filtered.filter((w) => s.isSelected(w.id)).map((w) => w.title), [filtered, s]);
   const rowsShown = Array.from({ length: win.end - win.start }, (_, i) => win.start + i);
@@ -335,8 +340,9 @@ export function LibraryPage() {
         </div>
       )}
 
-      {(s.count > 0 || s.selecting) && (
-        <BulkBar
+      <BulkBar
+          open={s.count > 0 || s.selecting}
+          ready={!s.sel.all || !!viewInfo}
           count={s.count}
           all={s.allSelected}
           total={viewTotal ?? keys.length}
@@ -352,10 +358,9 @@ export function LibraryPage() {
           canAlign={canEdit}
           onSend={() => setSendingMany(true)}
         />
-      )}
       <SendToDevice
         open={sendingMany}
-        target={target}
+        target={() => target() ?? { work_ids: [] }}
         count={s.count}
         title={`Send ${s.count} ${s.count === 1 ? "book" : "books"} to a device`}
         onClose={() => setSendingMany(false)}

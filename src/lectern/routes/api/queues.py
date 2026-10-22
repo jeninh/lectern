@@ -115,7 +115,9 @@ def enqueue(request: Request, auth: AuthCsrf, db: DbDep, pw_id: int, body: Enque
     t = device_queue.target(db, auth.user, pw_id)
     if t is None:
         raise _not_found()
-    ids = resolve_selection(db, auth.user, body.work_ids, body.selection)
+    ids = resolve_selection(
+        db, auth.user, body.work_ids, body.selection, limit=device_queue.MAX_BATCH
+    )
     results = device_queue.enqueue(db, auth.user, t, ids, client_ip(request))
     return {"results": results, "device": _device_json(db, t, auth.user)}
 

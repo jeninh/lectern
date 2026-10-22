@@ -30,6 +30,8 @@ export interface SelectionOptions<K extends S.Key> {
   onOpen?: (key: K) => void;
   /** Make the item at this index rendered (virtualized lists scroll to it). */
   reveal?: (index: number) => void;
+  /** Indices [start, end) of the items in the DOM (virtualized lists); default all. */
+  rendered?: readonly [number, number];
   /** Selection clears when this changes (a different view). */
   resetOn?: string;
   /** Also take Cmd/Ctrl+A and Esc while nothing in particular has focus. */
@@ -55,7 +57,7 @@ export interface Selection<K extends S.Key> {
   /** Clear and leave selection mode. */
   exit: () => void;
   toggle: (k: K) => void;
-  scopeProps: { onKeyDown: (e: React.KeyboardEvent) => void; onPointerDown: (e: React.PointerEvent) => void };
+  scopeProps: { tabIndex: -1; onKeyDown: (e: React.KeyboardEvent) => void; onPointerDown: (e: React.PointerEvent) => void; onBlur: (e: React.FocusEvent) => void };
   cellProps: (k: K) => CellProps;
   marquee: CSSProperties | null;
 }
@@ -99,6 +101,8 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
   const live = useRef({ o, state, selecting });
   live.current = { o, state, selecting };
   const pendingFocus = useRef(false);
+  /** The item that last held focus, while focus is meant to be in the collection. */
+  const focusedEl = useRef<HTMLElement | null>(null);
   const press = useRef<Press | null>(null);
   const byString = useMemo(() => new Map(o.keys.map((k) => [String(k), k])), [o.keys]);
 
@@ -137,12 +141,22 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
     el.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   });
 
+  // A virtualized list unmounts rows scrolled out of view. When that takes the focused item,
+  // focus would fall to <body> and arrow keys would scroll the page; keep it on the
+  // collection itself so the next key still reaches it (and reveals the focused item).
+  useLayoutEffect(() => {
+    const el = focusedEl.current;
+    if (!el || el.isConnected || !o.scope) return;
+    const a = document.activeElement;
+    if (a === null || a === document.body) o.scope.focus({ preventScroll: true });
+  });
+
   const handleKey = useCallback((e: KeyboardEvent | React.KeyboardEvent, inScope: boolean) => {
     const { o, state, selecting } = live.current;
     if (foreignMod(e)) return;
     if (inScope) {
       const t = e.target as HTMLElement;
-      const onItem = t.hasAttribute("data-sel-key");
+      const onItem = t.hasAttribute("data-sel-key") || t === o.scope;
       // Typing in a field, or using a control inside an item: theirs, except Esc to clear.
       if (!onItem && (isEditable(t) || e.key !== "Escape")) return;
     }
@@ -191,7 +205,10 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
   };
 
   const cellProps = (k: K): CellProps => {
-    const tabbable = state.focus !== null && byString.has(String(state.focus)) ? state.focus : o.keys[0];
+    // One tab stop: the focused item when it is in the DOM, else the first rendered one.
+    const [from, to] = o.rendered ?? [0, o.keys.length];
+    const fi = state.focus !== null ? o.keys.indexOf(state.focus) : -1;
+    const tabbable = fi >= from && fi < to ? state.focus : o.keys[from];
     return {
       "data-sel-key": String(k),
       role: "gridcell",
@@ -200,7 +217,9 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
       "data-focused": state.focus === k ? true : undefined,
       "data-selecting": selecting ? true : undefined,
       onFocus: (e) => {
-        if (e.target === e.currentTarget) setState((s) => (s.focus === k ? s : { ...s, focus: k }));
+        if (e.target !== e.currentTarget) return;
+        focusedEl.current = e.currentTarget as HTMLElement;
+        setState((s) => (s.focus === k ? s : { ...s, focus: k }));
       },
       onPointerDown: (e) => {
         clearPress();
@@ -289,12 +308,14 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
       setMarquee(null);
       // A plain click on empty space clears, as on a desktop.
       if (!moved && !additive) setState((s) => S.clear(s));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   };
 
   return {
@@ -313,7 +334,16 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
       setSelecting(false);
     },
     toggle: (k) => apply(S.toggle(live.current.state, k)),
-    scopeProps: { onKeyDown: (e) => handleKey(e, true), onPointerDown: onScopePointerDown },
+    scopeProps: {
+      tabIndex: -1,
+      onKeyDown: (e) => handleKey(e, true),
+      onPointerDown: onScopePointerDown,
+      onBlur: (e) => {
+        // Focus left for somewhere else (not an unmount, which blurs to nothing).
+        const to = e.relatedTarget as Node | null;
+        if (to ? !o.scope?.contains(to) : (e.target as Node).isConnected && e.target !== o.scope) focusedEl.current = null;
+      },
+    },
     cellProps,
     marquee,
   };

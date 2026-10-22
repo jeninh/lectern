@@ -592,10 +592,13 @@ def purge_file(
 # --- bulk ----------------------------------------------------------------------------------------
 
 
+BULK_MAX = 500  # works per bulk edit, listed or selected
+
+
 class BulkIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    work_ids: list[int] = Field(default_factory=list, max_length=500)
+    work_ids: list[int] = Field(default_factory=list, max_length=BULK_MAX)
     selection: Selection | None = None
     action: Literal[
         "set_authors",
@@ -674,7 +677,7 @@ def bulk_edit(
     replay = idempotency.lookup(db, auth.user.id, scope, key, payload)
     if replay is not None:
         return replay
-    ids = resolve_selection(db, auth.user, body.work_ids, body.selection)
+    ids = resolve_selection(db, auth.user, body.work_ids, body.selection, limit=BULK_MAX)
     batch_id = secrets.token_hex(8)
     results = []
     for wid in ids:

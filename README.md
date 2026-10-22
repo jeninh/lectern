@@ -157,10 +157,12 @@ read-aloud EPUB).
   jump), `Space` toggles, `Enter` or a double-click opens, `Esc` clears, and dragging across
   empty space draws a selection rectangle. `⌘/Ctrl A` selects the whole view, including books
   the page has not drawn yet: the bar says **All N selected** and the server resolves that
-  view itself. On a touch screen, press and hold a book to start selecting, then tap to add.
-- **Bulk edit.** The selection bar sets author or series, adds or removes tags and shelves,
-  sends to a device, queues alignment, or trashes many books at once, with one Undo for the
-  batch.
+  view itself, refusing if the view no longer holds exactly those books. On a touch screen, press and hold a book to start selecting, then tap to add.
+- **Bulk edit.** The selection bar sets author or series, adds or removes tags and shelves
+  (up to 500 books), sends to a device (200), queues alignment after a confirmation (50; books
+  already aligned are skipped), or trashes many books at once, with one Undo for the batch.
+  **File N** in Review before filing files only cards without unsaved choices whose match is
+  certain or chosen; the toast names the rest.
 - **Trash.** Trashed books and removed files are hidden at once and stay restorable from
   **Trash** for 30 days; a background job then deletes them. Only the owner can delete early.
 - **Metadata suggestions (optional, off by default).** The owner can enable them in Admin.

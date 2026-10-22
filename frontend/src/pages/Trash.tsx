@@ -149,8 +149,8 @@ export function TrashPage() {
           {!data.can_purge && <p className="hint">Only the owner can delete things before the {data.retention_days} days are up.</p>}
         </div>
       )}
-      {(s.count > 0 || s.selecting) && (
-        <SelectionBar count={s.count} all={s.allSelected} total={total} onSelectAll={s.selectAll} onClear={s.exit}>
+      {(
+        <SelectionBar open={s.count > 0 || s.selecting} count={s.count} all={s.allSelected} total={total} onSelectAll={s.selectAll} onClear={s.exit}>
           <button className="btn sm" disabled={!s.count} onClick={() => bulk("restore")}><Undo /> Restore</button>
           {data?.can_purge && <button className="btn sm danger" disabled={!s.count} onClick={() => bulk("delete")}>Delete now</button>}
         </SelectionBar>
