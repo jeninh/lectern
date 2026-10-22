@@ -59,6 +59,21 @@ test("the page scrolls with the wheel over the chapter list while audio plays, a
 
   // A window around the current chapter; every chapter is still reachable.
   await expect(chapters.getByRole("button")).toHaveCount(8);
+
+  // The window never moves out from under keyboard focus: with a row focused, playback moving
+  // past the window keeps that row (and focus); once focus leaves, the window catches up.
+  await page.locator(".now-playing").getByRole("button", { name: "Pause" }).click();
+  const first = chapters.getByRole("button").first();
+  const firstLabel = await first.textContent();
+  await first.focus();
+  const jumpTo = async (chapter: number) =>
+    audio.evaluate((a: HTMLAudioElement, n) => { a.currentTime = ((n + 0.5) * a.duration) / 40; }, chapter);
+  await jumpTo(30);
+  await expect(chapters.getByRole("button", { name: /Chapter 31\b/ })).toHaveCount(0);
+  await expect(first).toBeFocused();
+  expect(await first.textContent()).toBe(firstLabel);
+  await page.locator("#np-title").click();
+  await expect(chapters.locator('[aria-current="true"]')).toContainText("Chapter 31");
   await page.getByRole("button", { name: "Show all 40 chapters" }).click();
   await expect(chapters.getByRole("button")).toHaveCount(40);
   await page.getByRole("button", { name: "Show fewer chapters" }).click();
