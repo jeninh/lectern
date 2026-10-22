@@ -1,0 +1,393 @@
+"""Keep every PDF's canonical text current, and the work's text source in one place.
+
+The housekeeping thread (:mod:`lectern.services`) calls :func:`sweep` with the library rescan
+(every ``LECTERN_TRACK_RESCAN_SECONDS`` and at startup). For each PDF in the library it:
+
+1. reads the text layer when the file is new, changed, or was read by an older extractor
+   (:func:`refresh_file`: the sandboxed reader, then the layout), one PDF at a time;
+2. writes the canonical text document next to the work
+   (``derived/pdf-text-<sha256 prefix>.json``, replaced atomically, never in place) and its
+   sentences with page and box maps (``pdf_sentences``);
+3. marks a PDF whose pages mostly have no text ``needs_ocr`` (issue #17: OCR will produce the
+   same document, so everything below works on scans unchanged once it exists);
+4. for a work whose text is an EPUB, projects the PDF's sentences onto the work's sentences
+   (:mod:`lectern.pdftext.project`) whenever that list changes (an alignment, a narration);
+5. for a work whose only text is a PDF, gives it the text-only sentence list a work with an
+   EPUB gets at ingest, so positions, alignment, narration, and read-along all have
+   coordinates.
+
+:func:`work_text` is the one place that decides what a work's text is: its primary EPUB when
+it has one, else its first PDF whose text is ready. Alignment, narration, and the worker
+inputs ask it instead of looking for an EPUB.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import tempfile
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from lectern.ingest import formats
+from lectern.ingest.formats import FormatError, ProbeBusy
+from lectern.models import BookFile, FileKind, PdfSentence, PdfText, Sentence, Work
+from lectern.pdftext.document import DOCUMENT_VERSION, build_document, dumps, sha256_of
+
+log = logging.getLogger("lectern.pdftext")
+
+PENDING, READY, NEEDS_OCR, FAILED = "pending", "ready", "needs_ocr", "failed"
+MAX_ATTEMPTS = 3
+DERIVED_DIR = "derived"
+
+
+def document_rel(pdf_sha256: str) -> str:
+    """Where a PDF's text document lives, relative to its work directory."""
+    return f"{DERIVED_DIR}/pdf-text-{pdf_sha256[:16]}.json"
+
+
+@dataclass(frozen=True)
+class TextSource:
+    """A work's text: ``kind`` ``epub`` (the EPUB itself) or ``pdf`` (the PDF's canonical text
+    document). ``sha256`` is the digest of the bytes alignment and narration read (the EPUB,
+    or the document), which is what jobs, sentence maps, and alignments record."""
+
+    kind: str
+    file: BookFile
+    sha256: str
+
+
+def work_text(db: Session, library: Path, work: Work) -> tuple[TextSource, Path] | None:
+    """The work's text source and the path of the bytes to read (see the module docstring)."""
+    from lectern.align.tracks import work_epub
+
+    found = work_epub(db, library, work)
+    if found is not None:
+        return TextSource("epub", found[0], found[0].sha256), found[1]
+    pair = text_pdf(db, work.id)
+    if pair is None:
+        return None
+    book, row = pair
+    root = library.resolve()
+    path = (root / work.dir_path / document_rel(book.sha256)).resolve()
+    if root not in path.parents or not path.is_file():
+        return None
+    return TextSource("pdf", book, row.text_sha256 or ""), path
+
+
+def text_pdf(db: Session, work_id: int) -> tuple[BookFile, PdfText] | None:
+    """The work's first PDF (in the order they were added) whose text is ready and current."""
+    row = db.execute(
+        select(BookFile, PdfText)
+        .join(PdfText, PdfText.file_id == BookFile.id)
+        .where(
+            BookFile.work_id == work_id,
+            BookFile.media_type == formats.PDF,
+            PdfText.status == READY,
+            PdfText.pdf_sha256 == BookFile.sha256,
+            PdfText.version == DOCUMENT_VERSION,
+        )
+        .order_by(BookFile.added_at, BookFile.id)
+        .limit(1)
+    ).first()
+    return (row[0], row[1]) if row else None
+
+
+def pdf_text_of(db: Session, file_id: int) -> PdfText | None:
+    return db.scalar(select(PdfText).where(PdfText.file_id == file_id))
+
+
+@lru_cache(maxsize=8)
+def _load(path: str, text_sha256: str) -> dict:  # text_sha256 keys the cache
+    return json.loads(Path(path).read_bytes())
+
+
+def load_document(library: Path, work: Work, book: BookFile, row: PdfText) -> dict | None:
+    root = library.resolve()
+    path = (root / work.dir_path / document_rel(book.sha256)).resolve()
+    if root not in path.parents or not path.is_file() or not row.text_sha256:
+        return None
+    try:
+        return _load(str(path), row.text_sha256)
+    except (OSError, ValueError):
+        return None
+
+
+# --- reading a PDF -----------------------------------------------------------------------------
+
+
+def stale(row: PdfText | None, pdf_sha256: str) -> bool:
+    """Should this PDF be read (again)? New, changed, or read by an older extractor; a failure
+    is retried on later sweeps until ``MAX_ATTEMPTS`` (a new extractor version starts over)."""
+    if row is None or row.pdf_sha256 != pdf_sha256 or row.version != DOCUMENT_VERSION:
+        return True
+    return row.status == PENDING or (row.status == FAILED and row.attempts < MAX_ATTEMPTS)
+
+
+def document_sentences(doc: dict) -> list[dict]:
+    """The document's sentences, segmented exactly as alignment segments a spine item, with
+    their pages and highlight boxes."""
+    from lectern.align.text import segment_text
+    from lectern.pdftext.document import SectionText, sentence_boxes
+
+    out: list[dict] = []
+    for k, section in enumerate(doc.get("sections") or []):
+        text = SectionText(section["text"], section["blocks"])
+        for start, end in segment_text(text.text, text.block_starts()):
+            boxes = sentence_boxes(section, start, end)
+            pages = [b[0] for b in boxes] or [section["page_start"]]
+            out.append(
+                {
+                    "n": len(out),
+                    "section": k,
+                    "char_start": start,
+                    "char_end": end,
+                    "page_start": min(pages),
+                    "page_end": max(pages),
+                    "boxes": boxes,
+                }
+            )
+    return out
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> str | None:
+    """Read one PDF's text layer and store the result. Returns the new status, or ``None``
+    when nothing was done (the file is gone, or every parser slot was busy: try later)."""
+    from lectern.fsops import LIBRARY_LOCK
+
+    with session_factory() as db:
+        book = db.get(BookFile, file_id)
+        work = db.get(Work, book.work_id) if book else None
+        if book is None or work is None or book.media_type != formats.PDF:
+            return None
+        sha, work_id = book.sha256, work.id
+        root = library.resolve()
+        path = (root / work.dir_path / book.rel_path).resolve()
+        if root not in path.parents or not path.is_file():
+            return None
+    error = None
+    doc = None
+    try:
+        from lectern.pdftext.extract import extract_words
+
+        doc = build_document(extract_words(path), sha)
+    except ProbeBusy:
+        return None
+    except FormatError as exc:
+        error = f"{exc.code}: {exc.detail}"[:500] if getattr(exc, "detail", "") else exc.code
+    except Exception as exc:  # noqa: BLE001 - a layout bug must not stop the sweep
+        log.exception("reading the text of file %d failed", file_id)
+        error = f"internal: {type(exc).__name__}"
+    with LIBRARY_LOCK, session_factory() as db:
+        book = db.get(BookFile, file_id)
+        work = db.get(Work, work_id)
+        if book is None or work is None or book.sha256 != sha or book.work_id != work_id:
+            return None  # replaced or moved meanwhile: the next sweep reads the new one
+        row = pdf_text_of(db, file_id)
+        if row is None:
+            row = PdfText(file_id=file_id, work_id=work_id, pdf_sha256=sha, attempts=0)
+            db.add(row)
+        if row.pdf_sha256 != sha or row.version != DOCUMENT_VERSION:
+            row.attempts = 0
+        row.work_id, row.pdf_sha256, row.version = work_id, sha, DOCUMENT_VERSION
+        row.attempts = (row.attempts or 0) + 1
+        row.projected_key = None
+        db.execute(delete(PdfSentence).where(PdfSentence.file_id == file_id))
+        if doc is None:
+            row.status, row.error, row.text_sha256 = FAILED, error, None
+            row.sentence_count = row.chars = 0
+            db.commit()
+            log.warning("could not read the text of %s: %s", book.rel_path, error)
+            return FAILED
+        stats = doc["stats"]
+        row.pages, row.pages_with_text = stats["pages"], stats["pages_with_text"]
+        row.chars, row.stats, row.error = stats["chars"], stats, None
+        if doc["status"] != READY:
+            row.status, row.text_sha256, row.sentence_count = NEEDS_OCR, None, 0
+            row.sections = []
+            db.commit()
+            return NEEDS_OCR
+        data = dumps(doc)
+        _write_atomic(library / work.dir_path / document_rel(sha), data)
+        sentences = document_sentences(doc)
+        db.add_all(PdfSentence(file_id=file_id, **s) for s in sentences)
+        row.status, row.text_sha256 = READY, sha256_of(data)
+        row.sentence_count = len(sentences)
+        row.sections = [
+            {
+                "title": s["title"],
+                "page_start": s["page_start"],
+                "page_end": s["page_end"],
+                "from_outline": s["from_outline"],
+                "sentences": sum(1 for x in sentences if x["section"] == k),
+                "characters": len(s["text"]),
+            }
+            for k, s in enumerate(doc["sections"])
+        ]
+        db.commit()
+        log.info(
+            "read %d pages of %s: %d sentences in %d sections",
+            row.pages, book.rel_path, row.sentence_count, len(row.sections),
+        )  # fmt: skip
+        return READY
+
+
+# --- the work's sentences and the projection ----------------------------------------------------
+
+
+def ensure_pdf_sentences(db: Session, library: Path, work: Work) -> int:
+    """A work whose text is a PDF and that has no sentences yet gets the PDF's sentence list
+    (text only, ``matched = false``), exactly the list an alignment of it will produce, so
+    ``n`` is the same in ``sentences`` and ``pdf_sentences``. Caller commits."""
+    from lectern.ingest.sentences import replace_sentences
+    from lectern.models import Alignment
+
+    if db.scalar(select(Alignment.id).where(Alignment.work_id == work.id)) is not None:
+        return 0
+    if db.scalar(select(func.count()).select_from(Sentence).where(Sentence.work_id == work.id)):
+        return 0
+    found = work_text(db, library, work)
+    if found is None or found[0].kind != "pdf":
+        return 0
+    rows = db.scalars(
+        select(PdfSentence).where(PdfSentence.file_id == found[0].file.id).order_by(PdfSentence.n)
+    ).all()
+    replace_sentences(
+        db,
+        work.id,
+        [
+            {"n": r.n, "spine_index": r.section, "char_start": r.char_start, "char_end": r.char_end}
+            for r in rows
+        ],
+    )
+    return len(rows)
+
+
+def sentences_key(db: Session, work_id: int, source_sha: str) -> str:
+    """Changes whenever the work's sentence list is replaced (rows are deleted and inserted
+    again, so the largest id moves) or its text source changes."""
+    count, top = db.execute(
+        select(func.count(Sentence.id), func.max(Sentence.id)).where(Sentence.work_id == work_id)
+    ).one()
+    return hashlib.sha256(f"{source_sha}:{count}:{top}".encode()).hexdigest()
+
+
+def refresh_projection(
+    db: Session, library: Path, work: Work, book: BookFile, row: PdfText
+) -> bool:
+    """Point the PDF's sentences at the work's (EPUB) sentences, if that list changed since the
+    last projection. A PDF that is itself the work's text has ``epub_n`` NULL everywhere: its
+    ``n`` already is the work's. Returns True when anything was written. Caller commits."""
+    from lectern.align.text import iter_spine_items
+    from lectern.pdftext.project import project
+
+    found = work_text(db, library, work)
+    if found is None or found[0].kind != "epub":
+        if row.projected_key is None:
+            return False
+        db.execute(
+            PdfSentence.__table__.update().where(PdfSentence.file_id == book.id).values(epub_n=None)
+        )
+        row.projected_key = None
+        return True
+    key = sentences_key(db, work.id, found[0].sha256)
+    if row.projected_key == key:
+        return False
+    doc = load_document(library, work, book, row)
+    if doc is None:
+        return False
+    spans = db.execute(
+        select(Sentence.spine_index, Sentence.char_start, Sentence.char_end)
+        .where(Sentence.work_id == work.id)
+        .order_by(Sentence.n)
+    ).all()
+    if not spans:
+        return False
+    items = {item.index: item.text.text for item in iter_spine_items(found[1])}
+    work_texts = [items.get(si, "")[a:b] for si, a, b in spans]
+    pdf_rows = db.scalars(
+        select(PdfSentence).where(PdfSentence.file_id == book.id).order_by(PdfSentence.n)
+    ).all()
+    sections = doc["sections"]
+    pdf_texts = [sections[r.section]["text"][r.char_start : r.char_end] for r in pdf_rows]
+    for r, n in zip(pdf_rows, project(work_texts, pdf_texts), strict=True):
+        r.epub_n = n
+    row.projected_key = key
+    return True
+
+
+def sweep(session_factory: sessionmaker, library: Path, *, limit: int = 20) -> int:
+    """One pass over the library's PDFs (see the module docstring). Returns PDFs read."""
+    with session_factory() as db:
+        books = db.execute(
+            select(BookFile.id, BookFile.sha256, PdfText)
+            .join(Work, Work.id == BookFile.work_id)
+            .outerjoin(PdfText, PdfText.file_id == BookFile.id)
+            .where(
+                BookFile.media_type == formats.PDF,
+                BookFile.kind == FileKind.EBOOK,
+                Work.trashed_at.is_(None),
+            )
+            .order_by(BookFile.id)
+        ).all()
+        todo = [fid for fid, sha, row in books if stale(row, sha)]
+        ready = [fid for fid, _sha, row in books if row is not None and row.status == READY]
+    read = 0
+    for file_id in todo[:limit]:
+        if refresh_file(session_factory, library, file_id) is not None:
+            read += 1
+            ready.append(file_id)
+    # Database only (the projection reads the EPUB): no library lock, so uploads never wait.
+    for file_id in dict.fromkeys(ready):
+        with session_factory() as db:
+            try:
+                book = db.get(BookFile, file_id)
+                row = pdf_text_of(db, file_id)
+                work = db.get(Work, book.work_id) if book else None
+                if book is None or row is None or work is None or row.status != READY:
+                    continue
+                ensure_pdf_sentences(db, library, work)
+                refresh_projection(db, library, work, book, row)
+                db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                log.exception("updating the sentences of file %d failed", file_id)
+    return read
+
+
+def status_json(row: PdfText | None, book: BookFile) -> dict:
+    """What the app shows about a PDF's text (``GET /api/files/{id}/text`` and the work)."""
+    if row is None or row.pdf_sha256 != book.sha256 or row.version != DOCUMENT_VERSION:
+        return {"status": PENDING, "pages": None, "pages_with_text": None, "sections": [],
+                "sentences": 0, "error": None}  # fmt: skip
+    status = row.status
+    if status == FAILED and row.attempts < MAX_ATTEMPTS:
+        status = PENDING  # retried on the next sweep
+    return {
+        "status": status,
+        "pages": row.pages,
+        "pages_with_text": row.pages_with_text,
+        "sections": row.sections or [],
+        "sentences": row.sentence_count,
+        "error": row.error if status == FAILED else None,
+    }

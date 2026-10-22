@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from lectern import queue
 from lectern.align.text import spine_lengths
-from lectern.align.tracks import fingerprint_of, sync_tracks, work_epub, work_tracks
+from lectern.align.tracks import fingerprint_of, sync_tracks, work_tracks
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS, larger_model
 from lectern.ingest.sentences import replace_sentences
 from lectern.models import (
@@ -71,7 +71,8 @@ class LeaseLost(Exception):
 
 
 class NoInputs(ValueError):
-    """The work has no EPUB or no audio tracks, so there is nothing to align."""
+    """The work has no text (an EPUB, or a PDF whose text is ready) or no audio tracks, so
+    there is nothing to align."""
 
 
 Count = Annotated[int, Field(ge=0, le=10**9)]
@@ -151,14 +152,22 @@ def backoff_s(attempts: int, rng: random.Random | None = None) -> float:
 
 
 def align_payload(db: Session, library: Path, work: Work, model: str) -> dict:
-    """Input snapshot for an align job: what a result must match."""
-    found = work_epub(db, library, work)
+    """Input snapshot for an align job: what a result must match.
+
+    ``epub_sha256`` is the digest of the text the job reads: the EPUB, or for a work whose
+    only text is a PDF, the PDF's canonical text document (``text_source: "pdf"``; such jobs
+    need the ``align-pdf`` capability, so a worker that predates PDF text never claims one).
+    """
+    from lectern.pdftext.store import work_text
+
+    found = work_text(db, library, work)
     tracks = work_tracks(db, work.id)
     if found is None or not tracks:
-        raise NoInputs("the work needs an EPUB and at least one audio track")
-    book, _ = found
+        raise NoInputs("the work needs an EPUB or a text PDF and at least one audio track")
+    source, _ = found
     return {
-        "epub_sha256": book.sha256,
+        "epub_sha256": source.sha256,
+        "text_source": source.kind,
         "audio_fingerprint": fingerprint_of(tracks),
         "model": model,
         "language": work.language,
@@ -746,7 +755,9 @@ def apply_result(db: Session, data_dir: Path, library: Path, job: Job, body: byt
     if not inputs_current(db, library, job):
         raise LeaseLost()
     work = db.get(Work, job.work_id)
-    found = work_epub(db, library, work)
+    from lectern.pdftext.store import work_text
+
+    found = work_text(db, library, work)
     lengths = spine_lengths(found[1]) if found else []
     for s in sentence_map.sentences:
         if s.spine_index >= len(lengths) or s.char_end > lengths[s.spine_index]:
@@ -847,7 +858,9 @@ def _track_mismatch(sentence_map: SentenceMap, expected: list) -> str | None:
 
 def payload_matches_work(db: Session, library: Path, work: Work, payload: dict) -> bool:
     """Does the job's input snapshot still describe the work's current files?"""
-    found = work_epub(db, library, work)
+    from lectern.pdftext.store import work_text
+
+    found = work_text(db, library, work)
     if found is None or found[0].sha256 != payload.get("epub_sha256"):
         return False
     return fingerprint_of(work_tracks(db, work.id)) == payload.get("audio_fingerprint")
@@ -1115,7 +1128,7 @@ def engine_unavailable(db: Session, settings, now: datetime | None = None) -> di
     if reason is None:
         return None
     if queue.capability_online(db, KIND_ALIGN, now):
-        return None
+        return None  # a worker that aligns EPUBs also aligns PDF text once it is updated
     return {
         "reason": reason,
         "message": f"{_MISSING[reason]} and no external worker (lectern worker) has "
@@ -1216,10 +1229,15 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat().replace("+00:00", "Z") if dt else None
 
 
+def align_capability(payload: dict) -> str:
+    """``align``, or ``align-pdf`` for a job whose text is a PDF's text document."""
+    return queue.ALIGN_PDF if (payload or {}).get("text_source") == "pdf" else queue.ALIGN
+
+
 queue.register(
     queue.KindHandler(
         kind=KIND_ALIGN,
-        capability=lambda _payload: queue.ALIGN,
+        capability=align_capability,
         # inputs and results have their own routes (epub, tracks/{position}, SentenceMap)
     )
 )

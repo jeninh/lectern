@@ -247,6 +247,14 @@ def _edit_distance_pairs(
     return out
 
 
+def match_tokens(t: list[str], a: list[str]) -> list[tuple[int, int]]:
+    """Steps 1–2 alone: increasing ``(i, j)`` pairs of equal or near-equal tokens of two
+    streams. Used to project one text onto another edition of it (an EPUB onto a PDF,
+    :mod:`lectern.pdftext.project`) with the same anchors that align text to speech."""
+    pairs = _match_region(t, a, 0, len(t), 0, len(a), ANCHOR_N, False, False)
+    return _monotone(pairs)
+
+
 def _monotone(pairs: list[tuple[int, int]]) -> list[tuple[int, int]]:
     pairs.sort()
     out: list[tuple[int, int]] = []

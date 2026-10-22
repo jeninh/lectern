@@ -108,7 +108,7 @@ def spine_text(
         book = db.scalar(stmt.where(BookFile.sha256 == alignment.epub_sha256))
     book = book or primary_epub(db, work_id)
     if book is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No EPUB")
+        return _pdf_section_text(request, auth, db, settings, work, spine_index)
     root = settings.library_dir.resolve()
     path = (root / work.dir_path / book.rel_path).resolve()
     if root not in path.parents or not path.is_file():
@@ -131,11 +131,71 @@ def spine_text(
     return {"work_id": work_id, "file_id": book.id, "spine_index": spine_index, **data}
 
 
+def _pdf_section_text(request, auth, db, settings, work: Work, section: int) -> dict:
+    """A work whose text is a PDF: the section's canonical text, in the same block shape (and
+    under the same download accounting) as an EPUB spine item."""
+    from lectern.pdftext.document import section_texts
+    from lectern.pdftext.store import load_document, pdf_text_of, work_text
+
+    found = work_text(db, settings.library_dir, work)
+    if found is None or found[0].kind != "pdf":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No text")
+    book = found[0].file
+    row = pdf_text_of(db, book.id)
+    doc = load_document(settings.library_dir, work, book, row) if row else None
+    texts = section_texts(doc) if doc else []
+    if not 0 <= section < len(texts):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such section")
+    st = texts[section]
+    downloads.admit_once(
+        db,
+        settings,
+        auth.user,
+        downloads.Device.session(auth.session.id),
+        f"text:{work.id}",
+        client_ip(request),
+        "read-along text",
+    )
+    return {
+        "work_id": work.id,
+        "file_id": book.id,
+        "spine_index": section,
+        "length": len(st.text),
+        "blocks": [
+            {"kind": b.kind, "start": b.start, "text": st.text[b.start : b.end]}
+            for b in st.blocks()
+        ],
+    }
+
+
 # --- read-aloud EPUB ---------------------------------------------------------------------------
 
 
 def builder(request: Request) -> ReadAloudBuilder:
     return request.app.state.readaloud
+
+
+EXPORT_NEEDS_EPUB = (
+    "The narrated EPUB (EPUB 3 Media Overlays) is made from an EPUB edition; "
+    "this book's read-along is on its PDF pages."
+)
+
+
+def _pdf_states(db, settings, work: Work) -> dict:
+    """Where the work's text comes from and every PDF's text state (text PDF, scanned and
+    needing OCR, still reading, failed), for the Formats card."""
+    from lectern.ingest import formats
+    from lectern.routes.api.pdftext import text_state
+
+    pdfs = [
+        text_state(db, settings, f, work)
+        for f in sorted(work.files, key=lambda f: (f.added_at, f.id))
+        if f.media_type == formats.PDF
+    ]
+    from lectern.pdftext.store import work_text
+
+    found = work_text(db, settings.library_dir, work)
+    return {"text_source": found[0].kind if found else None, "pdfs": pdfs}
 
 
 def read_aloud_status(
@@ -162,11 +222,15 @@ def read_aloud_status(
     if alignment is not None:
         # live progress, ETA, error, and whether anything can run it (the Formats card)
         out["alignment"].update(alignment_activity(db, work.id, settings, detailed=detailed))
+    out.update(_pdf_states(db, settings, work))
     try:
         inputs = gather_inputs(db, settings, work)
     except Unavailable as exc:
         out.update(reason=exc.code, message=exc.message)
-        if exc.code in ("no_audio", "missing_file", "needs_epub"):
+        if exc.code == "needs_epub" and out["text_source"] == "pdf":
+            # Read-along works on the PDF's pages; only the narrated EPUB is EPUB-only.
+            out.update(reason="export_needs_epub", message=EXPORT_NEEDS_EPUB)
+        elif exc.code in ("no_audio", "missing_file", "needs_epub"):
             out["readalong"] = False
         return out
     state, sidecar, error = build.status(inputs)

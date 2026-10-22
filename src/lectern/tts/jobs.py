@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from lectern import queue
 from lectern.align.jobs import LeaseLost, ResultError, backoff_s
-from lectern.align.tracks import sync_tracks, work_epub, work_tracks
+from lectern.align.tracks import sync_tracks, work_tracks
 from lectern.config import Settings
 from lectern.ingest.library import safe_component
 from lectern.ingest.sentences import replace_sentences
@@ -49,6 +49,7 @@ from lectern.models import (
     Work,
     utcnow,
 )
+from lectern.pdftext.store import work_text
 from lectern.queue import InputFile, KindHandler, register
 from lectern.queue import tts_capability as capability
 from lectern.security.tokens import new_secret, sha256_hex
@@ -583,7 +584,7 @@ def _current_inputs(db: Session, settings: Settings, job: Job) -> tuple[Work, Pa
     work = db.get(Work, job.work_id) if job.work_id is not None else None
     if work is None or work.trashed_at is not None:
         raise LeaseLost()
-    found = work_epub(db, settings.library_dir, work)
+    found = work_text(db, settings.library_dir, work)
     if found is None or found[0].sha256 != (job.payload or {}).get("epub_sha256"):
         raise LeaseLost()
     sync_tracks(db, settings.library_dir, work)
@@ -882,7 +883,7 @@ def worker_inputs(db: Session, settings: Settings, job: Job) -> dict | None:
     changed under the job (its EPUB was replaced, or it gained an audiobook meanwhile)."""
     payload = job.payload or {}
     work = db.get(Work, job.work_id) if job.work_id is not None else None
-    found = work_epub(db, settings.library_dir, work) if work is not None else None
+    found = work_text(db, settings.library_dir, work) if work is not None else None
     if found is None or found[0].sha256 != payload.get("epub_sha256") or work_tracks(db, work.id):
         return None
     path = script_path(settings.data_dir, str(payload.get("script_sha256") or ""))
