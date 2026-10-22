@@ -20,6 +20,8 @@ from lectern import device_queue
 from lectern.access import can_see_work
 from lectern.covergen import cover_fields
 from lectern.models import DeviceQueueItem, User, Work
+from lectern.routes.api.selection import Selection
+from lectern.routes.api.selection import resolve as resolve_selection
 from lectern.routes.api.serializers import iso
 from lectern.security.deps import Auth, AuthCsrf, DbDep
 from lectern.security.sessions import client_ip
@@ -104,7 +106,8 @@ def show(auth: Auth, db: DbDep, pw_id: int) -> dict:
 
 
 class EnqueueIn(BaseModel):
-    work_ids: list[int] = Field(min_length=1, max_length=device_queue.MAX_BATCH)
+    work_ids: list[int] = Field(default_factory=list, max_length=device_queue.MAX_BATCH)
+    selection: Selection | None = None
 
 
 @router.post("/{pw_id}/items")
@@ -112,7 +115,10 @@ def enqueue(request: Request, auth: AuthCsrf, db: DbDep, pw_id: int, body: Enque
     t = device_queue.target(db, auth.user, pw_id)
     if t is None:
         raise _not_found()
-    results = device_queue.enqueue(db, auth.user, t, body.work_ids, client_ip(request))
+    ids = resolve_selection(
+        db, auth.user, body.work_ids, body.selection, limit=device_queue.MAX_BATCH
+    )
+    results = device_queue.enqueue(db, auth.user, t, ids, client_ip(request))
     return {"results": results, "device": _device_json(db, t, auth.user)}
 
 

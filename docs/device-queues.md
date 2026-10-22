@@ -12,8 +12,8 @@ pull, so the queue is just a personal shelf for one catalogue password.
 - **One book:** open it in the Library and choose **Send to device**. The dialog lists the
   devices you can send to, which ones already have the book waiting, and remembers your last
   choice.
-- **Several books:** in the Library choose **Select**, tap the books, then **Send to device**
-  in the selection bar (the same bar as bulk edit; readers see only **Send to device**). The
+- **Several books:** select them in the Library (click, `⌘/Ctrl` or `Shift` + click, `⌘/Ctrl A`
+  for the whole view; on a phone, press and hold), then **Send** in the selection bar (the same bar as bulk edit; readers see only **Send to device**). The
   toast says what happened to each book: sent, already waiting, not shared with that person,
   or without an EPUB.
 - **The queue:** on **Devices**, each device with a catalogue password shows how many books
@@ -114,7 +114,7 @@ All under the session cookie; writes need the CSRF token and a same-origin reque
 | --- | --- |
 | `GET /api/device-queues[?work_id=]` | devices you may send to (`own` first; the owner also gets everyone's), each with `pending`, and `queued` for `work_id` |
 | `GET /api/device-queues/{app_password_id}` | `pending` (catalogue order) and `history` (latest 50 delivered or removed) |
-| `POST /api/device-queues/{app_password_id}/items` `{"work_ids": [...]}` (≤ 200) | per-work `status`: `queued`, `requeued`, `already_queued`, `not_found`, `not_visible_to_device`, `no_ebook` |
+| `POST /api/device-queues/{app_password_id}/items` `{"work_ids": [...]}` (≤ 200), or `{"selection": …}` ([contracts](contracts.md#selections--get-apilibrarycount-selection-on-bulk-requests)) | per-work `status`: `queued`, `requeued`, `already_queued`, `not_found`, `not_visible_to_device`, `no_ebook` |
 | `DELETE /api/device-queues/{app_password_id}/items/{item_id}` | `{"removed": true}`; `false` if it was not pending |
 | `POST /api/device-queues/{app_password_id}/order` `{"item_ids": [...]}` | exactly the visible pending items; `409 queue_changed` otherwise |
 

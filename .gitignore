@@ -19,3 +19,6 @@ frontend/node_modules/
 
 # fixture helper output (full LibriVox file is not checked in)
 tests/fixtures/magi/full/
+frontend/e2e/.out/
+frontend/test-results/
+frontend/playwright-report/

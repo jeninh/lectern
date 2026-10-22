@@ -6,28 +6,29 @@ import { useLocalStorage } from "../lib/hooks";
 import { groupDevices, summarizeQueueResults } from "../lib/queues";
 import { useStore } from "../lib/store";
 import type { QueueDevice, QueueResult } from "../lib/types";
+import type { BulkTarget } from "./BulkBar";
 import { EmptyState } from "./EmptyState";
 import { Plus, Reader } from "./Icons";
 import { Sheet } from "./Sheet";
 
 /** "Send to device": pick one OPDS device (yours, or anyone's for the owner) and queue the
  * works for it. They appear first in that device's catalogue under "Queued for this device". */
-export function SendToDevice({ open, workIds, title, onClose, onSent }: { open: boolean; workIds: number[]; title: string; onClose: () => void; onSent?: () => void }) {
+export function SendToDevice({ open, workIds, target, count, title, onClose, onSent }: { open: boolean; workIds?: number[]; target?: () => BulkTarget; count?: number; title: string; onClose: () => void; onSent?: () => void }) {
   return (
     <Sheet open={open} onClose={onClose} title={title} variant="dialog" labelledBy="send-title">
-      {open && <SendForm workIds={workIds} onClose={onClose} onSent={onSent} />}
+      {open && <SendForm body={target ? target() : { work_ids: workIds ?? [] }} count={count ?? workIds?.length ?? 0} onClose={onClose} onSent={onSent} />}
     </Sheet>
   );
 }
 
-function SendForm({ workIds, onClose, onSent }: { workIds: number[]; onClose: () => void; onSent?: () => void }) {
+function SendForm({ body, count, onClose, onSent }: { body: BulkTarget; count: number; onClose: () => void; onSent?: () => void }) {
   const { toast, now } = useStore();
   const [devices, setDevices] = useState<QueueDevice[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [last, setLast] = useLocalStorage<number | null>("lectern.sendDevice", null);
   const [choice, setChoice] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
-  const single = workIds.length === 1 ? workIds[0] : null;
+  const single = "work_ids" in body && body.work_ids.length === 1 ? body.work_ids[0] : null;
   const hintId = useId();
 
   useEffect(() => {
@@ -56,7 +57,7 @@ function SendForm({ workIds, onClose, onSent }: { workIds: number[]; onClose: ()
     if (!device) return;
     setBusy(true);
     try {
-      const r = await post<{ results: QueueResult[] }>(`/api/device-queues/${device.id}/items`, { work_ids: workIds });
+      const r = await post<{ results: QueueResult[] }>(`/api/device-queues/${device.id}/items`, body);
       const s = summarizeQueueResults(r.results, device);
       toast(s.text, s.kind);
       setLast(device.id);
@@ -95,7 +96,7 @@ function SendForm({ workIds, onClose, onSent }: { workIds: number[]; onClose: ()
       <div className="sheet-actions">
         <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
         <button className="btn primary" disabled={busy || choice === null} data-autofocus>
-          {workIds.length === 1 ? "Send" : `Send ${workIds.length} books`}
+          {count === 1 ? "Send" : `Send ${count} books`}
         </button>
       </div>
     </form>

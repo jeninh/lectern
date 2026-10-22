@@ -25,6 +25,8 @@ from lectern.models import (
     utcnow,
 )
 from lectern.routes.api.readalong import visible_work
+from lectern.routes.api.selection import Selection
+from lectern.routes.api.selection import resolve as resolve_selection
 from lectern.routes.api.serializers import iso
 from lectern.security import audit
 from lectern.security.deps import (
@@ -146,6 +148,92 @@ def request_align(
     db.commit()
     response.status_code = status.HTTP_202_ACCEPTED if created else status.HTTP_200_OK
     return jobs.job_json(db, job, _worker_names(db))
+
+
+# Bulk alignment checks each work's files in the request (refresh_work), and every job is
+# CPU-hours of worker time: a small cap keeps both the request and the commitment bounded.
+ALIGN_MANY_MAX = 50
+
+
+class AlignManyIn(BaseModel):
+    work_ids: list[int] = Field(default_factory=list, max_length=ALIGN_MANY_MAX)
+    selection: Selection | None = None
+    model: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/works/align")
+def request_align_many(
+    request: Request, auth: JobManager, db: DbDep, settings: SettingsDep, body: AlignManyIn
+) -> dict:
+    """Queue alignment for many works (the Library's selection bar, after a confirmation).
+    Never forces and never re-runs: a work with an active job reports ``already_queued``, one
+    whose alignment is current ``already_aligned`` (re-run one work from its editor). One
+    result per work, in order: ``queued``, ``already_queued``, ``already_aligned``,
+    ``no_inputs``, ``out_of_memory_choose_model``, or ``not_found``. At most
+    ``ALIGN_MANY_MAX`` works."""
+    if body.model is not None and body.model not in MODELS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown_model")
+    ids = resolve_selection(db, auth.user, body.work_ids, body.selection, limit=ALIGN_MANY_MAX)
+    results = []
+    for wid in ids:
+        try:
+            work = visible_work(db, auth.user, wid)
+        except HTTPException:
+            results.append({"work_id": wid, "status": "not_found"})
+            continue
+        if (job := jobs.active_job(db, work.id)) is not None:
+            # Already on its way; a stale snapshot is re-queued by the worker sweep and edits.
+            results.append({"work_id": wid, "status": "already_queued", "job_id": job.id})
+            continue
+        # Marks a changed book's alignment stale (and re-queues it with its own model).
+        requeued = jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
+        db.commit()
+        if requeued is not None:
+            results.append({"work_id": wid, "status": "queued", "job_id": requeued.id})
+            continue
+        alignment = jobs.work_alignment(db, work.id)
+        if alignment is not None and alignment.status == AlignmentStatus.SUCCEEDED:
+            results.append({"work_id": wid, "status": "already_aligned"})
+            continue
+        # The same rules as POST /api/works/{id}/align: retry with the smaller model a
+        # failure chose, and never rerun an out-of-memory failure without a named model.
+        alignment = jobs.work_alignment(db, work.id)
+        retry = _retry_model(db, work.id)
+        if (
+            body.model is None
+            and retry is None
+            and alignment is not None
+            and alignment.status == AlignmentStatus.FAILED
+            and jobs.out_of_memory(alignment.error)
+        ):
+            results.append({"work_id": wid, "status": "out_of_memory_choose_model"})
+            continue
+        try:
+            job, created = jobs.enqueue_align(
+                db,
+                settings.library_dir,
+                work,
+                model=body.model or retry or settings.align_model,
+                created_by=auth.user.id,
+            )
+        except jobs.NoInputs:
+            db.rollback()
+            results.append({"work_id": wid, "status": "no_inputs"})
+            continue
+        if created:
+            audit.record(
+                db,
+                "align.request",
+                actor_user_id=auth.user.id,
+                target=f"work:{work.id}",
+                ip=client_ip(request),
+                detail=job.payload.get("model") if job.payload else None,
+            )
+        db.commit()
+        results.append(
+            {"work_id": wid, "status": "queued" if created else "already_queued", "job_id": job.id}
+        )
+    return {"results": results}
 
 
 @router.post("/jobs/{job_id}/cancel")
