@@ -22,8 +22,15 @@ jobs:
       - run: npm test
         working-directory: frontend
       - name: Install ffmpeg (audio ingest, transcode, and range tests), Noto CJK (generated covers), LuaJIT with LuaSocket/cjson (KOReader plugin), and restic (backups)
-        timeout-minutes: 10
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-noto-cjk luajit lua-socket lua-cjson restic
+        timeout-minutes: 15
+        run: |
+          # A slow or stuck Ubuntu mirror would otherwise hang here: bounded attempts, retried.
+          apt() { sudo timeout 240 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=60 "$@"; }
+          for i in 1 2 3; do
+            apt update -q && apt install -y -q --no-install-recommends ffmpeg fonts-noto-cjk luajit lua-socket lua-cjson restic && exit 0
+            echo "apt attempt $i failed; retrying"; sleep 10
+          done
+          exit 1
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -69,8 +76,15 @@ jobs:
       - run: npm run build
         working-directory: frontend
       - name: Install ffmpeg (the seeded audiobook's data-saver copy)
-        timeout-minutes: 10
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+        timeout-minutes: 15
+        run: |
+          # A slow or stuck Ubuntu mirror would otherwise hang here: bounded attempts, retried.
+          apt() { sudo timeout 240 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=60 "$@"; }
+          for i in 1 2 3; do
+            apt update -q && apt install -y -q --no-install-recommends ffmpeg && exit 0
+            echo "apt attempt $i failed; retrying"; sleep 10
+          done
+          exit 1
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
       - run: uv sync --frozen --extra dev
