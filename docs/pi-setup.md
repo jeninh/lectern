@@ -17,7 +17,7 @@ Placeholders used throughout: the Pi is `lectern-pi`, your user on it is `pi`, y
 │  your SSH key                │                           │  Docker Compose:                 │
 │  Lectern worker (align, TTS) │ ──── HTTPS, tailnet ────▶ │   tailscale (machine "lectern")  │
 └──────────────────────────────┘                           │   lectern :8080                  │
-┌──────────────┐  https://lectern.<tailnet>.ts.net        │  ~/lectern/{library,data}        │
+┌──────────────┐  https://lectern.<tailnet>.ts.net         │  ~/lectern/{library,data}        │
 │ phone (PWA)  │ ────────────────────────────────────────▶ │  USB drive: backups              │
 └──────────────┘                                           └──────────────────────────────────┘
 ┌──────────────┐  http://100.x.y.z:8080 (OPDS + sync)             ▲
@@ -253,9 +253,12 @@ the Pi. It connects out to Lectern, so the Mac needs only Tailscale. Full refere
 
 1. Install Tailscale on the Mac, signed in to your tailnet, and check that
    `https://lectern.tail1234.ts.net` opens.
-2. **Read access to the private repository** on the Mac (the installer checks first): either
-   `gh auth login` then `gh auth setup-git`, or an SSH key with
-   `--source git+ssh://git@github.com/jeninh/lectern`, or `--source /path/to/your/clone`.
+2. **Read access to the private repository** on the Mac (the installer checks first). Prefer
+   `gh auth login` then `gh auth setup-git`: the installer then installs exactly the server's
+   commit (the `LECTERN_COMMIT` pin from [step 4](#4-updating)). `--source` replaces that pinned
+   source, so with an SSH key add the commit yourself,
+   `--source git+ssh://git@github.com/jeninh/lectern@<commit>` (`git -C ~/lectern rev-parse HEAD`
+   on the Pi), or with `--source /path/to/your/clone` check that commit out in the clone first.
 3. In Lectern as the owner: **Admin → Workers → Add a worker**, name it. Paste the command it
    shows into Terminal on the Mac:
 
@@ -270,11 +273,14 @@ the Pi. It connects out to Lectern, so the Mac needs only Tailscale. Full refere
 
 **School and proxy mode.** The worker's `proxy` setting (`--proxy` to the installer, or
 `proxy` in `config.json`) applies to **every** request it makes, Lectern's included; the
-default, `system`, uses the macOS proxy settings and ignores their exception list. A school
+default, `system`, uses `HTTPS_PROXY`, else the macOS proxy settings, and ignores their
+exception list. A school
 proxy cannot reach a tailnet address, so with Lectern only on the tailnet:
 
-- If Tailscale connects on that network, set `"proxy": "none"` so the worker talks to Lectern
-  directly over Tailscale. Model downloads then go direct too, so **download the models at home
+- If Tailscale connects on that network, set `"proxy": "none"` in `config.json` so the worker
+  talks to Lectern directly over Tailscale. The agent reads it only at start: run
+  `lectern worker-service install` afterwards to restart it (or pass `--proxy none` to the
+  installer). Model downloads then go direct too, so **download the models at home
   first** (run one job there; they are cached in `~/.cache/huggingface`).
 - If the network forces everything through its proxy and blocks Tailscale, the worker cannot
   reach Lectern from there. Nothing breaks: jobs wait until the Mac is home.
@@ -379,12 +385,24 @@ lectern-compose run --rm --no-deps lectern lectern restore            # the newe
 lectern-compose start lectern
 ```
 
-**On a new Pi:** do steps 1–3 of this guide, write `.env` with the **same** `LECTERN_BASE_URL`
-(passkeys are bound to it), mount the drive, put the saved password in
-`data/lectern/backup-restic-password` (mode 600), restore the Tailscale state, run the
-restore, then `lectern-compose up -d --build`. Without the Tailscale state, remove the old
-`lectern` machine on the Machines page first and use a fresh auth key, or the new one is named
-`lectern-1`. Details, and what to do if a restore is interrupted:
+**On a new Pi:** do steps 1, 2, and 3.1–3.4 of this guide, **not** the first run (no new owner
+account), and write `.env` with the **same** `LECTERN_BASE_URL` (passkeys are bound to it).
+Then mount the drive, put the saved password in `data/lectern/backup-restic-password`
+(mode 600), and restore the Tailscale state
+([as root](deploy-tailscale.md#backups-and-restore)). The restore container runs inside the
+Tailscale container's network, so build the image and start Tailscale first, then restore and
+start everything:
+
+```sh
+cd ~/lectern
+LECTERN_COMMIT=$(git rev-parse HEAD) lectern-compose build
+lectern-compose up -d tailscale
+lectern-compose run --rm --no-deps lectern lectern restore
+lectern-compose up -d
+```
+
+Without the Tailscale state, remove the old `lectern` machine on the Machines page first and
+put a fresh auth key in `.env`, or the new one is named `lectern-1`. Details, and what to do if a restore is interrupted:
 [Restore](backups.md#restore) and [Backups and restore](deploy-tailscale.md#backups-and-restore).
 
 ## 11. Troubleshooting
