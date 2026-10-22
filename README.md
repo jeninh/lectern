@@ -33,7 +33,10 @@ docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build
 docker compose --env-file .env -f deploy/tailscale/compose.yaml logs lectern | grep -A3 "FIRST-RUN SETUP"
 ```
 
-[`docs/deploy-tailscale.md`](docs/deploy-tailscale.md) walks through it: `tailscale serve`
+Starting from a blank Raspberry Pi? [`docs/pi-setup.md`](docs/pi-setup.md) is the
+end-to-end guide: flashing the OS, Docker, this setup, updates, the Mac worker, a Kindle,
+phones, AI apps, backups, and troubleshooting.
+[`docs/deploy-tailscale.md`](docs/deploy-tailscale.md) walks through the Tailscale setup: `tailscale serve`
 gives you a trusted HTTPS address on your private tailnet (so passkeys work), nothing is
 published on the LAN or the Internet, and it covers Raspberry Pi 4 specifics, cloning a
 private repository with a read-only deploy key, upgrades, backups, and Kindle/Kobo with
