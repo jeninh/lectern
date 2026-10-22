@@ -916,6 +916,12 @@ Implemented in `lectern.routes.api.offline`; the app side and the rules are in
   and the identity without reaching the server (the session expiry, or
   `offline_max_age_seconds` from now, whichever is sooner).
 - Signing in (password or passkey) revokes the session the request's cookie still carries.
+- `POST /logout` with `x-lectern-app: signout` (the installed app; form field `csrf_token`)
+  names the session to end by its CSRF token, whatever cookie the browser sends. It answers
+  `200 {"signed_out": true}` once that session is revoked (also when it already was, and when
+  no session is named and the cookie has none), `409 signout_token_missing` when the token names
+  no session but the cookie holds a live one, and `403` cross-site. No redirect and no
+  `Clear-Site-Data`. The app clears its pending sign-out on that `200` only.
 - The `download.offline` audit row is advisory (the app sends it; a client could skip it). The
   file fetches themselves are metered and audited like any download or stream.
 

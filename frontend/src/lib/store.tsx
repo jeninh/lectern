@@ -111,7 +111,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [offlineBooks, setOfflineBooks] = useState<OfflineBook[]>([]);
   // A sign-out that has not reached the server yet (lib/offline/signout.ts): the app shows
   // only that, and never uses the session, until /logout gets through.
-  const [signingOut, setSigningOut] = useState(() => !!pendingSignOut());
+  const [signingOut] = useState(() => !!pendingSignOut());
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 20000);
@@ -192,12 +192,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // Finish a pending sign-out on start and whenever the server may be reachable again.
   useEffect(() => {
     if (!signingOut) return;
+    // One attempt at a time: reconnect, the 20 s timer, and the start can fire together.
+    let busy = false;
     let done = false;
     const attempt = async () => {
-      if (done || !(await finishSignOut())) return;
-      done = true;
+      if (busy || done) return;
+      busy = true;
+      try {
+        done = await finishSignOut();
+      } finally {
+        busy = false;
+      }
+      if (!done) return;
       await clearDevice().catch(() => {});
-      setSigningOut(false);
+      // Stay on "Signed out" until the page is gone: rendering the app again would call the
+      // API, meet the 401, and navigate a second time.
       window.location.assign("/login");
     };
     attempt();
@@ -255,12 +264,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [refreshMe, toast]);
   const wasOnline = useRef(online);
   useEffect(() => {
-    if (online && !wasOnline.current) {
+    if (online && !wasOnline.current && !signingOut) {
       reconnect();
       refreshLibrary().catch(() => {});
     }
     wasOnline.current = online;
-  }, [online, reconnect, refreshLibrary]);
+  }, [online, reconnect, refreshLibrary, signingOut]);
   useEffect(() => {
     if (!me) return;
     reconnect();

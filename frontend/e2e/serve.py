@@ -161,6 +161,38 @@ def seed(settings) -> None:
         db.commit()
 
 
+class LogoutFaults:
+    """Test-only: ``POST /__e2e/logout-faults`` with ``[status, ...]`` makes the next ``/logout``
+    requests answer those statuses, as a proxy in front of a restarting server would (502) or a
+    rejected request (403). Works in every browser, unlike request interception, which misses
+    requests that pass through the service worker on WebKit."""
+
+    def __init__(self, app) -> None:
+        self.app, self.queue = app, []
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == "/__e2e/logout-faults":
+            import json
+
+            body = b""
+            while True:
+                msg = await receive()
+                body += msg.get("body", b"")
+                if not msg.get("more_body"):
+                    break
+            self.queue = [int(x) for x in json.loads(body or b"[]")]
+            return await self._answer(send, 204, b"")
+        if scope["type"] == "http" and scope["path"] == "/logout" and self.queue:
+            return await self._answer(send, self.queue.pop(0), b"<html>Bad Gateway</html>")
+        return await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _answer(send, status: int, body: bytes) -> None:
+        headers = [(b"content-type", b"text/html"), (b"content-length", str(len(body)).encode())]
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+
 def main() -> None:
     from lectern.config import Settings
     from lectern.main import create_app
@@ -184,7 +216,7 @@ def main() -> None:
     settings.library_dir.mkdir(parents=True)
     seed(settings)
     app = create_app(settings, start_watcher=False, start_background=False)
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
+    uvicorn.run(LogoutFaults(app), host="127.0.0.1", port=PORT, log_level="warning")
 
 
 if __name__ == "__main__":

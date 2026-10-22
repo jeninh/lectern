@@ -159,12 +159,42 @@ test("signing out offline wipes the phone at once and ends the server session on
   await expect(page.locator(".user-chip:visible, .bottom-nav:visible")).toHaveCount(0);
 
   await context.setOffline(false);
-  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  // The app may notice the reconnect, finish, and navigate before this nudge runs.
+  await page.evaluate(() => window.dispatchEvent(new Event("online"))).catch(() => {});
   await page.waitForURL(/\/login/, { timeout: 30_000 });
   // The old session is dead on the server, even replayed by hand.
   const api = await pwRequest.newContext({ baseURL, extraHTTPHeaders: { cookie: `lectern_session=${cookie.value}` } });
   expect((await api.get("/api/me")).status()).toBe(401);
   await api.dispose();
+});
+
+test("a pending sign-out survives 502 and 403 answers and finishes only when the server confirms", async ({ page, context, baseURL, request }, info) => {
+  await signIn(page, userOf(info));
+  await controlled(page);
+  const cookie = (await context.cookies()).find((c) => c.name === "lectern_session")!;
+  const alive = async () => {
+    const api = await pwRequest.newContext({ baseURL, extraHTTPHeaders: { cookie: `lectern_session=${cookie.value}` } });
+    const status = (await api.get("/api/me")).status();
+    await api.dispose();
+    return status;
+  };
+  // Lectern restarts behind its proxy (502), then a 403, a 503, and a 502 again; only then is it reachable.
+  expect((await request.post("/__e2e/logout-faults", { data: [502, 403, 503, 502] })).status()).toBe(204);
+  await page.goto("/app/security");
+  await page.getByRole("button", { name: "Sign out", exact: true }).first().click();
+  const screen = page.getByTestId("signing-out");
+  await expect(screen).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("lectern.signout"))).not.toBeNull();
+  expect(await alive()).toBe(200);
+  // Reloading and reconnecting while the faults last keeps the app signed out, never in.
+  await page.reload();
+  await expect(screen).toBeVisible();
+  await expect(page.locator(".user-chip:visible, .bottom-nav:visible")).toHaveCount(0);
+  // The app may notice the reconnect, finish, and navigate before this nudge runs.
+  await page.evaluate(() => window.dispatchEvent(new Event("online"))).catch(() => {});
+  await page.waitForURL(/\/login/, { timeout: 45_000 });
+  expect(await page.evaluate(() => localStorage.getItem("lectern.signout"))).toBeNull();
+  expect(await alive()).toBe(401);
 });
 
 test("signing in on a phone ends the session a pending offline sign-out left behind", async ({ page, context, baseURL }, info) => {
@@ -210,6 +240,6 @@ test("downloads and identity expire after the offline deadline, even with the se
   await page.reload();
   await expect(page.locator(".user-chip:visible")).toHaveCount(0);
   await expect(page.getByTestId(`downloaded-${id}`)).toHaveCount(0);
-  expect((await cacheKeys(page))["lectern-books"] ?? []).toEqual([]);
+  await expect.poll(async () => (await cacheKeys(page))["lectern-books"] ?? []).toEqual([]);
   await context.setOffline(false);
 });

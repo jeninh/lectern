@@ -10,7 +10,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import func, select
 
-from lectern.models import LoginAttempt, Passkey, User, utcnow
+from lectern.models import LoginAttempt, Passkey, Session, User, utcnow
 from lectern.security import alerts, audit
 from lectern.security.deps import AuthOptional, DbDep, SettingsDep
 from lectern.security.passwords import hash_password, needs_rehash, verify_password
@@ -189,8 +189,42 @@ async def passkey_login_verify(request: Request, settings: SettingsDep, db: DbDe
     return resp
 
 
+async def _app_sign_out(request: Request, db, settings, auth) -> JSONResponse:
+    """The installed app's sign-out (``x-lectern-app: signout``), possibly retried long after the
+    person tapped Sign out offline (docs/offline.md#signing-out).
+
+    It names the session to end by that session's CSRF token, so it works whichever cookie the
+    browser sends by now. ``200 {"signed_out": true}`` is the only answer that means the session
+    is over: the app keeps retrying on anything else (a 502 from the proxy, a 403, ...).
+    """
+    from lectern.security.csrf import _origin_ok
+
+    if not _origin_ok(request, settings):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request blocked")
+    form = await request.form()
+    token = form.get("csrf_token")
+    token = token if isinstance(token, str) and 0 < len(token) <= 128 else None
+    target = db.scalar(select(Session).where(Session.csrf_token == token)) if token else None
+    if target is None and auth is not None:
+        # This browser holds a live session and the app's token names none (sessions are never
+        # deleted, so it never named one): it cannot be confirmed. The app asks again by the
+        # live session's token.
+        raise HTTPException(status.HTTP_409_CONFLICT, "signout_token_missing")
+    # No session named and no live cookie: no session can be used from this browser.
+    if target is not None and not target.revoked:
+        target.revoked = True
+        audit.record(db, "logout", actor_user_id=target.user_id, ip=client_ip(request))
+        db.commit()
+    response = JSONResponse({"signed_out": True})
+    if auth is None or (target is not None and auth.session.id == target.id):
+        clear_session_cookie(response, settings)
+    return response
+
+
 @router.post("/logout", include_in_schema=False)
 async def logout(request: Request, db: DbDep, settings: SettingsDep, auth: AuthOptional):
+    if request.headers.get("x-lectern-app") == "signout":
+        return await _app_sign_out(request, db, settings, auth)
     # Logout is state-changing but low-risk; we still require the CSRF token when a session exists.
     if auth is not None:
         from lectern.security.csrf import verify_csrf
@@ -203,9 +237,8 @@ async def logout(request: Request, db: DbDep, settings: SettingsDep, auth: AuthO
     clear_session_cookie(response, settings)
     # The installed app keeps books, audio, and positions on the device (docs/offline.md). The
     # app deletes them itself before signing out; this also clears them where the browser
-    # supports it, and the HTTP cache, in case the app could not. Not on the app's own fetch
-    # (it has already wiped): WebKit never completes a fetch whose response clears storage
-    # under the service worker that is handling it.
-    if request.headers.get("x-lectern-app") != "signout":
-        response.headers["Clear-Site-Data"] = '"cache", "storage"'
+    # supports it, and the HTTP cache, in case the app could not. (Not on the app's own fetch,
+    # _app_sign_out: WebKit never completes a fetch whose response clears storage under the
+    # service worker that is handling it, and the app has already wiped.)
+    response.headers["Clear-Site-Data"] = '"cache", "storage"'
     return response

@@ -155,7 +155,9 @@ server time of the position being replaced). A losing replay is
   in the ⌘K palette.
 - **Signing out offline.** The server session cannot end until the server hears about it. Until
   then the app shows only **Signed out** (it never uses the session again) and retries on every
-  start, on reconnect, and every 20 s. Signing in on the phone, as anyone, also ends any session
+  start, on reconnect, and every 20 s. It stops only when the server confirms the session is
+  over (`200 {"signed_out": true}`). A 502 from `tailscale serve` while Lectern restarts, a 403,
+  a 5xx, or a Wi-Fi sign-in page are not confirmations, and the app keeps retrying. Signing in on the phone, as anyone, also ends any session
   the browser still holds, so the next person never inherits the previous one's account.
 - **Revoked or expired sessions.** A session that ends any other way (signed out from another
   device, revoked under Security, expired) deletes everything the next time the app reaches
@@ -165,6 +167,13 @@ server time of the position being replaced). A losing replay is
   14 days) after the last time the app reached the server, whichever is sooner. Past it the app
   deletes everything, even if it is left open. If someone else signs in on the phone, the
   previous person's downloads are deleted first.
+  - The deadline is measured on the phone's clock. Setting the clock back extends it, so it
+    bounds a lost or shared phone, not someone set on keeping books they lost access to.
+  - The page enforces it, not the service worker: past the deadline the downloaded files stay
+    in Cache Storage until the app next opens, which deletes them before showing anything.
+- **Several tabs.** The position queue applies one change at a time within a tab. Two tabs (or
+  the installed app and a browser tab on Android) can still interleave; the worst case is a
+  conflict prompt that was not needed.
 
 ## Privacy: what is stored where
 

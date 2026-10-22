@@ -389,3 +389,70 @@ def test_me_bounds_how_long_the_app_works_offline(client, owner, settings):
     me = client.get("/api/me").json()
     until = datetime.fromisoformat(me["offline"]["until"].replace("Z", "+00:00"))
     assert until - now <= timedelta(seconds=settings.session_ttl_seconds)
+
+
+def _app_sign_out(client, csrf: str):
+    return client.post(
+        "/logout",
+        data={"csrf_token": csrf},
+        headers={"origin": ORIGIN, "x-lectern-app": "signout"},
+        follow_redirects=False,
+    )
+
+
+def test_app_sign_out_confirms_only_an_ended_session(client, owner):
+    """The installed app clears its pending sign-out only on 200 {"signed_out": true}
+    (docs/offline.md#signing-out); every other outcome leaves the session as it was."""
+    from lectern.security.sessions import COOKIE_NAME  # noqa: PLC0415
+
+    cookie = client.cookies.get(COOKIE_NAME)
+    # A token naming no session, or none, while a session is live on this browser: the server
+    # cannot say it ended, so it does not confirm (and touches nothing).
+    for token in ("not-this-sessions-token", ""):
+        r = _app_sign_out(client, token)
+        assert r.status_code == 409 and r.json()["detail"] == "signout_token_missing"
+        assert client.get("/api/me").status_code == 200
+    # Cross-site: refused, not confirmed.
+    r = client.post(
+        "/logout",
+        data={"csrf_token": owner["csrf"]},
+        headers={"origin": "https://evil.example", "x-lectern-app": "signout"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 403 and client.get("/api/me").status_code == 200
+    # The real token: ended, confirmed, cookie cleared, no Clear-Site-Data.
+    r = _app_sign_out(client, owner["csrf"])
+    assert r.status_code == 200 and r.json() == {"signed_out": True}
+    assert "clear-site-data" not in r.headers
+    client.cookies.set(COOKIE_NAME, cookie)
+    assert client.get("/api/me").status_code == 401
+    # Retried after it already worked (the answer was lost): still confirmed.
+    assert _app_sign_out(client, owner["csrf"]).json() == {"signed_out": True}
+
+
+def test_app_sign_out_ends_the_named_session_not_a_newer_one(client, owner):
+    """By the time the retry gets through, someone else may have signed in on the phone: the
+    session the app signed out of ends, the newer one stays."""
+    from lectern.security.sessions import COOKIE_NAME  # noqa: PLC0415
+
+    old_cookie, old_csrf = client.cookies.get(COOKIE_NAME), owner["csrf"]
+    guest = make_user(client, owner["csrf"], "guest", "reader")
+    # The old session is still live elsewhere (another browser holding its cookie).
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    other = TestClient(client.app)
+    other.cookies.set(COOKIE_NAME, old_cookie)
+    client.cookies.clear()
+    login(client, "guest", guest["password"])
+    r = _app_sign_out(client, old_csrf)
+    assert r.status_code == 200 and r.json() == {"signed_out": True}
+    assert other.get("/api/me").status_code == 401
+    assert client.get("/api/me").json()["user"]["username"] == "guest"
+
+
+def test_app_sign_out_without_a_live_session_here_is_confirmed(client, owner):
+    from lectern.security.sessions import COOKIE_NAME  # noqa: PLC0415
+
+    client.cookies.delete(COOKIE_NAME)
+    r = _app_sign_out(client, "")
+    assert r.status_code == 200 and r.json() == {"signed_out": True}
