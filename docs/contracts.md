@@ -248,7 +248,7 @@ still waiting after it left reports `transcode.message` (why it is not moving) i
 have a copy). The owner turns copies off for the library with
 `PUT /api/library-settings {"data_saver_enabled": false}` (instance setting, on by default;
 cancels every live transcode job) and an owner or member for one work with
-`PATCH /api/works/{id} {"data_saver_enabled": false}` (migration 0015; cancels its job,
+`PATCH /api/works/{id} {"data_saver_enabled": false}` (migration 0016; cancels its job,
 undoable like any save). Either way `POST …/transcode` answers `409 data_saver_off` or
 `409 data_saver_off_for_work`, `LECTERN_AUDIO_LOW_AUTO` skips the work, and existing copies
 keep playing until deleted. `DELETE /api/works/{id}/transcode` (owner, member) cancels the
@@ -257,7 +257,7 @@ too), returning `{"deleted_bytes"}`; `POST` makes them again. `GET /api/admin/da
 (owner) sums it up for the library: the switch, `local_ffmpeg`, `worker_online`,
 `unavailable`, audiobooks with copies, bytes, and live jobs.
 
-**Who plays which.** `users.data_saver` (migration 0015, `POST /api/me/preferences
+**Who plays which.** `users.data_saver` (migration 0016, `POST /api/me/preferences
 {"data_saver": true}`, off by default) is the account's default. Each device may choose
 otherwise with the player's switch (kept in that browser); "Use account setting" follows the
 account again. With data saver in effect the player streams `variant=low` when the track has

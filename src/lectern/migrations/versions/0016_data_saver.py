@@ -5,8 +5,8 @@ work. Turning it off stops new ones; existing copies stay until deleted.
 ``users.data_saver`` (default off): whether the player and offline downloads use the
 data-saver copy on devices that have not chosen for themselves.
 
-Revision ID: 0015_data_saver
-Revises: 0014_nested_shelves
+Revision ID: 0016_data_saver
+Revises: 0015_job_crashes
 Create Date: 2026-10-22
 
 """
@@ -16,8 +16,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0015_data_saver"
-down_revision = "0014_nested_shelves"
+revision = "0016_data_saver"
+down_revision = "0015_job_crashes"
 branch_labels = None
 depends_on = None
 
