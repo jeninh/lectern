@@ -693,6 +693,10 @@ class Job(Base):
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus, native_enum=False, length=16))
     priority: Mapped[int] = mapped_column(Integer, default=0)  # lower runs first
     attempts: Mapped[int] = mapped_column(Integer, default=0)  # claims so far
+    # Times this job took its worker down with it (an engine that exits the process, a
+    # segfault, an out-of-memory kill), as the worker reports them. CRASH_LIMIT of them fail
+    # the job for good, whatever attempts are left (lectern.align.jobs).
+    crashes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     max_attempts: Mapped[int] = mapped_column(Integer, default=3)
     run_after: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)  # backoff
     payload: Mapped[dict | None] = mapped_column(JSON, default=None)

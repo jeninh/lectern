@@ -28,6 +28,17 @@ KOKORO = "kokoro"
 ELEVENLABS = "elevenlabs"
 ENGINES = (KOKORO, PIPER, ELEVENLABS)
 KOKORO_MODEL = "kokoro-82m"
+# Where KPipeline gets its weights and voices (Hugging Face); `lectern worker-doctor --prepare`
+# downloads them ahead of the first job.
+KOKORO_REPO = "hexgrad/Kokoro-82M"
+KOKORO_FILES = ("config.json", "kokoro-v1_0.pth")
+# Kokoro's English G2P (misaki) needs this spaCy pipeline, pinned in pyproject.toml (the
+# `mac` and `kokoro` extras). Keep the URL in step with it.
+SPACY_MODEL = "en_core_web_sm"
+SPACY_MODEL_URL = (
+    "https://github.com/explosion/spacy-models/releases/download/"
+    "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+)
 KOKORO_SAMPLE_RATE = 24000
 SPEED_MIN, SPEED_MAX = 0.5, 2.0
 
@@ -44,6 +55,34 @@ KOKORO_VOICES = (
 
 class EngineUnavailable(RuntimeError):
     """The engine or voice is not installed here (not retryable on this machine)."""
+
+
+class KokoroSetupMissing(EngineUnavailable):
+    """Kokoro is installed without spaCy's English model (an install from before it was a
+    dependency)."""
+
+
+def forbid_runtime_installs() -> None:
+    """Make a missing spaCy model an ordinary error instead of a run-time install.
+
+    misaki (Kokoro's English G2P) calls ``spacy.cli.download`` when ``en_core_web_sm`` is
+    missing. That shells out to ``pip`` or ``uv pip install``; in a uv tool environment or a
+    container neither works ("No virtual environment found"), and spaCy then calls
+    ``sys.exit()``, which used to take the whole worker down mid-job. The model is a pinned
+    dependency now; this turns an install that predates it into a clear, catchable error."""
+    try:
+        import spacy.cli
+    except ImportError:
+        return
+
+    def refuse(name: str = SPACY_MODEL, *_a, **_k) -> None:
+        raise KokoroSetupMissing(
+            f"spaCy model {name} is not installed, and Lectern does not install packages while "
+            "a job runs. Run `lectern worker-doctor --prepare` (or reinstall with the kokoro / "
+            "mac extra)."
+        )
+
+    spacy.cli.download = refuse
 
 
 class Synth(Protocol):
@@ -138,7 +177,8 @@ class KokoroSynth:
             raise EngineUnavailable("Kokoro is not installed on this server (lectern[kokoro])")
         from kokoro import KPipeline
 
-        self._pipeline = KPipeline(lang_code=voice[:1] or "a")
+        forbid_runtime_installs()
+        self._pipeline = KPipeline(lang_code=voice[:1] or "a", repo_id=KOKORO_REPO)
         self._voice = voice
         self._speed = max(SPEED_MIN, min(SPEED_MAX, speed))
 

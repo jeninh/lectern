@@ -51,6 +51,8 @@ export interface TtsJob {
   spent_credits: number | null;
   eta: { seconds: number; basis: string } | null;
   lease: { worker: string } | null;
+  crashes?: number;
+  waiting?: { summary: string } | null;
 }
 
 export interface AudiobookState {

@@ -30,9 +30,11 @@ connects to it.
    process's arguments, so `ps` does not show it. It is single use and expires, so the copy
    left in the shell history is worthless once used. To keep it out of the history as well,
    run the command without `LECTERN_WORKER_CODE=…`; the installer then asks for the code. It installs [uv](https://docs.astral.sh/uv/) if needed,
-   then `lectern[mac]` as a uv tool (Python 3.12, MLX Whisper, Kokoro, the menu bar), then ffmpeg
-   with Homebrew if Homebrew is present. It exchanges the code for a worker key and installs two
-   launch agents. Nothing runs as root. Run the same command again with a new code to upgrade or
+   then `lectern[mac]` as a uv tool (Python 3.12, MLX Whisper, Kokoro with spaCy's English
+   model, the menu bar), then ffmpeg with Homebrew if Homebrew is present. It then runs
+   `lectern worker-doctor --prepare` (below), which downloads the alignment model, Kokoro's
+   weights, and its voices with progress and tries each engine once. It exchanges the code for
+   a worker key and installs two launch agents. Nothing runs as root. Run the same command again with a new code to upgrade or
    to re-enroll.
 
 Options: `--name`, `--proxy`, `--ca-bundle` (see [School mode](#school-and-proxy-mode)),
@@ -125,6 +127,82 @@ listed in `MLX_REPOS` are loaded); retries and "larger
 model" suggestions treat both the same. No Mac timings are quoted here: none were measured.
 
 Choose with `lectern worker --engine auto|mlx|cpu` or `"engine"` in `config.json`.
+
+## Self-test: `lectern worker-doctor`
+
+The worker offers a capability only after it has worked on this Mac. At every start the agent
+(and `lectern worker`) runs these checks in a child process, downloading missing models first,
+and leaves out every capability that fails. The reason goes to the server and appears under
+**Admin → Workers** as "not offering tts-kokoro: …". Run the checks yourself any time:
+
+```sh
+lectern worker-doctor             # check only; downloads nothing
+lectern worker-doctor --prepare   # download models and voices, repair, then check
+```
+
+| Capability | Checks |
+| --- | --- |
+| `align` | the engine loads (MLX, or faster-whisper), its model is on disk, one second of audio transcribes |
+| `tts-kokoro` | `kokoro` and its English G2P import; spaCy's `en_core_web_sm` is installed; ffmpeg is on the PATH; the weights (`kokoro-v1_0.pth`, `config.json`) and a voice are cached (`--prepare`: every voice Lectern offers); one sentence is synthesized |
+| `transcode` | ffmpeg encodes a fraction of a second of AAC |
+
+`--prepare` also installs the pinned spaCy model when it is missing, and restarts the worker
+service afterwards so it picks up what now passes. Downloads use the worker's proxy and extra
+CA certificates. Set `"self_test": false` in `config.json` (or `lectern worker
+--no-self-test`) to skip the checks at start.
+
+## When a job crashes the worker
+
+An engine that ends the process (a library calling `sys.exit()`, a segfault, an out-of-memory
+kill) no longer takes the job down with the worker:
+
+- A `SystemExit` or other non-`Exception` error from an engine is caught: the job is reported
+  failed right away with the reason (for example `the engine called sys.exit(2)`), the full
+  traceback goes to the worker log, the server queues it again after its usual backoff
+  (30 s, then doubling, at most an hour), and the worker stops offering that capability for
+  30 minutes.
+- A process that dies outright leaves `current-job.json` in the worker's folder. The next start
+  reports that job as crashed, before the self-test and even while paused; the marker stays
+  until the server has answered. A worker that was being stopped (Quit, SIGTERM, `lectern
+  worker-doctor --prepare` restarting it) and was killed before it could hand the job back
+  marks the file `stopping`: the next start hands the job back instead, so a restart never
+  counts as a crash. If the lease already expired the server reclaimed the job on its own (an
+  attempt, not a crash). Segfaults also leave a Python traceback in the log (`faulthandler`).
+- **A job that crashes a worker twice fails for good**, with the last error: "crashed the
+  worker 2 times; last error: …". It shows in the book's Formats card and under Admin →
+  Workers → Recently failed. Retry it once the cause is fixed.
+
+**Admin → Workers → Queue** says why each waiting job waits: the capability it needs, every
+worker and why it cannot take the job (offline, paused and why, not offering it and why, its
+allowlist, busy with another job), the lease holder and expiry, when a backoff ends, attempts,
+crashes, and the last error. `GET /api/jobs?status=active` returns the same as `waiting`.
+
+### Troubleshooting: Kokoro jobs stuck at 0 % ("No virtual environment found")
+
+Workers installed before this fix loop on Kokoro jobs: the worker claims the job, loads
+Kokoro, and exits with `No virtual environment found; run uv venv … or pass --system` in its
+log. Kokoro's English G2P (misaki) needs spaCy's `en_core_web_sm` and, when it is missing,
+tries to install it with `uv pip install` in the middle of the job. A uv tool has no virtual
+environment to install into, and spaCy then calls `sys.exit()`, killing the worker with the
+lease held. The model is now a pinned dependency. To fix an existing Mac, either:
+
+- run the installer again with a new code from Admin → Workers (upgrades everything), or
+- upgrade in place without re-enrolling:
+
+  ```sh
+  uv tool install --force --python 3.12 'lectern[mac] @ git+https://github.com/jeninh/lectern'
+  lectern worker-doctor --prepare     # downloads Kokoro's weights and voices, restarts the worker
+  ```
+
+- or, keeping the installed version, add only the model:
+
+  ```sh
+  uv pip install --python ~/.local/share/uv/tools/lectern/bin/python \
+    https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+  lectern worker-service install      # restart the worker
+  ```
+
+Jobs that already failed stay failed; press **Retry** on the book.
 
 ## Credentials stay job-only
 
