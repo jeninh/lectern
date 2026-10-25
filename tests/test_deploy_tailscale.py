@@ -95,6 +95,9 @@ def test_paths_resolve_against_the_repository_root(compose_config):
     lectern, ts = cfg["services"]["lectern"], cfg["services"]["tailscale"]
     assert Path(lectern["build"]["context"]) == ROOT
     assert lectern["build"]["args"]["LECTERN_EXTRAS"] == ""  # default, non-align image
+    # Empty in .env.example must fall back to the app's defaults, not reach it as "".
+    assert lectern["environment"]["LECTERN_ALIGN_MODEL"] == "small"
+    assert lectern["environment"]["LECTERN_ALIGN_THREADS"] == "0"
     assert lectern["user"] == "1000:1000"
     mounts = {m["target"]: m for m in lectern["volumes"] + ts["volumes"]}
     assert Path(mounts["/data"]["source"]) == ROOT / "data" / "lectern"
@@ -124,6 +127,9 @@ def test_env_overrides_apply(compose_config):
     assert lectern["user"] == "1001:1002"
     assert lectern["environment"]["LECTERN_BASE_URL"] == "https://books.tail1234.ts.net"
     assert lectern["environment"]["LECTERN_LOG_LEVEL"] == "DEBUG"
+    assert lectern["build"]["args"]["LECTERN_EXTRAS"] == "align tts"
+    assert lectern["environment"]["LECTERN_ALIGN_MODEL"] == "base"
+    assert lectern["environment"]["LECTERN_ALIGN_THREADS"] == "4"
     assert ts["environment"]["TS_HOSTNAME"] == "books"
     assert ts["environment"]["TS_AUTHKEY"] == "tskey-auth-not-a-real-key"
 

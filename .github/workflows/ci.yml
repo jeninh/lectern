@@ -111,25 +111,28 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        extras: ["", "align", "tts"]
+        # "align tts": both on one server (a Pi aligning and narrating while the Mac is off).
+        extras: ["", "align", "tts", "align tts"]
     steps:
       - uses: actions/checkout@v4
-      - run: docker build --build-arg LECTERN_EXTRAS=${{ matrix.extras }} -t lectern:ci .
+      - run: docker build --build-arg "LECTERN_EXTRAS=${{ matrix.extras }}" -t lectern:ci .
       - name: CLI and optional transcription import
         run: |
           docker run --rm lectern:ci lectern worker --help
           docker run --rm lectern:ci lectern restore --help > /dev/null
           docker run --rm lectern:ci restic version
-          docker run --rm lectern:ci python -c "from lectern.align.transcribe import transcription_available as t; print('faster-whisper:', t()); assert t() == ('${{ matrix.extras }}' == 'align')"
-      - name: Piper (generated audiobooks) is in the tts image only
-        run: docker run --rm lectern:ci python -c "from lectern.tts.engines import piper_installed as p; print('piper:', p()); assert p() == ('${{ matrix.extras }}' == 'tts')"
+          docker run --rm lectern:ci python -c "from lectern.align.transcribe import transcription_available as t; print('faster-whisper:', t()); assert t() == ('align' in '${{ matrix.extras }}'.split())"
+      - name: Piper (generated audiobooks) is in the tts images only
+        run: docker run --rm lectern:ci python -c "from lectern.tts.engines import piper_installed as p; print('piper:', p()); assert p() == ('tts' in '${{ matrix.extras }}'.split())"
       - name: Generated covers render in the image (bundled fonts + Noto CJK)
         run: docker run --rm lectern:ci python -c "from lectern import covergen as c; assert c._cjk_font_files(); [c.render_jpeg(c.design_for(t, a)) for t, a in (('吾輩は猫である', '夏目漱石'), ('الكتاب المقدس', ''), ('ⲁⲓⲝⲟⲙ', ''))]"
-  # The image a Raspberry Pi builds from deploy/tailscale/compose.yaml: default extras,
-  # linux/arm64 under QEMU. Blocking like every other job; nothing is pushed.
+  # The images a Raspberry Pi builds from deploy/tailscale/compose.yaml, linux/arm64 under
+  # QEMU: the default extras, and "align,tts" (comma form) for a Pi that aligns and narrates
+  # by itself when the Mac worker is off. Blocking like every other job; nothing is pushed.
   arm64:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Two emulated builds: the default image, then align+tts.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Validate deploy/tailscale (compose and serve.json)
@@ -187,3 +190,22 @@ jobs:
           docker logs smoke 2>&1 | grep -A3 "FIRST-RUN SETUP" | grep -q "https://lectern.tail1234.ts.net/setup?token="
           sudo test -s "$RUNNER_TEMP/smoke/data/lectern.db"   # written as UID 1001 via the bind mount
           docker rm -f smoke
+      - name: Build linux/arm64 (align and tts)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: lectern:arm64-align-tts
+          build-args: LECTERN_EXTRAS=align,tts
+          cache-from: type=gha,scope=lectern-arm64-align-tts
+          cache-to: type=gha,scope=lectern-arm64-align-tts,mode=max
+      - name: Smoke test align and tts on arm64 (emulated)
+        run: |
+          set -eu
+          test "$(docker image inspect lectern:arm64-align-tts --format '{{.Architecture}}')" = arm64
+          docker run --rm lectern:arm64-align-tts python -c "from lectern.align.transcribe import transcription_available as t; assert t()"
+          docker run --rm lectern:arm64-align-tts python -c "from lectern.tts.engines import piper_installed as p; assert p()"
+          # Import the native engines, not just the package metadata: CTranslate2 and Piper's ONNX runtime.
+          docker run --rm lectern:arm64-align-tts python -c "import ctranslate2, faster_whisper, onnxruntime, piper"
