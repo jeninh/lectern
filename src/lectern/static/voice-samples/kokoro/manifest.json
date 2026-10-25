@@ -1,0 +1,188 @@
+{
+ "speed": 1.0,
+ "codec": "aac",
+ "voices": {
+  "af_heart": {
+   "file": "af_heart.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 4.95,
+   "bytes": 24966
+  },
+  "af_bella": {
+   "file": "af_bella.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.42,
+   "bytes": 29460
+  },
+  "af_nicole": {
+   "file": "af_nicole.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 7.45,
+   "bytes": 39261
+  },
+  "af_sarah": {
+   "file": "af_sarah.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.17,
+   "bytes": 28194
+  },
+  "af_sky": {
+   "file": "af_sky.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.08,
+   "bytes": 27171
+  },
+  "am_adam": {
+   "file": "am_adam.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.05,
+   "bytes": 28456
+  },
+  "am_michael": {
+   "file": "am_michael.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.62,
+   "bytes": 30112
+  },
+  "am_fenrir": {
+   "file": "am_fenrir.m4a",
+   "language": "en-us",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.05,
+   "bytes": 25356
+  },
+  "bf_emma": {
+   "file": "bf_emma.m4a",
+   "language": "en-gb",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 4.8,
+   "bytes": 23581
+  },
+  "bf_isabella": {
+   "file": "bf_isabella.m4a",
+   "language": "en-gb",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 4.78,
+   "bytes": 24330
+  },
+  "bm_george": {
+   "file": "bm_george.m4a",
+   "language": "en-gb",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.75,
+   "bytes": 30246
+  },
+  "bm_lewis": {
+   "file": "bm_lewis.m4a",
+   "language": "en-gb",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.9,
+   "bytes": 30011
+  },
+  "bm_fable": {
+   "file": "bm_fable.m4a",
+   "language": "en-gb",
+   "text": "Once upon a time, in a quiet town by the sea, there lived a curious reader.",
+   "duration_s": 5.0,
+   "bytes": 26368
+  },
+  "ef_dora": {
+   "file": "ef_dora.m4a",
+   "language": "es",
+   "text": "Érase una vez, en un pueblo tranquilo junto al mar, una lectora muy curiosa.",
+   "duration_s": 4.58,
+   "bytes": 23804
+  },
+  "em_alex": {
+   "file": "em_alex.m4a",
+   "language": "es",
+   "text": "Érase una vez, en un pueblo tranquilo junto al mar, una lectora muy curiosa.",
+   "duration_s": 4.67,
+   "bytes": 25354
+  },
+  "ff_siwis": {
+   "file": "ff_siwis.m4a",
+   "language": "fr-fr",
+   "text": "Il était une fois, dans un village tranquille au bord de la mer, une lectrice curieuse.",
+   "duration_s": 5.38,
+   "bytes": 28306
+  },
+  "hf_alpha": {
+   "file": "hf_alpha.m4a",
+   "language": "hi",
+   "text": "एक समय की बात है, समुद्र के किनारे एक शांत गाँव में एक जिज्ञासु पाठक रहता था।",
+   "duration_s": 7.33,
+   "bytes": 36857
+  },
+  "hm_omega": {
+   "file": "hm_omega.m4a",
+   "language": "hi",
+   "text": "एक समय की बात है, समुद्र के किनारे एक शांत गाँव में एक जिज्ञासु पाठक रहता था।",
+   "duration_s": 7.4,
+   "bytes": 36852
+  },
+  "if_sara": {
+   "file": "if_sara.m4a",
+   "language": "it",
+   "text": "C'era una volta, in un paese tranquillo vicino al mare, una lettrice molto curiosa.",
+   "duration_s": 5.3,
+   "bytes": 31034
+  },
+  "im_nicola": {
+   "file": "im_nicola.m4a",
+   "language": "it",
+   "text": "C'era una volta, in un paese tranquillo vicino al mare, una lettrice molto curiosa.",
+   "duration_s": 5.85,
+   "bytes": 31683
+  },
+  "jf_alpha": {
+   "file": "jf_alpha.m4a",
+   "language": "ja",
+   "text": "むかしむかし、海のそばの静かな町に、本が大好きな人が住んでいました。",
+   "duration_s": 6.55,
+   "bytes": 34120
+  },
+  "jm_kumo": {
+   "file": "jm_kumo.m4a",
+   "language": "ja",
+   "text": "むかしむかし、海のそばの静かな町に、本が大好きな人が住んでいました。",
+   "duration_s": 7.03,
+   "bytes": 38464
+  },
+  "pf_dora": {
+   "file": "pf_dora.m4a",
+   "language": "pt-br",
+   "text": "Era uma vez, numa cidade tranquila à beira-mar, uma leitora muito curiosa.",
+   "duration_s": 4.53,
+   "bytes": 24280
+  },
+  "pm_alex": {
+   "file": "pm_alex.m4a",
+   "language": "pt-br",
+   "text": "Era uma vez, numa cidade tranquila à beira-mar, uma leitora muito curiosa.",
+   "duration_s": 4.55,
+   "bytes": 24551
+  },
+  "zf_xiaobei": {
+   "file": "zf_xiaobei.m4a",
+   "language": "zh",
+   "text": "很久以前，在海边一个安静的小镇上，住着一位爱读书的人。",
+   "duration_s": 7.03,
+   "bytes": 32493
+  },
+  "zm_yunjian": {
+   "file": "zm_yunjian.m4a",
+   "language": "zh",
+   "text": "很久以前，在海边一个安静的小镇上，住着一位爱读书的人。",
+   "duration_s": 5.9,
+   "bytes": 27050
+  }
+ }
+}

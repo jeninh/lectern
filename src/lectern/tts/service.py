@@ -3,6 +3,7 @@ queueing a narration, and retrying one (routes in ``lectern.routes.api.tts``).""
 
 from __future__ import annotations
 
+import json
 import shutil
 from functools import lru_cache
 from pathlib import Path
@@ -119,6 +120,28 @@ def kokoro_where(db: Session, settings: Settings) -> str | None:
     return "worker" if queue.capability_online(db, "tts-kokoro") else None
 
 
+KOKORO_SAMPLES = Path(__file__).resolve().parents[1] / "static" / "voice-samples" / "kokoro"
+
+
+@lru_cache(maxsize=1)
+def _kokoro_samples() -> dict:
+    try:
+        voices = json.loads((KOKORO_SAMPLES / "manifest.json").read_text())["voices"]
+        return {v: s for v, s in voices.items() if (KOKORO_SAMPLES / s["file"]).is_file()}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def kokoro_sample(voice: str) -> dict | None:
+    """The built-in clip of a Kokoro voice (scripts/kokoro_samples.py): a standard sentence at
+    speed 1.0, served from /static, so it plays with no engine on this server or worker."""
+    s = _kokoro_samples().get(voice)
+    if not s:
+        return None
+    return {"url": f"/static/voice-samples/kokoro/{s['file']}", "text": s["text"],
+            "duration_s": s["duration_s"]}  # fmt: skip
+
+
 def catalog(db: Session, settings: Settings, user: User) -> dict:
     piper_voices = [v.json() for v in eng.piper_voices(settings)]
     piper_ok = eng.piper_installed() and bool(piper_voices)
@@ -140,7 +163,8 @@ def catalog(db: Session, settings: Settings, user: User) -> dict:
                 else "Runs on this server."
             ),
             "voices": [
-                {"id": v, "name": v, "language": eng.kokoro_lang(v)} for v in eng.KOKORO_VOICES
+                {"id": v, "name": v, "language": eng.kokoro_lang(v), "sample": kokoro_sample(v)}
+                for v in eng.KOKORO_VOICES
             ],
             "default_voice": "af_heart",
             "model": eng.KOKORO_MODEL,
