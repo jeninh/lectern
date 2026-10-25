@@ -12,6 +12,9 @@ filing. A work can hold an EPUB and a PDF of the same book side by side.
 
 A second file of the same format in one work is `book-<sha256 prefix>.<ext>`.
 
+DRM-free MOBI and AZW3 are converted to EPUB at ingest and filed as EPUBs; DRM-protected ones
+are refused ([kindle.md](kindle.md)).
+
 **CBR is not supported.** Reading RAR safely needs a maintained RAR decoder, and the Python
 options either run the non-free `unrar` program or go through libarchive's RAR code. Convert a
 CBR to CBZ (unpack it and zip the images) before adding it. Uploads refuse `.cbr` with a
@@ -115,5 +118,5 @@ EPUB as before.
 
 The MCP upload tool goes through the same resumable upload and review API, so it takes the
 same formats. Its description should list them from `lectern.ingest.formats.FORMATS_SUMMARY`
-("EPUB, PDF, or CBZ comics (CBR is not supported: convert it to CBZ), and M4B/M4A, MP3,
-OGG/Opus, or FLAC audiobooks") and the media types from `lectern.uploads.MEDIA_TYPES`.
+("EPUB, PDF, or CBZ comics (CBR is not supported: convert it to CBZ), DRM-free MOBI or AZW3
+(converted to EPUB), and M4B/M4A, MP3, OGG/Opus, or FLAC audiobooks") and the media types from `lectern.uploads.MEDIA_TYPES`.

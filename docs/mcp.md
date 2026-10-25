@@ -121,9 +121,10 @@ Errors come back as tool errors the AI app can read, for example
 `forbidden: needs file scope. This AI key does not have it; its owner can add it in Lectern
 under Devices → AI tools → Edit.`
 
-- `upload_book`: put a book or audiobook file (`.epub`, `.pdf`, `.cbz`, `.mp3`, `.m4b`/`.m4a`,
-  `.ogg`/`.opus`, `.flac`) into **Review before filing**. CBR is not supported; convert it to
-  CBZ ([pdf-comics.md](pdf-comics.md)). The file's first bytes must match its extension. Files up to 2 MiB go in one call as base64. Larger
+- `upload_book`: put a book or audiobook file (`.epub`, `.pdf`, `.cbz`, `.mobi`, `.azw3`,
+  `.mp3`, `.m4b`/`.m4a`, `.ogg`/`.opus`, `.flac`) into **Review before filing**. CBR is not
+  supported; convert it to CBZ ([pdf-comics.md](pdf-comics.md)). MOBI and AZW3 are converted to
+  EPUB; DRM-protected ones are refused with `drm_protected` ([kindle.md](kindle.md)). The file's first bytes must match its extension. Files up to 2 MiB go in one call as base64. Larger
   files are sent in 2 MiB chunks: the first call gives `total_size` and the whole file's
   `sha256` and returns an `upload_id`; each later call gives `upload_id`, `offset`, and the
   chunk. A call with only `upload_id` reports how far the upload got (resume). This is the

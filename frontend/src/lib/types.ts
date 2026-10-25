@@ -546,6 +546,8 @@ export interface ImportFileInfo {
   track_no: number | null;
   disc_no: number | null;
   chapters: number;
+  /** "MOBI" or "AZW3" when the upload was converted to this EPUB. */
+  converted_from?: string | null;
 }
 
 export interface ImportInfo {

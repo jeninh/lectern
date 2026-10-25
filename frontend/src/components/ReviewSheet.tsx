@@ -345,7 +345,7 @@ function ImportCard({ imp, siblings, cell, onUnsaved }: { imp: ImportInfo; sibli
           {imp.files.map((f) => (
             <li key={f.id}>
               <span className="name" title={f.filename}>{f.filename}</span>
-              <span className="hint">{bytes(f.size)}{f.duration_s ? ` · ${clock(f.duration_s)}` : ""}{f.status === "duplicate" ? " · duplicate" : ""}</span>
+              <span className="hint">{f.converted_from ? `Converted from ${f.converted_from} to EPUB · ` : ""}{bytes(f.size)}{f.duration_s ? ` · ${clock(f.duration_s)}` : ""}{f.status === "duplicate" ? " · duplicate" : ""}</span>
               {imp.files.length > 1 && (
                 <button className="icon-btn ghost sm" aria-label={`Remove ${f.filename} from this book`} title="Remove" onClick={() => removeFile(f.id)}>
                   <Close />
