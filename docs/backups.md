@@ -121,7 +121,8 @@ directory and library. It:
   always go to `data/lectern/pre-restore-<time>/`; replaced library files go to its `library/`
   folder, unless you skip that copy (below). Library files are never otherwise deleted;
 - **rolls back** if anything fails part-way (a full disk, an I/O error): the server is left
-  exactly as it was, including folders the restore had created, and the error says so.
+  exactly as it was, including folders the restore had created, and the error says so;
+- **can be finished or undone after a crash** or power loss part-way through (below).
 
 **Skipping the pre-restore copy.** `--no-pre-restore-copy` (or
 `LECTERN_RESTORE_KEEP_REPLACED=0` in the server's environment) keeps each replaced library
@@ -131,20 +132,28 @@ key, and sentence maps are always kept in `pre-restore-*/`.
 
 ### If a restore is interrupted
 
-A crash, power loss, or `kill -9` **during the swap** (the last, short step) is not recovered
-automatically ([#16](https://github.com/jeninh/lectern/issues/16)): files already
-swapped in stay, and the ones they replaced are aside. Before that step nothing has changed.
-To recover by hand, with Lectern stopped:
+Before it stages a single file, the restore writes its plan to
+`data/lectern/restore-journal.json` (flushed to disk), and removes it once everything is in
+place. If a crash, power loss, or `kill -9` stops it part-way, the journal stays, and:
 
-1. **Simplest:** run the same `lectern restore` again. It replaces whatever is there and
-   leaves the half-done state in a new `pre-restore-*` folder.
-2. **To go back to how it was instead:** move everything in the newest
-   `data/lectern/pre-restore-<time>/` back over `data/lectern/` (`lectern.db`, `secret_key`,
-   `align/`, `revisions/`, `lectern.db-wal` / `-shm` if present), and its `library/` folder
-   back over the library. With `--no-pre-restore-copy`, the originals of library files are
-   next to them as `.<name>.replaced-restore-<time>`: rename each back to `<name>`.
-3. Delete leftover staged copies, named `.<name>.restore-<time>`, in `data/lectern/` and the
-   library: `find data/lectern library -name '.*.restore-*'`.
+- **Lectern refuses to start** (the log says why), and a new `lectern restore` refuses too;
+- `lectern restore --resume` **finishes** the restore: it swaps in the rest of the staged
+  copies, then tidies up as a finished restore would;
+- `lectern restore --undo` **puts everything back** exactly as it was before the restore,
+  byte for byte: the originals come back from `pre-restore-<time>/` (or from
+  `.<name>.replaced-restore-<time>` with `--no-pre-restore-copy`), and the staged copies, the
+  folders the restore created, and its scratch copy of the backup are removed.
+
+Run either with Lectern stopped, the same way as the restore (below). Both are safe to run
+again if they are interrupted themselves. A restore stopped while it was still copying files
+had changed nothing; `--undo` clears what it left. One stopped after every file was already
+swapped in, while it was tidying up, can only be resumed.
+
+Neither the journal nor the files are trusted blindly: `--undo` and `--resume` refuse a
+journal that names anything outside the data directory and the library. Each step's progress
+is read from the files themselves (a rename survives a power cut whole), and a replaced
+library file kept on another volume (a Pi with the library on USB) is copied there in full
+and flushed before the original is deleted.
 
 The server migrates the schema on its next start. With the Tailscale compose file
 (`lectern-compose` is the alias from the guide):
@@ -155,6 +164,8 @@ lectern-compose stop lectern
 lectern-compose run --rm --no-deps lectern lectern backup --list
 lectern-compose run --rm --no-deps lectern lectern restore            # the newest
 lectern-compose run --rm --no-deps lectern lectern restore 1a2b3c4d   # or a given one
+lectern-compose run --rm --no-deps lectern lectern restore --resume   # after a crash: finish
+lectern-compose run --rm --no-deps lectern lectern restore --undo     # or put it all back
 lectern-compose start lectern
 ```
 
@@ -178,4 +189,6 @@ The restore path is tested in CI: `tests/test_backups.py` backs up a running ser
 without library files), changes and deletes things, runs `lectern restore`, and signs in to
 the restored server. It also covers a crafted manifest, symlinks in the library and in a
 snapshot, paths that escape the library, the free-space check, unreadable files, a busy
-target, and a restore that fails half-way.
+target, a restore that fails half-way, and one killed with `kill -9` half-way through the
+swap (with the library on the same and on another volume), then undone byte for byte or
+resumed.
