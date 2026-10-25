@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Claude Code PostToolUse hook (installed by .agents/setup): sends a Hackatime heartbeat
+# for the file the tool acted on, falling back to the working directory.
+input=$(cat)
+entity=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // .tool_input.path // .cwd // empty' <<<"$input" 2>/dev/null)
+write=()
+case $(jq -r '.tool_name // empty' <<<"$input" 2>/dev/null) in
+Edit | MultiEdit | Write | NotebookEdit) write=(--write) ;;
+esac
+"$HOME/.local/bin/wakatime-cli" --entity "${entity:-$PWD}" --project lectern \
+	--plugin "claude-code lectern-hackatime-hook/1" "${write[@]}" >/dev/null 2>&1 &
+exit 0

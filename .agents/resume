@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Amp orb resume hook: runs after the thread's secrets are applied, on start and every wake.
+# Writes ~/.wakatime.cfg for Hackatime from the HACKATIME_API_KEY secret. Never print the key.
+set -euo pipefail
+
+if [ -z "${HACKATIME_API_KEY:-}" ]; then
+	echo "HACKATIME_API_KEY is not set; Hackatime reporting is disabled." >&2
+	exit 0
+fi
+
+umask 077
+cat >"$HOME/.wakatime.cfg.tmp" <<EOF
+[settings]
+api_url = https://hackatime.hackclub.com/api/hackatime/v1
+api_key = ${HACKATIME_API_KEY}
+heartbeat_rate_limit_seconds = 30
+EOF
+mv "$HOME/.wakatime.cfg.tmp" "$HOME/.wakatime.cfg"
