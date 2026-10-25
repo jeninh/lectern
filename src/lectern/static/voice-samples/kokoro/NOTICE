@@ -1,0 +1,7 @@
+These voice samples were generated with Kokoro-82M v1.0 (https://huggingface.co/hexgrad/Kokoro-82M)
+by scripts/kokoro_samples.py. Kokoro-82M's weights and voices are licensed under the Apache
+License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+Kokoro v1.0 was trained in part on CC BY audio: Koniwa (CC BY 3.0,
+https://github.com/koniwa/koniwa) and SIWIS (CC BY 4.0,
+https://datashare.ed.ac.uk/handle/10283/2353).

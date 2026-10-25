@@ -35,6 +35,7 @@ from lectern.models import (
     Sentence,
 )
 from lectern.tts import elevenlabs as el
+from lectern.tts import engines as eng
 from lectern.tts import jobs as tj
 from lectern.tts import script as sc
 from lectern.tts.runner import TTSRunner
@@ -310,6 +311,24 @@ def test_local_claim_routes_by_engine_and_defers(client, owner, settings, tmp_pa
         claimed = tj.claim_local(db, {"kokoro"})
         assert claimed is not None and claimed[0].status == JobStatus.LEASED
         assert tj.claim_local(db, {"kokoro"}) is None  # one lease
+
+
+def test_every_kokoro_voice_has_a_built_in_sample_without_any_engine(
+    client, owner, settings, tmp_path
+):
+    """Kokoro is neither on this server nor on a worker, yet each voice has a clip that plays
+    (run scripts/kokoro_samples.py when the voice list changes)."""
+    work_id = _work(settings, owner, client, tmp_path)
+    state = client.get(f"/api/works/{work_id}/audiobook").json()
+    kokoro = next(e for e in state["engines"] if e["id"] == "kokoro")
+    assert kokoro["runs_on"] is None
+    assert [v["id"] for v in kokoro["voices"]] == list(eng.KOKORO_VOICES)
+    for v in kokoro["voices"]:
+        clip = client.get(v["sample"]["url"])
+        assert clip.status_code == 200 and clip.content[4:8] == b"ftyp", v["id"]
+    by_id = {v["id"]: v["sample"]["text"] for v in kokoro["voices"]}
+    assert by_id["af_heart"] == by_id["bm_george"] != by_id["ff_siwis"]
+    assert "海" in by_id["jf_alpha"] and "海" in by_id["zm_yunjian"]
 
 
 def test_readers_cannot_make_audiobooks(client, owner, settings, tmp_path):
