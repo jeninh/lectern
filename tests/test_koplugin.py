@@ -592,27 +592,33 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     plugin, sdir = root / "plugins" / "lectern.koplugin", root / "settings"
     secret = (plugin / "lectern_bootstrap.txt").read_text().strip()
 
-    # Wi-Fi off at first start: nothing happens, nothing is shown, the secret stays.
-    out = lua(plugin, sdir, "setup", "offline")
-    assert out["pending"] and not out["paired"] and out["secret_on_disk"]
-    assert out["messages"] == 0
-    assert out["status_line"] == "Setting up: waiting for the network"
-
-    # Wi-Fi up but Lectern not reachable yet (Tailscale still connecting): setup keeps
-    # retrying with backoff instead of waiting for the next Wi-Fi event, quietly.
+    # Lectern not reachable at first start (Tailscale still connecting, or Wi-Fi off and
+    # NetworkMgr saying so): setup tries, fails, and retries with backoff, quietly; the secret
+    # stays.
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         dead = f"http://127.0.0.1:{sock.getsockname()[1]}"
     early = tmp_path / "early"
     early.mkdir()
     (early / "lectern.lua").write_text(f'return {{ ["server_url"] = "{dead}" }}\n')
-    out = lua(plugin, early, "setup-retry")
-    assert out["pending"] and out["delays"] == [30, 60, 120] and out["messages"] == 0
-    assert out["after_reconnect"] == 3
+    for network in ("online", "offline"):
+        out = lua(plugin, early, "setup-retry", network)
+        assert out["pending"] and out["delays"] == [30, 60, 120] and out["messages"] == 0
+        assert out["after_reconnect"] == 3
+        assert out["status_line"] == "Setting up: will retry (connection refused)"
     assert (plugin / "lectern_bootstrap.txt").exists()
 
-    out = lua(plugin, sdir, "setup")
-    assert out["paired"] and not out["secret_on_disk"]
+    # Sync now while it is not reachable says so, with the real error and the next try.
+    out = lua(plugin, early, "sync-now", "offline")
+    assert out["messages"] == 1 and out["prompts"] == 0
+    assert "not reachable yet (connection refused)" in out["message"]
+    assert out["retry_in"] == 60 and "by itself in 1 min" in out["message"]
+
+    # NetworkMgr says offline but the network works (Wi-Fi managed outside KOReader on a
+    # jailbroken Kindle, issue #45): setup still happens at first start.
+    out = lua(plugin, sdir, "setup", "offline")
+    assert out["paired"] and not out["secret_on_disk"] and not out["pending"]
+    assert out["messages"] == 1
     assert (plugin / "lectern_bootstrap.txt").exists() is False
     s = out["settings"]
     k = out["kosync"]
@@ -627,11 +633,23 @@ def test_plugin_end_to_end(live, settings, tmp_path):
         assert db.scalar(select(DeviceBootstrap.used_at)) is not None
     assert httpx.get(f"{base}/users/auth", headers=ko("owner", s["userkey"])).status_code == 200
 
-    # Offline in the reader: suspend and open neither prompt nor reach kosync; the push waits.
-    out = lua(plugin, sdir, "offline-push")
+    # NetworkMgr says offline but the network works: the push goes out anyway, quietly.
+    looks_offline = tmp_path / "looks-offline"
+    shutil.copytree(sdir, looks_offline)
+    out = lua(plugin, looks_offline, "offline-push")
+    assert out["kosync_calls"] == 0 and out["prompts"] == 0 and out["messages"] == 0
+    assert out["outbox"] == 0 and out.get("retry_in") is None
+    assert out["settings"]["last_push_at"]
+
+    # Offline in the reader: suspend and open neither prompt nor reach kosync; the push
+    # waits, a retry is scheduled, and later pushes wait for it instead of trying each time.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    out = lua(plugin, sdir, "offline-push", dead)
     assert out["auto_sync"] is True and out["pages_before_update"] == 10
     assert out["kosync_calls"] == 0 and out["prompts"] == 0 and out["messages"] == 0
-    assert out["outbox"] == 1
+    assert out["outbox"] == 1 and out["retry_in"] == 30
     assert out["status_line"] == "Offline · 1 position waiting to send"
 
     # Wi-Fi back: the queued position goes out quietly.
@@ -679,6 +697,24 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     out = lua(plugin, sdir, "pair", base + "/", "owner", code)
     assert out["message"].startswith("Paired") and out["kosync"]["userkey"] != s["userkey"]
     assert httpx.get(f"{base}/users/auth", headers=ko("owner", s["userkey"])).status_code == 401
+
+    # Sync now with NetworkMgr saying offline still syncs and says so (no Wi-Fi prompt).
+    out = lua(plugin, sdir, "sync-now", "offline")
+    assert out["prompts"] == 0 and out["message"].startswith("Synced with Lectern.")
+
+    # Setup failed at start, then Sync now sets up: the start's backoff is dropped, so the
+    # next automatic push goes out at once even while NetworkMgr says offline.
+    z = http.post(f"/api/devices/{dev_id}/koplugin", json={"server_url": base})
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        (plugin / "lectern_bootstrap.txt").write_bytes(
+            zf.read("lectern.koplugin/lectern_bootstrap.txt")
+        )
+    late = tmp_path / "late"
+    late.mkdir()
+    (late / "lectern.lua").write_text(f'return {{ ["server_url"] = "{dead}" }}\n')
+    out = lua(plugin, late, "sync-now", "offline", "reachable-now")
+    assert out["message"].startswith("Lectern is set up.")
+    assert out["outbox_after_push"] == 0 and out["tasks_after_push"] == 0
 
     # Revoked in the web app: Sync now says so plainly.
     http.post(f"/api/devices/{dev_id}/revoke")

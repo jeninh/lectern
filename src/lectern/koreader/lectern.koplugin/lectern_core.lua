@@ -191,6 +191,7 @@ function Core:applyCredentials(payload, server_url)
     s:saveSetting("paired_at", self.now())
     s:saveSetting("last_ok_at", self.now())
     s:delSetting("last_error")
+    s:delSetting("setup_error")
     s:flush()
     self.configure(self:config())
     return true
@@ -246,18 +247,28 @@ end
 
 --- First start: trade the zip's setup secret for this device's credentials.
 -- Returns "ok", "none" (no secret on disk), "invalid" (used, expired, or revoked: the secret
--- is deleted and Pair is the way forward), or "retry" (offline, rate limited, server error).
+-- is deleted and Pair is the way forward), or "retry" and the reason (connection error, rate
+-- limited, server error). The request is always attempted: whether the network is up is
+-- decided by the request itself, not by KOReader's NetworkMgr, which stays "offline" on
+-- devices whose Wi-Fi is managed outside KOReader.
 function Core:bootstrap()
     local secret = self:bootstrapSecret()
     if not secret then return "none" end
     self._bootstrap_secret = secret
+    local function postpone(why)
+        self:log("info", "setup postponed:", why)
+        self.store:saveSetting("setup_error", why)
+        self.store:saveSetting("last_attempt_at", self.now())
+        self.store:flush()
+        return "retry", why
+    end
     local server = self:serverUrl()
     if not server then
         self:log("warn", "setup secret present but no server address in", Core.DEVICE_FILE)
-        return "retry"
+        return postpone("no server address")
     end
     local code, data, err = self:request("POST", "/koplugin/bootstrap", {
-        server_url = server, json = { secret = secret }, timeout = { 5, 15 },
+        server_url = server, json = { secret = secret }, timeout = { 3, 10 },
     })
     if code == 200 and type(data) == "table" then
         if self:applyCredentials(data, str(data.server_url) or server) then
@@ -265,15 +276,14 @@ function Core:bootstrap()
             self:log("info", "set up as device", str(data.label) or "?", gone and "" or "(could not delete setup file)")
             return "ok"
         end
-        return "retry"
+        return postpone("unexpected answer")
     end
     if code == 410 or code == 400 or code == 401 or code == 422 then
         self:deleteBootstrap()
         self:log("warn", "setup secret refused by the server (HTTP " .. code .. "); pair with a code instead")
         return "invalid"
     end
-    self:log("info", "setup postponed:", code and ("HTTP " .. code) or (err or "offline"))
-    return "retry"
+    return postpone(code and ("HTTP " .. code) or (err or "offline"))
 end
 
 --- Lectern → Pair: a 6-digit code from the web app. Returns "ok", "invalid", or "retry".
@@ -307,7 +317,7 @@ function Core:status()
         return data
     end
     if code == 401 then return nil, "unauthorized" end
-    return nil, code and ("server " .. code) or "offline"
+    return nil, code and ("server " .. code) or (err or "offline")
 end
 
 -- --- outbox: progress waiting for Wi-Fi or Tailscale ---------------------------------------
@@ -429,7 +439,11 @@ end
 function Core:statusLine(online, ago)
     local box = #self:outbox()
     if not self:isPaired() then
-        if self:bootstrapSecret() then return "Setting up: waiting for the network" end
+        if self:bootstrapSecret() then
+            local why = self.store:readSetting("setup_error")
+            if why then return "Setting up: will retry (" .. why .. ")" end
+            return "Setting up: waiting for the network"
+        end
         return "Not paired"
     end
     local err = self.store:readSetting("last_error")
