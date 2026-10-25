@@ -175,6 +175,20 @@ class Settings(BaseSettings):
     # server. On here, it cannot be turned off in Admin; off, the owner may still turn it on there.
     offline: bool = False
 
+    # Text recognition for scanned PDFs (docs/ocr.md). The server's runner uses Tesseract when
+    # it is on the PATH (the image has it); off = OCR jobs wait for a worker that has it.
+    ocr_local_runner: bool = True
+    # Queue OCR for every scanned PDF by itself (off = only when someone asks for it).
+    ocr_auto: bool = True
+    tesseract_path: str = "tesseract"
+    # Resolution pages are recognised at (at most 40 megapixels a page).
+    ocr_dpi: int = Field(default=300, ge=100, le=600)
+    # Address-space cap of each page's child (and of Tesseract in it), MiB. One page at a
+    # time, so this bounds what OCR can take on a Raspberry Pi.
+    ocr_memory_limit_mb: int = Field(default=1536, ge=256, le=65536)
+    # Threads Tesseract may use for one page (OMP_THREAD_LIMIT).
+    ocr_threads: int = Field(default=1, ge=1, le=64)
+
     log_level: str = "INFO"
 
     @field_validator("base_url")

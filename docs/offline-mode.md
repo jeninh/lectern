@@ -72,7 +72,7 @@ download that model too.
 Offline mode is enforced inside Lectern's Python processes: the server (on the standard
 asyncio event loop, which the hook sees; uvloop would bypass it) and its alignment child, plus
 `lectern align-transcribe`, `align-bench`, `backup`, and `restore` when `LECTERN_OFFLINE=1`.
-Programs Lectern runs that are not Python (ffmpeg, restic), the Mac worker's tools
+Programs Lectern runs that are not Python (ffmpeg, restic, Tesseract), the Mac worker's tools
 (`worker-doctor`), and anything else in the container are outside it. Firewall rules in the
 container's network namespace close that gap: new outbound connections are rejected, while
 answers to incoming connections and loopback still work.

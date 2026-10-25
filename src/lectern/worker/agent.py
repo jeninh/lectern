@@ -44,9 +44,11 @@ def build_runners(
     from lectern.align.worker import AlignRunner
     from lectern.worker.runners import (
         KokoroRunner,
+        OcrRunner,
         TranscodeRunner,
         ffmpeg_available,
         kokoro_available,
+        tesseract_available,
     )
 
     runners: list = []
@@ -81,6 +83,11 @@ def build_runners(
     if "transcode" in candidates and "transcode" not in withheld:
         runners.append(TranscodeRunner())
         engines["transcode"] = "ffmpeg"
+    if want("ocr") and tesseract_available():
+        from lectern.ocr import engine as ocr_engine
+
+        runners.append(OcrRunner())
+        engines["ocr"] = ocr_engine.label(ocr_engine.probe()[0]) or "tesseract"
     return runners, engines, withheld
 
 

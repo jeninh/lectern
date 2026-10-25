@@ -25,7 +25,7 @@ Child processes (the alignment child) inherit the switch through :data:`CHILD_EN
 :func:`enforce_from_env`; ``HF_HUB_OFFLINE=1`` makes Hugging Face use only its cache there. (In
 this process it is inert once ``huggingface_hub`` was imported, which reads it at import; the
 hook still refuses its requests and it falls back to the cache.)
-Programs that are not Python (ffmpeg, restic) are outside this hook; firewall rules give the
+Programs that are not Python (ffmpeg, restic, Tesseract) are outside this hook; firewall rules give the
 hard guarantee for those (docs/offline-mode.md).
 
 An audit hook cannot be removed; turning offline mode off only makes it a no-op.

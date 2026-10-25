@@ -1,0 +1,394 @@
+"""Text recognition for scanned PDFs (issue #17, docs/ocr.md).
+
+Tesseract is real (CI installs it with English data); everything runs against the real app.
+The scanned fixture is drawn here: pages of rendered text saved as images in a PDF, so it has
+no text layer, exactly like a scan.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+
+import pypdfium2 as pdfium
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw, ImageFont
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, RectangleObject
+from sqlalchemy import select
+from tests.conftest import api_delete, api_post, drain_inbox
+
+from lectern.align.worker import RemoteWorker
+from lectern.db import session_factory
+from lectern.ingest.hashing import sha256_file
+from lectern.models import BookFile, Job, JobStatus, Work
+from lectern.ocr import child, engine
+from lectern.ocr import jobs as ocr
+from lectern.ocr.words import FLAG_BREAK, FLAG_HYPHEN, from_tsv
+from lectern.worker.runners import OcrRunner
+
+HAVE_TESSERACT = engine.probe()[0] is not None and "eng" in engine.probe()[1]
+if os.environ.get("TESSERACT_REQUIRED") == "1":
+    assert HAVE_TESSERACT, "TESSERACT_REQUIRED=1 but Tesseract with English data is missing"
+needs_tesseract = pytest.mark.skipif(not HAVE_TESSERACT, reason="tesseract not installed")
+
+FONT = Path(__file__).parents[1] / "src/lectern/fonts/LecternCover-Text.ttf"
+PAGES = [
+    ["Chapter One", "The lighthouse keeper climbed the stairs every night.",
+     "He counted the steps and listened to the sea below."],
+    ["The ships came rarely now, and the town had forgotten",
+     "the old tower on the rocks. Still he climbed, and still",
+     "the lamp turned over the dark water until morning."],
+]  # fmt: skip
+
+
+def page_image(lines: list[str]) -> Image.Image:
+    font = ImageFont.truetype(str(FONT), 40)
+    im = Image.new("L", (1700, 2200), 255)
+    d = ImageDraw.Draw(im)
+    for i, line in enumerate(lines):
+        d.text((150, 200 + 90 * i), line, font=font, fill=0)
+    return im.convert("RGB")
+
+
+def make_scan(path: Path, title: str = "The Lighthouse Keeper") -> Path:
+    images = [page_image(lines) for lines in PAGES]
+    raw = io.BytesIO()
+    images[0].save(raw, "PDF", save_all=True, append_images=images[1:], resolution=200)
+    w = PdfWriter(clone_from=io.BytesIO(raw.getvalue()))
+    w.add_metadata({"/Title": title, "/Author": "Ada Lovelace"})
+    w.write(path)
+    return path
+
+
+def make_text_pdf(path: Path, title: str = "Born Digital") -> Path:
+    """A born-digital PDF: real text in Helvetica on every page."""
+    w = PdfWriter()
+    for lines in PAGES:
+        page = w.add_blank_page(612, 792)
+        font = w._add_object(DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica")}))  # fmt: skip
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+        )
+        body = "".join(
+            f"BT /F1 12 Tf 72 {700 - 20 * i} Td ({t}) Tj ET\n" for i, t in enumerate(lines)
+        )
+        s = DecodedStreamObject()
+        s.set_data(body.encode())
+        page[NameObject("/Contents")] = w._add_object(s)
+    w.add_metadata({"/Title": title, "/Author": "Grace Hopper"})
+    w.write(path)
+    return path
+
+
+def pdf_file(title: str) -> tuple[BookFile, Work]:
+    with session_factory()() as db:
+        work = db.scalar(select(Work).where(Work.title == title))
+        book = db.scalar(select(BookFile).where(BookFile.work_id == work.id))
+        db.expunge_all()
+        return book, work
+
+
+def text_of(path: Path) -> str:
+    doc = pdfium.PdfDocument(str(path))
+    try:
+        out = []
+        for i in range(len(doc)):
+            page = doc[i]
+            tp = page.get_textpage()
+            out.append(tp.get_text_range())
+            tp.close()
+            page.close()
+        return "\n".join(out)
+    finally:
+        doc.close()
+
+
+@pytest.fixture
+def scanned(client, owner, settings):
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    make_scan(settings.inbox_path / "keeper.pdf")
+    drain_inbox(settings)
+    return pdf_file("The Lighthouse Keeper")
+
+
+# --- detection and languages -------------------------------------------------------------------
+
+
+def test_scans_are_found_and_text_pdfs_are_not(tmp_path):
+    scan = child.scan(make_scan(tmp_path / "scan.pdf"))
+    assert (len(scan.pages), scan.pages_with_text, scan.needs_ocr) == (2, 0, True)
+    assert scan.pages[0]["w"] == pytest.approx(612, abs=1)
+    text = child.scan(make_text_pdf(tmp_path / "text.pdf"))
+    assert (text.pages_with_text, text.needs_ocr) == (2, False)
+
+
+@pytest.mark.parametrize(
+    "metadata, code",
+    [(None, "eng"), ("", "eng"), ("en-GB", "eng"), ("fr", "fra"), ("fre", "fra"),
+     ("de-AT", "deu"), ("zh-Hant-TW", "chi_tra"), ("zh", "chi_sim"), ("sr-Latn", "srp_latn"),
+     ("xx", "eng"), ("nld", "nld")],
+)  # fmt: skip
+def test_the_work_language_picks_tesseract_data(metadata, code):
+    assert engine.language_for(metadata) == code
+
+
+@pytest.mark.parametrize("spec", ["", "eng+", "en", "eng;rm", "../eng", "eng+eng", "a+b+c+d"])
+def test_language_specs_that_could_not_be_tesseract_codes_are_refused(spec):
+    with pytest.raises(ValueError):
+        engine.parse_spec(spec)
+
+
+def test_words_keep_reading_order_line_breaks_and_hyphens():
+    tsv = "\n".join([
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+        "4\t1\t1\t1\t1\t0\t100\t100\t400\t40\t-1\t",
+        "5\t1\t1\t1\t1\t1\t100\t105\t150\t30\t96\tlight-",
+        "4\t1\t1\t1\t2\t0\t100\t160\t400\t40\t-1\t",
+        "5\t1\t1\t1\t2\t1\t100\t165\t120\t30\t95\thouse",
+        "5\t1\t1\t1\t2\t2\t240\t165\t100\t30\t3\t~",  # noise: below the confidence floor
+    ])  # fmt: skip
+    # 2 px per point, origin flipped: a 1000 px tall page
+    words = from_tsv(tsv, lambda x, y: (x / 2, (1000 - y) / 2), 0.5)
+    assert [w[0] for w in words] == ["light-", "house"]
+    assert words[0][6] == FLAG_HYPHEN | FLAG_BREAK and words[1][6] == FLAG_BREAK
+    # the word's box spans its line, in points with y up
+    assert words[0][1:5] == [50.0, 430.0, 125.0, 450.0]
+
+
+@needs_tesseract
+def test_boxes_land_on_the_words_on_rotated_and_offset_pages(tmp_path):
+    """Recognised boxes are in PDF user space (before /Rotate, crop box offset included), and
+    the text layer puts every word where it is on screen."""
+    upright = page_image(PAGES[0])
+    w = PdfWriter()
+    for rot in (0, 90, 180, 270):
+        buf = io.BytesIO()
+        upright.rotate(rot, expand=True).save(buf, "PDF", resolution=200)
+        page = PdfReader(buf).pages[0]
+        if rot:
+            page.rotate(rot)
+        else:
+            page.mediabox = page.cropbox = RectangleObject([-50, -30, 562, 762])
+        w.add_page(page)
+    w.write(tmp_path / "turned.pdf")
+    path = tmp_path / "turned.pdf"
+    pages = [child.ocr_page(path, i, tesseract="tesseract", language="eng", dpi=200,
+                            memory_mb=1536) for i in range(4)]  # fmt: skip
+    child.assemble(path, pages, tmp_path / "out.pdf", memory_mb=1536)
+    doc = pdfium.PdfDocument(str(tmp_path / "out.pdf"))
+    try:
+        for i, page in enumerate(pages):
+            assert " ".join(w[0] for w in page["words"]).startswith("Chapter One The lighthouse")
+            the = page["words"][2]
+            tp = doc[i].get_textpage()
+            # PDFium reads the invisible text in order, and finds it inside the word's box
+            assert tp.get_text_range().startswith("Chapter One\r\nThe lighthouse keeper")
+            inside = tp.get_text_bounded(the[1] - 1, the[2] - 1, the[3] + 1, the[4] + 1)
+            assert inside.strip() == "The", (i, inside)
+            tp.close()
+    finally:
+        doc.close()
+
+
+# --- the job lifecycle --------------------------------------------------------------------------
+
+
+@needs_tesseract
+def test_a_scan_is_recognised_into_a_searchable_copy_and_the_original_is_untouched(
+    client, owner, settings, scanned
+):
+    book, work = scanned
+    original = settings.library_dir / work.dir_path / book.rel_path
+    before = sha256_file(original)
+    st = client.get(f"/api/files/{book.id}/ocr").json()
+    assert (st["status"], st["language"]) == ("checking", "eng")
+
+    assert ocr.sweep(session_factory(), settings) == 1
+    assert ocr.sweep(session_factory(), settings) == 0  # one job, not one per sweep
+    st = client.get(f"/api/files/{book.id}/ocr").json()
+    assert (st["status"], st["pages"], st["pages_with_text"]) == ("queued", 2, 0)
+
+    assert ocr.OcrRunner(session_factory(), settings).run_once()
+    st = client.get(f"/api/files/{book.id}/ocr").json()
+    assert st["status"] == "done", st
+    assert st["result"]["pages"] == 2 and st["result"]["words"] > 30
+    assert sha256_file(original) == before == book.sha256
+
+    searchable = ocr.pdf_path(settings.library_dir, work, book.sha256)
+    text = text_of(searchable)
+    assert "lighthouse keeper climbed the stairs" in text and "until morning" in text
+    assert text_of(original).strip() == ""
+    # the searchable copy is a text PDF now: never recognised again
+    assert not child.scan(searchable).needs_ocr
+
+    # the words document: the text-layer reader's page shape, ready for the layout step
+    doc = json.loads(ocr.words_path(settings.library_dir, work, book.sha256).read_text())
+    assert (doc["kind"], doc["pdf_sha256"], doc["language"]) == ("ocr", book.sha256, "eng")
+    page = doc["pages"][0]
+    assert set(page) >= {"index", "w", "h", "x0", "y0", "rotation", "label", "chars",
+                         "map_errors", "words"}  # fmt: skip
+    first = page["words"][0]
+    assert first[0] == "Chapter" and 0 < first[1] < first[3] < page["w"]
+    assert 0 < first[2] < first[4] < page["h"] and first[2] > page["h"] / 2  # near the top
+
+    r = client.get(f"/api/files/{book.id}/ocr/pdf")
+    assert r.status_code == 200 and r.content == searchable.read_bytes()
+    assert "searchable" in r.headers["content-disposition"]
+
+    # deleting it removes the derived files only
+    st = api_delete(client, f"/api/files/{book.id}/ocr", owner["csrf"]).json()
+    assert st["status"] == "needs_ocr" and not searchable.exists() and original.is_file()
+    assert ocr.sweep(session_factory(), settings) == 0  # a deleted copy is not remade unasked
+    assert client.get(f"/api/files/{book.id}/ocr/pdf").status_code == 404
+
+
+def test_born_digital_pdfs_are_never_recognised(client, owner, settings):
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    make_text_pdf(settings.inbox_path / "digital.pdf")
+    drain_inbox(settings)
+    book, _work = pdf_file("Born Digital")
+    assert ocr.sweep(session_factory(), settings) == 0
+    assert client.get(f"/api/files/{book.id}/ocr").json()["status"] == "not_needed"
+    r = api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"])
+    assert (r.status_code, r.json()["detail"]) == (409, "has_text")
+    with session_factory()() as db:
+        assert db.scalar(select(Job).where(Job.kind == "ocr")) is None
+
+
+def test_without_an_engine_or_worker_it_says_so_and_queues_nothing(
+    client, owner, settings, scanned
+):
+    settings.tesseract_path = "no-such-tesseract"
+    book, _work = scanned
+    assert ocr.sweep(session_factory(), settings) == 0
+    st = client.get(f"/api/files/{book.id}/ocr").json()
+    assert st["status"] == "unavailable" and "Tesseract" in st["message"]
+    r = api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"])
+    assert (r.status_code, r.json()["detail"]) == (409, "no_engine")
+    # a worker that has OCR is enough: the job waits for it
+    key = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "pi"}).json()
+    wc = TestClient(client.app, headers={"Authorization": f"Bearer {key['secret']}"})
+    assert wc.post("/api/worker/jobs/claim", json={"worker": "w", "capabilities": ["ocr"]})
+    assert ocr.sweep(session_factory(), settings) == 1
+
+
+@needs_tesseract
+def test_a_failure_is_visible_and_retryable_and_nothing_stays_running(
+    client, owner, settings, scanned
+):
+    book, _work = scanned
+    r = api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"], {"language": "zzz"})
+    assert r.status_code == 200 and r.json()["status"] == "queued"
+    assert ocr.OcrRunner(session_factory(), settings).run_once()
+    st = client.get(f"/api/files/{book.id}/ocr").json()
+    assert st["status"] == "failed" and "zzz" in st["error"], st
+    assert not ocr.OcrRunner(session_factory(), settings).run_once()  # not retried by itself
+
+    r = api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"], {"language": "eng"})
+    assert r.json()["status"] == "queued"
+    # the server stops mid-run: the lease is handed back at the next start, not left running
+    with session_factory()() as db:
+        job = db.scalar(select(Job).where(Job.kind == "ocr", Job.status == JobStatus.QUEUED))
+        job.status, job.lease_token_hash, job.attempts = JobStatus.LEASED, "x" * 64, 1
+        db.commit()
+        assert ocr.recover_local(db) == 1
+        db.refresh(job)
+        assert job.status == JobStatus.QUEUED and job.error.startswith("the server restarted")
+        job.run_after = job.created_at
+        db.commit()
+    assert ocr.OcrRunner(session_factory(), settings).run_once()
+    assert client.get(f"/api/files/{book.id}/ocr").json()["status"] == "done"
+
+
+def test_members_start_ocr_readers_cannot(client, owner, settings, scanned):
+    from tests.conftest import login, make_user
+
+    book, _work = scanned
+    make_user(client, owner["csrf"], "rita", "reader")
+    r = api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"], {"language": "en;rm -rf"})
+    assert (r.status_code, r.json()["detail"]) == (422, "invalid_language")
+    client.cookies.clear()
+    csrf = login(client, "rita", "rita-correct horse")
+    assert client.get(f"/api/files/{book.id}/ocr").status_code == 404  # not shared with her
+    assert api_post(client, f"/api/files/{book.id}/ocr", csrf).status_code in (403, 404)
+
+
+@needs_tesseract
+def test_a_worker_recognises_pages_and_the_server_builds_the_pdf(
+    client, owner, settings, scanned, app
+):
+    book, work = scanned
+    key = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "mac"}).json()
+    assert api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"]).status_code == 200
+    http = TestClient(app, headers={"Authorization": f"Bearer {key['secret']}"})
+    worker = RemoteWorker("http://testserver", key["secret"], client=http, runners=[OcrRunner()])
+    assert worker.run_once()
+    with session_factory()() as db:
+        job = db.scalar(select(Job).where(Job.kind == "ocr"))
+        assert job.status == JobStatus.SUCCEEDED, job.error
+        assert job.leased_by_id is not None and job.result["words"] > 30
+    assert "the old tower on the rocks" in text_of(
+        ocr.pdf_path(settings.library_dir, work, book.sha256)
+    )
+
+
+@needs_tesseract
+def test_a_worker_cannot_publish_pages_the_pdf_does_not_have(client, owner, settings, scanned, app):
+    book, _work = scanned
+    key = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "mac"}).json()
+    api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"])
+    wc = TestClient(app, headers={"Authorization": f"Bearer {key['secret']}"})
+    r = wc.post("/api/worker/jobs/claim", json={"worker": "w", "capabilities": ["ocr"]})
+    assert r.status_code == 200 and set(r.json()["inputs"]) == {"pdf"}
+    job_id, token = r.json()["job"]["id"], {"X-Lease-Token": r.json()["lease"]["token"]}
+    bad = json.dumps({"first": 0, "pages": [{"index": 7, "words": []}]}).encode()
+    digest = hashlib.sha256(bad).hexdigest()
+    up = wc.put(f"/api/worker/jobs/{job_id}/artifacts/pages-00000.json", content=bad,
+                headers={**token, "X-Content-SHA256": digest})  # fmt: skip
+    assert up.status_code == 201, up.text
+    body = {"engine": "tesseract 5", "language": "eng", "batches": [
+        {"first": 0, "artifact": "pages-00000.json",
+         "artifact_sha256": digest}]}  # fmt: skip
+    r = wc.put(f"/api/worker/jobs/{job_id}/result", json=body, headers=token)
+    assert r.status_code == 422 and "invalid_pages" in r.text, r.text
+
+
+def test_orphaned_derived_files_are_removed(client, owner, settings, scanned):
+    book, work = scanned
+    derived = settings.library_dir / work.dir_path / "derived"
+    derived.mkdir(parents=True, exist_ok=True)
+    stale = derived / "ocr-0123456789abcdef.pdf"
+    stale.write_bytes(b"%PDF-")
+    mine = ocr.pdf_path(settings.library_dir, work, book.sha256)
+    mine.write_bytes(b"%PDF-")
+    settings.ocr_auto = False
+    ocr.sweep(session_factory(), settings)
+    assert not stale.exists() and mine.exists()
+
+
+def test_a_merge_takes_the_searchable_copy_along(client, owner, settings, scanned):
+    book, work = scanned
+    make_text_pdf(settings.inbox_path / "other.pdf", title="Another Edition")
+    drain_inbox(settings)
+    _other_book, target = pdf_file("Another Edition")
+    copy = ocr.pdf_path(settings.library_dir, work, book.sha256)
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    copy.write_bytes(b"%PDF-searchable")
+    ocr.words_path(settings.library_dir, work, book.sha256).write_text("{}")
+    r = api_post(
+        client, f"/api/works/{work.id}/merge", owner["csrf"], {"target_work_id": target.id}
+    )
+    assert r.status_code == 200, r.text
+    with session_factory()() as db:
+        target = db.get(Work, target.id)
+        assert ocr.has_output(settings.library_dir, target, book.sha256)
+        assert ocr.pdf_path(settings.library_dir, target, book.sha256).read_bytes() == (
+            b"%PDF-searchable"
+        )

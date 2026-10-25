@@ -5,8 +5,9 @@
   kind"). The server owns everything around it (the script, validation, the edition, the
   sentence map); this side only turns sentences into audio with exact timings.
 - :class:`TranscodeRunner`: ``transcode`` jobs (data-saver renditions) with ffmpeg.
+- :class:`OcrRunner`: ``ocr`` jobs (text recognition of scanned PDFs) with Tesseract.
 
-Both upload outputs as artifacts as soon as they exist, so a retried or resumed attempt
+All of them upload outputs as artifacts as soon as they exist, so a retried or resumed attempt
 skips work an earlier attempt finished.
 """
 
@@ -311,3 +312,71 @@ class TranscodeRunner:
                                "artifact": out, "artifact_sha256": digest})  # fmt: skip
         ctx.hb.stop()
         ctx.submit(json.dumps({"renditions": renditions}).encode())
+
+
+class OcrRunner:
+    """``ocr`` jobs (scanned PDFs, lectern.ocr.jobs): Tesseract, one page at a time in the
+    same sandboxed child the server uses. Every batch of pages is uploaded as an artifact as
+    soon as it is done; the server checks them, makes the searchable PDF, and publishes it."""
+
+    kind = "ocr"
+    capabilities = ("ocr",)
+
+    def __init__(self, tesseract: str = "tesseract", *, dpi: int | None = None,
+                 memory_mb: int = 1536, threads: int = 1) -> None:  # fmt: skip
+        self.tesseract = tesseract
+        self.dpi = dpi
+        self.memory_mb = memory_mb
+        self.threads = threads
+
+    def run(self, ctx: JobContext) -> None:
+        from lectern.ocr import child, engine
+        from lectern.ocr.jobs import BATCH_PAGES, batch_name, batches, recognise_batch
+
+        p = ctx.payload
+        language = str(p.get("language") or engine.DEFAULT_LANGUAGE)
+        version, installed = engine.probe(self.tesseract)
+        if version is None:
+            raise EngineUnavailable("Tesseract is not installed")
+        try:
+            missing = engine.missing_languages(language, installed)
+        except ValueError as exc:
+            raise PermanentJobError(str(exc)) from None
+        if missing:
+            raise PermanentJobError(f"Tesseract has no data for {'+'.join(missing)} on this worker")
+        total = int(p.get("pages") or 0)
+        dpi = int(self.dpi or p.get("dpi") or 300)
+        have = ctx.artifacts()
+        pdf = None
+        done = []
+        for first, last in batches(total, int(p.get("batch_pages") or BATCH_PAGES)):
+            name = batch_name(first)
+            if name not in have:
+                if pdf is None:
+                    pdf = ctx.input("pdf", ctx.tmp / "book.pdf")
+
+                def on_page(index: int) -> None:
+                    ctx.progress((index + 1) / max(1, total), f"page {index + 1} of {total}")
+
+                try:
+                    data = recognise_batch(pdf, first, last, tesseract=self.tesseract,
+                                           language=language, dpi=dpi, memory_mb=self.memory_mb,
+                                           threads=self.threads, on_page=on_page)  # fmt: skip
+                except child.OcrError as exc:
+                    raise PermanentJobError(f"text recognition failed: {exc}") from None
+                out = ctx.tmp / name
+                out.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+                digest = ctx.upload_artifact(name, out)
+                out.unlink(missing_ok=True)
+            else:
+                digest = have[name]["sha256"]
+            done.append({"first": first, "artifact": name, "artifact_sha256": digest})
+        ctx.hb.stop()
+        body = {"engine": engine.label(version), "language": language, "batches": done}
+        ctx.submit(json.dumps(body).encode())
+
+
+def tesseract_available(path: str = "tesseract") -> bool:
+    from lectern.ocr import engine
+
+    return engine.probe(path)[0] is not None
