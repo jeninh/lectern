@@ -275,17 +275,14 @@ the Pi. It connects out to Lectern, so the Mac needs only Tailscale. Full refere
    to upgrade after you update the Pi.
 
 **School and proxy mode.** The worker's `proxy` setting (`--proxy` to the installer, or
-`proxy` in `config.json`) applies to **every** request it makes, Lectern's included; the
-default, `system`, uses `HTTPS_PROXY`, else the macOS proxy settings, and ignores their
-exception list. A school
-proxy cannot reach a tailnet address, so with Lectern only on the tailnet:
+`proxy` in `config.json`; default `system`: `HTTPS_PROXY`, else the macOS proxy settings) is
+for model downloads and a server with a public address. Requests to Lectern on the tailnet skip
+it: when the server's address is a Tailscale one (your `*.ts.net` name while Tailscale is
+connected), the worker talks to it directly, since a school proxy cannot reach the tailnet.
+Nothing to change:
 
-- If Tailscale connects on that network, set `"proxy": "none"` in `config.json` so the worker
-  talks to Lectern directly over Tailscale. The agent reads it only at start: run
-  `lectern worker-service install` afterwards to restart it (add `--no-login` if you installed
-  with it), or pass `--proxy none` to the installer. Model downloads then go direct too, so
-  **download the models at home first** (run one job there; they are cached in
-  `~/.cache/huggingface`).
+- If Tailscale connects on that network, the worker reaches Lectern over Tailscale and still
+  downloads models through the proxy.
 - If the network forces everything through its proxy and blocks Tailscale, the worker cannot
   reach Lectern from there. Nothing breaks: jobs wait until the Mac is home.
 - `--ca-bundle /path/school-ca.pem` (or `ca_bundle`) matters only for a network that inspects
