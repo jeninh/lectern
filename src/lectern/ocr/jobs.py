@@ -405,6 +405,8 @@ def read_batches(src: Source, files: dict[int, Path]) -> tuple[list[dict], bool]
     to its JSON; every page must be in exactly one batch."""
     geometry = src.scan["pages"]
     pages: dict[int, dict] = {}
+    words = chars = 0
+    truncated = False
     for first, path in sorted(files.items()):
         try:
             size = path.stat().st_size
@@ -430,21 +432,24 @@ def read_batches(src: Source, files: dict[int, Path]) -> tuple[list[dict], bool]
             page = validated_page(raw, geometry[index])
             if raw.get("failed"):
                 page["failed"] = True
+            # The caps apply as pages are read, so what is kept stays bounded however many
+            # batches a worker sends (pages past them keep no words, as in the PDF reader).
+            if (
+                truncated
+                or words + len(page["words"]) > MAX_WORDS
+                or (chars + page["chars"] > MAX_CHARS)
+            ):
+                truncated = True
+                page["words"], page["chars"] = [], 0
+            else:
+                words += len(page["words"])
+                chars += page["chars"]
             pages[index] = page
+        del data, raw_pages
     missing = [i + 1 for i in range(len(geometry)) if i not in pages]
     if missing:
         raise ValueError(f"pages missing: {missing[:10]}")
-    out = [pages[i] for i in range(len(geometry))]
-    words = chars = 0
-    truncated = False
-    for page in out:
-        if truncated or words + len(page["words"]) > MAX_WORDS or chars + page["chars"] > MAX_CHARS:
-            truncated = True
-            page["words"], page["chars"] = [], 0
-            continue
-        words += len(page["words"])
-        chars += page["chars"]
-    return out, truncated
+    return [pages[i] for i in range(len(geometry))], truncated
 
 
 def build_document(src: Source, pages: list[dict], *, engine_label: str, language: str,
@@ -494,9 +499,10 @@ def publish(db: Session, settings: Settings, job: Job, src: Source, doc: dict) -
         pdf_file = stage / "ocr.pdf"
         # Assembly can take a while (a worker stopped heartbeating when it submitted): the
         # lease must outlast it, and only one assembly runs at a time in this process.
-        if not _extend_lease(db, job, child.ASSEMBLE_TIMEOUT_S + 300):
-            raise LeaseLost()
         with ASSEMBLY_SLOT:
+            # the slot first: waiting behind another assembly must not use up this lease
+            if not _extend_lease(db, job, child.ASSEMBLE_TIMEOUT_S + 300):
+                raise LeaseLost()
             child.assemble(src.path, doc["pages"], pdf_file,
                            memory_mb=settings.ocr_memory_limit_mb)  # fmt: skip
         pdf_digest = _sha256_file(pdf_file)

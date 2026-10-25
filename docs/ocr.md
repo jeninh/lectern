@@ -65,7 +65,7 @@ A failure is shown on the work with its reason and a **Retry** button (owners, m
 
 | Reason | What happens |
 |---|---|
-| a language without Tesseract data (`Tesseract has no data for 'deu' here`) | fails at once; pick another language or install its data |
+| a language without Tesseract data (`Tesseract has no data for 'deu' here`) | on the server: fails at once. On a worker: retried with backoff (the server or another worker may have it), then failed. Pick another language or install its data |
 | Tesseract missing on a worker | the worker hands the job back and stops offering `ocr` for a while |
 | an unreadable or password-protected PDF | fails at once |
 | anything else (a crash, a full disk) | retried with backoff, then failed |

@@ -104,7 +104,8 @@ def _run(args: list[str], tmp: str, timeout: float, env: dict | None = None) -> 
     except BaseException:
         _kill_group(proc)
         raise
-    _kill_group(proc)  # anything the child left behind
+    # A normal exit: the child waited for its Tesseract, and its PID is reaped now, so its
+    # group id may already belong to someone else; nothing to kill.
     try:
         status = json.loads(stdout.decode("utf-8", "replace").strip().splitlines()[-1])
     except (ValueError, IndexError):

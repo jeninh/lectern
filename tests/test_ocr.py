@@ -497,33 +497,105 @@ def test_a_worker_cannot_make_the_server_parse_a_huge_batch(
     assert r.status_code == 422 and "too large" in r.text, r.text
 
 
-@needs_tesseract
-def test_a_page_timeout_kills_tesseract_too(tmp_path, monkeypatch):
-    """The child runs in its own process group; on a timeout nothing of it survives."""
-    import subprocess
-
-    path = make_scan(tmp_path / "scan.pdf")
-    seen = {}
-    real = subprocess.Popen
-
-    def spy(*a, **kw):
-        proc = real(*a, **kw)
-        seen["pgid"] = proc.pid
-        return proc
-
-    monkeypatch.setattr(child.subprocess, "Popen", spy)
-    with pytest.raises(child.OcrError) as err:
-        child._run(["page", str(path), "0", str(tmp_path / "o.json"), "tesseract", "eng",
-                    "600", "1536"], str(tmp_path), 0.5)  # fmt: skip
-    assert err.value.code == "timed_out"
+def test_a_page_timeout_kills_a_running_tesseract_too(tmp_path):
+    """The page child runs in its own process group: on a timeout the engine it started is
+    killed with it (a stand-in that never finishes plays a stuck Tesseract)."""
+    import threading
     import time
 
-    deadline = time.monotonic() + 10  # a killed grandchild is reaped by init, not by us
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(seen["pgid"], 0)
-        except ProcessLookupError:
-            break
+    path = make_scan(tmp_path / "scan.pdf")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stuck = bindir / "tesseract"
+    stuck.write_text("#!/bin/sh\nexec sleep 120\n")
+    stuck.chmod(0o755)
+    seen: list[int] = []
+    stop = threading.Event()
+
+    def sleepers() -> list[int]:
+        out = []
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            try:
+                cmd = Path(f"/proc/{d}/cmdline").read_bytes().split(b"\0")
+                state = Path(f"/proc/{d}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                continue
+            if cmd[:2] == [b"sleep", b"120"] and state != "Z":
+                out.append(int(d))
+        return out
+
+    def watch() -> None:
+        while not stop.is_set():
+            seen.extend(p for p in sleepers() if p not in seen)
+            time.sleep(0.05)
+
+    t = threading.Thread(target=watch, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(child.OcrError) as err:
+            child._run(["page", str(path), "0", str(tmp_path / "o.json"), str(stuck), "eng",
+                        "150", "1536"], str(tmp_path), 8)  # fmt: skip
+    finally:
+        stop.set()
+        t.join()
+    assert err.value.code == "timed_out"
+    assert seen, "the stand-in engine never started"
+    deadline = time.monotonic() + 10  # the killed grandchild is reaped by init, not by us
+    while set(seen) & set(sleepers()) and time.monotonic() < deadline:
         time.sleep(0.1)
-    else:
-        pytest.fail("the page child's process group outlived its timeout")
+    assert not set(seen) & set(sleepers()), "the engine outlived its page's timeout"
+
+
+def test_the_caps_apply_while_pages_are_read(client, owner, settings, scanned, monkeypatch):
+    """Pages past the book-wide cap are emptied as they are read, so a worker sending many
+    batches never makes the server hold more than the cap."""
+    book, work = scanned
+    src = ocr.Source(book, work, Path("unused"), ocr.load_scan(settings.data_dir, book.sha256)
+                     or ocr.scan_file(settings, book, work))  # fmt: skip
+    src.scan = {**src.scan, "pages": [src.scan["pages"][0]] * 4}
+    word = ["word", 100, 600, 160, 620, 16, 0]
+    files = {}
+    for first in (0, 2):
+        files[first] = settings.data_dir / f"b{first}.json"
+        files[first].write_text(json.dumps({"first": first, "pages": [
+            {"index": i, "words": [word] * 3} for i in (first, first + 1)]}))  # fmt: skip
+    kept: list[dict] = []
+    held: list[int] = []
+    real = ocr.validated_page
+
+    def spy(raw, geometry):
+        held.append(sum(len(p["words"]) for p in kept))  # what is held when the next is read
+        page = real(raw, geometry)
+        kept.append(page)
+        return page
+
+    monkeypatch.setattr(ocr, "validated_page", spy)
+    monkeypatch.setattr(ocr, "MAX_WORDS", 4)
+    pages, truncated = ocr.read_batches(src, files)
+    assert truncated and [len(p["words"]) for p in pages] == [3, 0, 0, 0]
+    assert max(held) <= 4
+
+
+@needs_tesseract
+def test_a_worker_without_the_language_fails_retryably_and_never_bounces(
+    client, owner, settings, scanned, app, monkeypatch
+):
+    from lectern.ocr import engine as eng
+
+    book, _work = scanned
+    key = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "mac"}).json()
+    api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"], {"language": "eng"})
+    real = eng.probe
+    monkeypatch.setattr(eng, "probe", lambda *a: (real(*a)[0], ("fra",)))
+    http = TestClient(app, headers={"Authorization": f"Bearer {key['secret']}"})
+    worker = RemoteWorker("http://testserver", key["secret"], client=http, runners=[OcrRunner()])
+    assert worker.run_once()
+    with session_factory()() as db:
+        job = db.scalar(select(Job).where(Job.kind == "ocr"))
+        # an attempt is spent and the reason recorded: with no one able to run it, the job
+        # ends failed after max_attempts instead of being handed back forever
+        assert job.status == JobStatus.QUEUED and job.attempts == 1
+        assert "no data for eng" in job.error
+    assert "ocr" in worker.capabilities  # the worker keeps offering OCR for other jobs

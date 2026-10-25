@@ -349,8 +349,10 @@ class OcrRunner:
         except ValueError as exc:
             raise PermanentJobError(str(exc)) from None
         if missing:
-            # the server (or another worker) may have it: hand the job back, do not fail it
-            raise EngineUnavailable(f"Tesseract has no data for {'+'.join(missing)} here")
+            # A retryable failure, not a hand-back: the server (or another worker) may take
+            # it during the backoff, and with nothing that has the language the attempts run
+            # out and the job fails with this reason instead of bouncing forever.
+            raise RuntimeError(f"Tesseract has no data for {'+'.join(missing)} on this worker")
         total = int(p.get("pages") or 0)
         dpi = int(self.dpi or p.get("dpi") or 300)
         have = ctx.artifacts()
@@ -371,9 +373,7 @@ class OcrRunner:
                                            threads=self.threads, on_page=on_page)  # fmt: skip
                 except child.OcrError as exc:
                     message, retryable = failure_message(exc, language)
-                    if exc.code == "language_missing":
-                        raise EngineUnavailable(message) from None
-                    if not retryable:
+                    if not retryable and exc.code != "language_missing":
                         raise PermanentJobError(message) from None
                     raise RuntimeError(message) from None  # retried with backoff
                 out = ctx.tmp / name
