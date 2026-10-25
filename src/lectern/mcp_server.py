@@ -98,6 +98,9 @@ You act as one person, with only their permissions and only the scopes their AI 
   start_alignment / job_status, edit_metadata.
 - Only EPUB has text: alignment, read-along, and read-aloud need an EPUB. PDF and comics are
   page-based and cannot be aligned. CBR is not supported; ask the person to convert it to CBZ.
+- DRM-free MOBI and AZW3 files are converted to EPUB when uploaded. DRM-protected ones are
+  refused (drm_protected): tell the person Lectern can only add DRM-free books, and do not
+  suggest ways to remove DRM.
 - There is no way to download book files or audio through these tools.
 """
 
@@ -243,6 +246,10 @@ def _http_error(exc: HTTPException) -> ToolError:
         429: "too many requests; wait a minute",
         503: "the server is busy; try the same call again shortly",
     }.get(exc.status_code)
+    if code == "drm_protected":
+        from lectern.ingest.kindle import DRM_MESSAGE
+
+        hint = DRM_MESSAGE
     msg = f"{code}" + (f" ({hint})" if hint and hint != code else "")
     if extra:
         msg += f": {json.dumps(extra, default=str)[:500]}"
@@ -460,8 +467,9 @@ def upload_book(
     ] = True,
 ) -> dict:
     """Upload a book file into "Review before filing": EPUB, PDF, or CBZ comic (.epub, .pdf,
-    .cbz; CBR is not supported, convert it to CBZ) or an audiobook (MP3, M4B/M4A, OGG/Opus,
-    FLAC). The file's first bytes must match its extension. Nothing is filed yet: when the upload is complete this returns the detected
+    .cbz; CBR is not supported, convert it to CBZ), a DRM-free MOBI or AZW3 (.mobi, .azw3;
+    converted to EPUB, DRM-protected files are refused), or an audiobook (MP3, M4B/M4A,
+    OGG/Opus, FLAC). The file's first bytes must match its extension. Nothing is filed yet: when the upload is complete this returns the detected
     metadata and the proposed match; confirm it with confirm_import. Resumable: calling with
     upload_id and no content returns how many bytes the server has. Scope: upload (a certain
     match is filed straight away only if the person turned on auto-filing and the key also
@@ -481,8 +489,8 @@ def upload_book(
             media_type = _EXTENSIONS.get(Path(filename).suffix.lower())
             if media_type is None:
                 raise ToolError(
-                    "unsupported_media_type: use .epub, .pdf, .cbz, .mp3, .m4b, .m4a, .ogg, "
-                    ".opus, or .flac (CBR is not supported: convert it to CBZ)"
+                    "unsupported_media_type: use .epub, .pdf, .cbz, .mobi, .azw3, .mp3, .m4b, "
+                    ".m4a, .ogg, .opus, or .flac (CBR is not supported: convert it to CBZ)"
                 )
             size = total_size or len(data)
             if not size:

@@ -116,7 +116,7 @@ Cmd/Ctrl+K palette, or drop files or whole folders anywhere on the page. Or copy
 
 ![Add books](docs/screenshots/books-library-add.png)
 
-- **Upload.** EPUB, PDF, CBZ comics, M4B/M4A, MP3, OGG/Opus, and FLAC go up through the resumable upload API in
+- **Upload.** EPUB, PDF, CBZ comics, DRM-free MOBI/AZW3 (converted to EPUB), M4B/M4A, MP3, OGG/Opus, and FLAC go up through the resumable upload API in
   ≤ 50 MiB chunks, each with its own SHA-256. The tray shows live progress per file with pause,
   resume, cancel, and retry, grouped by book. Wrong formats, files over the server limit, and
   exact duplicates are reported in plain words before anything is filed.
@@ -178,6 +178,13 @@ with no JavaScript, and refuses zip bombs. It reads PDF Info/XMP metadata and co
 with their own media types, can be sent to devices, and sync pages with KOReader. **CBR is not
 supported**; convert it to CBZ. Read-along, alignment, and the read-aloud export need an EPUB
 edition. Details: [`docs/pdf-comics.md`](docs/pdf-comics.md).
+
+## Kindle books
+
+DRM-free MOBI and AZW3 books are converted to EPUB when they arrive (in a resource-limited
+child process) and filed as `book.epub` with their title, authors, ISBN, ASIN, language, and
+cover. **DRM-protected books are refused**: Lectern can only add DRM-free books. Details:
+[`docs/kindle.md`](docs/kindle.md).
 
 ![A comic as a two-page spread](docs/screenshots/formats-comic-spread.png)
 

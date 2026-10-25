@@ -28,10 +28,9 @@ import re
 import subprocess
 import sys
 import tempfile
-import threading
 from pathlib import Path
 
-from lectern.ingest.formats import FormatError, Probe, ProbeBusy
+from lectern.ingest.formats import PARSER_SLOTS, FormatError, Probe, ProbeBusy
 
 MAX_PAGES = 10_000
 MAX_PAGE_SIDE_PT = 14_400  # the PDF 1.7 limit (200 inches); larger pages are not rendered
@@ -41,12 +40,9 @@ MEMORY_LIMIT_BYTES = 1536 * 1024 * 1024
 CPU_LIMIT_S = 30
 OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024
 MAX_FIELD = 2048
-# At most this many parser children at once in this server process (uploads, imports, inbox,
-# the editor's "use the book's own cover"), each up to MEMORY_LIMIT_BYTES and TIMEOUT_S. A
-# caller that cannot get a slot within BUSY_WAIT_S gets ProbeBusy and retries later.
-MAX_CONCURRENT = 2
+# Parser children share lectern.ingest.formats.PARSER_SLOTS with MOBI conversions. A caller
+# that cannot get a slot within BUSY_WAIT_S gets ProbeBusy and retries later.
 BUSY_WAIT_S = 10.0
-_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT)
 _JUNK_TITLE = re.compile(r"^(microsoft (word|powerpoint) - )", re.I)
 _FILE_SUFFIX = re.compile(r"\.(docx?|pptx?|odt|rtf|pdf|indd|qxd|tex|txt)$", re.I)
 _ISBN = re.compile(r"(?:isbn[-: ]*)?((?:97[89][- ]?)?(?:\d[- ]?){9}[\dXx])", re.I)
@@ -55,12 +51,12 @@ _ISBN = re.compile(r"(?:isbn[-: ]*)?((?:97[89][- ]?)?(?:\d[- ]?){9}[\dXx])", re.
 def probe_pdf(path: Path) -> Probe:
     """Read ``path`` in the sandboxed child; raises :class:`FormatError`, or
     :class:`ProbeBusy` when no parser slot frees up within :data:`BUSY_WAIT_S`."""
-    if not _SLOTS.acquire(timeout=BUSY_WAIT_S):
+    if not PARSER_SLOTS.acquire(timeout=BUSY_WAIT_S):
         raise ProbeBusy()
     try:
         return _probe_pdf(path)
     finally:
-        _SLOTS.release()
+        PARSER_SLOTS.release()
 
 
 def _probe_pdf(path: Path) -> Probe:

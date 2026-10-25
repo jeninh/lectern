@@ -68,6 +68,8 @@ const MEDIA: Record<string, string> = {
   epub: "application/epub+zip",
   pdf: "application/pdf",
   cbz: "application/vnd.comicbook+zip",
+  mobi: "application/x-mobipocket-ebook",
+  azw3: "application/vnd.amazon.mobi8-ebook",
   mp3: "audio/mpeg",
   m4b: "audio/mp4",
   m4a: "audio/mp4",
@@ -77,7 +79,7 @@ const MEDIA: Record<string, string> = {
   opus: "audio/ogg",
   flac: "audio/flac",
 };
-export const ACCEPT = ".epub,.pdf,.cbz,.m4b,.m4a,.mp3,.ogg,.opus,.oga,.flac,application/epub+zip,application/pdf,application/vnd.comicbook+zip,audio/mpeg,audio/mp4,audio/ogg,audio/flac";
+export const ACCEPT = ".epub,.pdf,.cbz,.mobi,.azw3,.m4b,.m4a,.mp3,.ogg,.opus,.oga,.flac,application/epub+zip,application/pdf,application/vnd.comicbook+zip,application/x-mobipocket-ebook,application/vnd.amazon.mobi8-ebook,audio/mpeg,audio/mp4,audio/ogg,audio/flac";
 
 export function mediaTypeOf(name: string): string | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -463,7 +465,11 @@ class ResyncError extends Error {}
 /** What went wrong, in words that say what to do next. */
 export function plainError(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.code === "unsupported_media_type") return "Wrong format. Lectern takes EPUB, PDF, and CBZ comics, and M4B, MP3, OGG/Opus, or FLAC audiobooks. Convert CBR comics to CBZ first.";
+    if (e.code === "unsupported_media_type") return "Wrong format. Lectern takes EPUB, PDF, CBZ comics, and DRM-free MOBI or AZW3, and M4B, MP3, OGG/Opus, or FLAC audiobooks. Convert CBR comics to CBZ first.";
+    if (e.code === "drm_protected") return "This book is DRM-protected; Lectern can only add DRM-free books.";
+    if (e.code === "not_mobi") return "Wrong format: this is not a readable MOBI or AZW3 book.";
+    if (e.code === "mobi_too_complex") return "This MOBI or AZW3 is too large or complex to convert safely.";
+    if (e.code === "convert_busy") return "The server is busy converting other books. Retry in a moment.";
     if (e.code === "not_epub") return "Wrong format: this is not a readable EPUB. It may be damaged or DRM-protected.";
     if (e.code === "not_pdf") return "Wrong format: this is not a readable PDF.";
     if (e.code === "pdf_encrypted") return "This PDF is password-protected. Remove the password and upload it again.";

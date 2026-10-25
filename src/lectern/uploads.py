@@ -31,6 +31,9 @@ MEDIA_TYPES: dict[str, tuple[tuple[str, ...], str]] = {
     "application/epub+zip": ((".epub",), ".epub"),
     "application/pdf": ((".pdf",), ".pdf"),
     "application/vnd.comicbook+zip": ((".cbz",), ".cbz"),
+    # Kindle books, converted to EPUB at finalize (lectern.ingest.kindle); never stored as is.
+    "application/x-mobipocket-ebook": ((".mobi",), ".mobi"),
+    "application/vnd.amazon.mobi8-ebook": ((".azw3",), ".azw3"),
     "audio/mpeg": ((".mp3",), ".mp3"),
     "audio/mp4": ((".m4b", ".m4a", ".mp4"), ".m4b"),
     "audio/ogg": ((".ogg", ".opus", ".oga"), ".ogg"),
