@@ -74,6 +74,13 @@ SCAN_VERSION = 1
 # PDFs scanned per sweep at most (each is a few sandboxed children); the rest wait a minute.
 SCANS_PER_SWEEP = 20
 RESULT_MAX_BYTES = 1024 * 1024
+# One stored batch file (10 pages of at most 30,000 characters each fit in a few MiB). A
+# larger one is refused before it is read: the server parses batches in its own memory.
+BATCH_MAX_BYTES = 16 * 1024 * 1024
+# The whole book, as the PDF text reader caps it (lectern.pdftext.extract): beyond these the
+# remaining pages keep no words and the document says ``truncated``.
+MAX_WORDS = 1_500_000
+MAX_CHARS = 8_000_000
 ARTIFACT_RE = r"^pages-\d{5}\.json$"
 DERIVED = "derived"
 
@@ -131,6 +138,9 @@ def _write_json(path: Path, data: dict) -> None:
         tmp.unlink(missing_ok=True)
 
 
+PERMANENT_SCAN_ERRORS = frozenset({"not_pdf", "pdf_encrypted", "too_many_pages"})
+
+
 def scan_file(settings: Settings, book: BookFile, work: Work) -> dict | None:
     """Scan one PDF now and cache the result (``None`` when the parser slots are busy)."""
     path = settings.library_dir / work.dir_path / book.rel_path
@@ -147,6 +157,8 @@ def scan_file(settings: Settings, book: BookFile, work: Work) -> dict | None:
         return None
     except FormatError as exc:
         data = {"version": SCAN_VERSION, "error": exc.code}
+        if exc.code not in PERMANENT_SCAN_ERRORS:
+            return data  # may be load or a limit: looked at again by the next sweep
     _write_json(_scan_path(settings.data_dir, book.sha256), data)
     return data
 
@@ -298,7 +310,8 @@ def sweep(session_factory: sessionmaker, settings: Settings) -> int:
                 work = db.get(Work, book.work_id) if book is not None else None
                 if book is None or work is None:
                     continue
-                scan = scan_file(settings, book, work)
+                db.expunge_all()
+            scan = scan_file(settings, book, work)  # sandboxed children: no session held
             scanned += 1
         if not scan or not scan.get("needs_ocr") or not settings.ocr_auto:
             continue
@@ -386,12 +399,21 @@ def source_of(db: Session, settings: Settings, job: Job) -> Source:
     return Source(book, work, path, scan)
 
 
-def read_batches(src: Source, files: dict[int, Path]) -> list[dict]:
-    """Every page, validated against the server's own page geometry. ``files`` maps each
-    batch's first page to its JSON; every page must be in exactly one batch."""
+def read_batches(src: Source, files: dict[int, Path]) -> tuple[list[dict], bool]:
+    """Every page, validated against the server's own page geometry, and whether the book
+    was cut at :data:`MAX_WORDS` / :data:`MAX_CHARS`. ``files`` maps each batch's first page
+    to its JSON; every page must be in exactly one batch."""
     geometry = src.scan["pages"]
     pages: dict[int, dict] = {}
     for first, path in sorted(files.items()):
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise ValueError(f"batch {batch_name(first)} is missing") from exc
+        if size > BATCH_MAX_BYTES:
+            raise ValueError(
+                f"batch {batch_name(first)} is larger than {BATCH_MAX_BYTES // (1024 * 1024)} MiB"
+            )
         try:
             data = json.loads(path.read_text("utf-8"))
         except (OSError, ValueError) as exc:
@@ -412,11 +434,21 @@ def read_batches(src: Source, files: dict[int, Path]) -> list[dict]:
     missing = [i + 1 for i in range(len(geometry)) if i not in pages]
     if missing:
         raise ValueError(f"pages missing: {missing[:10]}")
-    return [pages[i] for i in range(len(geometry))]
+    out = [pages[i] for i in range(len(geometry))]
+    words = chars = 0
+    truncated = False
+    for page in out:
+        if truncated or words + len(page["words"]) > MAX_WORDS or chars + page["chars"] > MAX_CHARS:
+            truncated = True
+            page["words"], page["chars"] = [], 0
+            continue
+        words += len(page["words"])
+        chars += page["chars"]
+    return out, truncated
 
 
 def build_document(src: Source, pages: list[dict], *, engine_label: str, language: str,
-                   dpi: int) -> dict:  # fmt: skip
+                   dpi: int, truncated: bool = False) -> dict:  # fmt: skip
     """The words document: the text-layer reader's batch pages for the whole PDF, the
     outline, and how they were recognised."""
     words = sum(len(p["words"]) for p in pages)
@@ -429,7 +461,7 @@ def build_document(src: Source, pages: list[dict], *, engine_label: str, languag
         "dpi": dpi,
         "pages": pages,
         "toc": src.scan.get("toc") or [],
-        "truncated": False,
+        "truncated": truncated,
         "stats": {
             "pages": len(pages),
             "pages_with_words": sum(1 for p in pages if p["words"]),
@@ -446,7 +478,8 @@ def dumps(doc: dict) -> bytes:
 
 def publish(db: Session, settings: Settings, job: Job, src: Source, doc: dict) -> dict:
     """Write the searchable PDF and the words, then install both and finish the job in one
-    step, holding the lease. Raises ``LeaseLost`` when the lease (or the file) is gone."""
+    step, holding the lease. Raises :class:`Stale` when the PDF changed or its work was
+    trashed meanwhile, ``LeaseLost`` when the lease is gone."""
     from lectern.align.jobs import LeaseLost
     from lectern.fsops import LIBRARY_LOCK
     from lectern.jobs import _place
@@ -459,7 +492,13 @@ def publish(db: Session, settings: Settings, job: Job, src: Source, doc: dict) -
         data = dumps(doc)
         words_file.write_bytes(data)
         pdf_file = stage / "ocr.pdf"
-        child.assemble(src.path, doc["pages"], pdf_file, memory_mb=settings.ocr_memory_limit_mb)
+        # Assembly can take a while (a worker stopped heartbeating when it submitted): the
+        # lease must outlast it, and only one assembly runs at a time in this process.
+        if not _extend_lease(db, job, child.ASSEMBLE_TIMEOUT_S + 300):
+            raise LeaseLost()
+        with ASSEMBLY_SLOT:
+            child.assemble(src.path, doc["pages"], pdf_file,
+                           memory_mb=settings.ocr_memory_limit_mb)  # fmt: skip
         pdf_digest = _sha256_file(pdf_file)
         result = {
             **doc["stats"],
@@ -472,7 +511,7 @@ def publish(db: Session, settings: Settings, job: Job, src: Source, doc: dict) -
             db.refresh(src.work)
             db.refresh(src.book)
             if src.work.trashed_at is not None or src.book.sha256 != doc["pdf_sha256"]:
-                raise LeaseLost()
+                raise Stale()
             if not queue.hold_lease(db, job):
                 raise LeaseLost()
             try:
@@ -505,6 +544,27 @@ def publish(db: Session, settings: Settings, job: Job, src: Source, doc: dict) -
     shutil.rmtree(queue.artifacts_dir(settings.data_dir, job.id), ignore_errors=True)
     log.info("ocr job %s: %d words on %d pages", job.id, result["words"], result["pages"])
     return {"job_id": job.id, "status": "succeeded", **result}
+
+
+ASSEMBLY_SLOT = threading.BoundedSemaphore(1)
+
+
+def _extend_lease(db: Session, job: Job, seconds: float) -> bool:
+    """Push the lease's expiry out, only while it is still exactly this job's lease."""
+    from datetime import timedelta
+
+    now = utcnow()
+    done = db.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status == JobStatus.LEASED,
+               Job.lease_token_hash == job.lease_token_hash, Job.lease_expires_at > now)
+        .values(lease_expires_at=now + timedelta(seconds=seconds), heartbeat_at=now,
+                updated_at=now)
+        .execution_options(synchronize_session=False)
+    ).rowcount  # fmt: skip
+    db.commit()
+    db.refresh(job)
+    return done == 1
 
 
 def _sha256_file(path: Path) -> str:
@@ -657,16 +717,19 @@ class OcrRunner:
                     threads=self.settings.ocr_threads, on_page=on_page,
                 )  # fmt: skip
                 _write_json(out, data)
-            pages = read_batches(src, {f: store / batch_name(f) for f, _ in batches(
+            pages, truncated = read_batches(src, {f: store / batch_name(f) for f, _ in batches(
                 total, int(payload.get("batch_pages") or BATCH_PAGES))})  # fmt: skip
             doc = build_document(src, pages, engine_label=engine.label(version) or "tesseract",
-                                 language=language, dpi=dpi)  # fmt: skip
+                                 language=language, dpi=dpi, truncated=truncated)  # fmt: skip
             publish(db, self.settings, job, src, doc)
         except _Stopping:
             db.rollback()
             align_jobs.release(db, db.get(Job, job.id))
         except LeaseLost:
-            db.rollback()  # cancelled, or the work went away: nothing to record
+            db.rollback()
+            # cancelled meanwhile (then this does nothing), or the lease ran out: a local
+            # lease is never reclaimed by the sweep, so hand it back for a retry
+            self._fail(db, job, "the lease ran out during text recognition", True)
         except Stale:
             db.rollback()
             self._fail(db, job, "the PDF changed or was removed since it was queued", False)
@@ -692,7 +755,9 @@ class _Stopping(Exception):
 
 def recover_local(db: Session) -> int:
     """Leases the server's own runner held when the server stopped: retried (with backoff,
-    resuming from the stored batches) or failed when attempts are used up."""
+    resuming from the stored batches) or failed when attempts are used up. A restart counts
+    as an attempt, as it does for alignment: a book that crashes the server every time
+    must not loop forever."""
     from lectern.align import jobs as align_jobs
 
     n = 0
@@ -735,7 +800,7 @@ def _worker_inputs(db: Session, settings: Settings, job: Job) -> dict | None:
 
 def _worker_result(db: Session, settings: Settings, job: Job, body: bytes, artifacts: Path) -> dict:
     """Check a worker's batches (pinned, like every artifact) and publish them."""
-    from lectern.align.jobs import LeaseLost, ResultError
+    from lectern.align.jobs import ResultError
     from lectern.jobs import _pin
     from lectern.security.tokens import new_secret
 
@@ -753,7 +818,7 @@ def _worker_result(db: Session, settings: Settings, job: Job, body: bytes, artif
     try:
         src = source_of(db, settings, job)
     except Stale:
-        raise LeaseLost() from None
+        raise ResultError(422, "input_changed", ["the PDF changed or was removed"]) from None
     expected = {f for f, _ in batches(len(src.scan["pages"]),
                                        int(payload.get("batch_pages") or BATCH_PAGES))}  # fmt: skip
     got = [b.first for b in parsed.batches]
@@ -768,6 +833,8 @@ def _worker_result(db: Session, settings: Settings, job: Job, body: bytes, artif
         for b in parsed.batches:
             copy = pin / batch_name(b.first)
             try:
+                if (artifacts / b.artifact).stat().st_size > BATCH_MAX_BYTES:
+                    raise ResultError(422, "invalid_pages", [f"{b.artifact} is too large"])
                 digest = _pin(artifacts / b.artifact, copy)
             except FileNotFoundError:
                 digest = None
@@ -775,13 +842,15 @@ def _worker_result(db: Session, settings: Settings, job: Job, body: bytes, artif
                 raise ResultError(422, "missing_artifact", [b.artifact])
             files[b.first] = copy
         try:
-            pages = read_batches(src, files)
+            pages, truncated = read_batches(src, files)
         except ValueError as exc:
             raise ResultError(422, "invalid_pages", [str(exc)[:300]]) from exc
-        doc = build_document(src, pages, engine_label=parsed.engine,
-                             language=parsed.language, dpi=int(payload.get("dpi") or 0))  # fmt: skip
+        doc = build_document(src, pages, engine_label=parsed.engine, language=parsed.language,
+                             dpi=int(payload.get("dpi") or 0), truncated=truncated)  # fmt: skip
         try:
             return publish(db, settings, job, src, doc)
+        except Stale:
+            raise ResultError(422, "input_changed", ["the PDF changed or was removed"]) from None
         except child.OcrError as exc:
             raise ResultError(422, "assembly_failed", [str(exc)[:300]]) from exc
     finally:

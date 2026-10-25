@@ -133,13 +133,15 @@ def test_scans_are_found_and_text_pdfs_are_not(tmp_path):
     "metadata, code",
     [(None, "eng"), ("", "eng"), ("en-GB", "eng"), ("fr", "fra"), ("fre", "fra"),
      ("de-AT", "deu"), ("zh-Hant-TW", "chi_tra"), ("zh", "chi_sim"), ("sr-Latn", "srp_latn"),
-     ("xx", "eng"), ("nld", "nld")],
+     ("xx", "eng"), ("nld", "nld"), ("osd", "eng")],
 )  # fmt: skip
 def test_the_work_language_picks_tesseract_data(metadata, code):
     assert engine.language_for(metadata) == code
 
 
-@pytest.mark.parametrize("spec", ["", "eng+", "en", "eng;rm", "../eng", "eng+eng", "a+b+c+d"])
+@pytest.mark.parametrize(
+    "spec", ["", "eng+", "en", "eng;rm", "../eng", "eng+eng", "a+b+c+d", "eng\n+fra", " eng"]
+)
 def test_language_specs_that_could_not_be_tesseract_codes_are_refused(spec):
     with pytest.raises(ValueError):
         engine.parse_spec(spec)
@@ -392,3 +394,136 @@ def test_a_merge_takes_the_searchable_copy_along(client, owner, settings, scanne
         assert ocr.pdf_path(settings.library_dir, target, book.sha256).read_bytes() == (
             b"%PDF-searchable"
         )
+
+
+def _queue(client, owner, book) -> int:
+    r = api_post(client, f"/api/files/{book.id}/ocr", owner["csrf"])
+    assert r.status_code == 200 and r.json()["status"] == "queued", r.text
+    return r.json()["job"]["id"]
+
+
+@needs_tesseract
+def test_a_pdf_changed_mid_run_fails_the_job_instead_of_leaving_it_leased(
+    client, owner, settings, scanned, monkeypatch
+):
+    book, _work = scanned
+    job_id = _queue(client, owner, book)
+    real = ocr.recognise_batch
+
+    def then_replace_the_file(*a, **kw):
+        out = real(*a, **kw)
+        with session_factory()() as db:  # an edit swapped the PDF meanwhile
+            db.get(BookFile, book.id).sha256 = "f" * 64
+            db.commit()
+        return out
+
+    monkeypatch.setattr(ocr, "recognise_batch", then_replace_the_file)
+    assert ocr.OcrRunner(session_factory(), settings).run_once()
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        assert job.status == JobStatus.FAILED and "changed" in job.error
+        assert ocr.active_job(db, job.work_id) is None
+
+
+@needs_tesseract
+def test_a_lease_lost_before_publishing_is_handed_back(
+    client, owner, settings, scanned, monkeypatch
+):
+    book, work = scanned
+    job_id = _queue(client, owner, book)
+    monkeypatch.setattr(ocr, "_extend_lease", lambda *a: False)
+    assert ocr.OcrRunner(session_factory(), settings).run_once()
+    with session_factory()() as db:
+        job = db.get(Job, job_id)
+        assert job.status == JobStatus.QUEUED and "lease" in job.error  # retried, not stuck
+    assert not ocr.has_output(settings.library_dir, work, book.sha256)
+
+
+def test_a_retry_resumes_from_stored_batches(client, owner, settings, scanned, monkeypatch):
+    book, work = scanned
+    job_id = _queue(client, owner, book)
+    store = ocr.queue.artifacts_dir(settings.data_dir, job_id)
+    store.mkdir(parents=True)
+    done = {"first": 0, "pages": [
+        {"index": i, "words": [["Zebra", 100, 600, 160, 620, 16, 2]], "conf": 90, "dpi": 300}
+        for i in range(2)]}  # fmt: skip
+    (store / ocr.batch_name(0)).write_text(json.dumps(done))
+
+    def never(*a, **kw):
+        raise AssertionError("a stored batch was recognised again")
+
+    monkeypatch.setattr(ocr, "recognise_batch", never)
+    monkeypatch.setattr(ocr, "local_engine", lambda _s: ("5.3.0", ("eng",)))
+    assert ocr.OcrRunner(session_factory(), settings).run_once()
+    words = json.loads(ocr.words_path(settings.library_dir, work, book.sha256).read_text())
+    assert [p["words"][0][0] for p in words["pages"]] == ["Zebra", "Zebra"]
+    assert "Zebra" in text_of(ocr.pdf_path(settings.library_dir, work, book.sha256))
+
+
+def test_books_past_the_word_cap_are_truncated(client, owner, settings, scanned, monkeypatch):
+    book, work = scanned
+    src = ocr.Source(book, work, Path("unused"), ocr.load_scan(settings.data_dir, book.sha256)
+                     or ocr.scan_file(settings, book, work))  # fmt: skip
+    path = settings.data_dir / "batch.json"
+    word = ["word", 100, 600, 160, 620, 16, 0]
+    path.write_text(json.dumps({"first": 0, "pages": [
+        {"index": i, "words": [word] * 3} for i in range(2)]}))  # fmt: skip
+    monkeypatch.setattr(ocr, "MAX_WORDS", 4)
+    pages, truncated = ocr.read_batches(src, {0: path})
+    assert truncated and [len(p["words"]) for p in pages] == [3, 0]
+    monkeypatch.setattr(ocr, "BATCH_MAX_BYTES", 64)
+    with pytest.raises(ValueError, match="larger than"):
+        ocr.read_batches(src, {0: path})
+
+
+def test_a_worker_cannot_make_the_server_parse_a_huge_batch(
+    client, owner, settings, scanned, app, monkeypatch
+):
+    book, _work = scanned
+    monkeypatch.setattr(ocr, "BATCH_MAX_BYTES", 256)
+    key = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "mac"}).json()
+    _queue(client, owner, book)
+    wc = TestClient(app, headers={"Authorization": f"Bearer {key['secret']}"})
+    r = wc.post("/api/worker/jobs/claim", json={"worker": "w", "capabilities": ["ocr"]})
+    job_id, token = r.json()["job"]["id"], {"X-Lease-Token": r.json()["lease"]["token"]}
+    big = json.dumps({"first": 0, "pages": [{"index": 0, "words": []}], "pad": "x" * 1000}).encode()
+    digest = hashlib.sha256(big).hexdigest()
+    up = wc.put(f"/api/worker/jobs/{job_id}/artifacts/pages-00000.json", content=big,
+                headers={**token, "X-Content-SHA256": digest})  # fmt: skip
+    assert up.status_code == 201, up.text
+    body = {"engine": "tesseract 5", "language": "eng", "batches": [
+        {"first": 0, "artifact": "pages-00000.json", "artifact_sha256": digest}]}  # fmt: skip
+    r = wc.put(f"/api/worker/jobs/{job_id}/result", json=body, headers=token)
+    assert r.status_code == 422 and "too large" in r.text, r.text
+
+
+@needs_tesseract
+def test_a_page_timeout_kills_tesseract_too(tmp_path, monkeypatch):
+    """The child runs in its own process group; on a timeout nothing of it survives."""
+    import subprocess
+
+    path = make_scan(tmp_path / "scan.pdf")
+    seen = {}
+    real = subprocess.Popen
+
+    def spy(*a, **kw):
+        proc = real(*a, **kw)
+        seen["pgid"] = proc.pid
+        return proc
+
+    monkeypatch.setattr(child.subprocess, "Popen", spy)
+    with pytest.raises(child.OcrError) as err:
+        child._run(["page", str(path), "0", str(tmp_path / "o.json"), "tesseract", "eng",
+                    "600", "1536"], str(tmp_path), 0.5)  # fmt: skip
+    assert err.value.code == "timed_out"
+    import time
+
+    deadline = time.monotonic() + 10  # a killed grandchild is reaped by init, not by us
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(seen["pgid"], 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the page child's process group outlived its timeout")

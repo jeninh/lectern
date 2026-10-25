@@ -1502,6 +1502,7 @@ def test_the_agent_offers_only_what_passes_its_self_test(tmp_path, monkeypatch):
     monkeypatch.setattr(mlx, "worker_transcriber", lambda *a, **k: None)
     monkeypatch.setattr(runners, "kokoro_available", lambda: True)
     monkeypatch.setattr(runners, "ffmpeg_available", lambda *a: True)
+    monkeypatch.setattr(runners, "tesseract_available", lambda *a: False)
     tested = []
 
     def check_isolated(caps, **kw):

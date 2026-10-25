@@ -331,7 +331,13 @@ class OcrRunner:
 
     def run(self, ctx: JobContext) -> None:
         from lectern.ocr import child, engine
-        from lectern.ocr.jobs import BATCH_PAGES, batch_name, batches, recognise_batch
+        from lectern.ocr.jobs import (
+            BATCH_PAGES,
+            batch_name,
+            batches,
+            failure_message,
+            recognise_batch,
+        )
 
         p = ctx.payload
         language = str(p.get("language") or engine.DEFAULT_LANGUAGE)
@@ -343,7 +349,8 @@ class OcrRunner:
         except ValueError as exc:
             raise PermanentJobError(str(exc)) from None
         if missing:
-            raise PermanentJobError(f"Tesseract has no data for {'+'.join(missing)} on this worker")
+            # the server (or another worker) may have it: hand the job back, do not fail it
+            raise EngineUnavailable(f"Tesseract has no data for {'+'.join(missing)} here")
         total = int(p.get("pages") or 0)
         dpi = int(self.dpi or p.get("dpi") or 300)
         have = ctx.artifacts()
@@ -363,7 +370,12 @@ class OcrRunner:
                                            language=language, dpi=dpi, memory_mb=self.memory_mb,
                                            threads=self.threads, on_page=on_page)  # fmt: skip
                 except child.OcrError as exc:
-                    raise PermanentJobError(f"text recognition failed: {exc}") from None
+                    message, retryable = failure_message(exc, language)
+                    if exc.code == "language_missing":
+                        raise EngineUnavailable(message) from None
+                    if not retryable:
+                        raise PermanentJobError(message) from None
+                    raise RuntimeError(message) from None  # retried with backoff
                 out = ctx.tmp / name
                 out.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
                 digest = ctx.upload_artifact(name, out)

@@ -50,7 +50,11 @@ included), 10 minutes of CPU, a 15-minute wall clock, no core dumps, `nice` 10. 
 in grayscale at `LECTERN_OCR_DPI` (300) and at most 40 megapixels, and Tesseract uses
 `LECTERN_OCR_THREADS` (1). Memory stays flat whatever the length of the book. A page that hits a
 limit is tried once more at half the resolution, then left without text and counted
-(*"2 pages could not be read"*); the rest of the book still gets its text.
+(*"2 pages could not be read"*); the rest of the book still gets its text. A timeout kills the
+child and its Tesseract together. The server parses recognised pages in its own memory, so a
+stored batch is at most 16 MiB and a book keeps at most 1.5 million words and 8 million
+characters (the PDF text reader's caps; beyond them the document says `truncated`). Only one
+searchable PDF is assembled at a time.
 
 Recognised pages are stored in batches of 10 (`pages-00010.json`, the job's artifacts), so a
 retry, a restart, or a worker taking over resumes at the first missing batch.
@@ -65,7 +69,8 @@ A failure is shown on the work with its reason and a **Retry** button (owners, m
 | Tesseract missing on a worker | the worker hands the job back and stops offering `ocr` for a while |
 | an unreadable or password-protected PDF | fails at once |
 | anything else (a crash, a full disk) | retried with backoff, then failed |
-| the server restarts mid-run | handed back at the next start, resumed from the stored batches |
+| the server restarts mid-run | requeued at the next start (counts as an attempt), resumed from the stored batches |
+| the PDF changes or its work is trashed mid-run | fails with that reason (Retry recognises the new file) |
 | a worker disappears | its lease expires and the usual sweep requeues the job |
 
 No state stays "running": every lease either heartbeats, expires, or is handed back.
@@ -98,10 +103,14 @@ rotation, label, chars, map_errors, words: [[text, x0, y0, x1, y1, size, flags]]
 user space (points, origin bottom left, before `/Rotate`), flags 1 = line-end hyphen and 2 =
 line break, plus the outline as `toc`. Each word's box spans its line, as PDFium's loose boxes
 do. So the same layout step (running heads and page numbers, columns, dehyphenation, Unicode)
-builds the same canonical text document from it, with `status: "ready"`, and sentences,
-positions, alignment, narration, and the read-along overlay then work on scans unchanged. The
-document records the OCR engine and language, so a new recognition is a new text and an older
-alignment goes stale.
+can build the same canonical text document from it, with `status: "ready"`, and sentences,
+positions, alignment, narration, and the read-along overlay then work on scans unchanged.
+
+Still to do once PR #34 is merged (a small hookup, not part of this change): store a scan's
+text from this file; mark the document as `ready` from the recognised text rather than by the
+text-layer rule (a sparse scan, such as a picture book, would otherwise stay `needs_ocr`); and
+record the OCR engine and language in the document, so a new recognition is a new text and an
+older alignment goes stale.
 
 ## Not yet
 

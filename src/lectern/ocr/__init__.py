@@ -1,7 +1,7 @@
 """Text recognition (OCR) for scanned PDFs (issue #17, docs/ocr.md).
 
-A scanned PDF is pictures of pages with no text layer. Lectern finds them (:mod:`.scan`),
-recognises their words page by page with Tesseract in a sandboxed child (:mod:`.child`) as a
+A scanned PDF is pictures of pages with no text layer. Lectern finds them and recognises
+their words page by page with Tesseract in sandboxed children (:mod:`.child`), as a
 background job (:mod:`.jobs`, kind ``ocr``, capability ``ocr``: the server's own runner or a
 worker), and keeps two derived files next to the work, never touching the original:
 

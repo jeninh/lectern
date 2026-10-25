@@ -68,7 +68,7 @@ def language_for(work_language: str | None) -> str:
         return "srp_latn"
     if len(base) == 2:
         return _ISO1.get(base, DEFAULT_LANGUAGE)
-    if len(base) == 3 and base.isalpha():
+    if len(base) == 3 and base.isalpha() and base != "osd":
         return _ISO2B.get(base, base)
     return DEFAULT_LANGUAGE
 
@@ -76,8 +76,8 @@ def language_for(work_language: str | None) -> str:
 def parse_spec(spec: str) -> list[str]:
     """``eng+fra`` → ``["eng", "fra"]``; ``ValueError`` for anything that is not 1 to
     :data:`MAX_LANGUAGES` Tesseract codes (they become a command-line argument)."""
-    codes = [c for c in (spec or "").strip().split("+")]
-    if not 1 <= len(codes) <= MAX_LANGUAGES or not all(LANG_CODE.match(c) for c in codes):
+    codes = (spec or "").split("+")
+    if not 1 <= len(codes) <= MAX_LANGUAGES or not all(LANG_CODE.fullmatch(c) for c in codes):
         raise ValueError(f"not a Tesseract language: {spec!r:.40}")
     if len(set(codes)) != len(codes):
         raise ValueError("a language is listed twice")
@@ -117,7 +117,9 @@ def probe(path: str = ENGINE) -> tuple[str | None, tuple[str, ...]]:
         )
         lines = (out.stdout or b"").decode("utf-8", "replace").splitlines()
         langs = tuple(
-            sorted(c for c in (ln.strip() for ln in lines[1:]) if LANG_CODE.match(c) and c != "osd")
+            sorted(
+                c for c in (ln.strip() for ln in lines[1:]) if LANG_CODE.fullmatch(c) and c != "osd"
+            )
         )
     except (OSError, subprocess.SubprocessError):
         version, langs = None, ()

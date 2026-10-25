@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lectern.ingest import pdf as pdf_ingest
-from lectern.ingest.formats import FormatError, ProbeBusy
+from lectern.ingest.formats import PARSER_SLOTS, FormatError, ProbeBusy
 
 SCAN_BATCH = 500
 # A page "has text" with this many characters in its text layer (as the text-layer reader
@@ -86,24 +86,41 @@ def _env(extra: dict | None = None) -> dict:
 
 
 def _run(args: list[str], tmp: str, timeout: float, env: dict | None = None) -> dict:
+    # Its own process group: on a timeout the child *and* the Tesseract it started are
+    # killed, so a retry never runs next to an orphan (twice the memory on a Pi).
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, "-I", "-m", "lectern.ocr.child", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_env(env),
+        cwd=tmp,
+        start_new_session=True,
+    )
     try:
-        res = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [sys.executable, "-I", "-m", "lectern.ocr.child", *args],
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            env=_env(env),
-            cwd=tmp,
-        )
+        stdout, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_group(proc)
         raise OcrError("timed_out", f"no answer in {int(timeout)} s") from None
+    except BaseException:
+        _kill_group(proc)
+        raise
+    _kill_group(proc)  # anything the child left behind
     try:
-        status = json.loads(res.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        status = json.loads(stdout.decode("utf-8", "replace").strip().splitlines()[-1])
     except (ValueError, IndexError):
-        raise OcrError("crashed", f"child exited {res.returncode}") from None
+        raise OcrError("crashed", f"child exited {proc.returncode}") from None
     if not status.get("ok"):
         raise OcrError(status.get("error") or "crashed", status.get("detail") or "")
     return status
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    import signal
+
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(Exception):
+        proc.communicate(timeout=5)
 
 
 def scan(path: Path) -> Scan:
@@ -115,7 +132,7 @@ def scan(path: Path) -> Scan:
     toc: list[list] = []
     first, total = 0, None
     while total is None or first < total:
-        if not pdf_ingest._SLOTS.acquire(timeout=pdf_ingest.BUSY_WAIT_S):
+        if not PARSER_SLOTS.acquire(timeout=pdf_ingest.BUSY_WAIT_S):
             raise ProbeBusy()
         try:
             with tempfile.TemporaryDirectory(prefix="lectern-ocr-scan-") as tmp:
@@ -131,7 +148,7 @@ def scan(path: Path) -> Scan:
                 except (OSError, ValueError):
                     raise FormatError("pdf_too_complex", "output limit") from None
         finally:
-            pdf_ingest._SLOTS.release()
+            PARSER_SLOTS.release()
         total = int(data["pages"])
         pages.extend(data["batch"])
         if first == 0:
