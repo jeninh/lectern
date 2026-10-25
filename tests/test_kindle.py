@@ -338,3 +338,38 @@ def test_a_busy_converter_keeps_the_upload_for_a_retry(client, owner, settings, 
             formats.PARSER_SLOTS.release()
     r = api_post(client, f"/api/uploads/{uid}/finalize", csrf, {"sha256": digest})
     assert r.status_code == 200, r.text
+
+
+def test_sanitizer_keeps_nothing_that_loads_or_runs(tmp_path):
+    """CSS escapes, image-set, javascript: in cite, and SVG files must not survive. Expected
+    output is \"no remote reference anywhere\", checked on the serialized result."""
+    from lxml import etree
+
+    sheets = [
+        r"p{background:\75rl(https://evil.example/a.png)}",
+        r'p{background-image:image-set("https://evil.example/b.png" 1x)}',
+        r'@\69mport "https://evil.example/c.css";',
+        "p{x:url(//evil.example/d.png)}",
+    ]
+    for css in sheets:
+        assert "evil.example" not in kindle.clean_css(css), css
+    assert kindle.clean_css("p{background:url(../Images/a.png)}") == (
+        "p{background:url(../Images/a.png)}"
+    )
+    html = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<p style="background:\\75rl(https://evil.example/e.png)">a</p>'
+        b'<blockquote cite="javascript:alert(1)">b</blockquote>'
+        b'<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:\\75rl(https://evil.example/f)"/>'
+        b"</svg></body></html>"
+    )
+    body = kindle.Sanitizer(mobi=False).body(kindle._parse_document(html))
+    out = etree.tostring(body).decode()
+    assert "evil.example" not in out and "javascript" not in out and "cite" not in out
+    folder = tmp_path / "res"
+    folder.mkdir()
+    (folder / "pic.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" onload="x()"/>')
+    (folder / "pic.png").write_bytes(b"\x89PNG")
+    book = kindle.Book()
+    kindle._add_resources(book, folder)
+    assert set(book.resources) == {"pic.png"}

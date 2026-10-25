@@ -69,8 +69,10 @@ GPL-3.0, no native code), unpacks the book; Lectern builds the EPUB from what it
 | Documents | at most 5 000 |
 
 Every XHTML document is rebuilt from an allowlist of elements and attributes in the XHTML
-namespace: no scripts, styles with `url()` or `@import`, forms, frames, objects, event handlers,
-meta refreshes, or remote images; old Mobipocket markup (`<font>`, `<center>`, page breaks,
+namespace: no scripts, forms, frames, objects, event handlers, meta refreshes, or remote
+images. Inline styles that could load anything (`url()`, `image-set()`, CSS escapes) are
+dropped; stylesheets have their escapes decoded and then lose `@import` and every remote
+reference. SVG image files are not carried over, and inline SVG is sanitized like the rest; old Mobipocket markup (`<font>`, `<center>`, page breaks,
 `height`/`width` spacing) becomes HTML5 with CSS. Links are kept only to documents and ids that
 exist, or to `http`, `https`, and `mailto`. A MOBI7 book is split into chapters at its page
 breaks, with its table of contents taken from the NCX; a KF8 book keeps its own documents,

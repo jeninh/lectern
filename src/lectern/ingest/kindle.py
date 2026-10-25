@@ -282,10 +282,8 @@ ATTRS = {
     "colgroup": {"span"},
     "ol": {"start", "reversed", "type"},
     "li": {"value"},
-    "blockquote": {"cite"},
-    "q": {"cite"},
-    "del": {"cite", "datetime"},
-    "ins": {"cite", "datetime"},
+    "del": {"datetime"},
+    "ins": {"datetime"},
     "time": {"datetime"},
     "nav": {"hidden"},
     "details": {"open"},
@@ -300,7 +298,16 @@ SVG_ATTRS = frozenset(
     "fill stroke stroke-width transform opacity id class style offset stop-color font-size "
     "font-family text-anchor".split()
 )
-_BAD_STYLE = re.compile(r"url\s*\(|expression|javascript|behaviou?r|-moz-binding|@import", re.I)
+# Inline styles and SVG presentation attributes are dropped whole when they could load anything
+# or run anything; a backslash (a CSS escape, e.g. ``\\75rl(``) is refused rather than decoded.
+_BAD_STYLE = re.compile(
+    r"\\|url\s*\(|image-set|\bimage\s*\(|cross-fade|element\s*\(|expression|javascript|"
+    r"behaviou?r|-moz-binding|@import",
+    re.I,
+)
+_CSS_ESCAPE = re.compile(r"\\(?:([0-9A-Fa-f]{1,6})[ \t\r\n\f]?|([^\r\n\f0-9A-Fa-f]))")
+_CSS_COMMENT = re.compile(r"/\*.*?(?:\*/|$)", re.S)
+_REMOTE = r"(?:https?|ftp|data|file|javascript|blob|filesystem):|//"
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$")
 _LANG = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$")
 _ASIN = re.compile(r"^[A-Z0-9]{10}$")
@@ -325,14 +332,15 @@ MEDIA_TYPES = {
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".gif": "image/gif",
-    ".svg": "image/svg+xml",
     ".webp": "image/webp",
     ".ttf": "font/ttf",
     ".otf": "font/otf",
     ".woff": "font/woff",
     ".woff2": "font/woff2",
 }
-IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/svg+xml", "image/webp"})
+# SVG files are not carried over (they can hold scripts and remote references); inline <svg> in
+# a document goes through the sanitizer instead.
+IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
 
 def _local(tag) -> str:
@@ -622,9 +630,7 @@ def _head_info(root, base: str, book: Book, kind: str) -> tuple[str, list[str], 
             if target and target[0] in book.resources:
                 sheets.append(target[0])
         elif tag == "style" and kind == "kf8":
-            css = "".join(el.itertext())
-            if not _BAD_STYLE.search(css):
-                styles.append(css)
+            styles.append(clean_css("".join(el.itertext())))
     return title, sheets, styles
 
 
@@ -755,12 +761,25 @@ def _add_resources(book: Book, folder: Path, prefix: str = "") -> None:
         book.resources[name] = (data, media)
 
 
+def _unescape(m: re.Match) -> str:
+    ch = chr(int(m.group(1), 16)) if m.group(1) else m.group(2)
+    if ch in "\"'\\" or ord(ch) < 0x20 or ord(ch) > 0x10FFFF or 0xD800 <= ord(ch) <= 0xDFFF:
+        return m.group(0) if m.group(2) else f"\\{ord(ch) & 0x1FFFFF:x} "
+    return ch
+
+
+def clean_css(css: str) -> str:
+    """A stylesheet that loads nothing from outside the book. CSS escapes are decoded first
+    (``\\75rl(`` is ``url(``), so the checks see what a renderer would."""
+    css = _CSS_COMMENT.sub("", _CSS_ESCAPE.sub(_unescape, css))
+    css = re.sub(r"@import\b[^;]*(?:;|$)", "", css, flags=re.I)
+    css = re.sub(r"url\(\s*['\"]?\s*(?:[a-z][a-z0-9+.-]*:|//)[^)]*\)", "none", css, flags=re.I)
+    css = re.sub(rf"(['\"])\s*(?:{_REMOTE})[^'\"]*\1", '""', css, flags=re.I)
+    return re.sub(r"expression\s*\(|behaviou?r\s*:|-moz-binding", "x-removed:", css, flags=re.I)
+
+
 def _clean_css(data: bytes) -> bytes:
-    """Stylesheets may load nothing from outside the book."""
-    css = data.decode("utf-8", "replace")
-    css = re.sub(r"@import[^;]*;", "", css, flags=re.I)
-    css = re.sub(r"url\(\s*['\"]?\s*(?:https?:|data:|//)[^)]*\)", "none", css, flags=re.I)
-    return css.encode("utf-8")
+    return clean_css(data.decode("utf-8", "replace")).encode("utf-8")
 
 
 def _build_kf8(book: Book, oebps: Path, header: Header) -> None:
