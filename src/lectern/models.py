@@ -1233,7 +1233,7 @@ class GeneratedAudiobook(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
-# --- The text layer of PDFs (migration 0015_pdf_text) -------------------------------------------
+# --- The text layer of PDFs (migration 0016_pdf_text) -------------------------------------------
 
 
 class PdfText(Base):

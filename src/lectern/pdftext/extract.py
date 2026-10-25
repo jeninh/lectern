@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lectern.ingest import pdf as pdf_ingest
-from lectern.ingest.formats import FormatError, ProbeBusy
+from lectern.ingest.formats import PARSER_SLOTS, FormatError, ProbeBusy
 
 BATCH_PAGES = 48
 # Characters read from one page; a page with more (a dense table, a broken generator) keeps
@@ -128,7 +128,7 @@ def _page(p: dict) -> RawPage:
 
 
 def _run_batch(path: Path, first: int, last: int) -> dict:
-    if not pdf_ingest._SLOTS.acquire(timeout=pdf_ingest.BUSY_WAIT_S):
+    if not PARSER_SLOTS.acquire(timeout=pdf_ingest.BUSY_WAIT_S):
         raise ProbeBusy()
     try:
         with tempfile.TemporaryDirectory(prefix="lectern-pdftext-") as tmp:
@@ -168,7 +168,7 @@ def _run_batch(path: Path, first: int, last: int) -> dict:
             except (OSError, ValueError):
                 raise FormatError("pdf_too_complex", "output limit") from None
     finally:
-        pdf_ingest._SLOTS.release()
+        PARSER_SLOTS.release()
 
 
 # --- the child --------------------------------------------------------------------------------

@@ -1474,6 +1474,15 @@ def test_the_queue_explains_why_a_job_waits(client, owner, work_id, app, worker_
         db.execute(update(WorkerCredential).values(capabilities=["align"]))
         db.commit()
     assert waiting()["workers"][0]["why"] == "its allowlist does not include tts-kokoro"
+    # ...but an allowlist with align also allows align-pdf, as claims do
+    pdf_job = add_job(work_id, "align", {"text_source": "pdf"})
+    (job,) = [j for j in client.get("/api/jobs?status=active").json()["jobs"]
+              if j["id"] == pdf_job]  # fmt: skip
+    assert job["waiting"]["capability"] == "align-pdf"
+    assert job["waiting"]["workers"][0]["why"] == "does not offer align-pdf"
+    with session_factory()() as db:
+        db.execute(update(Job).where(Job.id == pdf_job).values(status=JobStatus.CANCELLED))
+        db.commit()
     with session_factory()() as db:
         db.execute(update(WorkerCredential).values(capabilities=None))
         db.commit()

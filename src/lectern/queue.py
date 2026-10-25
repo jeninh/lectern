@@ -455,7 +455,7 @@ def explain_wait(
         info = c.info or {}
         if cap in SERVER_ONLY:
             why = "this kind of job never leaves the server"
-        elif c.capabilities is not None and cap not in c.capabilities:
+        elif not claimable([cap], c):
             why = f"its allowlist does not include {cap}"
         elif cap not in advertised:
             missing = (info.get("unavailable") or {}).get(cap)
