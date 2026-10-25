@@ -34,9 +34,12 @@ MENUBAR_LABEL = "dev.lectern.worker.menubar"
 STATE_EVERY_S = 3.0
 
 
-def build_runners(cfg: wcfg.AgentConfig) -> tuple[list, dict[str, str]]:
-    """Runners for every engine installed here (narrowed by ``cfg.capabilities``), and the
-    engine versions to report."""
+def build_runners(
+    cfg: wcfg.AgentConfig, *, self_test: bool = True
+) -> tuple[list, dict[str, str], dict[str, str]]:
+    """Runners for every engine installed here (narrowed by ``cfg.capabilities``) whose
+    self-test passes (:mod:`lectern.worker.doctor`, in a child process, downloading missing
+    models first), the engine versions to report, and the capabilities withheld with why."""
     from lectern.align.mlx import worker_transcriber
     from lectern.align.worker import AlignRunner
     from lectern.worker.runners import (
@@ -48,23 +51,37 @@ def build_runners(cfg: wcfg.AgentConfig) -> tuple[list, dict[str, str]]:
 
     runners: list = []
     engines: dict[str, str] = {}
+    withheld: dict[str, str] = {}
     allowed = set(cfg.capabilities) if cfg.capabilities is not None else None
 
     def want(cap: str) -> bool:
         return allowed is None or cap in allowed
 
-    if want("align"):
-        tr = worker_transcriber(cfg.engine, cfg.model)
-        if tr is not None:
-            runners.append(AlignRunner(tr))
-            engines["align"] = tr.label
-    if want("tts-kokoro") and kokoro_available() and ffmpeg_available():
+    tr = worker_transcriber(cfg.engine, cfg.model) if want("align") else None
+    candidates = [c for c, have in (("align", tr is not None),
+                                    ("tts-kokoro", kokoro_available() and ffmpeg_available()),
+                                    ("transcode", ffmpeg_available())) if want(c) and have]  # fmt: skip
+    if self_test and candidates:
+        from lectern.worker import doctor
+
+        log.info("self-test: %s (downloads missing models first)", ", ".join(candidates))
+        results = doctor.check_isolated(candidates, engine=cfg.engine, model=cfg.model)
+        for cap, r in results.items():
+            if r.ok:
+                log.info("self-test %s: ok (%s)", cap, r.engine)
+            else:
+                log.error("self-test %s failed, not offering it: %s", cap, r.reason)
+                withheld[cap] = r.reason or "self-test failed"
+    if "align" in candidates and "align" not in withheld:
+        runners.append(AlignRunner(tr))
+        engines["align"] = tr.label
+    if "tts-kokoro" in candidates and "tts-kokoro" not in withheld:
         runners.append(KokoroRunner())
         engines["tts-kokoro"] = "kokoro-82m"
-    if want("transcode") and ffmpeg_available():
+    if "transcode" in candidates and "transcode" not in withheld:
         runners.append(TranscodeRunner())
         engines["transcode"] = "ffmpeg"
-    return runners, engines
+    return runners, engines, withheld
 
 
 class Agent:
@@ -90,11 +107,6 @@ class Agent:
             raise SystemExit(0)
         # before the engines load: their model downloads go through the same proxy and CAs
         apply_network_env(self.cfg.proxy, self.cfg.ca_bundle, self.home)
-        engines: dict[str, str] = {}
-        if runners is None:
-            runners, engines = build_runners(self.cfg)
-        if not runners:
-            raise SystemExit("no engine installed: nothing this worker could run")
         self.stop = threading.Event()
         self._cfg_at = time.monotonic()
         self.worker = RemoteWorker(
@@ -103,18 +115,36 @@ class Agent:
             name=self.cfg.name or platform.node() or "mac",
             lease_s=self.cfg.lease_s,
             poll_s=self.cfg.poll_s,
-            runners=runners,
+            runners=list(runners or []),
             pause=self.pause_reason,
             stop=self.stop,
             client=client,
+            crash_marker=self.home / "current-job.json",
             info={
                 "version": __version__,
                 "platform": f"{sys.platform}-{platform.machine()}",
-                "engines": engines,
+                "engines": {},
             },  # fmt: skip
             **http_options(self.cfg.proxy, self.cfg.ca_bundle),
         )
         self.last_error: str | None = None
+        if runners is None:
+            # A job the previous process died in is settled before the (possibly long)
+            # self-test, while its lease is most likely still valid.
+            self.worker.report_crash()
+            wcfg.write_state({"state": "paused", "reason": "checking engines (first run downloads "
+                              "models)", "updated_at": time.time(), "server": self.cfg.server,
+                              "job": None, "pid": os.getpid()}, self.home)  # fmt: skip
+            built, engines, withheld = build_runners(self.cfg, self_test=self.cfg.self_test)
+            if not built and not withheld:
+                raise SystemExit("no engine installed: nothing this worker could run")
+            # With every self-test failed the agent stays up and tells the server why
+            # (paused, "engines unavailable: …") instead of exiting into a launchd restart loop.
+            self.worker.runners = built
+            self.worker.withheld = withheld
+            self.worker.info["engines"] = engines
+        elif not runners:
+            raise SystemExit("no engine installed: nothing this worker could run")
 
     def _reload(self) -> None:
         if time.monotonic() - self._cfg_at >= 2.0:
@@ -131,6 +161,9 @@ class Agent:
     def state(self) -> dict:
         current = self.worker.current
         reason = None if current else self.pause_reason()
+        if not current and not reason and not self.worker.capabilities:
+            reason = "engines unavailable: " + "; ".join(sorted(set(
+                self.worker.unavailable.values())))[:150] if self.worker.unavailable else None  # fmt: skip
         p, n = self.conditions.power, self.conditions.network
         return {
             "pid": os.getpid(),
@@ -142,6 +175,7 @@ class Agent:
             "job": current,
             "capabilities": self.worker.capabilities,
             "engines": self.worker.info.get("engines", {}),
+            "unavailable": self.worker.unavailable,
             "power": None if p is None else {"on_ac": p.on_ac, "percent": p.percent},
             "network": None if n is None else {"on_wifi": n.on_wifi, "ssid": n.ssid},
             "error": self.last_error,
@@ -159,6 +193,7 @@ class Agent:
             if self.stop.is_set():
                 raise KeyboardInterrupt
             log.warning("stopping after handing back the current job")
+            self.worker.mark_stopping()
             self.stop.set()
 
         signal.signal(signal.SIGINT, _on_signal)
@@ -222,6 +257,9 @@ def plist_for(label: str, argv: list[str], *, keep_alive: bool, logs: Path,
         "ProcessType": "Background" if keep_alive else "Interactive",
         # Low I/O and CPU priority: the Mac stays responsive while a book renders.
         "LowPriorityIO": keep_alive,
+        # Time to hand a job back on stop (a model load does not check for it); a worker
+        # killed anyway leaves a "stopping" marker, released, not counted as a crash.
+        "ExitTimeOut": 60,
         "Nice": 10 if keep_alive else 0,
         "ThrottleInterval": 30,
         "StandardOutPath": str(logs / f"{label}.log"),
@@ -267,6 +305,15 @@ def install_service(*, menubar: bool = True, start_at_login: bool = True) -> lis
         _launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
         written.append(path)
     return written
+
+
+def restart_service() -> bool:
+    """Restart the installed worker agent (it re-runs its self-test); ``False`` when it is
+    not installed here."""
+    if sys.platform != "darwin" or not (launch_agents_dir() / f"{AGENT_LABEL}.plist").exists():
+        return False
+    _launchctl("kickstart", "-k", f"gui/{os.getuid()}/{AGENT_LABEL}")
+    return True
 
 
 def uninstall_service() -> None:

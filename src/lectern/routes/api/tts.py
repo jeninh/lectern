@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from lectern import integrations
 from lectern.models import Role, WorkerCredential
+from lectern.routes.api.align import server_capabilities
 from lectern.routes.api.readalong import visible_work
 from lectern.security import audit
 from lectern.security.deps import (
@@ -88,7 +89,15 @@ def audiobook_state(auth: Viewer, db: DbDep, settings: SettingsDep, work_id: int
         "reason": reason,
         "chapters": chapters,
         **svc.catalog(db, settings, auth.user),
-        "job": tj.job_json(db, job, _workers(db)) if job else None,
+        "job": tj.job_json(
+            db,
+            job,
+            _workers(db),
+            server_caps=server_capabilities(db, settings),
+            for_owner=auth.user.role == Role.OWNER,
+        )  # fmt: skip
+        if job
+        else None,
         "edition": (
             {
                 "engine": edition.engine,

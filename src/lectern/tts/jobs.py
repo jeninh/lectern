@@ -244,7 +244,11 @@ def heartbeat(
     return job.lease_expires_at
 
 
-def fail(db: Session, job: Job, error: str, *, retryable: bool) -> dict:
+def fail(db: Session, job: Job, error: str, *, retryable: bool, crashed: bool = False) -> dict:
+    from lectern.align.jobs import count_crash
+
+    if crashed:
+        error, retryable = count_crash(job, error, retryable)
     now = utcnow()
     job.error = error[:2000]
     job.lease_expires_at = None
@@ -808,7 +812,13 @@ def eta(db: Session, job: Job, now: datetime | None = None) -> dict | None:
 
 
 def job_json(
-    db: Session, job: Job, workers: dict[int, str] | None = None, *, detailed: bool = True
+    db: Session,
+    job: Job,
+    workers: dict[int, str] | None = None,
+    *,
+    detailed: bool = True,
+    server_caps: set[str] | None = None,
+    for_owner: bool = False,
 ) -> dict:
     p = job.payload or {}
     r = job.result or {}
@@ -829,6 +839,7 @@ def job_json(
         "status": job.status.value,
         "attempts": job.attempts,
         "max_attempts": job.max_attempts,
+        "crashes": job.crashes or 0,
         "priority": job.priority,
         "engine": p.get("engine"),
         "model": p.get("model"),
@@ -853,6 +864,9 @@ def job_json(
         "error": job.error if detailed else (None if job.error is None else "failed"),
         "result": _success_body(job) if job.status == JobStatus.SUCCEEDED else None,
         "eta": eta(db, job),
+        "waiting": queue.explain_wait(db, job, server_caps=server_caps, for_owner=for_owner)
+        if detailed
+        else None,
     }
 
 

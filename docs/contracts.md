@@ -408,6 +408,15 @@ also reports `model`, `audio_s` (its audio duration), and
 [`alignment.md`](alignment.md#jobs-leases-and-the-eta)). `result.stats` holds the matcher's
 statistics and timings. `GET /api/jobs` adds `measured_speed`.
 
+`status=active` lists queued and leased jobs. Every job also has `crashes` (times it took its
+worker down; see the failure endpoint) and `waiting`: `null` once finished, else why it is where
+it is (`lectern.queue.explain_wait`): `{capability, summary, workers, eligible_online,
+server_runs, ahead, lease: {holder, expires_at, heartbeat_at} | null, run_after, attempts,
+max_attempts, crashes, last_error}`. `workers` (`{id, label, state, eligible, why}` per active
+credential, with its pause reason or why it does not offer the capability) and the reasons in
+`summary` are for the owner only, as on Admin → Workers: members get `workers: []` and a
+summary without worker names or reasons.
+
 ### Generated audiobooks — `tts` jobs
 
 `kind = "tts"` jobs narrate a text-only work into an audiobook edition whose sentence map
@@ -821,6 +830,13 @@ with the error (a previous successful alignment's `sentences` stay in place unti
 replaces them). Response `200 {"status": "queued", "run_after": "…"}` or
 `{"status": "failed"}`.
 
+`"crashed": true` (optional) says the job took the worker process down: an engine called
+`sys.exit()` or raised another non-`Exception` error, or the process died and its crash marker
+was found at the next start (then the token is the one it held). The job's `crashes` counter
+goes up; at `CRASH_LIMIT` (2) the failure is terminal whatever attempts remain, with
+`error = "crashed the worker 2 times; last error: <error>"`. Lease expiry alone does not count
+as a crash (a sleeping laptop is not a broken job).
+
 ### Lease expiry and reclaim
 
 On every claim and from a 30-second background sweep: each job with `status = 'leased'` and
@@ -880,7 +896,9 @@ external worker, whatever it advertises: the job needs a secret only the server 
 - A job is leased only if `kind ∈ kinds ∩ remote kinds` and `capability ∈ advertised ∩
   credential allowlist`, minus server-only ones; then the usual oldest-first order by
   `(priority, created_at, id)`.
-- `info` is shown to the owner and never used for routing.
+- `info` is shown to the owner and never used for routing. `info.unavailable`
+  (`{capability: reason}`, at most 16, reasons ≤ 200 characters) names capabilities the worker
+  has but does not offer, for example after a failed `lectern worker-doctor` self-test.
 - The response adds `job.capability` and `artifacts_url`. For `align`, `inputs` keeps its
   shape (`{"epub", "tracks": [...]}`); for every other kind `inputs` is
   `{name: {"url", "sha256", "media_type", "size"}}`.

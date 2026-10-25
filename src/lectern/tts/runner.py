@@ -204,6 +204,15 @@ class TTSRunner:
             log.exception("tts job %d failed", job_id)
             self._fail(job_id, token, _text(exc), retryable=True)
             return True
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:  # noqa: BLE001 - SystemExit from inside an engine
+            # Unhandled, it would end this thread silently with the lease held.
+            log.error("tts job %d: the engine exited", job_id, exc_info=True)
+            error = f"the engine called sys.exit({exc.code!r})" if isinstance(
+                exc, SystemExit) else _text(exc)  # fmt: skip
+            self._fail(job_id, token, error, retryable=True, crashed=True)
+            return True
         finally:
             hb.stop()
             shutil.rmtree(scratch, ignore_errors=True)
@@ -306,9 +315,11 @@ class TTSRunner:
                 return
             fn(db, job)
 
-    def _fail(self, job_id: int, token: str, error: str, *, retryable: bool) -> None:
+    def _fail(self, job_id: int, token: str, error: str, *, retryable: bool,
+              crashed: bool = False) -> None:  # fmt: skip
         log.warning("tts job %d: %s", job_id, error)
-        self._with_lease(job_id, token, lambda db, j: tj.fail(db, j, error, retryable=retryable))
+        self._with_lease(job_id, token, lambda db, j: tj.fail(db, j, error, retryable=retryable,
+                                                             crashed=crashed))  # fmt: skip
 
 
 def _text(exc: BaseException) -> str:

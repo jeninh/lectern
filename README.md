@@ -62,7 +62,8 @@ audiobooks on the GPU (MLX Whisper, CPU fallback), generated audiobooks with Kok
 transcodes. **Admin → Workers → Add a worker** gives a one-line install command; a small
 menu-bar app switches it on and off, shows the current job, and pauses it on battery or off
 Wi-Fi. Its key can only run jobs and is revocable. When no worker is online the Pi runs what
-it can itself. See [`docs/mac-worker.md`](docs/mac-worker.md), including school/proxy mode.
+it can itself. `lectern worker-doctor --prepare` downloads its models and tries each engine;
+the worker offers only what passes, and Admin → Workers shows why a queued job waits. See [`docs/mac-worker.md`](docs/mac-worker.md), including school/proxy mode.
 
 ## KOReader plugin
 
