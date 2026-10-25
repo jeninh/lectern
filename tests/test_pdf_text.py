@@ -793,3 +793,30 @@ def test_a_restored_library_without_derived_files_reads_its_pdfs_again(client, o
     with session_factory()() as db:
         after = db.scalar(select(WorkProgress.sentence_n).where(WorkProgress.work_id == work.id))
     assert after == before
+
+
+def test_an_unwritable_work_folder_fails_that_pdf_only_and_stops_retrying(
+    client, owner, settings, monkeypatch
+):
+    from lectern.pdftext import store
+    from lectern.pdftext.store import MAX_ATTEMPTS
+
+    first = _file(settings, "two-column.pdf")
+    second = _file(settings, "plain.pdf")
+    real = store._write_atomic
+    tries = []
+
+    def write(path, data):
+        if f"/{_work_of(first).dir_path}/" in str(path):
+            tries.append(path)
+            raise PermissionError(13, "Permission denied")
+        return real(path, data)
+
+    monkeypatch.setattr(store, "_write_atomic", write)
+    sweep(session_factory(), settings.library_dir)
+    assert client.get(f"/api/files/{second}/text").json()["status"] == "ready"
+    for _ in range(MAX_ATTEMPTS + 2):
+        sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/files/{first}/text").json()
+    assert st["status"] == "failed" and "write_failed" in st["error"]
+    assert len(tries) == MAX_ATTEMPTS  # then it waits for Retry

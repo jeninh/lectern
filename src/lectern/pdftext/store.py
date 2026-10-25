@@ -217,6 +217,14 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
         old_text = row.text_sha256
         row.projected_key = None
         db.execute(delete(PdfSentence).where(PdfSentence.file_id == file_id))
+        data = dumps(doc) if doc is not None and doc["status"] == READY else None
+        if data is not None:
+            try:
+                _write_atomic(library / work.dir_path / document_rel(sha), data)
+            except OSError as exc:
+                # An unwritable work folder fails this PDF (retried up to MAX_ATTEMPTS),
+                # never the sweep: the other PDFs are still read.
+                doc, error = None, f"write_failed: {exc.strerror or type(exc).__name__}"[:500]
         if doc is None:
             row.status, row.error, row.text_sha256 = FAILED, error, None
             row.sentence_count = row.chars = 0
@@ -231,8 +239,6 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
             row.sections = []
             db.commit()
             return NEEDS_OCR
-        data = dumps(doc)
-        _write_atomic(library / work.dir_path / document_rel(sha), data)
         sentences = document_sentences(doc)
         db.add_all(PdfSentence(file_id=file_id, **s) for s in sentences)
         row.status, row.text_sha256 = READY, sha256_of(data)
@@ -493,9 +499,12 @@ def sweep(session_factory: sessionmaker, library: Path, *, limit: int = 20) -> i
         ready = [fid for fid, _sha, row, _d in books if row is not None and row.status == READY]
     read = 0
     for file_id in todo[:limit]:
-        if refresh_file(session_factory, library, file_id) is not None:
-            read += 1
-            ready.append(file_id)
+        try:
+            if refresh_file(session_factory, library, file_id) is not None:
+                read += 1
+                ready.append(file_id)
+        except Exception:  # noqa: BLE001 - one PDF must not stop the others
+            log.exception("reading the text of file %d failed", file_id)
     # Database only (the projection reads the EPUB): no library lock, so uploads never wait.
     for file_id in dict.fromkeys(ready):
         with session_factory() as db:
