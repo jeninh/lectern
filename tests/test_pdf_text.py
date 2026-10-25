@@ -233,6 +233,27 @@ def test_sentence_boxes_split_a_word_shared_by_two_sentences():
     assert sentence_boxes(section, 4, 10) == [[0, 140.0, 10.0, 200.0, 20.0]]
 
 
+def test_document_sentences_scale_with_a_long_outline_section():
+    # A two-part outline gives one section of a whole novel: boxing its sentences must stay
+    # near-linear (it once rebuilt the word index per sentence: about 20 s for these 150k words).
+    import time
+
+    n = 150_000
+    text = " ".join(("Word", "end.")[i % 10 // 9] if i % 10 in (0, 9) else "word" for i in range(n))
+    words, pos = [], 0
+    for i, token in enumerate(text.split(" ")):
+        page, line = divmod(i // 10, 40)
+        words.append([pos, pos + len(token), page, 10.0, line * 12.0, 60.0, line * 12.0 + 10])
+        pos += len(token) + 1
+    section = {"text": text, "blocks": [[0, "p"]], "words": words, "page_start": 0}
+    started = time.monotonic()
+    sentences = document_sentences({"sections": [section]})
+    assert time.monotonic() - started < 8
+    assert len(sentences) == n // 10
+    assert sentences[-1]["page_end"] == (n // 10 - 1) // 40
+    assert sentences[-1]["boxes"] == [[374, 10.0, 468.0, 60.0, 478.0]]
+
+
 # --- in the library ----------------------------------------------------------------------------
 
 

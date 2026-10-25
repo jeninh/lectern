@@ -139,8 +139,9 @@ def document_sentences(doc: dict) -> list[dict]:
     out: list[dict] = []
     for k, section in enumerate(doc.get("sections") or []):
         text = SectionText(section["text"], section["blocks"])
+        starts = [w[0] for w in section["words"]]
         for start, end in segment_text(text.text, text.block_starts()):
-            boxes = sentence_boxes(section, start, end)
+            boxes = sentence_boxes(section, start, end, starts)
             pages = [b[0] for b in boxes] or [section["page_start"]]
             out.append(
                 {
@@ -198,11 +199,24 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
     except Exception as exc:  # noqa: BLE001 - a layout bug must not stop the sweep
         log.exception("reading the text of file %d failed", file_id)
         error = f"internal: {type(exc).__name__}"
+    # Serialising and boxing a long PDF takes seconds: done before the locks, so uploads and
+    # other writers never wait on it.
+    data = dumps(doc) if doc is not None and doc["status"] == READY else None
+    sentences = document_sentences(doc) if data is not None else []
     with LIBRARY_LOCK, session_factory() as db:
         book = db.get(BookFile, file_id)
         work = db.get(Work, work_id)
         if book is None or work is None or book.sha256 != sha or book.work_id != work_id:
             return None  # replaced or moved meanwhile: the next sweep reads the new one
+        if data is not None:
+            # Written before any database write, so the SQLite write lock is not held over
+            # the fsync of a large document.
+            try:
+                _write_atomic(library / work.dir_path / document_rel(sha), data)
+            except OSError as exc:
+                # An unwritable work folder fails this PDF (retried up to MAX_ATTEMPTS),
+                # never the sweep: the other PDFs are still read.
+                doc, error = None, f"write_failed: {exc.strerror or type(exc).__name__}"[:500]
         row = pdf_text_of(db, file_id)
         if row is None:
             row = PdfText(file_id=file_id, work_id=work_id, pdf_sha256=sha, attempts=0)
@@ -217,14 +231,6 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
         old_text = row.text_sha256
         row.projected_key = None
         db.execute(delete(PdfSentence).where(PdfSentence.file_id == file_id))
-        data = dumps(doc) if doc is not None and doc["status"] == READY else None
-        if data is not None:
-            try:
-                _write_atomic(library / work.dir_path / document_rel(sha), data)
-            except OSError as exc:
-                # An unwritable work folder fails this PDF (retried up to MAX_ATTEMPTS),
-                # never the sweep: the other PDFs are still read.
-                doc, error = None, f"write_failed: {exc.strerror or type(exc).__name__}"[:500]
         if doc is None:
             row.status, row.error, row.text_sha256 = FAILED, error, None
             row.sentence_count = row.chars = 0
@@ -239,9 +245,9 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
             row.sections = []
             db.commit()
             return NEEDS_OCR
-        sentences = document_sentences(doc)
         db.add_all(PdfSentence(file_id=file_id, **s) for s in sentences)
         row.status, row.text_sha256 = READY, sha256_of(data)
+        row.attempts = 0  # a later failure gets its full MAX_ATTEMPTS again
         row.sentence_count = len(sentences)
         if was_self and old_text == row.text_sha256:
             db.flush()

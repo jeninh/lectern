@@ -154,12 +154,16 @@ def section_texts(doc: dict) -> list[SectionText]:
 # --- sentence boxes -------------------------------------------------------------------------------
 
 
-def sentence_boxes(section: dict, start: int, end: int) -> list[list[float]]:
+def sentence_boxes(
+    section: dict, start: int, end: int, starts: list[int] | None = None
+) -> list[list[float]]:
     """Highlight rectangles for the characters ``[start, end)`` of a section: one per line
     piece, ``[page, x0, y0, x1, y1]``. A word cut by the span (a sentence that ends inside a
-    word's box) contributes the matching share of its width."""
+    word's box) contributes the matching share of its width. ``starts`` (the words' first
+    characters) is built once per section by a caller that asks for every sentence."""
     words = section["words"]
-    starts = [w[0] for w in words]
+    if starts is None:
+        starts = [w[0] for w in words]
     i = max(0, bisect_left(starts, start) - 1)
     rects: list[list[float]] = []
     while i < len(words) and words[i][0] < end:
