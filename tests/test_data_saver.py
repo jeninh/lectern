@@ -305,6 +305,17 @@ def test_a_job_cancelled_mid_run_publishes_no_more_tracks(
     assert lows(client, book["id"]) == [None, None]  # the first finished after the cancel
 
 
+def test_cancelling_a_stale_copy_never_undoes_a_finished_job(client, owner, settings, book):
+    make(client, owner, book["id"])
+    with session_factory()() as stale:
+        job = stale.get(Job, the_job().id)  # loaded while queued
+        assert job.status == JobStatus.QUEUED
+        assert transcode.run_pending(session_factory(), settings) == 1
+        transcode.cancel_transcode(stale, job)
+        stale.commit()
+    assert the_job().status == JobStatus.SUCCEEDED
+
+
 def test_the_account_default_round_trips(client, owner):
     assert client.get("/api/me").json()["preferences"]["data_saver"] is False
     r = api_post(client, "/api/me/preferences", owner["csrf"], {"data_saver": True})

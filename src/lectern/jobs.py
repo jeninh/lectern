@@ -121,14 +121,21 @@ def transcoder_unavailable(db: Session, settings: Settings, now=None) -> dict | 
 def cancel_transcode(db: Session, job: Job) -> None:
     """Cancel a live transcode job. A local run stops publishing (``_publish_variant`` needs
     the lease); a worker's result is refused (``queue.hold_lease``). Caller commits."""
-    if job.status not in JOB_ACTIVE_STATUSES:
-        return
-    job.status = JobStatus.CANCELLED
-    job.lease_token_hash = None
-    job.lease_expires_at = None
-    job.heartbeat_at = None
-    job.finished_at = utcnow()
-    db.flush()
+    # Conditional on the row, not this session's copy: a job that finished meanwhile stays
+    # finished (its renditions are published).
+    db.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status.in_(JOB_ACTIVE_STATUSES))
+        .values(
+            status=JobStatus.CANCELLED,
+            lease_token_hash=None,
+            lease_expires_at=None,
+            heartbeat_at=None,
+            finished_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.expire(job)
 
 
 def cancel_all_transcodes(db: Session) -> int:
