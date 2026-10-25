@@ -167,8 +167,11 @@ def worker(args: argparse.Namespace) -> None:
     if not args.no_self_test:
         from lectern.worker import doctor
 
-        results = doctor.check_isolated([r.capabilities[0] for r in runners],
-                                        engine=args.engine, model=args.model)  # fmt: skip
+        results = doctor.check_isolated(
+            [r.capabilities[0] for r in runners], engine=args.engine, model=args.model,
+            align_options={"device": args.device, "compute_type": args.compute_type,
+                           "threads": args.threads, "download_root": args.models_dir},
+        )  # fmt: skip
         withheld = {c: r.reason or "self-test failed" for c, r in results.items() if not r.ok}
         for cap, why in withheld.items():
             logging.getLogger("lectern.worker").error("not offering %s: %s", cap, why)
@@ -193,6 +196,7 @@ def worker(args: argparse.Namespace) -> None:
         logging.getLogger("lectern.align.worker").warning(
             "stopping after handing back the current job (signal again to force)"
         )
+        w.mark_stopping()
         stop.set()
 
     signal.signal(signal.SIGINT, _on_signal)

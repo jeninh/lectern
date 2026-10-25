@@ -412,13 +412,15 @@ def explain_wait(
     job: Job,
     *,
     server_caps: set[str] | None = None,
+    for_owner: bool = True,
     now: datetime | None = None,
 ) -> dict | None:
     """Why an active job is where it is, for the owner (Admin → Workers, the job detail):
     the capability it needs, every worker that could take it and why it does not (offline,
     paused, not offering it and why, not allowed by its allowlist, busy), the lease holder and
     expiry, and ``run_after`` (backoff). ``server_caps``: capabilities this server runs
-    itself, when known. ``None`` for a finished job."""
+    itself, when known. ``None`` for a finished job. Without ``for_owner`` (a member) the
+    workers, their labels, and their reasons are left out, as on Admin → Workers."""
     from lectern.models import JOB_ACTIVE_STATUSES, Job, JobStatus, WorkerCredential, utcnow
 
     if job.status not in JOB_ACTIVE_STATUSES:
@@ -497,17 +499,19 @@ def explain_wait(
         if job.error:
             summary += f" after: {job.error[:200]}"
     elif ready:
-        summary = f"Next for {', '.join(ready[:3])}" + (f" ({ahead} ahead)" if ahead else "")
+        who = ", ".join(ready[:3]) if for_owner else "a worker"
+        summary = f"Next for {who}" + (f" ({ahead} ahead)" if ahead else "")
     elif server:
         summary = "No worker can take it now; this server will run it itself"
     else:
         summary = f"Waiting for a worker that can run {cap}"
         reasons = [f"{w['label']}: {w['why']}" for w in workers if w["why"]]
-        summary += f" ({'; '.join(reasons[:3])})" if reasons else " (no workers added)"
+        if for_owner:
+            summary += f" ({'; '.join(reasons[:3])})" if reasons else " (no workers added)"
     return {
         "capability": cap,
         "summary": summary[:400],
-        "workers": workers,
+        "workers": workers if for_owner else [],
         "eligible_online": len(ready),
         "server_runs": server,
         "ahead": ahead,

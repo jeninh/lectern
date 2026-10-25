@@ -193,14 +193,15 @@ def check_kokoro(*, prepare: bool, install: bool, say: Say) -> Result:
     return r
 
 
-def check_align(*, engine: str, model: str, say: Say, prepare: bool) -> Result:
+def check_align(*, engine: str, model: str, say: Say, prepare: bool,
+                options: dict | None = None) -> Result:  # fmt: skip
     r = Result("align")
     state: dict = {}
 
     def load_engine() -> str:
         from lectern.align.mlx import worker_transcriber
 
-        tr = worker_transcriber(engine, model)
+        tr = worker_transcriber(engine, model, **(options or {}))
         if tr is None:
             raise _Failed("no transcription engine installed (the mac or align extra)")
         state["tr"] = tr
@@ -254,12 +255,14 @@ def check_transcode(*, say: Say) -> Result:
 
 
 def check(caps, *, prepare: bool = False, install: bool = False, engine: str = "auto",
-          model: str = "small", say: Say = lambda _m: None) -> dict[str, Result]:  # fmt: skip
+          model: str = "small", say: Say = lambda _m: None,
+          align_options: dict | None = None) -> dict[str, Result]:  # fmt: skip
     out: dict[str, Result] = {}
     for cap in caps:
         say(f"checking {cap}")
         if cap == "align":
-            out[cap] = check_align(engine=engine, model=model, say=say, prepare=prepare)
+            out[cap] = check_align(engine=engine, model=model, say=say, prepare=prepare,
+                                   options=align_options)  # fmt: skip
         elif cap == "tts-kokoro":
             out[cap] = check_kokoro(prepare=prepare, install=install, say=say)
         elif cap == "transcode":
@@ -270,7 +273,8 @@ def check(caps, *, prepare: bool = False, install: bool = False, engine: str = "
 
 
 def check_isolated(caps, *, prepare: bool = True, engine: str = "auto", model: str = "small",
-                   timeout_s: float = CHILD_TIMEOUT_S) -> dict[str, Result]:  # fmt: skip
+                   timeout_s: float = CHILD_TIMEOUT_S,
+                   align_options: dict | None = None) -> dict[str, Result]:  # fmt: skip
     """:func:`check` in a child process (its progress goes to this process's stderr, the
     worker log). A child that dies fails every capability it had not reported."""
     caps = list(caps)
@@ -280,6 +284,9 @@ def check_isolated(caps, *, prepare: bool = True, engine: str = "auto", model: s
             ",".join(caps), "--engine", engine, "--model", model]  # fmt: skip
     if prepare:
         argv.append("--prepare")
+    for key, value in (align_options or {}).items():
+        if value is not None:
+            argv += [f"--{key.replace('_', '-')}", str(value)]
     why = None
     try:
         done = subprocess.run(argv, stdout=subprocess.PIPE, timeout=timeout_s, check=False)  # noqa: S603
@@ -326,6 +333,11 @@ def build_parser(p: argparse.ArgumentParser | None = None) -> argparse.ArgumentP
     p.add_argument("--engine", choices=("auto", "mlx", "cpu"), default=None,
                    help="alignment engine (default: the worker's config)")  # fmt: skip
     p.add_argument("--model", default=None, help="alignment model (default: the worker's config)")
+    # what `lectern worker` runs alignment with, so the self-test checks the same thing
+    p.add_argument("--device", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--compute-type", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--threads", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--download-root", type=Path, default=None, help=argparse.SUPPRESS)
     p.add_argument("--json", action="store_true", help="one JSON line on stdout")
     p.add_argument("--no-restart", action="store_true",
                    help="do not restart the worker service after --prepare")  # fmt: skip
@@ -346,8 +358,11 @@ def run(args: argparse.Namespace) -> int:
     def say(msg: str) -> None:
         print(f"==> {msg}", file=sys.stderr, flush=True)
 
+    options = {k: v for k in ("device", "compute_type", "threads", "download_root")
+               if (v := getattr(args, k, None)) is not None}  # fmt: skip
     results = check(caps, prepare=args.prepare, install=args.prepare,
-                    engine=args.engine or cfg.engine, model=args.model or cfg.model, say=say)  # fmt: skip
+                    engine=args.engine or cfg.engine, model=args.model or cfg.model, say=say,
+                    align_options=options)  # fmt: skip
     if args.json:
         print(json.dumps({"results": [r.json() for r in results.values()]}), flush=True)
     else:

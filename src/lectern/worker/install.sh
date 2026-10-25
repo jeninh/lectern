@@ -96,18 +96,22 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   fi
 fi
 
-# Models and voices now, with progress, instead of in the first job; every engine is tried once.
-# A failure is not fatal: the worker offers only what passes (docs/mac-worker.md, Self-test).
+say "enrolling with $SERVER"
+set -- --server "$SERVER" --proxy "$PROXY" --no-service
+[ -n "$NAME" ] && set -- "$@" --name "$NAME"
+[ -n "$CA_BUNDLE" ] && set -- "$@" --ca-bundle "$CA_BUNDLE"
+[ -n "$ALLOW_HTTP" ] && set -- "$@" "$ALLOW_HTTP"
+LECTERN_WORKER_CODE="$CODE" lectern worker-enroll "$@"  # not in argv: ps shows argv
+
+# After enrolling, so the downloads use the proxy and CAs saved in config.json. Models and
+# voices now, with progress, instead of in the first job; every engine is tried once. A
+# failure is not fatal: the worker offers only what passes (docs/mac-worker.md, Self-test).
 say "preparing engines (first run downloads the alignment model and Kokoro's voices)"
 lectern worker-doctor --prepare --no-restart || say "some engines are not ready: see above; the worker offers the rest"
 
-say "enrolling with $SERVER"
-set -- --server "$SERVER" --proxy "$PROXY"
-[ -n "$NAME" ] && set -- "$@" --name "$NAME"
-[ -n "$CA_BUNDLE" ] && set -- "$@" --ca-bundle "$CA_BUNDLE"
-[ "$LOGIN" = "no" ] && set -- "$@" --no-login
-[ -n "$ALLOW_HTTP" ] && set -- "$@" "$ALLOW_HTTP"
-LECTERN_WORKER_CODE="$CODE" lectern worker-enroll "$@"  # not in argv: ps shows argv
+if [ "$(uname -s)" = "Darwin" ]; then
+  if [ "$LOGIN" = "no" ]; then lectern worker-service install --no-login; else lectern worker-service install; fi
+fi
 
 if [ "$(uname -s)" = "Darwin" ]; then
   say "done: the Lectern Worker menu-bar icon appears in a few seconds"

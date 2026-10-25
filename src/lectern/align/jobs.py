@@ -990,6 +990,7 @@ def job_json(
     workers: dict[int, str] | None = None,
     *,
     server_caps: set[str] | None = None,
+    for_owner: bool = False,
 ) -> dict:
     result = job.result or {}
     lease = None
@@ -1031,7 +1032,7 @@ def job_json(
         "error": job.error,
         "result": done,
         "eta": eta(db, job),
-        "waiting": queue.explain_wait(db, job, server_caps=server_caps),
+        "waiting": queue.explain_wait(db, job, server_caps=server_caps, for_owner=for_owner),
     }
 
 

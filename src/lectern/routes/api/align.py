@@ -87,8 +87,9 @@ def list_jobs(
     workers = _worker_names(db)
     speed = jobs.measured_speed(db, None)
     caps = server_capabilities(db, settings)
+    owner = auth.user.role == Role.OWNER
     return {
-        "jobs": [_job_json(db, j, workers, caps) for j in rows],
+        "jobs": [_job_json(db, j, workers, caps, owner) for j in rows],
         "measured_speed": ({"speed": round(speed[0], 3), "samples": speed[1]} if speed else None),
     }
 
@@ -98,7 +99,8 @@ def job_detail(auth: JobViewer, db: DbDep, settings: SettingsDep, job_id: int) -
     job = db.get(Job, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    return _job_json(db, job, _worker_names(db), server_capabilities(db, settings))
+    return _job_json(db, job, _worker_names(db), server_capabilities(db, settings),
+                     auth.user.role == Role.OWNER)  # fmt: skip
 
 
 def server_capabilities(db: Session, settings) -> set[str]:
@@ -116,12 +118,14 @@ def server_capabilities(db: Session, settings) -> set[str]:
     return caps
 
 
-def _job_json(db: Session, job: Job, workers: dict[int, str], caps: set[str] | None = None) -> dict:
+def _job_json(db: Session, job: Job, workers: dict[int, str], caps: set[str] | None = None,
+              owner: bool = False) -> dict:  # fmt: skip
+    """``waiting`` names workers and their reasons only for the owner (as Admin → Workers)."""
     from lectern.tts import jobs as tts_jobs
 
     if job.kind == tts_jobs.KIND:
-        return tts_jobs.job_json(db, job, workers, server_caps=caps)
-    return jobs.job_json(db, job, workers, server_caps=caps)
+        return tts_jobs.job_json(db, job, workers, server_caps=caps, for_owner=owner)
+    return jobs.job_json(db, job, workers, server_caps=caps, for_owner=owner)
 
 
 @router.post("/works/{work_id}/align")

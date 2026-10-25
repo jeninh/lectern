@@ -408,6 +408,15 @@ also reports `model`, `audio_s` (its audio duration), and
 [`alignment.md`](alignment.md#jobs-leases-and-the-eta)). `result.stats` holds the matcher's
 statistics and timings. `GET /api/jobs` adds `measured_speed`.
 
+`status=active` lists queued and leased jobs. Every job also has `crashes` (times it took its
+worker down; see the failure endpoint) and `waiting`: `null` once finished, else why it is where
+it is (`lectern.queue.explain_wait`): `{capability, summary, workers, eligible_online,
+server_runs, ahead, lease: {holder, expires_at, heartbeat_at} | null, run_after, attempts,
+max_attempts, crashes, last_error}`. `workers` (`{id, label, state, eligible, why}` per active
+credential, with its pause reason or why it does not offer the capability) and the reasons in
+`summary` are for the owner only, as on Admin → Workers: members get `workers: []` and a
+summary without worker names or reasons.
+
 ### Generated audiobooks — `tts` jobs
 
 `kind = "tts"` jobs narrate a text-only work into an audiobook edition whose sentence map

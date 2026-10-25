@@ -107,17 +107,6 @@ class Agent:
             raise SystemExit(0)
         # before the engines load: their model downloads go through the same proxy and CAs
         apply_network_env(self.cfg.proxy, self.cfg.ca_bundle, self.home)
-        engines: dict[str, str] = {}
-        withheld: dict[str, str] = {}
-        if runners is None:
-            wcfg.write_state({"state": "paused", "reason": "checking engines (first run downloads "
-                              "models)", "updated_at": time.time(), "server": self.cfg.server,
-                              "job": None, "pid": os.getpid()}, self.home)  # fmt: skip
-            runners, engines, withheld = build_runners(self.cfg, self_test=self.cfg.self_test)
-        if not runners and not withheld:
-            raise SystemExit("no engine installed: nothing this worker could run")
-        # With every self-test failed the agent stays up and tells the server why (paused,
-        # "engines unavailable: …") instead of exiting into a launchd restart loop.
         self.stop = threading.Event()
         self._cfg_at = time.monotonic()
         self.worker = RemoteWorker(
@@ -126,20 +115,36 @@ class Agent:
             name=self.cfg.name or platform.node() or "mac",
             lease_s=self.cfg.lease_s,
             poll_s=self.cfg.poll_s,
-            runners=runners,
+            runners=list(runners or []),
             pause=self.pause_reason,
             stop=self.stop,
             client=client,
             crash_marker=self.home / "current-job.json",
-            withheld=withheld,
             info={
                 "version": __version__,
                 "platform": f"{sys.platform}-{platform.machine()}",
-                "engines": engines,
+                "engines": {},
             },  # fmt: skip
             **http_options(self.cfg.proxy, self.cfg.ca_bundle),
         )
         self.last_error: str | None = None
+        if runners is None:
+            # A job the previous process died in is settled before the (possibly long)
+            # self-test, while its lease is most likely still valid.
+            self.worker.report_crash()
+            wcfg.write_state({"state": "paused", "reason": "checking engines (first run downloads "
+                              "models)", "updated_at": time.time(), "server": self.cfg.server,
+                              "job": None, "pid": os.getpid()}, self.home)  # fmt: skip
+            built, engines, withheld = build_runners(self.cfg, self_test=self.cfg.self_test)
+            if not built and not withheld:
+                raise SystemExit("no engine installed: nothing this worker could run")
+            # With every self-test failed the agent stays up and tells the server why
+            # (paused, "engines unavailable: …") instead of exiting into a launchd restart loop.
+            self.worker.runners = built
+            self.worker.withheld = withheld
+            self.worker.info["engines"] = engines
+        elif not runners:
+            raise SystemExit("no engine installed: nothing this worker could run")
 
     def _reload(self) -> None:
         if time.monotonic() - self._cfg_at >= 2.0:
@@ -156,6 +161,9 @@ class Agent:
     def state(self) -> dict:
         current = self.worker.current
         reason = None if current else self.pause_reason()
+        if not current and not reason and not self.worker.capabilities:
+            reason = "engines unavailable: " + "; ".join(sorted(set(
+                self.worker.unavailable.values())))[:150] if self.worker.unavailable else None  # fmt: skip
         p, n = self.conditions.power, self.conditions.network
         return {
             "pid": os.getpid(),
@@ -185,6 +193,7 @@ class Agent:
             if self.stop.is_set():
                 raise KeyboardInterrupt
             log.warning("stopping after handing back the current job")
+            self.worker.mark_stopping()
             self.stop.set()
 
         signal.signal(signal.SIGINT, _on_signal)
@@ -248,6 +257,9 @@ def plist_for(label: str, argv: list[str], *, keep_alive: bool, logs: Path,
         "ProcessType": "Background" if keep_alive else "Interactive",
         # Low I/O and CPU priority: the Mac stays responsive while a book renders.
         "LowPriorityIO": keep_alive,
+        # Time to hand a job back on stop (a model load does not check for it); a worker
+        # killed anyway leaves a "stopping" marker, released, not counted as a crash.
+        "ExitTimeOut": 60,
         "Nice": 10 if keep_alive else 0,
         "ThrottleInterval": 30,
         "StandardOutPath": str(logs / f"{label}.log"),

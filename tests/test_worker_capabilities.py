@@ -1530,3 +1530,47 @@ def test_doctor_checks_fail_instead_of_exiting(monkeypatch):
 def test_doctor_runs_isolated_and_reports_per_capability():
     out = doctor.check_isolated(["ocr"], prepare=False, timeout_s=120)
     assert not out["ocr"].ok and out["ocr"].reason == "known: this worker cannot run it"
+
+
+def test_a_crash_report_survives_an_unreachable_server_and_a_stop_is_not_a_crash(
+    client, owner, work_id, app, worker_key, wc, tts_kind, tmp_path
+):
+    job_id = add_job(work_id, "tts", KOKORO)
+    held = lease(claim(wc, capabilities=["tts-kokoro"]))
+    marker = tmp_path / "current-job.json"
+    marker.write_text(json.dumps({"job_id": job_id, "token": held["X-Lease-Token"],
+                                  "server": "http://testserver"}))  # fmt: skip
+
+    class Down:
+        def post(self, *a, **k):
+            raise OSError("no route to host")
+
+    down = RemoteWorker("http://testserver", worker_key, client=Down(), runners=[],
+                        crash_marker=marker)  # fmt: skip
+    assert down.report_crash() is None
+    assert marker.exists() and _job_row(job_id).crashes == 0  # kept for the next loop
+
+    # The previous process was being stopped (SIGTERM, then killed during a model load):
+    # the job goes back without an attempt or a crash.
+    data = json.loads(marker.read_text())
+    marker.write_text(json.dumps({**data, "stopping": True}))
+    assert _worker(app, worker_key, TranscodeRunner(), crash_marker=marker).report_crash() == job_id
+    job = _job_row(job_id)
+    assert job.status == JobStatus.QUEUED and job.crashes == 0 and job.attempts == 0
+    assert not marker.exists()
+
+
+def test_members_see_why_a_job_waits_without_worker_details(
+    client, owner, work_id, app, worker_key, wc
+):
+    from tests.conftest import login, make_user
+
+    job_id = add_job(work_id, "tts", KOKORO)
+    wc.post("/api/worker/status", json={"state": "ready", "capabilities": ["align"],
+            "info": {"unavailable": {"tts-kokoro": "synthesis: /Users/jane/.cache/x"}}})  # fmt: skip
+    mia = make_user(client, owner["csrf"], "mia", "member")
+    client.cookies.clear()
+    login(client, "mia", mia["password"])
+    (job,) = [j for j in client.get("/api/jobs?status=active").json()["jobs"] if j["id"] == job_id]
+    assert job["waiting"]["summary"] == "Waiting for a worker that can run tts-kokoro"
+    assert job["waiting"]["workers"] == [] and "jane" not in json.dumps(job)

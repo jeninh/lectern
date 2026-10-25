@@ -162,8 +162,12 @@ kill) no longer takes the job down with the worker:
   (30 s, then doubling, at most an hour), and the worker stops offering that capability for
   30 minutes.
 - A process that dies outright leaves `current-job.json` in the worker's folder. The next start
-  reports that job as crashed. Segfaults also leave a Python traceback in the log
-  (`faulthandler`).
+  reports that job as crashed, before the self-test and even while paused; the marker stays
+  until the server has answered. A worker that was being stopped (Quit, SIGTERM, `lectern
+  worker-doctor --prepare` restarting it) and was killed before it could hand the job back
+  marks the file `stopping`: the next start hands the job back instead, so a restart never
+  counts as a crash. If the lease already expired the server reclaimed the job on its own (an
+  attempt, not a crash). Segfaults also leave a Python traceback in the log (`faulthandler`).
 - **A job that crashes a worker twice fails for good**, with the last error: "crashed the
   worker 2 times; last error: …". It shows in the book's Formats card and under Admin →
   Workers → Recently failed. Retry it once the cause is fixed.

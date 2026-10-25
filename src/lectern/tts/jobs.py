@@ -818,6 +818,7 @@ def job_json(
     *,
     detailed: bool = True,
     server_caps: set[str] | None = None,
+    for_owner: bool = False,
 ) -> dict:
     p = job.payload or {}
     r = job.result or {}
@@ -863,7 +864,9 @@ def job_json(
         "error": job.error if detailed else (None if job.error is None else "failed"),
         "result": _success_body(job) if job.status == JobStatus.SUCCEEDED else None,
         "eta": eta(db, job),
-        "waiting": queue.explain_wait(db, job, server_caps=server_caps) if detailed else None,
+        "waiting": queue.explain_wait(db, job, server_caps=server_caps, for_owner=for_owner)
+        if detailed
+        else None,
     }
 
 

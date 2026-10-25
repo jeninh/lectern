@@ -811,6 +811,7 @@ class RemoteWorker:
         while not stop.is_set():
             reason = self._pause()
             if reason:
+                self.report_crash()  # paused (on battery, …) still settles a dead job
                 self.report("paused", reason)
                 stop.wait(self.poll_s)
                 continue
@@ -862,13 +863,27 @@ class RemoteWorker:
         except OSError:
             log.warning("could not write %s", self.crash_marker, exc_info=True)
 
+    def mark_stopping(self) -> None:
+        """A stop was asked for (SIGTERM, Quit, ``kickstart -k``): if the process is killed
+        before the job is handed back, the next start releases the job instead of reporting
+        a crash. Called from a signal handler: no network, one small write."""
+        if self.crash_marker is None or self._running is None:
+            return
+        try:
+            data = json.loads(self.crash_marker.read_text())
+            data["stopping"] = True
+            self.crash_marker.write_text(json.dumps(data))
+        except (OSError, ValueError):
+            pass
+
     def report_crash(self) -> int | None:
-        """If the previous process died during a job, tell the server (once): the job fails
-        with ``crashed``, and the server terminally fails a job that crashed workers twice.
-        Returns the job id reported."""
+        """If the previous process died during a job, tell the server: the job fails with
+        ``crashed`` (the server terminally fails a job that crashed workers twice), or, when
+        that process was being stopped, it is handed back. The marker is removed only once
+        the server answered; until then every loop (paused or not) tries again. Returns the
+        job id reported."""
         if self._marker_checked or self.crash_marker is None:
             return None
-        self._marker_checked = True
         try:
             data = json.loads(self.crash_marker.read_text())
         except FileNotFoundError:
@@ -879,12 +894,24 @@ class RemoteWorker:
         job_id = data.get("job_id")
         if not isinstance(job_id, int) or data.get("server") != self.server:
             self.crash_marker.unlink(missing_ok=True)
+            self._marker_checked = True
             return None
-        log.error("job %d: the previous worker process died while running it; reporting a "
-                  "crash", job_id)  # fmt: skip
-        self._fail(job_id, {"X-Lease-Token": str(data.get("token") or "")}, CRASHED_ERROR,
-                   retryable=True, crashed=True)  # fmt: skip
+        headers = {"X-Lease-Token": str(data.get("token") or "")}
+        if data.get("stopping"):
+            log.warning("job %d: the previous worker process was stopped before handing it "
+                        "back; handing it back now", job_id)  # fmt: skip
+            code = self._release(job_id, headers)
+        else:
+            log.error("job %d: the previous worker process died while running it; reporting "
+                      "a crash", job_id)  # fmt: skip
+            code = self._fail(job_id, headers, CRASHED_ERROR, retryable=True, crashed=True)
+        if code is None or code >= 500:
+            return None  # server unreachable: keep the marker and try again next loop
+        if code == 409:
+            log.warning("job %d: its lease had already expired; the server reclaimed it "
+                        "without counting the crash", job_id)  # fmt: skip
         self.crash_marker.unlink(missing_ok=True)
+        self._marker_checked = True
         return job_id
 
     # -- protocol steps ----------------------------------------------------------------------
@@ -991,22 +1018,28 @@ class RemoteWorker:
                 self.crash_marker.unlink(missing_ok=True)
         return True
 
-    def _release(self, job_id: int, headers: dict) -> None:
+    def _release(self, job_id: int, headers: dict) -> int | None:
         """Give the job back without spending an attempt; a server from before
-        ``/release`` existed gets a retryable failure instead."""
+        ``/release`` existed gets a retryable failure instead. Returns the HTTP status, or
+        ``None`` when the server could not be reached."""
         try:
             r = self.client.post(f"/api/worker/jobs/{job_id}/release", headers=headers)
             if r.status_code in (404, 405):
-                self._fail(job_id, headers, "worker stopped", retryable=True)
+                return self._fail(job_id, headers, "worker stopped", retryable=True)
+            return r.status_code
         except Exception:  # noqa: BLE001 - the lease will expire and the server reclaims it
             log.warning("job %d: could not hand the job back", job_id, exc_info=True)
+            return None
 
     def _fail(self, job_id: int, headers: dict, error: str, *, retryable: bool,
-              crashed: bool = False) -> None:  # fmt: skip
+              crashed: bool = False) -> int | None:  # fmt: skip
+        """Report a failure; returns the HTTP status, or ``None`` when unreachable."""
         body: dict = {"error": error, "retryable": retryable}
         if crashed:
             body["crashed"] = True
         try:
-            self.client.post(f"/api/worker/jobs/{job_id}/fail", json=body, headers=headers)
+            r = self.client.post(f"/api/worker/jobs/{job_id}/fail", json=body, headers=headers)
+            return r.status_code
         except Exception:  # noqa: BLE001 - the lease will expire and the server reclaims it
             log.warning("job %d: could not report failure", job_id, exc_info=True)
+            return None
