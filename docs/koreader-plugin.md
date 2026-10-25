@@ -64,7 +64,8 @@ minutes ago, expired, revoked) is deleted, and the plugin tells you to pair with
 instead. Without a reachable server at first start (Wi‑Fi off, Tailscale still connecting)
 setup retries quietly after 30 s, 1, 2, 5, and then every 15 minutes, and 3 s after KOReader
 reports Wi‑Fi back; the status line shows *Setting up: will retry (…)* with the actual error.
-Each try waits at most 3 s to connect, and with Wi‑Fi off it fails at once.
+Each try waits at most 3 s to connect (10 s in all); with Wi‑Fi off and no route it fails at
+once, but behind tailscaled's userspace proxy each try can hold KOReader for those seconds.
 
 ## Automatic sync
 

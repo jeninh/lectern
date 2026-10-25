@@ -702,6 +702,20 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     out = lua(plugin, sdir, "sync-now", "offline")
     assert out["prompts"] == 0 and out["message"].startswith("Synced with Lectern.")
 
+    # Setup failed at start, then Sync now sets up: the start's backoff is dropped, so the
+    # next automatic push goes out at once even while NetworkMgr says offline.
+    z = http.post(f"/api/devices/{dev_id}/koplugin", json={"server_url": base})
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        (plugin / "lectern_bootstrap.txt").write_bytes(
+            zf.read("lectern.koplugin/lectern_bootstrap.txt")
+        )
+    late = tmp_path / "late"
+    late.mkdir()
+    (late / "lectern.lua").write_text(f'return {{ ["server_url"] = "{dead}" }}\n')
+    out = lua(plugin, late, "sync-now", "offline", "reachable-now")
+    assert out["message"].startswith("Lectern is set up.")
+    assert out["outbox_after_push"] == 0 and out["tasks_after_push"] == 0
+
     # Revoked in the web app: Sync now says so plainly.
     http.post(f"/api/devices/{dev_id}/revoke")
     out = lua(plugin, sdir, "sync-now")

@@ -293,12 +293,21 @@ elseif command == "sync-now" then
     NET.connected = NET.online
     local p, ui = make(true)
     UI.shown, UI.tasks = {}, {} -- what Sync now does, not what the start did
+    -- "reachable-now": the start found the server unreachable; by Sync now it is (the
+    -- address from lectern_device.lua).
+    if arg[5] == "reachable-now" then p.store:delSetting("server_url") end
     p:syncNow()
     out.message = UI.shown[#UI.shown] and UI.shown[#UI.shown].text
     out.messages = #UI.shown
     out.retry_in = UI.tasks[1] and UI.tasks[1].s
     out.prompts = NET.prompts
     out.outbox = #p.core:outbox()
+    if p.core:isPaired() and ui.kosync then
+        -- An automatic push right after Sync now: goes out at once, no stale retry pending.
+        ui.kosync:updateProgress(false, false)
+        out.outbox_after_push = #p.core:outbox()
+        out.tasks_after_push = #UI.tasks
+    end
 end
 out.log = LOG
 out.settings = read_settings("lectern.lua")

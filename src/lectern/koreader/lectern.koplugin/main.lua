@@ -102,6 +102,13 @@ end
 function Lectern:trySetup(interactive)
     local result, why = self.core:bootstrap()
     self.setup_pending = result == "retry"
+    if not self.setup_pending then
+        -- Settled (e.g. by Sync now): drop the earlier attempt's backoff, or automatic pushes
+        -- would wait for that stale retry.
+        self.retry_attempt = 0
+        self.retry_pending = false
+        UIManager:unschedule(self.retry_task)
+    end
     if result == "ok" then
         UIManager:show(InfoMessage:new{
             text = _("Lectern is set up.\n\nProgress sync and the Lectern catalogue (Search → OPDS catalog) are configured for this device."),
@@ -317,7 +324,8 @@ end
 function Lectern:retrySoon(seconds)
     if online() then return self:scheduleRetry(seconds) end
     if not self.retry_pending then
-        self:scheduleRetry(self.core:retryDelay(math.max(self.retry_attempt, 1)))
+        self.retry_attempt = math.max(self.retry_attempt, 1)
+        self:scheduleRetry(self.core:retryDelay(self.retry_attempt))
     end
 end
 
@@ -370,6 +378,9 @@ function Lectern:syncNow()
         text = _("Lectern refused this device's key. It was revoked or paired again elsewhere.\n\nUse Lectern → Pair with a code.")
     elseif left > 0 or not status then
         text = string.format(_("Lectern is not reachable right now (%s). %d position(s) will be sent automatically when it is."), why or err or "offline", left)
+        if left > 0 and self.retry_pending then
+            text = text .. string.format(_("\n\nNext try in %s."), inTime(self.core:retryDelay(self.retry_attempt)))
+        end
     else
         text = string.format(_("Synced with Lectern.\n%d position(s) sent. %d book(s) waiting for this device."), sent, status.queue and status.queue.pending or 0)
     end
