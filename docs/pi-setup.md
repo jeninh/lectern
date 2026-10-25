@@ -221,18 +221,21 @@ Sign-ins and admin actions are on the **Activity** page in the web app.
 
 ## 5. Build extras and Piper voices
 
-`LECTERN_EXTRAS` in `.env` picks what the image can do itself; rebuild after changing it
-([step 4](#4-updating)).
+`LECTERN_EXTRAS` in `.env` picks what the image can do itself, as a space- or
+comma-separated list; rebuild after changing it ([step 4](#4-updating)).
 
 | `LECTERN_EXTRAS` | Adds | On a Pi |
 | --- | --- | --- |
 | empty (default) | nothing: alignment and Kokoro wait for a worker | **use this**, with the Mac worker |
 | `tts` | Piper, CPU text-to-speech for generated audiobooks | fine: lets the Pi narrate without the Mac |
-| `align` | faster-whisper (~0.6 GB, ~1.4 GB RAM per job) | **no**; align on the Mac |
+| `align` | faster-whisper (~0.6 GB, ~1.4 GB RAM per job) | 4 GB or more: a slow fallback while the Mac is off |
+| `align tts` | both | 4 GB or more: the Pi aligns and narrates by itself while the Mac is off |
 
-Only one extra can be built at a time today ([#30](https://github.com/jeninh/lectern/issues/30)).
+With `align`, also set `LECTERN_ALIGN_MODEL=base` and `LECTERN_ALIGN_THREADS=4` in `.env`.
+While the Mac worker is online it gets each new alignment job first, for 10 minutes
+([What it runs](mac-worker.md#what-it-runs)).
 
-**Piper voices** (with `LECTERN_EXTRAS=tts`): put `<voice>.onnx` and `<voice>.onnx.json` in
+**Piper voices** (with `tts` in `LECTERN_EXTRAS`): put `<voice>.onnx` and `<voice>.onnx.json` in
 `data/lectern/tts/piper/`, or download them into the running container:
 
 ```sh
@@ -290,8 +293,8 @@ proxy cannot reach a tailnet address, so with Lectern only on the tailnet:
 
 Use **Only on Wi-Fi** with `wifi_networks: ["Home"]` to run only at home. Details:
 [School and proxy mode](mac-worker.md#school-and-proxy-mode). While the Mac is off or paused,
-alignment and Kokoro narrations wait for it; what the Pi can run itself (data-saver
-transcodes, Piper) runs on the Pi.
+Kokoro narrations wait for it, and so does alignment unless the image has `align`; what the
+Pi can run itself (data-saver transcodes, Piper, alignment with `align`) runs on the Pi.
 
 ## 7. Kindle
 
@@ -415,7 +418,8 @@ More in [the Tailscale guide](deploy-tailscale.md#troubleshooting).
 
 ### Alignment stuck on "Aligning…" or "cannot run"
 
-- **No worker.** The default image never aligns on the Pi; jobs wait for a worker. The book's
+- **No worker.** The default image never aligns on the Pi; jobs wait for a worker (or build
+  with `align`, [§5](#5-build-extras-and-piper-voices)). The book's
   Formats card says alignment cannot run when no worker has connected in 5 minutes. Check
   **Admin → Workers**: is the Mac listed, online, and not paused (battery, Wi-Fi rules, menu
   bar **Worker on**)? Jobs start as soon as it connects.

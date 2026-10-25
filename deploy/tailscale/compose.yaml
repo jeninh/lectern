@@ -50,8 +50,8 @@ services:
     build:
       context: ../..
       args:
-        # Empty = the default, slim image (no transcription). Keep it empty on a Raspberry
-        # Pi and align from another machine with `lectern worker`.
+        # Empty = the default, slim image (no transcription, no Piper). A space- or
+        # comma-separated list adds engines, e.g. "align tts" (docs/deploy-tailscale.md).
         LECTERN_EXTRAS: ${LECTERN_EXTRAS:-}
         # Pins Mac workers installed from /worker/install.sh to this code:
         #   LECTERN_COMMIT=$(git rev-parse HEAD) docker compose … up -d --build
@@ -72,6 +72,9 @@ services:
       LECTERN_LOG_LEVEL: ${LECTERN_LOG_LEVEL:-INFO}
       # Address baked into KOReader plugin zips; empty = the detected Tailscale IP, :8080.
       LECTERN_DEVICE_URL: ${LECTERN_DEVICE_URL:-}
+      # Only used by an image built with `align` (docs/alignment.md); on a Pi: base, core count.
+      LECTERN_ALIGN_MODEL: ${LECTERN_ALIGN_MODEL:-small}
+      LECTERN_ALIGN_THREADS: ${LECTERN_ALIGN_THREADS:-0}
     # Create data and library yourself, owned by LECTERN_UID:LECTERN_GID. Docker would
     # otherwise create them owned by root, and Lectern could not write to them.
     volumes:

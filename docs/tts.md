@@ -37,7 +37,10 @@ worker online; it waits, and starts when one connects.
 
 1. Build the image with the engine: `LECTERN_EXTRAS=tts` (`docker compose build --build-arg
    LECTERN_EXTRAS=tts`, or set it in `.env` for `deploy/tailscale/`); plain installs use
-   `pip install 'lectern[tts]'`.
+   `pip install 'lectern[tts]'`. `LECTERN_EXTRAS` is a space- or comma-separated list:
+   `LECTERN_EXTRAS="align tts"` adds alignment too, so a Pi 4 or 5 with at least 4 GB can align
+   and narrate by itself while the Mac worker is off
+   ([alignment.md](alignment.md#where-to-run-it-raspberry-pi-nas-laptop)).
 2. Put one or more voices (`<voice>.onnx` and `<voice>.onnx.json`) in `<LECTERN_DATA_DIR>/tts/piper/`
    (or `LECTERN_PIPER_VOICES_DIR`). With the image:
 

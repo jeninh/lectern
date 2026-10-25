@@ -38,7 +38,7 @@ Who runs the job depends on the installation:
 
 | Installation | What happens |
 | --- | --- |
-| `pip install 'lectern[align]'`, or the image built with `--build-arg LECTERN_EXTRAS=align` (1.62 GB vs. 1.04 GB default, both with ffmpeg; plus ~0.46 GB per downloaded `small` model under `/data`) | The server runs jobs itself, one at a time, in a background thread (`LECTERN_ALIGN_LOCAL_WORKER=1`, the default). |
+| `pip install 'lectern[align]'`, or the image built with `--build-arg LECTERN_EXTRAS=align` (or a list that includes it, such as `"align tts"`; 1.62 GB vs. 1.04 GB default, both with ffmpeg; plus ~0.46 GB per downloaded `small` model under `/data`) | The server runs jobs itself, one at a time, in a background thread (`LECTERN_ALIGN_LOCAL_WORKER=1`, the default). |
 | Default image / plain `lectern` (e.g. a Raspberry Pi with an empty `LECTERN_EXTRAS`) | Jobs wait in the queue for an external worker (`lectern worker`, below). The log says so at startup, and while no worker has connected in the last 5 minutes the book's Formats card says alignment cannot run, with a link to this section, instead of "Aligning…". The jobs stay queued and start as soon as a worker connects. |
 | Either, with `LECTERN_ALIGN_LOCAL_WORKER=0` | The server never transcribes, even with the extra installed. Use this on a small host. |
 
@@ -49,6 +49,8 @@ workers, but expired leases are only reclaimed when a worker claims).
 To turn alignment on, either rebuild the image with the engine
 (`docker compose build --build-arg LECTERN_EXTRAS=align`, or set `LECTERN_EXTRAS=align` in
 `.env` for `deploy/tailscale/`) or connect an external worker as described below.
+`LECTERN_EXTRAS` takes a space- or comma-separated list, so `LECTERN_EXTRAS="align tts"`
+builds one image that both aligns and narrates with Piper ([`tts.md`](tts.md)).
 
 A job can also be requested by hand: `POST /api/works/{id}/align {"model": "medium",
 "force": true}` (owner or member). `force` cancels the active job first. Jobs are listed at
@@ -61,12 +63,18 @@ With the default model (`small`, `int8`, CPU) Lectern measured **2.9× realtime 
 vCPUs with 1.4 GB peak memory** on a 13-minute recording (see [Benchmark](#benchmark)): a
 10-hour audiobook would take about 3½ hours there. Memory, not CPU, is what rules out small machines.
 
-- **Raspberry Pi and other ARM boards, 4 GB or less.** Run the default (slim) image and set
-  `LECTERN_ALIGN_LOCAL_WORKER=0`; run `lectern worker` on a desktop or laptop instead. A Pi
-  can technically run `small`/`int8` (CTranslate2 ships ARM64 wheels), but the 1.3 GB working
-  set competes with the server and the page cache, and we have **not measured** a Pi, so we
-  quote no speed for it. If you try, use `LECTERN_ALIGN_MODEL=base` and `LECTERN_ALIGN_THREADS=`
-  the core count, and expect it to be much slower than the x86 figure.
+- **Raspberry Pi 4 or 5 with at least 4 GB, as a fallback.** Run `lectern worker` (or the
+  [Mac worker](mac-worker.md)) on a faster machine for most jobs, and build the Pi's image
+  with `LECTERN_EXTRAS="align tts"` so it can still align (and narrate with Piper) by itself
+  while that machine is off. While a worker is online the Pi leaves each new job to it for
+  `LECTERN_LOCAL_DEFER_SECONDS` (10 minutes) before taking it itself
+  ([Pi fallback](mac-worker.md#what-it-runs)). CTranslate2 ships ARM64 wheels and CI builds
+  and imports this image for `linux/arm64`, but we have **not measured** a Pi, so we quote no
+  speed for it; expect it to be much slower than the x86 figure. Use
+  `LECTERN_ALIGN_MODEL=base` and `LECTERN_ALIGN_THREADS=` the core count to keep the working
+  set (about 1.3 GB with `small`) from crowding the server and the page cache.
+- **Smaller boards (under 4 GB).** Run the default (slim) image, or set
+  `LECTERN_ALIGN_LOCAL_WORKER=0`, and align with `lectern worker` elsewhere.
 - **NAS or mini PC with ≥ 8 GB.** The `align` image is fine. One job runs at a time and the
   thread yields to requests; reading and sync stay responsive, but it will use the CPU for
   hours per book.
