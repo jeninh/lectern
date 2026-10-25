@@ -2,12 +2,16 @@
 
 First start: trades the one-time setup secret in lectern_bootstrap.txt for this device's own
 credentials, writes KOReader's Progress sync (kosync) server, username and key and an OPDS
-catalogue entry, and deletes the secret. Without network it waits quietly for Wi-Fi.
+catalogue entry, and deletes the secret. Without network it retries quietly with backoff.
 
 Then: automatic progress sync through KOReader's own kosync plugin (pull on open, push on
 close and suspend, and every N page turns), with pushes that cannot reach the server kept in
 an outbox and retried quietly once Wi-Fi (and Tailscale) is back, instead of prompting to turn
 Wi-Fi on. Menu: Sync now, Books sent to this device, connection status, settings, Pair.
+
+Whether the network is up is decided by trying the request (short timeouts), never by
+KOReader's NetworkMgr alone: on jailbroken Kindles whose Wi-Fi is brought up outside KOReader
+it reports offline forever. NetworkMgr only decides how soon to retry.
 ]]
 
 local ConfirmBox = require("ui/widget/confirmbox")
@@ -56,11 +60,6 @@ local function online()
     return ok and res
 end
 
-local function connected()
-    local ok, res = pcall(NetworkMgr.isConnected, NetworkMgr)
-    return ok and res
-end
-
 function Lectern:init()
     self.store = LuaSettings:open(DataStorage:getSettingsDir() .. "/lectern.lua")
     self.core = Core.new{
@@ -87,22 +86,29 @@ end
 function Lectern:start()
     if self.core:bootstrapSecret() and not self.core:isPaired() then
         self:trySetup()
-        if self.setup_pending and connected() then
-            self.retry_attempt = 1
-            self:scheduleRetry(self.core:retryDelay(1))
-        end
-    elseif #self.core:outbox() > 0 and online() then
-        self:scheduleRetry(2)
+    elseif #self.core:outbox() > 0 then
+        self:retrySoon(2)
     end
 end
 
-function Lectern:trySetup()
-    if not online() and not connected() then
-        self.setup_pending = true -- onNetworkConnected tries again; no prompt
-        return
+local function inTime(seconds)
+    if seconds < 60 then return string.format(_("%d s"), seconds) end
+    return string.format(_("%d min"), math.floor(seconds / 60))
+end
+
+--- Trade the setup secret now, whatever NetworkMgr says (on Kindles whose Wi-Fi is managed
+-- outside KOReader it reports offline forever). A failed request is the "network down"
+-- signal: retry with backoff. Quiet unless the reader asked (Sync now).
+function Lectern:trySetup(interactive)
+    local result, why = self.core:bootstrap()
+    self.setup_pending = result == "retry"
+    if not self.setup_pending then
+        -- Settled (e.g. by Sync now): drop the earlier attempt's backoff, or automatic pushes
+        -- would wait for that stale retry.
+        self.retry_attempt = 0
+        self.retry_pending = false
+        UIManager:unschedule(self.retry_task)
     end
-    self.setup_pending = false
-    local result = self.core:bootstrap()
     if result == "ok" then
         UIManager:show(InfoMessage:new{
             text = _("Lectern is set up.\n\nProgress sync and the Lectern catalogue (Search → OPDS catalog) are configured for this device."),
@@ -113,7 +119,15 @@ function Lectern:trySetup()
             text = _("This plugin's setup link was already used, expired, or revoked.\n\nIn Lectern, open Devices → this device → KOReader plugin → Show pairing code, then choose Lectern → Pair with a code here."),
         })
     elseif result == "retry" then
-        self.setup_pending = true
+        -- Tailscale (e.g. KUAL) may still be coming up, or Wi-Fi is off: back off.
+        self.retry_attempt = self.retry_attempt + 1
+        local delay = self.core:retryDelay(self.retry_attempt)
+        self:scheduleRetry(delay)
+        if interactive then
+            UIManager:show(InfoMessage:new{
+                text = string.format(_("Lectern is not reachable yet (%s).\n\nCheck Wi-Fi and Tailscale. Setup tries again by itself in %s."), why or "offline", inTime(delay)),
+            })
+        end
     end
 end
 
@@ -250,10 +264,12 @@ function Lectern:hookKOSync()
             return orig_update(ks, ensure_networking, interactive, on_suspend)
         end
         plugin:queueCurrent(ks)
-        if online() then
-            plugin:flush()
-        elseif ensure_networking and plugin.core:options().offline_mode == "wifi" then
+        if not online() and ensure_networking and plugin.core:options().offline_mode == "wifi" then
             NetworkMgr:runWhenOnline(function() plugin:flush() end)
+        elseif online() or not plugin.retry_pending then
+            -- NetworkMgr may say offline while the network works (Wi-Fi managed outside
+            -- KOReader): try anyway. Once a send failed, the backoff takes it from there.
+            plugin:flush()
         end
     end
 
@@ -288,6 +304,7 @@ function Lectern:flush()
     local sent, left, why = self.core:drain()
     if left == 0 then
         self.retry_attempt = 0
+        self.retry_pending = false
         UIManager:unschedule(self.retry_task)
     elseif why ~= "unauthorized" then
         self.retry_attempt = self.retry_attempt + 1
@@ -299,18 +316,24 @@ end
 function Lectern:scheduleRetry(seconds)
     UIManager:unschedule(self.retry_task)
     UIManager:scheduleIn(seconds, self.retry_task)
+    self.retry_pending = true
+end
+
+--- NetworkMgr is only a scheduling hint: when it says online, retry in ``seconds``;
+-- otherwise keep (or start) the backoff, whose retries still send a request when due.
+function Lectern:retrySoon(seconds)
+    if online() then return self:scheduleRetry(seconds) end
+    if not self.retry_pending then
+        self.retry_attempt = math.max(self.retry_attempt, 1)
+        self:scheduleRetry(self.core:retryDelay(self.retry_attempt))
+    end
 end
 
 function Lectern:retry()
-    if not connected() then return end -- Wi-Fi is off: wait for NetworkConnected
+    self.retry_pending = false
     if self.setup_pending then
         self:trySetup()
-        if self.setup_pending then
-            -- Tailscale (e.g. KUAL) may still be coming up: back off while Wi-Fi stays on.
-            self.retry_attempt = self.retry_attempt + 1
-            self:scheduleRetry(self.core:retryDelay(self.retry_attempt))
-            return
-        end
+        if self.setup_pending then return end -- trySetup scheduled the next try
         self.retry_attempt = 0
     end
     if #self.core:outbox() == 0 then return end
@@ -326,21 +349,23 @@ function Lectern:onNetworkConnected()
 end
 
 function Lectern:onResume()
-    if #self.core:outbox() > 0 and online() then self:scheduleRetry(5) end
+    if #self.core:outbox() > 0 then self:retrySoon(5) end
 end
 
 function Lectern:onCloseWidget()
     UIManager:unschedule(self.retry_task)
+    self.retry_pending = false
 end
 
 -- --- Sync now ------------------------------------------------------------------------------
 
+--- Always tries, whatever NetworkMgr says, and always says what happened: set up or synced,
+-- refused, or not reachable with the actual error and when it tries again.
 function Lectern:syncNow()
     if not self.core:isPaired() then
-        if self.core:bootstrapSecret() then return self:trySetup() end
+        if self.core:bootstrapSecret() then return self:trySetup(true) end
         return self:showPair()
     end
-    if NetworkMgr:willRerunWhenOnline(function() self:syncNow() end) then return end
     local k = self.ui and self.ui.kosync
     if k and self.ui.document then self:queueCurrent(k) end
     local sent, left, why = self:flush()
@@ -353,6 +378,9 @@ function Lectern:syncNow()
         text = _("Lectern refused this device's key. It was revoked or paired again elsewhere.\n\nUse Lectern → Pair with a code.")
     elseif left > 0 or not status then
         text = string.format(_("Lectern is not reachable right now (%s). %d position(s) will be sent automatically when it is."), why or err or "offline", left)
+        if left > 0 and self.retry_pending then
+            text = text .. string.format(_("\n\nNext try in %s."), inTime(self.core:retryDelay(self.retry_attempt)))
+        end
     else
         text = string.format(_("Synced with Lectern.\n%d position(s) sent. %d book(s) waiting for this device."), sent, status.queue and status.queue.pending or 0)
     end
@@ -368,7 +396,6 @@ function Lectern:downloadDir()
 end
 
 function Lectern:showQueue()
-    if NetworkMgr:willRerunWhenOnline(function() self:showQueue() end) then return end
     local status, err = self.core:status()
     if not status then
         UIManager:show(InfoMessage:new{ text = string.format(_("Could not reach Lectern (%s)."), err or "offline") })
@@ -437,7 +464,7 @@ function Lectern:showStatus()
         add(_("Last push"), last and ago(last) or _("never"))
         UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
     end
-    if not self.core:isPaired() or not online() then return show() end
+    if not self.core:isPaired() then return show() end
     local status = self.core:status()
     if status then
         add(_("Books waiting"), status.queue and status.queue.pending or 0)
@@ -476,7 +503,6 @@ function Lectern:doPair(server, username, code)
         UIManager:show(InfoMessage:new{ text = _("Enter the server address (http://100.x.y.z:8080), your username and the 6-digit code.") })
         return
     end
-    if NetworkMgr:willRerunWhenOnline(function() self:doPair(server, username, code) end) then return end
     local result = self.core:pair(server, username, code)
     local text = ({
         ok = _("Paired. Progress sync and the Lectern catalogue are set up."),

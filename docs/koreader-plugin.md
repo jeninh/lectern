@@ -26,9 +26,16 @@ pressing Push.
 4. Eject, start (or restart) KOReader, and turn on Wi‑Fi and Tailscale (see
    [Tailscale on the e-reader](#tailscale-on-the-e-reader)).
 
-On the first start with a connection the plugin shows *Lectern is set up*. If Wi‑Fi is off
-it waits silently and finishes when Wi‑Fi comes up. Everything lives under **Tools →
-Lectern** in KOReader's menu.
+On the first start with a connection the plugin shows *Lectern is set up*. If Lectern is not
+reachable it retries silently and finishes once Wi‑Fi and Tailscale are up; **Sync now**
+tries at once and tells you the outcome. Everything lives under **Tools → Lectern** in
+KOReader's menu.
+
+The plugin decides whether the network is up by trying the request (with short timeouts),
+not by asking KOReader. On a jailbroken Kindle whose Wi‑Fi is brought up outside KOReader
+(KUAL or scriptlets, `--no-framework` mode) KOReader can report *offline* forever while the
+network works; the plugin still sets up and syncs there. KOReader's network state only
+decides how soon it retries.
 
 The zip contains the plugin's Lua files, `lectern_device.lua` (server address, username,
 device name; not secret), and `lectern_bootstrap.txt` (the one-time setup secret).
@@ -54,9 +61,11 @@ the same secret can be exchanged again, and each exchange rotates the credential
 only the last one to arrive works. The window does not grow with retries, and a new zip, a
 pairing code, or revoking the device ends it at once. A refused secret (used more than 15
 minutes ago, expired, revoked) is deleted, and the plugin tells you to pair with a code
-instead. Without a reachable server at first start (Tailscale still connecting) setup retries
-quietly after 30 s, 1, 2, 5, and then every 15 minutes while Wi‑Fi stays on, and 3 s after
-Wi‑Fi comes back.
+instead. Without a reachable server at first start (Wi‑Fi off, Tailscale still connecting)
+setup retries quietly after 30 s, 1, 2, 5, and then every 15 minutes, and 3 s after KOReader
+reports Wi‑Fi back; the status line shows *Setting up: will retry (…)* with the actual error.
+Each try waits at most 3 s to connect (10 s in all); with Wi‑Fi off and no route it fails at
+once, but behind tailscaled's userspace proxy each try can hold KOReader for those seconds.
 
 ## Automatic sync
 
@@ -70,12 +79,14 @@ KOReader's own progress sync does the work; the plugin turns it on and makes it 
   e-reader: close enough that a crash or a dead battery loses little, rare enough not to keep
   the radio busy. KOReader waits until you stop turning pages for 10 seconds before pushing,
   so skimming does not cause a burst. Set 0 to turn it off, or anything up to 200.
-- **Wi‑Fi off: queue, don't nag.** Without a connection, automatic pushes go to a small outbox
-  (newest position per book, at most 50 books) instead of KOReader's *Turn on Wi‑Fi?* prompt,
-  and automatic pulls are skipped. When Wi‑Fi comes back the plugin waits 3 seconds for
-  Tailscale and sends the outbox, oldest first. If Wi‑Fi is up but Lectern is not reachable
-  (Tailscale still connecting, server down), it retries quietly after 30 s, 1, 2, 5, and then
-  every 15 minutes while the network stays up. Nothing is shown unless you asked for it. A
+- **Wi‑Fi off: queue, don't nag.** Automatic pushes go to a small outbox (newest position per
+  book, at most 50 books) and are sent right away; one that cannot reach Lectern stays there
+  instead of KOReader's *Turn on Wi‑Fi?* prompt. While KOReader reports no network, automatic
+  pulls are skipped. When Wi‑Fi comes back the plugin waits 3 seconds for Tailscale and sends
+  the outbox, oldest first. If Lectern is not reachable (Wi‑Fi off, Tailscale still
+  connecting, server down), it retries quietly after 30 s, 1, 2, 5, and then every 15 minutes;
+  further pushes while KOReader reports no network wait for that retry rather than trying
+  each time. Nothing is shown unless you asked for it. A
   position is dropped only if Lectern answers that it is invalid (400/422); any other answer,
   such as a 404 from a wrong address, keeps the outbox.
   **When Wi‑Fi is off → Turn Wi‑Fi on to sync** restores KOReader's behaviour of switching
@@ -87,7 +98,7 @@ KOReader's own progress sync does the work; the plugin turns it on and makes it 
 | Item | |
 | --- | --- |
 | *status line* | Connected, Offline/Retrying with how many positions wait, Not reachable, or *Device revoked or replaced: pair again*. Tap for details: server, account, device, last push, books waiting. |
-| **Sync now** | Sends the current position and the outbox, pulls, and says what happened. |
+| **Sync now** | Sends the current position and the outbox, pulls, and always says what happened: synced, refused, or not reachable with the actual error. Before setup has finished it tries setup now and says *set up*, or the error and when it tries again. |
 | **Books sent to this device** | The device's Send to device queue. Tap a book to download it into KOReader's download folder (as `Title - Author (2).epub` if that name is taken; nothing is replaced); a complete download marks it delivered in Lectern, as with the catalogue. |
 | **Sync automatically**, **Also push every N pages**, **When another device is further ahead**, **When Wi‑Fi is off** | The settings above. |
 | **Pair with a code…** | See below. |

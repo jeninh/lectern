@@ -213,20 +213,28 @@ if command == "setup" then
     out.status_line = p.core:statusLine(NET.online)
     out.menu = UI.menu and UI.menu.lectern and #UI.menu.lectern.sub_item_table or 0
 elseif command == "offline-push" then
+    -- NetworkMgr says offline. With a dead server address (arg 4) the network really is down;
+    -- without one it only looks down (Wi-Fi managed outside KOReader) and the push goes out.
     NET.online, NET.connected = false, false
     local p, ui = make(true)
+    local real_server = p.store:readSetting("server_url")
+    if arg[4] then p.store:saveSetting("server_url", arg[4]) end
     local k = ui.kosync
     out.auto_sync = k.settings.auto_sync
     out.pages_before_update = k.settings.pages_before_update
     -- What kosync does on suspend and when a book opens, with automatic sync on.
     k:updateProgress(true, false, true)
     k:getProgress(true, false)
+    -- A page-turn push while the backoff is pending waits for it (no new request).
+    p.store:saveSetting("server_url", real_server)
+    k:updateProgress(false, false)
     out.kosync_calls = #k.calls
     out.outbox = #p.core:outbox()
     out.prompts = NET.prompts
     out.messages = #UI.shown
-    out.tasks = #UI.tasks
+    out.retry_in = UI.tasks[1] and UI.tasks[1].s
     out.status_line = p.core:statusLine(false)
+    p.store:flush()
 elseif command == "reconnect" then
     NET.online, NET.connected = true, true
     local p = make(false)
@@ -249,8 +257,10 @@ elseif command == "server-down" then
     out.messages = #UI.shown
     out.status_line = p.core:statusLine(true)
 elseif command == "setup-retry" then
-    -- Wi-Fi is up, the server is not reachable yet (Tailscale still connecting).
-    NET.online, NET.connected = true, true
+    -- The server is not reachable yet (Tailscale still connecting, or Wi-Fi off: arg 4
+    -- "offline" makes NetworkMgr say so too).
+    NET.online = arg[4] ~= "offline"
+    NET.connected = NET.online
     local p = make(false)
     out.pending = p.setup_pending == true
     local delays = {}
@@ -259,6 +269,7 @@ elseif command == "setup-retry" then
         run_tasks()
     end
     out.delays = delays
+    out.status_line = p.core:statusLine(NET.online)
     p:onNetworkConnected()
     out.after_reconnect = UI.tasks[1] and UI.tasks[1].s
     out.messages = #UI.shown
@@ -278,10 +289,25 @@ elseif command == "pair" then
     out.paired = p.core:isPaired()
     out.kosync = read_settings("kosync.lua").settings
 elseif command == "sync-now" then
+    NET.online = arg[4] ~= "offline"
+    NET.connected = NET.online
     local p, ui = make(true)
+    UI.shown, UI.tasks = {}, {} -- what Sync now does, not what the start did
+    -- "reachable-now": the start found the server unreachable; by Sync now it is (the
+    -- address from lectern_device.lua).
+    if arg[5] == "reachable-now" then p.store:delSetting("server_url") end
     p:syncNow()
-    out.message = UI.shown[1] and UI.shown[1].text
+    out.message = UI.shown[#UI.shown] and UI.shown[#UI.shown].text
+    out.messages = #UI.shown
+    out.retry_in = UI.tasks[1] and UI.tasks[1].s
+    out.prompts = NET.prompts
     out.outbox = #p.core:outbox()
+    if p.core:isPaired() and ui.kosync then
+        -- An automatic push right after Sync now: goes out at once, no stale retry pending.
+        ui.kosync:updateProgress(false, false)
+        out.outbox_after_push = #p.core:outbox()
+        out.tasks_after_push = #UI.tasks
+    end
 end
 out.log = LOG
 out.settings = read_settings("lectern.lua")
