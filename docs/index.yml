@@ -87,6 +87,11 @@ sections:
         description: Nightly encrypted backups, and restoring from one.
         icon: shield
         audience: owner
+      - file: offline-mode.md
+        title: Offline mode
+        description: Guarantee the server makes no internet connections, with models downloaded first.
+        icon: shield
+        audience: owner
 
   - title: Reference
     docs:
