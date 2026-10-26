@@ -1,11 +1,18 @@
 # Generated audiobooks (text-to-speech)
 
-A book that has an EPUB but no audiobook gets **Make an audiobook…** in its Formats list
+A book that has an EPUB or a text PDF ([pdf-read-along.md](pdf-read-along.md)) but no
+audiobook gets **Make an audiobook…** in its Formats list
 (owners and members). Choose an engine, a voice, a speed, and which chapters; play a sample;
 then Lectern narrates the text into an ordinary audiobook edition of the work: one track per
 chapter under `audio/`, titled after the chapter, playable, downloadable, and streamable like
 any imported audiobook. **Read-along works immediately**: every sentence's start and end come
 from the synthesis itself, so no alignment run is queued and none is needed.
+
+For a PDF-only book the script is the PDF's extracted sentences (running heads, page numbers
+and hyphenation already removed), and its chapters are the PDF's sections: outline entries,
+or 10-page ranges when it has no outline; the sheet shows each one's pages. A scanned PDF is
+refused with `pdf_needs_ocr` until it has text (issue #17), one still being read with
+`pdf_text_pending`, and a comic with `needs_epub`.
 
 ```diagram
 ┌──────────┐ sentences  ┌──────────────┐ one sentence ┌──────────┐ PCM + sample ┌───────────┐

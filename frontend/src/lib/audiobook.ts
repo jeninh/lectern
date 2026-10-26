@@ -34,6 +34,8 @@ export interface ChapterInfo {
   sentences: number;
   characters: number;
   preview: string;
+  /** A PDF section's first and last page (1-based); null for an EPUB chapter. */
+  pages?: [number, number] | null;
 }
 
 export interface TtsJob {
@@ -145,7 +147,9 @@ export function duration(s: number): string {
 }
 
 export const REASONS: Record<string, string> = {
-  needs_epub: "Needs an EPUB edition: narration reads the EPUB's text.",
+  needs_epub: "Needs an EPUB or a text PDF: narration reads the book's text, and comics have none.",
+  pdf_needs_ocr: "This PDF is scanned pages with no text layer. It can be narrated once OCR has given it text.",
+  pdf_text_pending: "Reading the PDF's text… narration is possible in a minute.",
   has_audio: "This book already has an audiobook.",
   not_allowed: "Only owners and members can make audiobooks.",
   unreadable_epub: "The EPUB could not be read.",

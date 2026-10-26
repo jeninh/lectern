@@ -1,4 +1,5 @@
-"""Background housekeeping for alignment: lease sweeps, track rescans, the local worker.
+"""Background housekeeping for alignment: lease sweeps, track rescans, PDF text, the local
+worker.
 
 Started from the app lifespan when background work is enabled. All of it is best effort and
 restartable: a crashed sweep is retried on the next tick, and a work whose files changed is
@@ -21,6 +22,7 @@ from lectern.align.worker import LocalWorker
 from lectern.config import Settings
 from lectern.fsops import LIBRARY_LOCK
 from lectern.models import Work
+from lectern.pdftext import store as pdftext
 
 log = logging.getLogger("lectern.services")
 
@@ -47,7 +49,8 @@ def rescan_works(session_factory: sessionmaker, library: Path) -> int:
 
 class Housekeeping:
     """One thread: reclaim expired leases every ``job_sweep_seconds`` and rescan the library
-    for audio every ``track_rescan_seconds`` (and once at start)."""
+    for audio and PDF text layers (:func:`lectern.pdftext.store.sweep`) every
+    ``track_rescan_seconds`` (and once at start)."""
 
     def __init__(self, session_factory: sessionmaker, settings: Settings) -> None:
         self.session_factory = session_factory
@@ -68,6 +71,11 @@ class Housekeeping:
             now = time.monotonic()
             if now >= next_rescan:
                 next_rescan = now + self.settings.track_rescan_seconds
+                try:
+                    # PDF text first: a PDF-only work with audio can then be queued below.
+                    pdftext.sweep(self.session_factory, self.settings.library_dir)
+                except Exception:  # noqa: BLE001
+                    log.exception("PDF text sweep failed")
                 try:
                     n = rescan_works(self.session_factory, self.settings.library_dir)
                     if n:

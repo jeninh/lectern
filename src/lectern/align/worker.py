@@ -27,9 +27,10 @@ from pathlib import Path
 from pydantic import ValidationError
 from sqlalchemy.orm import sessionmaker
 
+from lectern import queue
 from lectern.align import isolate, jobs
 from lectern.align.pipeline import TrackInput, TranscribeFn, align_work
-from lectern.align.tracks import work_epub, work_tracks
+from lectern.align.tracks import work_tracks
 from lectern.align.transcribe import (
     MODELS,
     Transcriber,
@@ -37,6 +38,7 @@ from lectern.align.transcribe import (
     transcribe_tracks,
 )
 from lectern.models import Job, Work
+from lectern.pdftext.store import work_text
 from lectern.sentence_map import SentenceMap
 
 log = logging.getLogger("lectern.align.worker")
@@ -213,7 +215,7 @@ class LocalWorker:
             claimed = jobs.claim(
                 db,
                 kinds=[jobs.KIND_ALIGN],
-                capabilities=[jobs.KIND_ALIGN],
+                capabilities=[queue.ALIGN, queue.ALIGN_PDF],
                 worker=self.name,
                 lease_s=self.lease_s,
                 credential_id=None,
@@ -226,7 +228,7 @@ class LocalWorker:
             job_id, payload, work_id = job.id, dict(job.payload or {}), job.work_id
             attempt = job.attempts
             work = db.get(Work, work_id)
-            found = work_epub(db, self.library, work) if work else None
+            found = work_text(db, self.library, work) if work else None
             tracks = [
                 TrackInput(
                     t.position,
@@ -611,10 +613,11 @@ class JobContext:
 
 
 class AlignRunner:
-    """``align`` jobs: download the EPUB and tracks, transcribe, match, upload the map."""
+    """``align`` jobs: download the text (an EPUB, or a PDF's text document) and the tracks,
+    transcribe, match, upload the map."""
 
     kind = jobs.KIND_ALIGN
-    capabilities = ("align",)
+    capabilities = ("align", "align-pdf")
 
     def __init__(
         self,
@@ -643,8 +646,9 @@ class AlignRunner:
     def run(self, ctx: JobContext) -> None:
         job, payload, claimed = ctx.job, ctx.payload, ctx.claimed
         ctx.progress(0.0, "downloading inputs")
+        inputs = claimed["inputs"]
         epub = ctx.download(
-            claimed["inputs"]["epub"], ctx.tmp / "book.epub", payload["epub_sha256"]
+            inputs.get("text") or inputs["epub"], ctx.tmp / "book.text", payload["epub_sha256"]
         )
         tracks = []
         offset = 0.0

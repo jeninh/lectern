@@ -13,9 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from lectern import integrations, queue
-from lectern.align.tracks import sync_tracks, work_epub, work_tracks
+from lectern.align.tracks import sync_tracks, work_tracks
 from lectern.config import Settings
+from lectern.ingest import formats
 from lectern.models import Job, JobStatus, Role, User, Work
+from lectern.pdftext.store import pdf_text_of, work_text
 from lectern.tts import elevenlabs as el
 from lectern.tts import engines as eng
 from lectern.tts import jobs as tj
@@ -75,12 +77,14 @@ def _book(path: str, sha256: str) -> sc.Book:
 
 
 def book_for(db: Session, settings: Settings, work: Work) -> tuple[sc.Book, str]:
-    found = work_epub(db, settings.library_dir, work)
+    """The work's text as chapters: its EPUB's, or a text PDF's sections (outline chapters or
+    page ranges, :mod:`lectern.pdftext`). The digest is the one alignments record."""
+    found = work_text(db, settings.library_dir, work)
     if found is None:
-        raise ServiceError(409, "needs_epub")
-    book, path = found
+        raise ServiceError(409, no_text_reason(db, work))
+    source, path = found
     try:
-        return _book(str(path), book.sha256), book.sha256
+        return _book(str(path), source.sha256), source.sha256
     except Exception as exc:  # noqa: BLE001 - a damaged EPUB is the caller's 422
         raise ServiceError(422, "unreadable_epub") from exc
 
@@ -89,12 +93,32 @@ def eligibility(db: Session, settings: Settings, work: Work, user: User) -> str 
     """Why this person cannot make an audiobook of this work now, or ``None``."""
     if user.role not in (Role.OWNER, Role.MEMBER):
         return "not_allowed"
-    if work_epub(db, settings.library_dir, work) is None:
-        return "needs_epub"
+    if work_text(db, settings.library_dir, work) is None:
+        return no_text_reason(db, work)
     sync_tracks(db, settings.library_dir, work)
     if work_tracks(db, work.id):
         return "has_audio"
     return None
+
+
+def no_text_reason(db: Session, work: Work) -> str:
+    """Why a work has no text to narrate: ``pdf_needs_ocr`` (its PDFs are scans; issue #17),
+    ``pdf_text_pending`` (a PDF's text is still being read), else ``needs_epub`` (no EPUB and
+    no PDF: comics and audio-only works)."""
+    from lectern.pdftext.store import NEEDS_OCR, READY, status_json
+
+    statuses = [
+        status_json(pdf_text_of(db, f.id), f)["status"]
+        for f in work.files
+        if f.media_type == formats.PDF
+    ]
+    if not statuses:
+        return "needs_epub"
+    if any(s not in (NEEDS_OCR, READY, "failed") for s in statuses):
+        return "pdf_text_pending"
+    if NEEDS_OCR in statuses:
+        return "pdf_needs_ocr"
+    return "needs_epub"
 
 
 def chapters_json(book: sc.Book) -> list[dict]:
@@ -105,6 +129,7 @@ def chapters_json(book: sc.Book) -> list[dict]:
             "sentences": len(c.sentences),
             "characters": c.characters,
             "preview": c.sentences[0].text[:160],
+            "pages": list(c.pages) if c.pages else None,
         }  # fmt: skip
         for c in book.chapters
     ]
@@ -388,7 +413,7 @@ def retry(db: Session, settings: Settings, work: Work, user: User) -> Job:
     reason = eligibility(db, settings, work, user)
     if reason:
         raise ServiceError(409 if reason != "not_allowed" else 403, reason)
-    found = work_epub(db, settings.library_dir, work)
+    found = work_text(db, settings.library_dir, work)
     if found is None or found[0].sha256 != payload.get("epub_sha256"):
         raise ServiceError(409, "text_changed")
     job = tj.new_job(db, work, payload, user.id)

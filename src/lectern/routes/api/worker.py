@@ -21,7 +21,7 @@ from sqlalchemy import update
 
 from lectern import queue
 from lectern.align import jobs
-from lectern.align.tracks import work_epub, work_tracks
+from lectern.align.tracks import work_tracks
 from lectern.http_range import file_response
 from lectern.models import Job, Work, WorkerCredential, WorkerEnrollment, utcnow
 from lectern.security import audit
@@ -157,12 +157,16 @@ def _leased(db, cred, job_id: int, token: str | None, *, allow_succeeded: bool =
 
 
 def claim_body(job: Job, token: str, lease_s: int, inputs: dict | None = None) -> dict:
-    """``inputs`` for align is ``{"epub": url, "tracks": [url, …]}`` (unchanged); for every
-    other kind it is ``{name: {"url", "sha256", "media_type", "size"}}``."""
+    """``inputs`` for align is ``{"epub": url, "tracks": [url, …]}`` (unchanged); a job whose
+    text is a PDF's text document (capability ``align-pdf``) has ``"text"`` instead of
+    ``"epub"``. For every other kind it is ``{name: {"url", "sha256", "media_type", "size"}}``."""
     payload = job.payload or {}
     if job.kind == jobs.KIND_ALIGN:
+        pdf = payload.get("text_source") == "pdf"
         inputs = {
-            "epub": f"/api/worker/jobs/{job.id}/inputs/epub",
+            (
+                "text" if pdf else "epub"
+            ): f"/api/worker/jobs/{job.id}/inputs/{'text' if pdf else 'epub'}",
             "tracks": [
                 f"/api/worker/jobs/{job.id}/inputs/tracks/{t['position']}"
                 for t in payload.get("tracks", [])
@@ -325,7 +329,8 @@ def enroll(
 
 
 @router.get("/jobs/{job_id}/inputs/epub")
-def input_epub(
+@router.get("/jobs/{job_id}/inputs/text")
+def input_text(
     request: Request,
     cred: WorkerAuth,
     db: DbDep,
@@ -333,15 +338,19 @@ def input_epub(
     job_id: int,
     x_lease_token: LeaseToken = None,
 ):
+    """The text an align job reads: the EPUB, or a PDF's canonical text document (JSON)."""
+    from lectern.pdftext.store import work_text
+
     job = _leased(db, cred, job_id, x_lease_token)
     if not jobs.inputs_current(db, settings.library_dir, job):
         raise _lease_lost()
     work = db.get(Work, job.work_id)
-    found = work_epub(db, settings.library_dir, work) if work else None
+    found = work_text(db, settings.library_dir, work) if work else None
     if found is None:
         raise _lease_lost()
-    book, path = found
-    return _input(request, path, book.media_type, book.sha256)
+    source, path = found
+    media_type = source.file.media_type if source.kind == "epub" else "application/json"
+    return _input(request, path, media_type, source.sha256)
 
 
 @router.get("/jobs/{job_id}/inputs/tracks/{position}")

@@ -10,6 +10,10 @@ answers with the *newer* of the two: KOReader's own record, or a web/audio posit
 translated back into an xpointer for the same document. The device that wrote last wins,
 exactly as between two KOReader devices. Projection needs both visibility of the work and the
 exact aligned edition (``_projectable``); otherwise the sync is plain koreader-sync-server.
+
+A text PDF with a current sentence map (:mod:`lectern.pdftext.positions`) is projected the same
+way, with pages instead of xpointers: a page KOReader syncs becomes the first sentence on it,
+and a newer web/audio position comes back as the page it is on.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lectern.access import can_see_work
+from lectern.ingest import formats
 from lectern.models import (
     Alignment,
     BookFile,
@@ -37,6 +42,7 @@ from lectern.models import (
     Work,
     WorkProgress,
 )
+from lectern.pdftext.positions import pdf_map
 from lectern.positions import SentencePos
 from lectern.progress import (
     get_progress as work_progress_of,
@@ -59,10 +65,12 @@ PROJECTED_DEVICE_ID = "lectern"
 
 @dataclass(frozen=True)
 class _Edition:
-    """The work a KOReader document belongs to, when its progress can be projected."""
+    """The work a KOReader document belongs to, when its progress can be projected: through
+    ``epub`` (xpointers) or through ``pdf`` (pages; :class:`lectern.pdftext.positions.PdfMap`)."""
 
     work: Work
-    epub: Path
+    epub: Path | None
+    pdf: object | None = None
 
 
 def _projectable(db: Session, library: Path, user: User, document: str) -> _Edition | None:
@@ -82,6 +90,11 @@ def _projectable(db: Session, library: Path, user: User, document: str) -> _Edit
     for book in books:
         if not can_see_work(db, user, book.work_id):
             continue
+        if book.media_type == formats.PDF:
+            m = pdf_map(db, library, book)
+            if m is not None:
+                return _Edition(m.work, None, m)
+            continue
         alignment = db.scalar(select(Alignment).where(Alignment.work_id == book.work_id))
         if alignment is None or alignment.epub_sha256 != book.sha256:
             continue  # another edition: its DOM paths and offsets do not match the sentences
@@ -96,6 +109,21 @@ def _projectable(db: Session, library: Path, user: User, document: str) -> _Edit
 def _project_put(db: Session, library: Path, user: User, body: ProgressIn) -> None:
     edition = _projectable(db, library, user, body.document)
     if edition is None:
+        return
+    if edition.pdf is not None:
+        if not body.progress.isdigit():
+            return
+        n = edition.pdf.sentence_at_page(int(body.progress) - 1)
+        if n is not None:
+            set_progress(
+                db,
+                user_id=user.id,
+                work_id=edition.work.id,
+                pos=SentencePos(n, 0),
+                source=ProgressSource.KOREADER,
+                raw=body.progress,
+                device=body.device,
+            )
         return
     idx = sentence_index(db, edition.work.id)
     pos = xpointer_to_sentence(edition.epub, idx, body.progress)
@@ -128,6 +156,19 @@ def _newer_projection(
     if not len(idx):
         return None
     pos = SentencePos(min(wp.sentence_n, len(idx) - 1), wp.sentence_offset)
+    if edition.pdf is not None:
+        page = edition.pdf.page_of(pos.n)
+        if page is None:
+            return None
+        pages = max(edition.pdf.row.pages, 1)
+        return {
+            "document": document,
+            "progress": str(page + 1),
+            "percentage": round(min(1.0, (page + 1) / pages), 4),
+            "device": wp.device or f"Lectern {wp.source.value}",
+            "device_id": f"{PROJECTED_DEVICE_ID}-{wp.source.value}",
+            "timestamp": int(wp.updated_at.timestamp()),
+        }
     xpointer = sentence_to_xpointer(edition.epub, idx, pos)
     if xpointer is None:
         return None

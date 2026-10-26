@@ -1,10 +1,14 @@
-"""The script a TTS job reads: the work's EPUB as chapters of numbered sentences.
+"""The script a TTS job reads: the work's text as chapters of numbered sentences.
 
 Sentences are exactly the ones alignment would produce (:func:`lectern.align.text.segment_items`
 over the same spine walk), so the sentence map a generated audiobook installs uses the same
 coordinates as everything else and every stored reading position keeps its place. A chapter
 is a spine item that has something to say; its title comes from the EPUB's table of contents
 (EPUB 3 nav or EPUB 2 NCX), else from a short first line, else "Chapter N".
+
+A work whose only text is a PDF reads the PDF's canonical text document instead
+(:mod:`lectern.pdftext`): its sections are the chapters, named after the PDF's outline
+entries, or "Pages 1–10", "Pages 11–20", … when the PDF has no outline.
 
 ``pause_s`` is the silence after a sentence: longer at the end of a paragraph and after a
 heading-like line. It belongs to no sentence, so highlighting stays on the words.
@@ -53,6 +57,7 @@ class Chapter:
     spine_index: int
     title: str
     sentences: list[ScriptSentence] = field(default_factory=list)
+    pages: tuple[int, int] | None = None  # a PDF section's first and last page, 1-based
 
     @property
     def characters(self) -> int:
@@ -69,8 +74,21 @@ class Book:
     sentences: list[SentenceSpan]
 
 
+def _document_sections(path: Path) -> list[dict] | None:
+    """A PDF text document's sections, or ``None`` for an EPUB."""
+    import json
+
+    from lectern.pdftext.document import is_text_document
+
+    with open(path, "rb") as f:
+        if not is_text_document(f.read(1)):
+            return None
+    return json.loads(path.read_bytes()).get("sections") or []
+
+
 def read_book(epub: Path) -> Book:
-    titles = toc_titles(epub)
+    sections = _document_sections(epub)
+    titles = toc_titles(epub) if sections is None else {}
     by_spine: dict[int, list[SentenceSpan]] = {}
     items = list(iter_spine_items(epub))
     sentences = segment_items(items)
@@ -105,8 +123,14 @@ def read_book(epub: Path) -> Book:
                 ScriptSentence(s.n, s.text, pause, s.spine_index, s.char_start, s.char_end)
             )
         first = chapter.sentences[0].text
+        if sections is not None:
+            sec = sections[item.index]
+            chapter.pages = (sec["page_start"] + 1, sec["page_end"] + 1)
+            named = sec["title"]
+        else:
+            named = _title_at_start(epub, item.index, titles.get(item.href, []))
         chapter.title = (
-            _title_at_start(epub, item.index, titles.get(item.href, []))
+            named
             or (first if len(first) <= TITLE_MAX_CHARS // 2 else "")
             or f"Chapter {len(chapters) + 1}"
         )[:TITLE_MAX_CHARS]

@@ -417,6 +417,12 @@ credential, with its pause reason or why it does not offer the capability) and t
 `summary` are for the owner only, as on Admin → Workers: members get `workers: []` and a
 summary without worker names or reasons.
 
+### PDF text and read-along on PDF pages — `/api/files/{id}/text`, `/api/files/{id}/sentences`
+
+See [pdf-read-along.md](pdf-read-along.md#api). Boxes are `[page, x0, y0, x1, y1]`: a 0-based
+page and a rectangle in PDF user space (points, origin bottom left, before `/Rotate`); each
+PDF sentence carries `work_n`, the sentence of `GET /api/works/{id}/sentences` it is.
+
 ### Generated audiobooks — `tts` jobs
 
 `kind = "tts"` jobs narrate a text-only work into an audiobook edition whose sentence map
@@ -780,6 +786,12 @@ current lease hash, or whose lease has expired, or whose job is no longer `lease
 `409 lease_lost`.
 
 ### Inputs — `GET /api/worker/jobs/{id}/inputs/epub`, `GET …/inputs/tracks/{position}`
+
+An align job whose payload has `"text_source": "pdf"` (kind `align`, capability `align-pdf`:
+the claim body's `kinds` must include `"align-pdf"`) lists `"text"` instead of `"epub"` in
+`inputs`: `GET /api/worker/jobs/{id}/inputs/text` serves the PDF's canonical text document
+(JSON, docs/pdf-read-along.md), and the payload's `epub_sha256` is that document's SHA-256.
+`/inputs/epub` serves the same file for such a job.
 
 Bearer key + `X-Lease-Token`. Serve the work's current EPUB / track file with `Range` support,
 `ETag: "<sha256>"`, and `X-Content-SHA256`. Before serving, the server compares the current

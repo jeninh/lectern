@@ -387,9 +387,13 @@ export type ReadAloudState = "unavailable" | "not_generated" | "generating" | "r
 export interface ReadAloudStatus {
   work_id: number;
   status: ReadAloudState;
-  reason: "no_alignment" | "alignment_stale" | "no_audio" | "no_ebook" | "needs_epub" | "missing_file" | null;
+  reason: "no_alignment" | "alignment_stale" | "no_audio" | "no_ebook" | "needs_epub" | "export_needs_epub" | "missing_file" | null;
   message: string | null;
   readalong: boolean;
+  /** Where the work's text comes from (an EPUB, a text PDF, or nothing). */
+  text_source?: "epub" | "pdf" | null;
+  /** Every PDF of the work and its text state. */
+  pdfs?: PdfTextState[];
   alignment: AlignmentSummary | null;
   download_url: string | null;
   size: number | null;
@@ -739,4 +743,54 @@ export interface PagesInfo {
   /** PDFs: where pdf.js loads the file. Comics: null (pages are images). */
   url: string | null;
   progress: PageProgress | null;
+  /** PDFs: what was read from the text layer, and whether read-along works on the pages. */
+  text?: PdfTextState;
+  /** PDFs with a sentence map: a newer position from elsewhere (audio, EPUB, KOReader), as a page. */
+  position?: { page: number; sentence_n: number; source: "web" | "audio" | "koreader"; device: string | null; updated_at: string | null } | null;
+}
+
+/** A PDF's text layer (docs/pdf-read-along.md): a text PDF ("ready"), a scan ("needs_ocr"), being read, or unreadable. */
+export type PdfTextStatus = "pending" | "ready" | "needs_ocr" | "failed";
+
+export interface PdfSection {
+  title: string;
+  page_start: number;
+  page_end: number;
+  from_outline: boolean;
+  sentences: number;
+  characters: number;
+}
+
+export interface PdfTextState {
+  file_id: number;
+  work_id: number;
+  status: PdfTextStatus;
+  pages: number | null;
+  pages_with_text: number | null;
+  sections: PdfSection[];
+  sentences: number;
+  error: string | null;
+  /** Where the work's text comes from: its EPUB, this (or another) PDF, or nothing yet. */
+  text_source: "epub" | "pdf" | null;
+  /** "self": this PDF is the work's text; "epub": its sentences point at the EPUB's; null: no map. */
+  map: "self" | "epub" | null;
+  readalong: boolean;
+}
+
+/** A PDF sentence as highlight rectangles: [page (0-based), x0, y0, x1, y1] in PDF user space. */
+export type PdfBox = [number, number, number, number, number];
+
+export interface PdfSentenceBoxes {
+  n: number;
+  /** The work sentence (audio timeline) this PDF sentence is; null when the EPUB lacks it. */
+  work_n: number | null;
+  page: number;
+  boxes: PdfBox[];
+}
+
+export interface PdfSentencesResponse {
+  file_id: number;
+  count: number;
+  map: "self" | "epub";
+  sentences: PdfSentenceBoxes[];
 }

@@ -2,7 +2,7 @@
 
 Every job has a ``capability``: what a worker must advertise to claim it. It is derived from
 the job's kind and payload when the job is inserted (``capability_for``): ``align`` →
-``align``, ``transcode`` → ``transcode``, ``tts`` → ``tts-<payload.engine>``. Workers send
+``align`` (``align-pdf`` when its text is a PDF's), ``transcode`` → ``transcode``, ``tts`` → ``tts-<payload.engine>``. Workers send
 the capabilities they have on every claim; the server leases a job only to a worker that
 advertises its capability, that the credential's owner-set allowlist permits, and that may
 leave the server at all (``SERVER_ONLY`` never does).
@@ -41,12 +41,16 @@ CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 ALIGN = "align"
+# Alignment whose text is a PDF's canonical text document (a ``text`` input instead of an
+# EPUB). Workers from before PDF text do not advertise it, so they never claim such a job; a
+# credential allowed to ``align`` may also ``align-pdf`` (the same engine).
+ALIGN_PDF = "align-pdf"
 TRANSCODE = "transcode"
 OCR = "ocr"  # reserved: no job kind uses it yet
 TTS_KOKORO = "tts-kokoro"
 TTS_PIPER = "tts-piper"
 TTS_ELEVENLABS = "tts-elevenlabs"
-KNOWN_CAPABILITIES = (ALIGN, TRANSCODE, OCR, TTS_KOKORO, TTS_PIPER, TTS_ELEVENLABS)
+KNOWN_CAPABILITIES = (ALIGN, ALIGN_PDF, TRANSCODE, OCR, TTS_KOKORO, TTS_PIPER, TTS_ELEVENLABS)
 # Never leased to an external worker: the job needs a secret only the server holds (the
 # ElevenLabs integration key). Local runners may still claim them.
 SERVER_ONLY = frozenset({TTS_ELEVENLABS})
@@ -158,6 +162,8 @@ def claimable(advertised: Iterable[str], cred: WorkerCredential | None) -> list[
     if cred is None:
         return caps
     allowed = cred.capabilities
+    if allowed is not None and ALIGN in allowed:
+        allowed = [*allowed, ALIGN_PDF]
     return [c for c in caps if c not in SERVER_ONLY and (allowed is None or c in allowed)]
 
 
@@ -449,7 +455,7 @@ def explain_wait(
         info = c.info or {}
         if cap in SERVER_ONLY:
             why = "this kind of job never leaves the server"
-        elif c.capabilities is not None and cap not in c.capabilities:
+        elif not claimable([cap], c):
             why = f"its allowlist does not include {cap}"
         elif cap not in advertised:
             missing = (info.get("unavailable") or {}).get(cap)

@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { MakeAudiobookRow } from "../components/MakeAudiobook";
-import { NeedsEpub, ReadAloudFormats } from "../components/ReadAloudFormats";
+import { ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
 import { DownloadButton } from "../components/Offline";
@@ -23,7 +23,7 @@ import { MOD, useLocalStorage } from "../lib/hooks";
 import { useSelection, type CellProps } from "../lib/useSelection";
 import { useGridColumns, useWindowRows } from "../lib/virtual";
 import { useStore } from "../lib/store";
-import { bookFiles, formatName, formatOf, hasEpub, isPaged, readerPath } from "../lib/formats";
+import { bookFiles, formatName, formatOf, hasEpub, isPaged, PDF, readerPath } from "../lib/formats";
 import type { Work } from "../lib/types";
 
 type Sort = "title" | "author" | "added";
@@ -645,8 +645,8 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
       <div>
         <h3 style={{ margin: "0 0 8px", fontSize: 14, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Read-along</h3>
         <ul className="slots">
-          {epub && !work.audio && canUpload && <MakeAudiobookRow work={work} />}
-          {epub ? <ReadAloudFormats work={work} active /> : <NeedsEpub />}
+          {(epub || work.files.some((f) => f.media_type === PDF)) && !work.audio && canUpload && <MakeAudiobookRow work={work} />}
+          <ReadAloudFormats work={work} active />
         </ul>
       </div>
       {editable.length > 0 && (

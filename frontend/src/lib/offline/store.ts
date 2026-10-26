@@ -8,7 +8,8 @@
 // download limits; a refused file stops the download and nothing is kept.
 
 import { ApiError, call, csrf, get, OfflineError, post } from "../api";
-import type { Me, PagesInfo, SentenceInfo, SentencesResponse, SpineTextResponse, TracksResponse, Work, WorkProgressResponse } from "../types";
+import { loadPdfSentences } from "../pdfreadalong";
+import type { Me, PagesInfo, PdfSentencesResponse, SentenceInfo, SentencesResponse, SpineTextResponse, TracksResponse, Work, WorkProgressResponse } from "../types";
 import { dropDatabase, idb } from "./db";
 import { BOOKS_CACHE, bookKey, DOWNLOAD_HEADER, SHELL_PREFIX } from "./routes";
 
@@ -65,6 +66,8 @@ export interface OfflineBook {
 export interface OfflineReadAlong {
   sentences: SentenceInfo[];
   texts: SpineTextResponse[];
+  /** Read-along on the downloaded PDF's pages: its sentences as highlight boxes. */
+  pdf?: PdfSentencesResponse;
 }
 
 export interface Owner {
@@ -374,7 +377,9 @@ export async function download(workId: number, choice: Choice, onProgress: (p: P
       record.parts.audio = bytes;
     }
     if (choice.readalong && m.readalong) {
-      await idb.put("readalong", workId, await readAlongData(workId));
+      const data = await readAlongData(workId);
+      if (record.pdf?.text?.readalong) data.pdf = await loadPdfSentences(record.pdf.file_id);
+      await idb.put("readalong", workId, data);
       record.parts.readalong = true;
     }
     if (record.work.cover_url) {

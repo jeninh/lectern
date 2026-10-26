@@ -1231,3 +1231,74 @@ class GeneratedAudiobook(Base):
         ForeignKey("users.id", ondelete="SET NULL"), default=None
     )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+# --- The text layer of PDFs (migration 0016_pdf_text) -------------------------------------------
+
+
+class PdfText(Base):
+    """What Lectern read from one PDF's text layer (``lectern.pdftext``).
+
+    ``status``: ``pending`` (not read yet), ``ready`` (a canonical text document exists:
+    ``text_sha256`` names it, ``sections`` summarises it, ``pdf_sentences`` holds its sentences
+    with their pages and boxes), ``needs_ocr`` (most pages have no usable text: a scan; issue
+    #17's OCR will fill in the same document), or ``failed`` (the sandboxed reader refused or
+    crashed; ``error`` says why). ``version`` is the extractor's
+    (:data:`lectern.pdftext.document.DOCUMENT_VERSION`): a newer one reads the file again.
+    """
+
+    __tablename__ = "pdf_texts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    file_id: Mapped[int] = mapped_column(
+        ForeignKey("book_files.id", ondelete="CASCADE"), unique=True
+    )
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    pdf_sha256: Mapped[str] = mapped_column(String(64))
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    text_sha256: Mapped[str | None] = mapped_column(String(64), default=None)
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    pages_with_text: Mapped[int] = mapped_column(Integer, default=0)
+    chars: Mapped[int] = mapped_column(Integer, default=0)
+    sentence_count: Mapped[int] = mapped_column(Integer, default=0)
+    # [{"title", "page_start", "page_end", "from_outline", "sentences", "characters"}]
+    sections: Mapped[list | None] = mapped_column(JSON, default=None)
+    stats: Mapped[dict | None] = mapped_column(JSON, default=None)
+    error: Mapped[str | None] = mapped_column(String(512), default=None)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # The work sentence list ``pdf_sentences.epub_n`` was projected onto (a digest of it), when
+    # the work's text comes from an EPUB; NULL = no projection (the PDF is the text, or none yet).
+    projected_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class PdfSentence(Base):
+    """A sentence of a PDF's canonical text, where it is on the pages, and (for a work whose
+    text is an EPUB) the work sentence it is the same text as.
+
+    ``section``/``char_start``/``char_end`` are text coordinates in the PDF's text document;
+    ``boxes`` are highlight rectangles ``[[page, x0, y0, x1, y1], …]`` in PDF user space, one
+    per line piece; ``page_start``/``page_end`` are 0-based. ``epub_n`` is NULL when the PDF
+    itself is the work's text (then ``n`` is the work's sentence number) or when the text was
+    not found in the EPUB.
+    """
+
+    __tablename__ = "pdf_sentences"
+    __table_args__ = (
+        UniqueConstraint("file_id", "n", name="uq_pdf_sentence_n"),
+        Index("ix_pdf_sentences_page", "file_id", "page_start"),
+        Index("ix_pdf_sentences_epub", "file_id", "epub_n"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    file_id: Mapped[int] = mapped_column(ForeignKey("book_files.id", ondelete="CASCADE"))
+    n: Mapped[int] = mapped_column(Integer)
+    section: Mapped[int] = mapped_column(Integer)
+    char_start: Mapped[int] = mapped_column(Integer)
+    char_end: Mapped[int] = mapped_column(Integer)
+    page_start: Mapped[int] = mapped_column(Integer)
+    page_end: Mapped[int] = mapped_column(Integer)
+    boxes: Mapped[list] = mapped_column(JSON)
+    epub_n: Mapped[int | None] = mapped_column(Integer, default=None)
