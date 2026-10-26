@@ -90,7 +90,10 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
   useEffect(() => {
     refresh().catch(() => {});
   }, [refresh]);
-  const busy = info?.transcode && ["queued", "running"].includes(info.transcode.status);
+  const busy = info?.transcode && ["queued", "leased"].includes(info.transcode.status);
+  // Copies turned off, or nothing that could make one: offer no button that would fail.
+  const canMake = canUpload && !info?.data_saver?.off && !info?.data_saver?.unavailable;
+  const accountSaver = !!me?.preferences.data_saver;
   useVisiblePolling(() => busy && refresh().catch(() => {}), 4000);
 
   const lowReady = !!info?.tracks.length && info.tracks.every((t) => t.variants.low);
@@ -159,6 +162,9 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
                 <span />
               </button>
               <span id="saver-l">Data saver</span>
+              {p.dataSaverDevice !== null && p.dataSaverDevice !== accountSaver && (
+                <button className="linklike hint" onClick={() => p.setDataSaver(null)} title="Use your account's setting (Security) on this device">Use account setting</button>
+              )}
             </span>
             {ebook && <Link className="btn sm ghost" to={readerPath(w)}><Reader /> Read</Link>}
           </div>
@@ -169,10 +175,11 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
                 : lowReady
                   ? "Data saver is on."
                   : busy
-                    ? `Making the data-saver copy… ${info?.transcode?.progress ?? 0} of ${info?.transcode?.total ?? 0} files done.`
+                    ? info?.transcode?.message ?? `Making the data-saver copy… ${info?.transcode?.progress ?? 0} of ${info?.transcode?.total ?? 0} files done.`
                     : "No data-saver copy yet; streaming the original."
               : "Streams the original files. Data saver uses a smaller copy for slow connections such as phones away from home."}
-            {p.dataSaver && !lowReady && !busy && canUpload && <> <button className="linklike" onClick={transcode}>Make one now</button>.</>}
+            {p.dataSaver && !lowReady && !busy && canMake && <> <button className="linklike" onClick={transcode}>Make one now</button>.</>}
+            {p.dataSaver && !lowReady && !busy && canUpload && info?.data_saver?.unavailable && <> {info.data_saver.unavailable.message}</>}
           </p>
         </div>
       </div>
@@ -223,10 +230,10 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
               </li>
             ))}
           </ul>
-          {canUpload && !lowReady && !busy && (
+          {canMake && !lowReady && !busy && (
             <button className="btn sm" onClick={transcode} style={{ marginTop: 10 }}>Make a data-saver copy</button>
           )}
-          {lowReady && <p className="hint">Data-saver copy ready ({bytes(lowSize)}). Originals stay untouched.</p>}
+          {lowReady && <p className="hint">Data-saver copy ready: {bytes(lowSize)} instead of {bytes(origSize)}{origSize > lowSize ? ` (${bytes(origSize - lowSize)} saved)` : ""}. Originals stay untouched.</p>}
         </section>
       </div>
     </section>

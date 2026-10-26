@@ -128,6 +128,7 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
         "metadata": metadata_of(work),
         "playback_default": work.playback_default,
         "readalong_enabled": work.readalong_enabled,
+        "data_saver_enabled": work.data_saver_enabled,
         "primary_file_id": primary.id if primary else None,
         "cover": {
             "has_cover": work.has_cover,
@@ -862,6 +863,7 @@ class LibrarySettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metadata_lookup_enabled: bool | None = None
+    data_saver_enabled: bool | None = None
 
 
 @router.put("/library-settings")
@@ -872,6 +874,10 @@ def update_library_settings(
         if instance.get(db, k) != v:
             instance.set_value(db, k, v, auth.user.id)
             _audit(db, request, auth, "settings.change", k, "on" if v else "off")
+            if k == "data_saver_enabled" and not v:
+                from lectern.jobs import cancel_all_transcodes
+
+                cancel_all_transcodes(db)
     db.commit()
     return {"settings": instance.all_settings(db), "can_change": True}
 

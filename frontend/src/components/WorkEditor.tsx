@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ApiError, get, patch, post, postBlob } from "../lib/api";
+import { ApiError, del, get, patch, post, postBlob } from "../lib/api";
 import { buildPatch, changes, coverAuthor, initialDraft, rebase, type Draft } from "../lib/editor";
 import { bytes, relativeTime } from "../lib/format";
 import { applyFields, display, FIELD_LABEL, suggestionDiff, validate } from "../lib/metadata";
 import { clock } from "../lib/player";
 import { useStore } from "../lib/store";
-import type { CoverStyle, EditorState, LookupResult, LookupSuggestion, Metadata } from "../lib/types";
+import type { CoverStyle, EditorState, LookupResult, LookupSuggestion, Metadata, TracksResponse } from "../lib/types";
 import { Book, Down, Headphones, Shuffle, Sparkle, Trash, Undo, Up, Upload } from "./Icons";
 import { MetadataForm } from "./MetadataForm";
 import { Sheet } from "./Sheet";
@@ -640,6 +640,7 @@ function PlaybackTab({ state, draft, set, onRefresh }: { state: EditorState; dra
           </>
         )}
       </section>
+      {state.tracks.length > 0 && <DataSaverSection workId={state.work.id} draft={draft} set={set} />}
       <section className="card flat" aria-labelledby="ra-h">
         <h3 id="ra-h" className="detail-h" style={{ marginTop: 0 }}>Read-aloud EPUB</h3>
         <p className="hint" style={{ marginTop: 0 }}>
@@ -649,6 +650,68 @@ function PlaybackTab({ state, draft, set, onRefresh }: { state: EditorState; dra
         <button className="btn sm" onClick={regenerate} disabled={busy !== null || !state.read_aloud.readalong} aria-busy={busy === "readaloud"}>Regenerate now</button>
       </section>
     </div>
+  );
+}
+
+/** Data-saver copies of this book's audio: the switch (saved with the book), what exists and
+ * what it saves, and making or deleting the copies now. */
+function DataSaverSection({ workId, draft, set }: { workId: number; draft: Draft; set: SetDraft }) {
+  const { toast, me } = useStore();
+  const [info, setInfo] = useState<TracksResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => get<TracksResponse>(`/api/works/${workId}/tracks`).then(setInfo, () => {}), [workId]);
+  useEffect(() => {
+    load();
+  }, [load]);
+  const ds = info?.data_saver;
+  const job = info?.transcode;
+  const running = !!job && ["queued", "leased"].includes(job.status);
+  const total = info?.tracks.length ?? 0;
+  const libraryOff = me?.library_settings?.data_saver_enabled === false;
+  const act = async (make: boolean) => {
+    setBusy(true);
+    try {
+      if (make) {
+        const r = await post<{ status: string }>(`/api/works/${workId}/transcode`);
+        toast(r.status === "ready" ? "The data-saver copy is ready." : "Making a data-saver copy.");
+      } else {
+        const r = await del<{ deleted_bytes: number }>(`/api/works/${workId}/transcode`);
+        toast(`Data-saver copy deleted (${bytes(r.deleted_bytes)} freed). The originals are untouched.`);
+      }
+      await load();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saved = ds ? ds.original_bytes - ds.low_bytes : 0;
+  return (
+    <section className="card flat" aria-labelledby="ds-h">
+      <h3 id="ds-h" className="detail-h" style={{ marginTop: 0 }}>Data saver</h3>
+      <div className="row pref-row">
+        <button type="button" role="switch" className="switch" aria-checked={draft.data_saver_enabled} aria-labelledby="ds-label" onClick={() => set("data_saver_enabled", !draft.data_saver_enabled)} disabled={libraryOff}>
+          <span aria-hidden="true" />
+        </button>
+        <span id="ds-label"><strong>Make data-saver copies</strong><span className="hint"> {libraryOff ? "Turned off for the whole library in Admin." : "A smaller copy of each audio file for phones and downloads. Turning it off stops new copies; saved ones stay until you delete them."}</span></span>
+      </div>
+      <p className="hint" id="ds-status">
+        {!info ? "…" : running
+          ? job!.message ?? `Making the copy… ${job!.progress ?? 0} of ${job!.total} files done.`
+          : ds && ds.tracks_ready > 0
+            ? `${ds.tracks_ready} of ${total} ${total === 1 ? "file has" : "files have"} a copy: ${bytes(ds.low_bytes)} instead of ${bytes(ds.original_bytes)}${saved > 0 ? ` (${bytes(saved)} saved)` : ""}.`
+            : "No data-saver copy yet."}
+        {!running && ds?.unavailable && <> {ds.unavailable.message}</>}
+      </p>
+      <div className="row">
+        {(!ds || ds.tracks_ready < total) && !running && (
+          <button className="btn sm" onClick={() => act(true)} disabled={busy || !!ds?.off || !!ds?.unavailable} aria-busy={busy}>Make a data-saver copy</button>
+        )}
+        {((ds?.tracks_ready ?? 0) > 0 || running) && (
+          <button className="btn sm ghost" onClick={() => act(false)} disabled={busy}>Delete the copy</button>
+        )}
+      </div>
+    </section>
   );
 }
 

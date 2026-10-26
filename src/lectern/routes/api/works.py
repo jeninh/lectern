@@ -20,11 +20,20 @@ from lectern.align import jobs as align_jobs
 from lectern.editing import Journal
 from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest.merge import merge_work
-from lectern.jobs import active_job, enqueue_transcode, find_variant
+from lectern.jobs import (
+    active_job,
+    delete_renditions,
+    enqueue_transcode,
+    find_variant,
+    generation_off,
+    rendition_sizes,
+    transcoder_unavailable,
+)
 from lectern.models import (
     Alignment,
     AudioTrack,
     AuditLog,
+    JobStatus,
     MatchSuggestion,
     ProgressSource,
     Role,
@@ -102,6 +111,10 @@ def tracks(auth: Auth, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
                 },
             }
         )
+    # Why copies cannot be made names server internals: owners and members only.
+    editor = can_edit_library(auth.user)
+    unavailable = transcoder_unavailable(db, settings) if rows and editor else None
+    have, original, low = rendition_sizes(settings, work, rows)
     return {
         "work_id": work_id,
         "audio_fingerprint": audio_fingerprint(t.sha256 for t in rows),
@@ -112,9 +125,21 @@ def tracks(auth: Auth, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
             "status": job.status.value,
             "progress": (job.result or {}).get("done"),
             "total": len((job.payload or {}).get("tracks", [])),
+            # a queued job with nothing to run it says so instead of waiting silently
+            "message": unavailable["message"]
+            if unavailable and job.status == JobStatus.QUEUED
+            else None,
         }
         if job
         else None,
+        # Whether copies may be made, what could make them, and what they save.
+        "data_saver": {
+            "off": generation_off(db, work) if editor else None,
+            "unavailable": unavailable,
+            "tracks_ready": have,
+            "original_bytes": original,
+            "low_bytes": low,
+        },
     }
 
 
@@ -392,8 +417,11 @@ def transcode(
     work = _visible_work(db, auth.user, work_id)
     if not _tracks(db, work_id):
         raise HTTPException(status.HTTP_409_CONFLICT, "no_audio")
-    if shutil.which(settings.ffmpeg_path) is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "ffmpeg_unavailable")
+    if off := generation_off(db, work):
+        raise HTTPException(status.HTTP_409_CONFLICT, off)
+    # Neither ffmpeg here nor a transcoding worker online: say so rather than queue forever.
+    if transcoder_unavailable(db, settings) is not None and active_job(db, work_id) is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no_transcoder")
     job = enqueue_transcode(db, settings, work, auth.user.id)
     db.commit()
     runner = getattr(request.app.state, "jobs", None)
@@ -402,6 +430,16 @@ def transcode(
     if job is None:
         return {"status": "ready"}
     return {"status": job.status.value, "job_id": job.id}
+
+
+@router.delete("/works/{work_id}/transcode")
+def delete_transcode(auth: Manager, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
+    """Delete the work's data-saver copies and stop any being made (owner and member).
+    Originals are untouched; ``POST`` makes them again."""
+    work = _visible_work(db, auth.user, work_id)
+    freed = delete_renditions(db, settings, work)
+    db.commit()
+    return {"deleted_bytes": freed}
 
 
 @router.get("/listening")

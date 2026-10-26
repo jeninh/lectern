@@ -123,6 +123,26 @@ export function SecurityPage() {
           </div>
         </section>
 
+        <section className="card" id="data-saver" aria-labelledby="ds-h" data-highlight={hash === "data-saver" || undefined}>
+          <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+            <div>
+              <h2 id="ds-h">Data saver</h2>
+              <p className="sub" id="ds-sub">Play and download the smaller copy of audiobooks when there is one, on every device that has not chosen otherwise with the Data saver switch in its player. Without a copy, the original plays. Off by default.</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              className="switch"
+              aria-checked={!!me?.preferences.data_saver}
+              aria-labelledby="ds-h"
+              aria-describedby="ds-sub"
+              onClick={() => setPreference("data_saver", !me?.preferences.data_saver)}
+            >
+              <span aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+
         {(me?.user.role === "owner" || me?.user.role === "member") && (
           <section className="card" id="adding" aria-labelledby="add-h" data-highlight={hash === "adding" || undefined}>
             <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>

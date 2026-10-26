@@ -79,6 +79,8 @@ class User(Base):
     download_cap_per_hour: Mapped[int | None] = mapped_column(Integer, default=None)
     # Migration 0007: file uploads whose proposed match is certain without asking.
     auto_file_imports: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Migration 0017: play and download the data-saver copy on devices that have not chosen.
+    data_saver: Mapped[bool] = mapped_column(Boolean, default=False)
 
     passkeys: Mapped[list[Passkey]] = relationship(back_populates="user", cascade="all, delete")
     sync_keys: Mapped[list[SyncKey]] = relationship(back_populates="user", cascade="all, delete")
@@ -256,6 +258,8 @@ class Work(Base):
     primary_file_id: Mapped[int | None] = mapped_column(Integer, default=None)
     playback_default: Mapped[str | None] = mapped_column(String(16), default=None)
     readalong_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Migration 0017: whether data-saver renditions may be made for this work (lectern.jobs).
+    data_saver_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     cover_source: Mapped[str | None] = mapped_column(String(16), default=None)
     # Migration 0010: the generated cover used while there is no cover art (has_cover False).
     # cover_style None = picked from the title/author hash; cover_seed = the editor's shuffle.

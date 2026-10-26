@@ -87,11 +87,15 @@ export interface Preferences {
   show_technical_details: boolean;
   /** File uploads whose proposed match is certain without asking. */
   auto_file_imports: boolean;
+  /** Play and download the data-saver copy on devices that have not chosen for themselves. */
+  data_saver: boolean;
 }
 
 export interface LibrarySettings {
   /** Outbound metadata suggestions (Open Library, Google Books); off by default. */
   metadata_lookup_enabled: boolean;
+  /** Whether data-saver copies are made at all; on by default. */
+  data_saver_enabled: boolean;
 }
 
 export interface Progress {
@@ -342,7 +346,17 @@ export interface TracksResponse {
   total_duration_s: number;
   alignment: AlignmentSummary | null;
   tracks: Track[];
-  transcode: { status: string; progress: number | null; total: number } | null;
+  /** ``message``: a queued job that nothing can run (no ffmpeg here, no worker online). */
+  transcode: { status: string; progress: number | null; total: number; message: string | null } | null;
+  data_saver: {
+    /** Why copies are not made (owners and members only): turned off for the library or this book. */
+    off: "data_saver_off" | "data_saver_off_for_work" | null;
+    /** Nothing can make a copy right now (owners and members only). */
+    unavailable: { reason: string; message: string } | null;
+    tracks_ready: number;
+    original_bytes: number;
+    low_bytes: number;
+  };
 }
 
 export interface TextPosition {
@@ -635,6 +649,8 @@ export interface EditorState {
   metadata: Metadata;
   playback_default: PlaybackDefault;
   readalong_enabled: boolean;
+  /** Whether data-saver copies may be made for this book (the library switch is in Admin). */
+  data_saver_enabled: boolean;
   primary_file_id: number | null;
   cover: {
     has_cover: boolean;

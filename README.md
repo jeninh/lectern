@@ -263,8 +263,13 @@ Readers never see add, edit, or trash controls, and the API refuses them (`403`)
   with HTTP range requests; originals stay downloadable.
 - **Data saver**: an optional ~64 kb/s copy (AAC by default, or Opus) made once with ffmpeg
   and cached under `<Author>/<Title>/derived/audio/`, for phones on a slow home uplink.
-  Originals are never touched. Make it per book from the player, or set
-  `LECTERN_AUDIO_LOW_AUTO=1` to make one after every audiobook import.
+  Originals are never touched, and the copy has the same track boundaries and timestamps, so
+  progress and read-along stay in place. A connected [worker](docs/mac-worker.md) makes it
+  when there is one; otherwise the server does, one file at a time at low priority. Make it
+  per book from the player or the book's editor (which also shows the space saved and
+  deletes the copy), or set `LECTERN_AUDIO_LOW_AUTO=1` to make one after every audiobook
+  import. Admin turns copies off for the library, the editor for one book. Each account
+  chooses whether to use it (Security), and each device may choose otherwise in its player.
 - **One position per person per book**, shared by the reader, the player, and read-along.
   When another device moved on since this one last looked, Lectern asks
   ("Pixel 8, 12 min ago: 64% while listening. Continue here?") instead of jumping. Until a
@@ -415,6 +420,7 @@ and bursts of calls raise alerts. Keep it private: no Funnel, no public exposure
 | `LECTERN_AUDIO_LOW_CODEC` | `aac` | Data-saver codec: `aac` (plays everywhere, iOS included) or `opus` |
 | `LECTERN_AUDIO_LOW_BITRATE_KBPS` | 64 | Data-saver bitrate |
 | `LECTERN_AUDIO_LOW_AUTO` | false | Make a data-saver copy after every audiobook import |
+| `LECTERN_TRANSCODE_MEMORY_LIMIT_MB` | 1024 | Address-space cap for the server's own data-saver ffmpeg (0 = none); it also runs on one thread at `nice` 19 |
 | `LECTERN_MCP_REQUESTS_PER_MINUTE` | 240 | MCP requests per minute per AI key (upload chunks included) |
 | `LECTERN_MCP_BURST_COUNT` / `_WINDOW_SECONDS` | 200 / 600 | This many AI tool calls by one key within the window alerts the user and the owner (0 = off) |
 | `LECTERN_WORKER_REQUESTS_PER_MINUTE` | 1200 | Requests per minute per valid worker key (failed worker logins use the per-IP limit) |

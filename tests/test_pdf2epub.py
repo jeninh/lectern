@@ -274,3 +274,12 @@ def test_a_failed_job_is_reported_and_retryable(client, owner, settings):
 def test_a_work_without_a_text_pdf_cannot_convert(client, owner, settings):
     st = client.get("/api/works/999999/pdf-epub")
     assert st.status_code == 404
+
+
+def test_a_server_without_ffmpeg_still_converts(client, owner, settings, monkeypatch):
+    """Data saver leaves transcodes to a worker when ffmpeg is missing; conversions need no
+    ffmpeg and must still run here."""
+    monkeypatch.setattr(settings, "ffmpeg_path", "/nonexistent/ffmpeg")
+    _file_id, work_id = _pdf_work(settings, "labels.pdf")
+    assert api_post(client, f"/api/works/{work_id}/pdf-epub", owner["csrf"]).status_code == 202
+    assert run_pending(session_factory(), settings) == 1

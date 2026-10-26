@@ -8,10 +8,15 @@ from lectern.models import InstanceSetting
 
 # key -> default. Metadata lookup sends titles, authors, and ISBNs to Open Library and Google
 # Books, so it is off until the owner turns it on. Offline mode (lectern.offline_mode) refuses
-# every outbound internet connection.
-DEFAULTS: dict[str, bool] = {"metadata_lookup_enabled": False, "offline_mode": False}
+# every outbound internet connection. Data-saver copies (lectern.jobs) are made unless the owner
+# turns them off for the whole library.
+DEFAULTS: dict[str, bool] = {
+    "metadata_lookup_enabled": False,
+    "offline_mode": False,
+    "data_saver_enabled": True,
+}
 # The library settings editors see and the owner changes through /api/library-settings.
-LIBRARY = ("metadata_lookup_enabled",)
+LIBRARY = ("metadata_lookup_enabled", "data_saver_enabled")
 
 
 def get(db: Session, key: str) -> bool:
