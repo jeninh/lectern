@@ -46,6 +46,8 @@ def serve() -> None:
         # request.client stays the socket peer; lectern.security.proxy applies forwarding
         # headers itself, and only for peers listed in LECTERN_TRUSTED_PROXIES.
         proxy_headers=False,
+        # Not uvloop: its sockets bypass the audit hook offline mode relies on (lectern.egress).
+        loop="asyncio",
         log_level=settings.log_level.lower(),
         access_log=False,
     )
@@ -594,6 +596,13 @@ def main(argv: list[str] | None = None) -> None:
         level=os.environ.get("LECTERN_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.command in ("align-transcribe", "align-bench", "backup", "restore"):
+        # Beside the server, on its machine: LECTERN_OFFLINE=1 holds here too (prepare-models
+        # checks it itself; the worker commands must reach their server).
+        from lectern import egress
+        from lectern.config import get_settings
+
+        egress.enforce(get_settings().offline)
     if args.command in ("worker", "worker-agent"):
         import faulthandler
 

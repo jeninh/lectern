@@ -371,9 +371,10 @@ class Transcriber:
                 if not egress.offline():
                     raise
                 raise TranscriptionUnavailable(
-                    f"offline mode is on and the {self.model_name} model is not downloaded "
-                    "(Admin → Offline mode → Download models, or `lectern prepare-models "
-                    f"--align-model {self.model_name}`): {exc}"
+                    f"offline mode is on and the {self.model_name} model could not be loaded "
+                    f"from the data directory: {exc}. If it is not downloaded, use Admin → "
+                    "Offline mode → Download models or `lectern prepare-models --align-model "
+                    f"{self.model_name}`"
                 ) from exc
         return self._model
 

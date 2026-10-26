@@ -69,21 +69,50 @@ download that model too.
 
 ## A hard guarantee: firewall rules
 
-Offline mode is enforced inside Lectern's Python processes. Programs Lectern runs that are not
-Python (ffmpeg, restic) and anything else in the container are outside it. Firewall rules in
-the container's network namespace close that gap: new outbound connections are rejected,
-while answers to incoming connections and loopback still work. They use `nft` on the host
-(`sudo apt install nftables` if it is missing) and last until the container is recreated, so
-run them again after every `docker compose … up` that recreates it.
+Offline mode is enforced inside Lectern's Python processes: the server (on the standard
+asyncio event loop, which the hook sees; uvloop would bypass it) and its alignment child, plus
+`lectern align-transcribe`, `align-bench`, `backup`, and `restore` when `LECTERN_OFFLINE=1`.
+Programs Lectern runs that are not Python (ffmpeg, restic), the Mac worker's tools
+(`worker-doctor`), and anything else in the container are outside it. Firewall rules in the
+container's network namespace close that gap: new outbound connections are rejected, while
+answers to incoming connections and loopback still work.
 
-**Tailscale setup** (`deploy/tailscale/compose.yaml`). Lectern shares the Tailscale
-container's network, and Tailscale itself needs the internet to stay connected, so the rules
-match Lectern's user and leave Tailscale's traffic alone. Replace `1000` if you set another
-`LECTERN_UID` in `.env`:
+A container's network namespace, and the rules in it, is rebuilt every time the container
+starts: `docker compose up`, a restart, a crash restarted by Docker, a reboot. So the rules are
+applied by [`deploy/offline-firewall.sh`](../deploy/offline-firewall.sh), which applies them
+once and again after every start of the container. It needs `nft` on the host (`sudo apt
+install nftables` if it is missing) and runs as a service:
 
-```sh
-PID=$(docker inspect -f '{{.State.Pid}}' "$(docker compose --env-file .env -f deploy/tailscale/compose.yaml ps -q tailscale)")
-sudo nsenter -t "$PID" -n nft -f - <<'EOF'
+```ini
+# /etc/systemd/system/lectern-offline-firewall.service
+[Unit]
+Description=Lectern offline mode firewall rules
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/home/pi/lectern/deploy/offline-firewall.sh lectern-tailscale-tailscale-1 1000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Adjust the path to your checkout, then `sudo systemctl daemon-reload && sudo systemctl enable
+--now lectern-offline-firewall`. The arguments depend on the setup:
+
+- **Tailscale setup** (`deploy/tailscale/compose.yaml`): `lectern-tailscale-tailscale-1 1000`.
+  Lectern shares the Tailscale container's network, and Tailscale itself needs the internet
+  to stay connected, so the rules match only Lectern's user; use your `LECTERN_UID` if you set
+  another one in `.env`. Lectern starts only once the sidecar is healthy, after the rules are in.
+- **Plain `compose.yaml`** (a reverse proxy on the host reaches Lectern through the published
+  port): `lectern`, with no user, so every new outbound connection from Lectern's own
+  namespace is rejected. There is a moment at each start before the rules are in, during
+  which only offline mode itself holds.
+
+The rules it applies (the Tailscale variant; without a user the `meta skuid` matches go):
+
+```nft
 table inet lectern_offline {
   chain output {
     type filter hook output priority 0; policy accept;
@@ -92,29 +121,11 @@ table inet lectern_offline {
     meta skuid 1000 reject
   }
 }
-EOF
 ```
 
-**Plain `compose.yaml`** (a reverse proxy on the host reaches Lectern through the published
-port). Lectern has its own network namespace, so every new outbound connection is rejected:
-
-```sh
-PID=$(docker inspect -f '{{.State.Pid}}' lectern)
-sudo nsenter -t "$PID" -n nft -f - <<'EOF'
-table inet lectern_offline {
-  chain output {
-    type filter hook output priority 0; policy accept;
-    oif "lo" accept
-    ct state established,related accept
-    reject
-  }
-}
-EOF
-```
-
-Check that it holds. This runs outside Lectern's own guard, so only the firewall can refuse
-it; *Connection refused* at once is the expected answer, a timeout or a connection means the
-rules are not in place:
+Check that they hold, after setting it up and whenever in doubt (after a reboot, say). This
+runs outside Lectern's own guard, so only the firewall can refuse it; *Connection refused* at
+once is the expected answer, a timeout or a connection means the rules are not in place:
 
 ```sh
 docker compose --env-file .env -f deploy/tailscale/compose.yaml exec lectern \
@@ -123,8 +134,11 @@ docker compose --env-file .env -f deploy/tailscale/compose.yaml exec lectern \
 
 (With the plain `compose.yaml`: `docker compose exec lectern python -c …`.)
 
-Remove the rules with `sudo nsenter -t "$PID" -n nft delete table inet lectern_offline`.
+To remove them, stop and disable the service and restart the container.
 
-The Tailscale rules were checked in a network namespace like the sidecar's: Lectern's user
-was refused at once, root (as `tailscaled` runs) was not, and loopback worked. They were not
-run against a live Tailscale deployment.
+What was tested, in an orb rather than on a Pi: with the script running against containers of
+the Lectern image, Lectern's user got *Connection refused* at once while root (as `tailscaled`
+runs) still reached the internet; without a user every outbound connection was refused while
+a request through the published port still got its answer; and the rules were back after
+`docker restart` and after `docker stop` plus `docker start`. It was not run against a live
+Tailscale deployment.

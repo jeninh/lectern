@@ -2,7 +2,8 @@
 
 Every outbound connection Python makes, whatever the library (``urllib``, ``httpx``,
 ``requests``, ``huggingface_hub``), goes through the ``socket`` module, which raises an audit
-event (:pep:`578`) *before* it resolves a name or connects. One audit hook refuses those events
+event (:pep:`578`) *before* it resolves a name or connects. (The server runs uvicorn on the
+standard asyncio loop for this reason: uvloop connects and resolves in libuv, out of sight.) One audit hook refuses those events
 while offline mode is on, so nothing has to remember to check: a new feature that talks to the
 internet is refused here too. The hook raises :class:`OfflineError`, a
 ``ConnectionRefusedError``, so libraries report it as an ordinary connection failure and the
@@ -12,15 +13,18 @@ Allowed while offline:
 
 - Unix sockets and loopback (``127.0.0.0/8``, ``::1``, ``localhost``): the reverse proxy or
   ``tailscale serve`` in front of Lectern, and the health check;
-- a UDP *connect* to the tailnet (``100.64.0.0/10``): it sends nothing; KOReader plugin zips
-  use it to learn Lectern's own Tailscale address (:func:`lectern.koplugin.detect_tailscale_ip`).
+- a UDP *connect* to Tailscale's resolver (:data:`TAILSCALE_PROBE`) and nowhere else: it sends
+  nothing; KOReader plugin zips use it to learn Lectern's own Tailscale address
+  (:func:`lectern.koplugin.detect_tailscale_ip`).
 
 Everything else is refused: name lookups other than ``localhost`` (DNS is outbound traffic
 too), reverse lookups, and connections to any other address, LAN included (a LAN proxy could
 forward to the internet).
 
 Child processes (the alignment child) inherit the switch through :data:`CHILD_ENV` and call
-:func:`enforce_from_env`; ``HF_HUB_OFFLINE=1`` makes Hugging Face use only its cache there.
+:func:`enforce_from_env`; ``HF_HUB_OFFLINE=1`` makes Hugging Face use only its cache there. (In
+this process it is inert once ``huggingface_hub`` was imported, which reads it at import; the
+hook still refuses its requests and it falls back to the cache.)
 Programs that are not Python (ffmpeg, restic) are outside this hook; firewall rules give the
 hard guarantee for those (docs/offline-mode.md).
 
@@ -38,7 +42,8 @@ import sys
 # started meanwhile enforce it too.
 CHILD_ENV = "LECTERN_OFFLINE_ENFORCED"
 _ENV = {CHILD_ENV: "1", "HF_HUB_OFFLINE": "1"}
-_TAILNET = ipaddress.ip_network("100.64.0.0/10")
+# Tailscale's resolver, which tailscaled routes through the tailnet interface in kernel TUN mode.
+TAILSCALE_PROBE = ("100.100.100.100", 53)
 _INET = (socket.AF_INET, socket.AF_INET6)
 _LOOKUPS = ("socket.getaddrinfo", "socket.gethostbyname")
 _REVERSE = ("socket.gethostbyaddr", "socket.getnameinfo")
@@ -109,15 +114,18 @@ def _text(host: object) -> str:
 def _hook(event: str, args: tuple) -> None:
     if not _on or not event.startswith("socket."):
         return
-    if event in ("socket.connect", "socket.sendto"):
+    if event in ("socket.connect", "socket.sendto", "socket.sendmsg"):
         sock, address = args
         if sock.family not in _INET or not isinstance(address, tuple):
             return  # Unix sockets, netlink: never leave the machine
         host = _text(address[0])
         if _loopback(host):
             return
-        ip = _ip(host)
-        if event == "socket.connect" and sock.type == socket.SOCK_DGRAM and ip in _TAILNET:
+        if (
+            event == "socket.connect"
+            and sock.type == socket.SOCK_DGRAM
+            and (host, address[1]) == TAILSCALE_PROBE
+        ):
             return  # a UDP connect sends nothing (see the module docstring)
         raise OfflineError(f"{host}:{address[1]}" if len(address) > 1 else host)
     if event in _LOOKUPS:

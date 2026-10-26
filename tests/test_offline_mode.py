@@ -3,6 +3,7 @@ contact the internet say so without trying, and models can be fetched ahead of t
 
 from __future__ import annotations
 
+import asyncio
 import http.server
 import os
 import socket
@@ -10,16 +11,19 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import urllib.request
 
 import httpx
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 from tests.conftest import ORIGIN, OWNER_PASSWORD, api_post, login, make_user, put_json
 from tests.test_lookup import FakeUpstream
 from tests.test_tts import KEY, FakeEleven
 
-from lectern import egress, lookup, offline_mode
+from lectern import cli, egress, koplugin, lookup, offline_mode
+from lectern.align.transcribe import Transcriber, TranscriptionUnavailable
 from lectern.config import Settings
 from lectern.main import create_app
 from lectern.tts import elevenlabs as el
@@ -71,9 +75,52 @@ def test_every_outbound_path_is_refused_before_it_starts(loopback_server):
     assert urllib.request.urlopen(loopback_server, timeout=5).read() == b"local"  # noqa: S310
     # Finding Lectern's own Tailscale address: a UDP connect sends nothing; sending does.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.connect(("100.100.100.100", 53))
+        s.connect(koplugin.TAILSCALE_PROBE)
         with pytest.raises(egress.OfflineError):
             s.sendto(b"x", ("100.100.100.100", 53))
+        with pytest.raises(egress.OfflineError):
+            s.sendmsg([b"x"], [], 0, ("192.0.2.1", 53))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s, pytest.raises(egress.OfflineError):
+        s.connect(("100.101.102.103", 53))  # any other tailnet peer could forward onward
+
+
+def test_the_server_runs_on_an_event_loop_the_guard_sees(monkeypatch):
+    """uvloop connects and resolves in libuv, where no audit event fires."""
+    seen: dict = {}
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: seen.update(kw))
+    cli.serve()
+    loop = uvicorn.Config(
+        "lectern.main:app_factory", loop=seen.get("loop", "auto")
+    ).get_loop_factory()()
+    egress.enforce(True)
+    try:
+        connect = loop.create_connection(asyncio.Protocol, "192.0.2.1", 80)
+        with pytest.raises(egress.OfflineError):
+            loop.run_until_complete(asyncio.wait_for(connect, 5))
+        with pytest.raises(egress.OfflineError):
+            loop.run_until_complete(loop.getaddrinfo("openlibrary.org", 443))
+    finally:
+        loop.close()
+
+
+def test_alignment_loads_only_downloaded_models_while_offline(monkeypatch):
+    calls: list[dict] = []
+
+    class WhisperModel:
+        def __init__(self, name, **kw):
+            calls.append(kw)
+            if kw.get("local_files_only"):
+                raise FileNotFoundError("model.bin")
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=WhisperModel)
+    )
+    Transcriber("small").load()
+    assert "local_files_only" not in calls[-1]
+    egress.enforce(True)
+    with pytest.raises(TranscriptionUnavailable, match="offline mode.*prepare-models"):
+        Transcriber("small").load()
+    assert calls[-1]["local_files_only"] is True
 
 
 def test_child_processes_inherit_it_and_turning_off_restores_the_environment(monkeypatch):
