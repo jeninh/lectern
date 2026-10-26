@@ -55,6 +55,10 @@ sections:
         title: PDFs and comics
         description: PDFs and CBZ comics next to EPUBs and audiobooks.
         icon: book
+      - file: pdf-read-along.md
+        title: Read-along for PDFs
+        description: Text PDFs get alignment, generated audiobooks, positions, and read-along on the pages.
+        icon: headphones
       - file: kindle.md
         title: Kindle books (MOBI and AZW3)
         description: DRM-free MOBI and AZW3 books are converted to EPUB on arrival.
