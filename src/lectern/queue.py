@@ -120,6 +120,7 @@ def _load_builtin() -> None:
     if ALIGN not in _HANDLERS:
         import lectern.align.jobs  # noqa: F401 - registers "align"
         import lectern.jobs  # noqa: F401 - registers "transcode"
+        import lectern.pdf2epub.jobs  # noqa: F401 - registers "pdf2epub" (server-only)
 
         try:
             import lectern.tts.jobs  # noqa: F401 - registers "tts" (generated audiobooks)

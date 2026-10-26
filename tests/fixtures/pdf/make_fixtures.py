@@ -330,10 +330,15 @@ def two_column(path: Path) -> dict:
     return {"pages": len(pages), "chapter_pages": chapter_pages, "hyphenated_lines": hyphenated}
 
 
-# --- plain.pdf --------------------------------------------------------------------------------
+# --- plain.pdf and labels.pdf -------------------------------------------------------------------
 
 
-def plain(path: Path) -> dict:
+PAGE_LABELS = "/PageLabels << /Nums [0 << /S /r >> 2 << /S /D /St 5 >>] >>"
+# pages 1-2 get lowercase roman numerals (front matter), page 3 onward counts from 5: an
+# offset, as when a book's printed "page 1" follows a numbered preface.
+
+
+def plain(path: Path, extra: str = "") -> dict:
     pdf = Pdf()
     res = fonts(pdf)
     size = (420, 595)
@@ -351,7 +356,7 @@ def plain(path: Path) -> dict:
         b"".join(ops) + text_op("F1", 8, 170, 36, f"Field Notes \u00b7 {i + 1}")
         for i, ops in enumerate(pages)
     ]
-    finish(pdf, path, contents, res, size)
+    finish(pdf, path, contents, res, size, extra=extra)
     return {"pages": len(pages)}
 
 
@@ -394,6 +399,7 @@ def main() -> None:
     facts = {
         "two-column.pdf": two_column(HERE / "two-column.pdf"),
         "plain.pdf": plain(HERE / "plain.pdf"),
+        "labels.pdf": plain(HERE / "labels.pdf", extra=PAGE_LABELS),
         "scanned.pdf": scanned(HERE / "scanned.pdf", 2, page_numbers=False),
         "low-text.pdf": scanned(HERE / "low-text.pdf", 3, page_numbers=True),
     }
