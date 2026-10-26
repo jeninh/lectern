@@ -121,7 +121,10 @@ def pair(request: Request, db: DbDep, settings: SettingsDep, body: PairIn) -> di
     limiters["koplugin_pair_user"].reset(user_key)
     koplugin.record(db, "koplugin.paired", active, result.label, ip)
     db.commit()
-    return {**result.payload, "lan_url": koplugin.home_url(settings)}
+    # The Tailscale address too, so a device paired over the home address keeps a fallback
+    # that is not the home address (the plugin never uses that one unverified).
+    remote = koplugin.default_server_url(settings)[0]
+    return {**result.payload, "server_url": remote, "lan_url": koplugin.home_url(settings)}
 
 
 class HelloIn(BaseModel):

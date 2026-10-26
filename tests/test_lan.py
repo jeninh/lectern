@@ -161,10 +161,26 @@ def test_hello_proves_knowledge_of_the_devices_own_secret(app, client, owner, ki
     # Unknown or revoked devices get nothing.
     assert hello(lan, "k999", nonce).status_code == 404
     assert hello(lan, "p1", nonce).status_code == 404
+    for odd in ("k²", "k¹1", "k１", "k 1", "k-1"):  # non-ASCII digits: 404, not a crash
+        assert hello(lan, odd, nonce).status_code == 404, odd
     assert api_post(client, f"/api/devices/{kindle['id']}/revoke", owner["csrf"]).status_code == 200
     assert hello(lan, kindle["id"], nonce).status_code == 404
     for bad in ("short", "Z" * 32, "a" * 129):
         assert hello(lan, kindle["id"], bad).status_code == 422
+
+
+def test_pairing_answers_with_the_tailscale_address_too(app, client, owner, kindle, monkeypatch):
+    """A device that pairs over the home address needs a fallback that is not that address."""
+    from lectern import koplugin
+
+    monkeypatch.setattr(koplugin, "detect_tailscale_ip", lambda: "100.88.1.2")
+    code = api_post(client, f"/api/devices/{kindle['id']}/pairing-code", owner["csrf"]).json()
+    r = on_lan(app, "192.168.1.30").post(
+        "/koplugin/pair", json={"username": "owner", "code": code["code"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["server_url"] == "http://100.88.1.2:8080"
+    assert r.json()["lan_url"] == LAN_URL
 
 
 def test_zip_status_and_defaults_carry_the_home_address(client, owner, kindle):

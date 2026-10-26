@@ -331,7 +331,12 @@ elseif command == "route" then
     -- Home Wi-Fi or Tailscale: what the next request uses, and what KOReader is set to.
     NET.online, NET.connected = true, true
     local p = make(false)
+    -- Right after start, before any check: KOReader's own sync and catalogue settings.
+    out.kosync_at_start = read_settings("kosync.lua").settings.custom_server
     p:onNetworkConnected()
+    out.kosync_after_connect = read_settings("kosync.lua").settings.custom_server
+    -- A request before the scheduled check (KOReader pulls ~0.5 s after reconnecting).
+    out.early_status = p.core:status() ~= nil
     run_tasks()
     out.active = p.core:activeUrl()
     out.status = p.core:status() ~= nil

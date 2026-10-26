@@ -209,7 +209,7 @@ do not enable *Force userspace mode*, for the same reason as above.
 | `POST /api/devices/{id}/koplugin/revoke` | session + CSRF, own device | revoke the unused secret and live code |
 | `POST /api/devices/{id}/pairing-code` | session + CSRF, own device | `{code, expires_at, attempts: 5, username}` |
 | `POST /koplugin/bootstrap` `{secret}` | the secret | credentials and `lan_url`, or `410 setup_secret_invalid` |
-| `POST /koplugin/pair` `{username, code}` | the code | credentials and `lan_url`, or `401 invalid_code` |
+| `POST /koplugin/pair` `{username, code}` | the code | credentials, `server_url` (the Tailscale address, if known), and `lan_url`, or `401 invalid_code` |
 | `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first), `lan_url` |
 | `POST /koplugin/hello` `{device_id, nonce, setup?}` | none (answers with a proof) | `{proof}`: HMAC-SHA256 of `lectern-lan:<nonce>` keyed by the hex SHA-256 of the catalogue password (or with `setup` the setup secret), or `404` ([home-network.md](home-network.md)) |
 

@@ -802,8 +802,12 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
     lectern_lua = away / "lectern.lua"
     lectern_lua.write_text(lectern_lua.read_text().replace(home, impostor_url))
     out = lua(plugin, away, "route")
+    # The last run trusted the home address; this start does not, before any check: KOReader's
+    # own sync and catalogue point at Tailscale at once, and stay there across the reconnect.
+    assert out["kosync_at_start"] == base + "/" and out["kosync_after_connect"] == base + "/"
+    assert out["early_status"] is True  # a request before the scheduled check: Tailscale
     assert out["active"] == base and out["status"] is True
-    assert out["settings"]["active_url"] == base
+    assert out["settings"].get("active_url", "") == ""
     assert out["kosync"]["custom_server"] == base + "/"
     assert out["opds"][0]["url"] == base + "/opds" and len(out["opds"]) == 2  # moved, not added
     assert seen and all(m == "POST" and p == "/koplugin/hello" for m, p, _ in seen)
@@ -833,4 +837,28 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
     assert out["status"] is True and out["settings"]["lan_url"] == ""
     out = lua(plugin, sdir, "route")
     assert out["active"] == base and out["kosync"]["custom_server"] == base + "/"
+
+    # Re-paired with a code over the home address: that address does not become the Tailscale
+    # fallback, which is used without a check.
+    settings.lan_port, settings.lan_url = 18081, home
+    paired = tmp_path / "paired-at-home"
+    shutil.copytree(sdir, paired)
+    code = http.post(f"/api/devices/{dev['device']['id']}/pairing-code").json()["code"]
+    out = lua(plugin, paired, "pair", home, "owner", code)
+    assert out["message"].startswith("Paired"), out["message"]
+    s = out["settings"]
+    assert s["server_url"] == base and s["lan_url"] == home and s["active_url"] == home
+    # Then another machine answers at the home address: only the nonce check reaches it.
+    seen.clear()
+    settings.lan_url = impostor_url
+    lectern_lua = paired / "lectern.lua"
+    lectern_lua.write_text(lectern_lua.read_text().replace(home, impostor_url))
+    out = lua(plugin, paired, "route")
+    assert out["active"] == base and out["status"] is True
+    assert out["kosync"]["custom_server"] == base + "/"
+    assert seen and all(m == "POST" and p == "/koplugin/hello" for m, p, _ in seen)
+    for _, _, headers in seen:
+        sent = json.dumps(headers).lower()
+        assert "authorization" not in sent and "x-auth-key" not in sent
+        assert s["app_password"].lower() not in sent and s["userkey"].lower() not in sent
     impostor.shutdown()

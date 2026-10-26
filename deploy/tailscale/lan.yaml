@@ -10,10 +10,37 @@
 # your router. tests/test_deploy_tailscale.py checks these invariants.
 
 services:
+  # Refuses anything but <private IPv4>:<port> in LECTERN_LAN_BIND (a bare port or 0.0.0.0
+  # would publish on every interface). Tailscale, which publishes the port, starts only after
+  # this succeeded, so a bad value publishes nothing.
+  lan-check:
+    image: tailscale/tailscale:v1.104.1@sha256:87c55d6be56ad85b3d8bceca5f87f73de288c609131460dd1be1874c250cc41d
+    restart: "no"
+    network_mode: none
+    environment:
+      LECTERN_LAN_BIND: ${LECTERN_LAN_BIND:?set LECTERN_LAN_BIND in .env to the Pi's LAN IP and a port, e.g. 192.168.1.20:8080}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if printf '%s\n' "$$LECTERN_LAN_BIND" | awk -F'[.:]' '
+          NF == 5 && $$5 ~ /^[0-9]+$$/ && $$5 > 0 && $$5 < 65536 {
+            for (i = 1; i < 5; i++) if ($$i !~ /^[0-9]+$$/ || $$i > 255) exit 1
+            if ($$1 == 10 || ($$1 == 172 && $$2 >= 16 && $$2 <= 31) || ($$1 == 192 && $$2 == 168) || ($$1 == 169 && $$2 == 254)) exit 0
+          }
+          { exit 1 }'; then
+          echo "LECTERN_LAN_BIND=$$LECTERN_LAN_BIND: ok"
+        else
+          echo "LECTERN_LAN_BIND must be the Pi's private LAN IPv4 address and a port, e.g. 192.168.1.20:8080 (not a bare port, 0.0.0.0, or a public address). Nothing was published." >&2
+          exit 1
+        fi
+
   tailscale:
     # Lectern lives in this container's network namespace, so the port is published here.
     ports:
       - "${LECTERN_LAN_BIND:?set LECTERN_LAN_BIND in .env to the Pi's LAN IP and a port, e.g. 192.168.1.20:8080}:8081"
+    depends_on:
+      lan-check:
+        condition: service_completed_successfully
 
   lectern:
     environment:

@@ -60,8 +60,11 @@ It is **off by default**. Turn it on only if you need it.
    LECTERN_LAN_URL=                     # empty = http://192.168.1.20:8080
    ```
 
-   Use the Pi's own address, never `0.0.0.0`. Lectern refuses to start if the address is
-   not a private one.
+   Use the Pi's own address, never `0.0.0.0`. Before anything is published, a small
+   `lan-check` step makes sure `LECTERN_LAN_BIND` is a private IPv4 address and a port; a
+   bare port, `0.0.0.0`, or a public address stops `up` with an error, and the Tailscale
+   container (which publishes the port) does not start, so nothing is published. Fix
+   `.env` and run `up` again.
 3. **Start with the extra file**, and add it to every compose command from now on (`up`,
    `logs`, upgrades):
 
@@ -86,13 +89,19 @@ It is **off by default**. Turn it on only if you need it.
 ## The KOReader plugin
 
 The zip carries the Tailscale address (*Server address for the e-reader*) and the home address.
-When the network comes up, on **Sync now**, and when its last check is over 10 minutes old,
-the plugin asks the home address to prove it is this device's Lectern: it sends a random nonce, and Lectern answers with
+The home address is trusted only after a check, and only until the next start, wake from
+sleep, or network change. At each of those the plugin goes back to the Tailscale address at
+once (KOReader's own Progress sync and catalogue settings included), then checks the home
+address a few seconds later; it also checks again on **Sync now** and every 10 minutes. The
+check: the plugin asks the home address to prove it is this device's Lectern: it sends a random nonce, and Lectern answers with
 an HMAC of the nonce keyed by the SHA-256 of a secret the device holds (its catalogue password,
 or before setup its one-time setup secret). Lectern stores exactly those hashes, so it can
 answer, and nobody else can. Only then does the plugin send credentials there. In a café or
 at a friend's, a different machine may well have the same private address, and the plugin
 does not send it anything secret. It uses Tailscale instead.
+
+A home address entered under **Pair with a code** is treated the same way: the plugin keeps
+Lectern's Tailscale address as the fallback and uses the home one only after the check.
 
 When the choice changes, the plugin rewrites KOReader's Progress sync server and the Lectern
 OPDS entry, so KOReader's own sync and catalogue follow. **Tools → Lectern → status** shows both
@@ -100,7 +109,9 @@ addresses and which one is in use. If the home address stops answering mid-sessi
 request retries over Tailscale.
 
 A Kindle **without Tailscale** works at home only. Its first start (the setup) must happen at
-home, and positions read elsewhere wait in the plugin's outbox until it is home again.
+home, and positions read elsewhere wait in the plugin's outbox until it is home again. Right
+after it wakes up or joins the Wi-Fi, a few seconds pass before the check confirms home; a
+position pushed in that moment waits in the outbox too.
 
 When you turn home Wi-Fi access off or change its address, plugins pick that up from Lectern
 at their next contact over Tailscale. Turning it off removes the home address from them.
@@ -154,5 +165,7 @@ its own; its container cannot announce names on your LAN, and the host already d
   knows a home address. If not, download a new zip (zips from before home Wi-Fi access was on
   do not carry it), or let it reach Lectern once over Tailscale. If it does, check the address
   with `curl` from a laptop on the same Wi-Fi.
+- **`up` stops with *service "lan-check" didn't complete successfully*:** `docker compose …
+  logs lan-check` says why; `LECTERN_LAN_BIND` must look like `192.168.1.20:8080`.
 - **Lectern does not start:** `docker compose … logs lectern` names the setting:
   `LECTERN_LAN_URL` must be `http://` with a private IP or a `.local` name.

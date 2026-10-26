@@ -165,10 +165,20 @@ def test_lan_overlay_publishes_one_private_address_to_the_lan_listener(compose_c
     assert not lectern.get("ports")
     assert lectern["environment"]["LECTERN_LAN_PORT"] == "8081"
     assert lectern["environment"]["LECTERN_LAN_URL"] == "http://192.168.1.20:8080"
+    # Tailscale (which publishes the port) waits for the bind check to succeed.
+    assert ts["depends_on"] == {
+        "lan-check": {"condition": "service_completed_successfully", "required": True}
+    }
+    check = cfg["services"]["lan-check"]
+    assert check["network_mode"] == "none" and not check.get("ports")
+    assert check["environment"]["LECTERN_LAN_BIND"] == "192.168.1.20:8080"
+    assert check["image"] == ts["image"]  # the pinned image, nothing new to pull
     # Everything else is exactly the plain deployment.
     for name in ("tailscale", "lectern"):
         a, b = dict(plain["services"][name]), dict(cfg["services"][name])
         a.pop("ports", None), b.pop("ports", None)
+        if name == "tailscale":
+            a.pop("depends_on", None), b.pop("depends_on", None)
         b["environment"] = {
             k: v
             for k, v in b["environment"].items()
@@ -187,6 +197,56 @@ def test_lan_overlay_publishes_one_private_address_to_the_lan_listener(compose_c
     # Without an address the overlay refuses to start rather than publish on every interface.
     result = compose_config(ENV_EXAMPLE, LAN)
     assert result.returncode != 0 and "LECTERN_LAN_BIND" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("bind", "ok"),
+    [
+        ("192.168.1.20:8080", True),
+        ("10.0.0.5:80", True),
+        ("172.31.255.1:8080", True),
+        ("169.254.3.4:8080", True),
+        # Compose would publish these on every interface (or a public one).
+        ("8080", False),
+        ("0.0.0.0:8080", False),
+        ("8.8.8.8:8080", False),
+        ("100.101.102.103:8080", False),  # the tailnet is not the home network
+        ("172.32.0.1:8080", False),
+        ("192.169.0.1:8080", False),
+        ("192.168.1.20:0", False),
+        ("192.168.1.20:65536", False),
+        ("192.168.1.256:8080", False),
+        ("192.168.1:8080", False),
+        ("192.168.1.20:80x", False),
+    ],
+)
+def test_lan_bind_check_accepts_only_a_private_address_and_port(compose_config, tmp_path, bind, ok):
+    """The lan-check service's script, as Compose resolves it, run with this shell and awk (the
+    container runs the same POSIX script under busybox). A wrong LECTERN_LAN_URL override must
+    not let a bad bind through."""
+    env = tmp_path / "lan.env"
+    env.write_text(
+        ENV_EXAMPLE.read_text()
+        .replace("LECTERN_LAN_BIND=\n", f"LECTERN_LAN_BIND={bind}\n")
+        .replace("LECTERN_LAN_URL=\n", "LECTERN_LAN_URL=http://lectern.local:8080\n")
+    )
+    resolved = compose_config(env, LAN)
+    if resolved.returncode != 0:  # Compose itself refuses it: nothing is published either
+        assert not ok, resolved.stderr
+        return
+    check = json.loads(resolved.stdout)["services"]["lan-check"]
+    assert check["entrypoint"] == ["/bin/sh", "-c"]
+    script = check["command"][0].replace("$$", "$")
+    run = subprocess.run(
+        ["sh", "-c", script],
+        env={"PATH": os.environ["PATH"], **check["environment"]},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (run.returncode == 0) is ok, run.stderr
+    if not ok:
+        assert "Nothing was published" in run.stderr
 
 
 def test_env_example_documents_every_compose_variable():

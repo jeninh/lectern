@@ -33,6 +33,7 @@ from __future__ import annotations
 import io
 import ipaddress
 import logging
+import re
 import secrets
 import socket
 import zipfile
@@ -303,7 +304,7 @@ def hello_key(db: Session, device_id: str, *, setup: bool) -> str | None:
     """What keys the home-address proof (lectern.lan.proof) for a device: the SHA-256 of its
     app password, or with ``setup`` of its newest setup secret that can still be exchanged.
     ``None`` for an unknown, revoked, or finished device or secret."""
-    if device_id[:1] != "k" or not device_id[1:].isdigit() or len(device_id) > 12:
+    if not re.fullmatch(r"k[0-9]{1,11}", device_id):
         return None
     key = db.get(SyncKey, int(device_id[1:]))
     parts = device_parts(db, key) if key else None

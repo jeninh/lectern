@@ -30,6 +30,9 @@ Core.DEFAULT_PAGES = 10
 Core.RETRY_DELAYS = { 30, 60, 120, 300, 900 } -- seconds, while the network is up
 Core.OUTBOX_MAX = 50
 Core.ROUTE_TTL = 600 -- seconds a home/Tailscale choice is trusted before it is checked again
+-- KOReader's sync and catalogue target while no trusted address is known (RFC 6761: .invalid
+-- never resolves), so their own requests cannot reach an unverified home address.
+Core.NOWHERE = "http://lectern.invalid"
 
 Core.DEFAULT_OPTIONS = {
     auto_sync = true,                 -- pull on open, push on close and suspend
@@ -180,7 +183,20 @@ function Core:saveLanUrl(value)
     -- "" remembers "the server has none" (so the zip's address is not used again).
     self.store:saveSetting("lan_url", str(value) or "")
     self.store:delSetting("active_url")
-    self._route = nil
+    self._route, self._route_at = nil, nil
+end
+
+--- Stop trusting the home address until it proves itself again: on start, wake, and network
+-- changes (another Wi-Fi may have a different machine at the same private IP). KOReader's own
+-- sync and catalogue settings go back to the Tailscale address at once, synchronously.
+function Core:forgetHome()
+    self._route, self._route_at = nil, nil
+    local active = self.store:readSetting("active_url")
+    if active and active ~= "" then
+        self.store:delSetting("active_url")
+        self.store:flush()
+        if self:isPaired() then self.configure(self:config()) end
+    end
 end
 
 local function nonce()
@@ -223,29 +239,34 @@ end
 --- Where to send requests now: the home address when it answers as this Lectern, else the
 -- Tailscale one. Checked again after ROUTE_TTL, or at once with ``force`` (network change,
 -- Sync now, a failed request). A change rewrites KOReader's kosync and OPDS settings.
+-- The home address is never used unverified, not even as the fallback: when it is the only
+-- address known (paired at home without a Tailscale address), an unverified route is nil.
 function Core:route(force)
     local remote, lan = self:serverUrl(), self:lanUrl()
-    if not lan or lan == remote then return remote end
+    if not lan then return remote end
     local now = self.now()
-    if not force and self._route and now - self._route_at < Core.ROUTE_TTL then
+    if not force and self._route_at and now - self._route_at < Core.ROUTE_TTL then
         return self._route
     end
-    local pick = self:verifyHome(lan) and lan or remote
-    self._route, self._route_at = pick, now
-    if self:isPaired() and pick ~= self.store:readSetting("active_url") then
-        self.store:saveSetting("active_url", pick)
+    local home = self:verifyHome(lan)
+    local pick = home and lan or (remote ~= lan and remote or nil)
+    self._route, self._route_at = pick, pick and now or nil
+    local want = home and lan or ""
+    if self:isPaired() and want ~= (self.store:readSetting("active_url") or "") then
+        self.store:saveSetting("active_url", want)
         self.store:flush()
-        self:log("info", pick == lan and "at home: using the home Wi-Fi address" or "away: using Tailscale")
+        self:log("info", home and "at home: using the home Wi-Fi address" or "not at home: using Tailscale")
         self.configure(self:config())
     end
     return pick
 end
 
---- The address in use (for display and KOReader's settings): the last route, else Tailscale.
+--- The address in use: the home one while verified, else Tailscale (nil if none is trusted).
 function Core:activeUrl()
-    local lan, active = self:lanUrl(), self.store:readSetting("active_url")
-    if lan and active == lan then return lan end
-    return self:serverUrl()
+    local lan, remote = self:lanUrl(), self:serverUrl()
+    if lan and self.store:readSetting("active_url") == lan then return lan end
+    if lan and remote == lan then return nil end
+    return remote
 end
 
 function Core:username()
@@ -258,7 +279,7 @@ end
 --- Everything main.lua needs to write KOReader's kosync and OPDS settings.
 function Core:config()
     return {
-        server_url = self:activeUrl(),
+        server_url = self:activeUrl() or Core.NOWHERE,
         username = self.store:readSetting("username"),
         userkey = self.store:readSetting("userkey"),
         app_password = self.store:readSetting("app_password"),
@@ -278,7 +299,7 @@ function Core:applyCredentials(payload, server_url)
     s:saveSetting("server_url", server_url)
     if payload.lan_url ~= nil then self:saveLanUrl(payload.lan_url) end
     s:delSetting("active_url")
-    self._route = nil
+    self._route, self._route_at = nil, nil
     s:saveSetting("username", username)
     s:saveSetting("userkey", userkey)
     s:saveSetting("app_password", password)
@@ -289,12 +310,8 @@ function Core:applyCredentials(payload, server_url)
     s:delSetting("last_error")
     s:delSetting("setup_error")
     s:flush()
-    local lan = self:lanUrl()
-    if lan and lan ~= server_url then
-        self:route(true) -- picks home or Tailscale now, and writes KOReader's settings for it
-    else
-        self.configure(self:config())
-    end
+    self.configure(self:config()) -- Tailscale first; the home address only once verified
+    if self:lanUrl() then self:route(true) end
     return true
 end
 
@@ -403,7 +420,16 @@ function Core:pair(server_url, username, code)
         server_url = server_url, json = { username = username, code = code }, timeout = { 5, 15 },
     })
     if code_status == 200 and type(data) == "table" then
-        if self:applyCredentials(data, server_url) then
+        -- Paired over the home address: it must not become the Tailscale fallback (that one is
+        -- used without a check). The server's own Tailscale address, else the one known before.
+        local remote = str(data.server_url)
+        if not remote then
+            remote = server_url
+            if server_url == str(data.lan_url) or server_url == self:lanUrl() then
+                remote = self:serverUrl() or server_url
+            end
+        end
+        if self:applyCredentials(data, remote) then
             self:deleteBootstrap() -- a stale zip secret is superseded
             self:log("info", "paired as device", str(data.label) or "?")
             return "ok"

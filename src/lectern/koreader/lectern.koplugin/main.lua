@@ -75,8 +75,21 @@ function Lectern:init()
     }
     self.retry_attempt = 0
     self.retry_task = function() self:retry() end
-    -- Home Wi-Fi or Tailscale: decided again after each network change (docs/home-network.md).
-    self.route_task = function() if self.core:isPaired() then self.core:route(true) end end
+    -- Home Wi-Fi or Tailscale (docs/home-network.md): checked again after start, wake, and
+    -- network changes, and every Core.ROUTE_TTL while KOReader runs.
+    self.route_task = function()
+        if not self.core:isPaired() or not self.core:lanUrl() then return end
+        self.core:route(true)
+        UIManager:scheduleIn(Core.ROUTE_TTL, self.route_task)
+    end
+    if not Lectern._started then
+        -- First start of this KOReader process: the device may be on another network than when
+        -- it last ran, so the home address is not trusted until it proves itself again.
+        Lectern._started = true
+        self:recheckHome(3)
+    elseif self.core:lanUrl() then
+        UIManager:scheduleIn(Core.ROUTE_TTL, self.route_task)
+    end
     if self.ui and self.ui.menu then
         self.ui.menu:registerToMainMenu(self)
     end
@@ -345,19 +358,32 @@ function Lectern:retry()
     self:flush()
 end
 
+--- Back to the Tailscale address now (KOReader's own sync and catalogue too), and check the
+-- home address again in ``delay`` seconds.
+function Lectern:recheckHome(delay)
+    self.core:forgetHome()
+    if self.core:lanUrl() then
+        UIManager:unschedule(self.route_task)
+        UIManager:scheduleIn(delay, self.route_task)
+    end
+end
+
+function Lectern:onNetworkDisconnected()
+    self.core:forgetHome()
+end
+
 function Lectern:onNetworkConnected()
     -- Tailscale may need a few seconds after Wi-Fi to bring the tailnet up.
     self.retry_attempt = 0
-    if self.core:lanUrl() then
-        UIManager:unschedule(self.route_task)
-        UIManager:scheduleIn(3, self.route_task)
-    end
+    self:recheckHome(3)
     if self.setup_pending or #self.core:outbox() > 0 then
         self:scheduleRetry(3)
     end
 end
 
 function Lectern:onResume()
+    -- Woken up, maybe elsewhere (Wi-Fi managed outside KOReader sends no network events).
+    self:recheckHome(5)
     if #self.core:outbox() > 0 then self:retrySoon(5) end
 end
 
