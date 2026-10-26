@@ -519,6 +519,15 @@ SCUTIL_SCHOOL = """<dictionary> {
   HTTPSEnable : 1
   HTTPSPort : 3128
   HTTPSProxy : proxy.school
+  __SCOPED__ : <dictionary> {
+    en0 : <dictionary> {
+      ExceptionsList : <array> {
+        0 : only.scoped
+      }
+      ExcludeSimpleHostnames : 0
+      HTTPSProxy : scoped.proxy
+    }
+  }
 }"""
 
 
@@ -537,6 +546,10 @@ SCUTIL_SCHOOL = """<dictionary> {
         ("192.168.4.20", "192.168.*", True),
         ("fd00::1", "fd00::/8", True),
         ("anything", "*", True),
+        ("lectern.example", "lectern.example:8443", True),
+        ("::1", "[::1]", True),
+        ("::1", "[::1]:8080", True),
+        ("fd00::1", "fd00::1", True),
     ],
 )
 def test_proxy_exception_patterns(host, pattern, match):
@@ -584,6 +597,24 @@ def test_system_proxy_honors_the_macos_exception_list(monkeypatch):
     monkeypatch.setattr(cond, "_resolve", lambda host: ["198.51.100.4"])
     assert cond.parse_scutil_exceptions(SCUTIL_SCHOOL) == (
         ["*.local", "169.254/16", "lectern.home.example"], True)  # fmt: skip
+    # per-interface (__SCOPED__) settings are not the system's
+    assert cond.parse_scutil_proxy(SCUTIL_SCHOOL) == "http://proxy.school:3128"
+    scoped_only = """<dictionary> {
+  ExcludeSimpleHostnames : 0
+  HTTPSEnable : 0
+  __SCOPED__ : <dictionary> {
+    en0 : <dictionary> {
+      ExceptionsList : <array> {
+        0 : only.scoped
+      }
+      ExcludeSimpleHostnames : 1
+      HTTPSEnable : 1
+      HTTPSProxy : scoped.proxy
+    }
+  }
+}"""
+    assert cond.parse_scutil_exceptions(scoped_only) == ([], False)
+    assert cond.parse_scutil_proxy(scoped_only) is None
     opts = cond.http_options("system", None)
     assert _routed(opts, "https://lectern.home.example/") == "direct"
     assert _routed(opts, "https://pi.local/") == "direct"

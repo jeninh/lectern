@@ -70,9 +70,15 @@ def parse_ssid(text: str) -> str | None:
     return m.group(1)
 
 
+def _scutil_global(text: str) -> str:
+    """``scutil --proxy`` without its per-interface ``__SCOPED__`` settings (listed last)."""
+    return text.split("__SCOPED__", 1)[0]
+
+
 def parse_scutil_proxy(text: str) -> str | None:
     """``scutil --proxy``: the HTTPS proxy as ``http://host:port`` when it is enabled. PAC
     files (``ProxyAutoConfigEnable``) are not evaluated: set the proxy URL explicitly."""
+    text = _scutil_global(text)
     values = dict(re.findall(r"^\s*(\w+)\s*:\s*(\S+)\s*$", text, re.M))
     if values.get("HTTPSEnable") == "1" and values.get("HTTPSProxy"):
         port = values.get("HTTPSPort") or "443"
@@ -83,6 +89,7 @@ def parse_scutil_proxy(text: str) -> str | None:
 def parse_scutil_exceptions(text: str) -> tuple[list[str], bool]:
     """``scutil --proxy``: the macOS proxy exception list (``ExceptionsList``, "Bypass proxy
     settings for these Hosts & Domains") and whether simple hostnames are excluded."""
+    text = _scutil_global(text)
     block = re.search(r"ExceptionsList\s*:\s*<array>\s*\{(.*?)\}", text, re.S)
     items = re.findall(r"^\s*\d+\s*:\s*(.+?)\s*$", block.group(1), re.M) if block else []
     simple = re.search(r"^\s*ExcludeSimpleHostnames\s*:\s*1\s*$", text, re.M) is not None
@@ -119,6 +126,10 @@ def matches_exception(host: str, pattern: str) -> bool:
     a domain (``example.com``, ``.example.com``, ``*.example.com`` match its subdomains), a
     wildcard (``192.168.*``), or a network (``10.0.0.0/8``, macOS's short ``169.254/16``)."""
     host, pattern = host.strip("[]").lower().rstrip("."), pattern.strip().lower()
+    if pattern.startswith("["):  # [::1] or [::1]:8080
+        pattern = pattern[1:].partition("]")[0]
+    elif pattern.count(":") == 1:  # host:8080 (a port is not compared)
+        pattern = pattern.partition(":")[0]
     if not pattern:
         return False
     if pattern == "*":
