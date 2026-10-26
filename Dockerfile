@@ -5,6 +5,8 @@ WORKDIR /ui
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
+# The Docs tab bundles ../docs (docs/index.yml, *.md, and the screenshots they show).
+COPY docs/ /docs/
 RUN npm run build
 
 FROM python:3.12-slim-bookworm AS build
