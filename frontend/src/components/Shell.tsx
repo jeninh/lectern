@@ -253,7 +253,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <h3 className="detail-h">Selecting books, uploads, and trash</h3>
         <dl className="shortcut-list">
           <dt>Click</dt><dd>Open a book or shelf; click its circle to start selecting, then clicks add or remove (<kbd>Enter</kbd> still opens). In Trash and uploads, select one</dd>
-          <dt><kbd>Enter</kbd></dt><dd>Open the focused one</dd>
+          <dt><kbd>Enter</kbd></dt><dd>Open the focused book or shelf</dd>
           <dt><kbd>{MOD}</kbd> click</dt><dd>Add or remove one</dd>
           <dt><kbd>Shift</kbd> click</dt><dd>Select a range; with <kbd>{MOD}</kbd>, add the range</dd>
           <dt><kbd>{MOD}</kbd><kbd>A</kbd></dt><dd>Select everything in this view, loaded or not</dd>
