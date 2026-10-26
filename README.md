@@ -44,6 +44,11 @@ KOReader. With any other reverse proxy in front, set
 `LECTERN_TRUSTED_PROXIES` to its address so rate limits and the audit log see your readers'
 IPs instead of the proxy's. Lectern's own sign-in is always required, private network or not.
 
+E-readers can also sync over your home Wi-Fi without Tailscale, if you opt in:
+[`docs/home-network.md`](docs/home-network.md) adds one port on the Pi's LAN address that
+answers only home-network devices and only the catalogue, progress sync, and the KOReader
+plugin. It is off by default and never meant to be forwarded on the router.
+
 ## Make an audiobook
 
 A book with an EPUB and no audiobook can be narrated into one: **Make an audiobook…** in its

@@ -1,0 +1,22 @@
+# Opt-in home Wi-Fi (LAN) access for e-readers without Tailscale. Off unless you add this
+# file to every compose command, after compose.yaml (guide: docs/home-network.md):
+#
+#   docker compose --env-file .env -f deploy/tailscale/compose.yaml -f deploy/tailscale/lan.yaml up -d --build
+#
+# It publishes Lectern's second listener (container port 8081) on ONE address of the host:
+# LECTERN_LAN_BIND, the Pi's own LAN IP and a port, e.g. 192.168.1.20:8080. That listener
+# answers only private source addresses and only the device protocols (OPDS, KOReader sync,
+# the plugin); the web app stays on the Tailscale HTTPS address. Never forward this port on
+# your router. tests/test_deploy_tailscale.py checks these invariants.
+
+services:
+  tailscale:
+    # Lectern lives in this container's network namespace, so the port is published here.
+    ports:
+      - "${LECTERN_LAN_BIND:?set LECTERN_LAN_BIND in .env to the Pi's LAN IP and a port, e.g. 192.168.1.20:8080}:8081"
+
+  lectern:
+    environment:
+      LECTERN_LAN_PORT: "8081"
+      # What e-readers use at home, put into each plugin zip; default http://LECTERN_LAN_BIND.
+      LECTERN_LAN_URL: ${LECTERN_LAN_URL:-http://${LECTERN_LAN_BIND}}

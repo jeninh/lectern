@@ -285,6 +285,8 @@ export interface PluginDefaults {
   server_url: string | null;
   source: "config" | "tailscale" | "none";
   port: number;
+  /** Home Wi-Fi address also put into the zip (docs/home-network.md); null when that is off. */
+  lan_url: string | null;
 }
 
 export interface PairingCode {

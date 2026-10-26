@@ -166,6 +166,8 @@ def server_settings(auth: OwnerRead, settings: SettingsDep) -> dict:
         "audio_low_bitrate_kbps": settings.audio_low_bitrate_kbps,
         "audio_low_auto": settings.audio_low_auto,
         "transcode_memory_limit_mb": settings.transcode_memory_limit_mb,
+        # Opt-in home Wi-Fi access for e-readers (docs/home-network.md).
+        "lan": {"enabled": settings.lan_enabled, "url": settings.lan_url or None},
     }
 
 

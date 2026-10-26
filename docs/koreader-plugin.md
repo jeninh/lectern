@@ -164,6 +164,12 @@ Tailscale's `100.64.0.0/10`, since the e-reader would then send its credentials 
 example `http://100.101.102.103:8080`) in `.env`. The plugin remembers the address, so pairing
 later does not ask for it again.
 
+With [home Wi-Fi access](home-network.md) on, the zip also carries Lectern's home address
+(`LECTERN_LAN_URL`). The plugin uses it whenever the Lectern there proves it is this device's
+server (`POST /koplugin/hello`, a nonce answered with an HMAC keyed by the hash of the device's
+own secret), and Tailscale otherwise, so a Kindle without Tailscale syncs at home. It never
+sends a credential to an address that failed that check.
+
 ## Tailscale on the e-reader
 
 The e-reader must be on your tailnet. Two ways, both covered in more detail in
@@ -198,13 +204,14 @@ do not enable *Force userspace mode*, for the same reason as above.
 
 | Route | Auth | |
 | --- | --- | --- |
-| `GET /api/devices/koplugin` | session | `{server_url, source: config\|tailscale\|none, port}` |
+| `GET /api/devices/koplugin` | session | `{server_url, source: config\|tailscale\|none, port, lan_url}` |
 | `POST /api/devices/{id}/koplugin` `{server_url?}` | session + CSRF, own device | the zip; mints a new secret |
 | `POST /api/devices/{id}/koplugin/revoke` | session + CSRF, own device | revoke the unused secret and live code |
 | `POST /api/devices/{id}/pairing-code` | session + CSRF, own device | `{code, expires_at, attempts: 5, username}` |
-| `POST /koplugin/bootstrap` `{secret}` | the secret | credentials, or `410 setup_secret_invalid` |
-| `POST /koplugin/pair` `{username, code}` | the code | credentials, or `401 invalid_code` |
-| `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first) |
+| `POST /koplugin/bootstrap` `{secret}` | the secret | credentials and `lan_url`, or `410 setup_secret_invalid` |
+| `POST /koplugin/pair` `{username, code}` | the code | credentials and `lan_url`, or `401 invalid_code` |
+| `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first), `lan_url` |
+| `POST /koplugin/hello` `{device_id, nonce, setup?}` | none (answers with a proof) | `{proof}`: HMAC-SHA256 of `lectern-lan:<nonce>` keyed by the hex SHA-256 of the catalogue password (or with `setup` the setup secret), or `404` ([home-network.md](home-network.md)) |
 
 `GET /api/devices` adds `koplugin` (the device has both credentials) and `plugin` (state of the
 newest setup secret) to each device. Storage: `device_bootstraps` and `device_pairing_codes`

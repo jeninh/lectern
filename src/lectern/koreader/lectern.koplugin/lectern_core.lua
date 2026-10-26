@@ -8,7 +8,14 @@ Core.new{
     configure = function(config) end,  -- writes KOReader's kosync + OPDS settings
     logger = { info, warn },           -- optional
     now = os.time,                     -- optional
+    sha2 = KOReader's ffi/sha2,        -- optional (sha256, hmac): the home address check
 }
+
+Two addresses: server_url (Tailscale) and, with home Wi-Fi access on, lan_url
+(docs/home-network.md). Core:route() prefers the home address, but only after the server there
+proved it is this device's Lectern (POST /koplugin/hello: an HMAC of a fresh nonce keyed by the
+SHA-256 of a secret this device holds), so no credential goes to another network's machine
+that happens to have the same private IP.
 
 Secrets (the setup secret, userkey, app password, pairing code) are never passed to the
 logger: every log line goes through Core:log, which also masks any known secret.
@@ -22,6 +29,7 @@ Core.BOOTSTRAP_FILE = "lectern_bootstrap.txt"
 Core.DEFAULT_PAGES = 10
 Core.RETRY_DELAYS = { 30, 60, 120, 300, 900 } -- seconds, while the network is up
 Core.OUTBOX_MAX = 50
+Core.ROUTE_TTL = 600 -- seconds a home/Tailscale choice is trusted before it is checked again
 
 Core.DEFAULT_OPTIONS = {
     auto_sync = true,                 -- pull on open, push on close and suspend
@@ -59,6 +67,11 @@ function Core.new(deps)
     self.configure = deps.configure or function() end
     self.logger = deps.logger
     self.now = deps.now or os.time
+    self.sha2 = deps.sha2
+    if not self.sha2 then
+        local ok, sha2 = pcall(require, "ffi/sha2")
+        if ok then self.sha2 = sha2 end
+    end
     return self
 end
 
@@ -155,6 +168,86 @@ function Core:serverUrl()
     return d and d.server_url
 end
 
+--- The home Wi-Fi address, if Lectern offers one: what the server last said, else the zip's.
+function Core:lanUrl()
+    local s = self.store:readSetting("lan_url")
+    if s then return s ~= "" and s or nil end
+    local d = self:deviceFile()
+    return d and d.lan_url
+end
+
+function Core:saveLanUrl(value)
+    -- "" remembers "the server has none" (so the zip's address is not used again).
+    self.store:saveSetting("lan_url", str(value) or "")
+    self.store:delSetting("active_url")
+    self._route = nil
+end
+
+local function nonce()
+    local f = io.open("/dev/urandom", "rb")
+    local bytes = f and f:read(16)
+    if f then f:close() end
+    if not bytes or #bytes < 16 then
+        local t = {}
+        for i = 1, 16 do t[i] = string.char(math.random(0, 255)) end
+        bytes = table.concat(t)
+    end
+    return (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+
+--- The secret this device holds and the server keeps a SHA-256 of: the app password once
+-- paired, before that the setup secret from the zip.
+function Core:proofSecret()
+    if self:isPaired() then
+        return self.store:readSetting("app_password"), self.store:readSetting("device_id"), false
+    end
+    local d = self:deviceFile()
+    return self:bootstrapSecret(), d and d.device_id, true
+end
+
+--- Is the Lectern at ``url`` this device's? Sends nothing secret: a nonce, checked against
+-- the server's HMAC of it.
+function Core:verifyHome(url)
+    local secret, device_id, setup = self:proofSecret()
+    if not secret or not device_id or not self.sha2 then return false end
+    local n = nonce()
+    local code, data = self:request("POST", "/koplugin/hello", {
+        server_url = url, json = { device_id = device_id, nonce = n, setup = setup },
+        timeout = { 2, 4 },
+    })
+    if code ~= 200 or type(data) ~= "table" then return false end
+    local sha2 = self.sha2
+    return str(data.proof) == sha2.hmac(sha2.sha256, sha2.sha256(secret), "lectern-lan:" .. n)
+end
+
+--- Where to send requests now: the home address when it answers as this Lectern, else the
+-- Tailscale one. Checked again after ROUTE_TTL, or at once with ``force`` (network change,
+-- Sync now, a failed request). A change rewrites KOReader's kosync and OPDS settings.
+function Core:route(force)
+    local remote, lan = self:serverUrl(), self:lanUrl()
+    if not lan or lan == remote then return remote end
+    local now = self.now()
+    if not force and self._route and now - self._route_at < Core.ROUTE_TTL then
+        return self._route
+    end
+    local pick = self:verifyHome(lan) and lan or remote
+    self._route, self._route_at = pick, now
+    if self:isPaired() and pick ~= self.store:readSetting("active_url") then
+        self.store:saveSetting("active_url", pick)
+        self.store:flush()
+        self:log("info", pick == lan and "at home: using the home Wi-Fi address" or "away: using Tailscale")
+        self.configure(self:config())
+    end
+    return pick
+end
+
+--- The address in use (for display and KOReader's settings): the last route, else Tailscale.
+function Core:activeUrl()
+    local lan, active = self:lanUrl(), self.store:readSetting("active_url")
+    if lan and active == lan then return lan end
+    return self:serverUrl()
+end
+
 function Core:username()
     local u = self.store:readSetting("username")
     if u then return u end
@@ -165,7 +258,7 @@ end
 --- Everything main.lua needs to write KOReader's kosync and OPDS settings.
 function Core:config()
     return {
-        server_url = self.store:readSetting("server_url"),
+        server_url = self:activeUrl(),
         username = self.store:readSetting("username"),
         userkey = self.store:readSetting("userkey"),
         app_password = self.store:readSetting("app_password"),
@@ -183,6 +276,9 @@ function Core:applyCredentials(payload, server_url)
     end
     local s = self.store
     s:saveSetting("server_url", server_url)
+    if payload.lan_url ~= nil then self:saveLanUrl(payload.lan_url) end
+    s:delSetting("active_url")
+    self._route = nil
     s:saveSetting("username", username)
     s:saveSetting("userkey", userkey)
     s:saveSetting("app_password", password)
@@ -193,7 +289,12 @@ function Core:applyCredentials(payload, server_url)
     s:delSetting("last_error")
     s:delSetting("setup_error")
     s:flush()
-    self.configure(self:config())
+    local lan = self:lanUrl()
+    if lan and lan ~= server_url then
+        self:route(true) -- picks home or Tailscale now, and writes KOReader's settings for it
+    else
+        self.configure(self:config())
+    end
     return true
 end
 
@@ -201,8 +302,18 @@ end
 
 function Core:request(method, path, opts)
     opts = opts or {}
-    local base = opts.server_url or self:serverUrl()
+    local base = opts.server_url or self:route()
     if not base then return nil, nil, "no server" end
+    local code, data, err = self:send(base, method, path, opts)
+    if not code and not opts.server_url and self._route then
+        -- Left home (or came back) since the last check: try the other address once.
+        local again = self:route(true)
+        if again ~= base then code, data, err = self:send(again, method, path, opts) end
+    end
+    return code, data, err
+end
+
+function Core:send(base, method, path, opts)
     local headers = { accept = opts.accept or "application/json" }
     local body
     if opts.json then
@@ -268,7 +379,7 @@ function Core:bootstrap()
         return postpone("no server address")
     end
     local code, data, err = self:request("POST", "/koplugin/bootstrap", {
-        server_url = server, json = { secret = secret }, timeout = { 3, 10 },
+        server_url = self:route(true), json = { secret = secret }, timeout = { 3, 10 },
     })
     if code == 200 and type(data) == "table" then
         if self:applyCredentials(data, str(data.server_url) or server) then
@@ -312,6 +423,11 @@ function Core:status()
     local code, data, err = self:request("GET", "/koplugin/status", { basic = true, timeout = { 4, 10 } })
     self:noteResult(code, err)
     if code == 200 and type(data) == "table" then
+        if data.lan_url ~= nil and str(data.lan_url) ~= self:lanUrl() then
+            self:saveLanUrl(data.lan_url) -- turned on, off, or moved on the server
+            self.store:flush()
+            self.configure(self:config()) -- Tailscale until the next request checks again
+        end
         self.store:saveSetting("queue_pending", tonumber(data.queue and data.queue.pending) or 0)
         self.store:flush()
         return data

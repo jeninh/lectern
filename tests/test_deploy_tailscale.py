@@ -18,6 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / "deploy" / "tailscale"
 COMPOSE = DEPLOY / "compose.yaml"
+LAN = DEPLOY / "lan.yaml"
 SERVE = DEPLOY / "serve.json"
 ENV_EXAMPLE = ROOT / ".env.example"
 TEST_ENV = ROOT / "tests" / "fixtures" / "deploy" / "tailscale.env"
@@ -37,13 +38,14 @@ def compose_config():
             pytest.fail("COMPOSE_REQUIRED is set but `docker compose` is not available")
         pytest.skip("docker compose not installed")
 
-    def run(env_file: Path) -> subprocess.CompletedProcess[str]:
+    def run(env_file: Path, *overlays: Path) -> subprocess.CompletedProcess[str]:
         # Shell variables override --env-file in Compose; keep the test hermetic.
         env = {
             k: v for k, v in os.environ.items() if not k.startswith(("LECTERN_", "TS_", "COMPOSE_"))
         }
         return subprocess.run(
             ["docker", "compose", "--env-file", str(env_file), "-f", str(COMPOSE)]
+            + [arg for o in overlays for arg in ("-f", str(o))]
             + ["config", "--format", "json"],
             cwd=ROOT,
             env=env,
@@ -55,8 +57,8 @@ def compose_config():
     return run
 
 
-def _load(run, env_file: Path) -> dict:
-    result = run(env_file)
+def _load(run, env_file: Path, *overlays: Path) -> dict:
+    result = run(env_file, *overlays)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -142,8 +144,53 @@ def test_missing_base_url_is_an_error(compose_config, tmp_path):
     assert "LECTERN_BASE_URL" in result.stderr
 
 
+def test_lan_overlay_publishes_one_private_address_to_the_lan_listener(compose_config, tmp_path):
+    """deploy/tailscale/lan.yaml (docs/home-network.md): opt-in, one host address, and nothing
+    else about the deployment changes."""
+    env = tmp_path / "lan.env"
+    base = ENV_EXAMPLE.read_text()
+    env.write_text(base.replace("LECTERN_LAN_BIND=\n", "LECTERN_LAN_BIND=192.168.1.20:8080\n"))
+    plain = _load(compose_config, ENV_EXAMPLE)
+    cfg = _load(compose_config, env, LAN)
+    ts, lectern = cfg["services"]["tailscale"], cfg["services"]["lectern"]
+    assert ts["ports"] == [
+        {
+            "mode": "ingress",
+            "host_ip": "192.168.1.20",
+            "target": 8081,
+            "published": "8080",
+            "protocol": "tcp",
+        }
+    ]
+    assert not lectern.get("ports")
+    assert lectern["environment"]["LECTERN_LAN_PORT"] == "8081"
+    assert lectern["environment"]["LECTERN_LAN_URL"] == "http://192.168.1.20:8080"
+    # Everything else is exactly the plain deployment.
+    for name in ("tailscale", "lectern"):
+        a, b = dict(plain["services"][name]), dict(cfg["services"][name])
+        a.pop("ports", None), b.pop("ports", None)
+        b["environment"] = {
+            k: v
+            for k, v in b["environment"].items()
+            if k not in ("LECTERN_LAN_PORT", "LECTERN_LAN_URL")
+        }
+        assert a == b, name
+
+    env.write_text(
+        env.read_text().replace("LECTERN_LAN_URL=\n", "LECTERN_LAN_URL=http://lectern.local:8080\n")
+    )
+    cfg = _load(compose_config, env, LAN)
+    assert (
+        cfg["services"]["lectern"]["environment"]["LECTERN_LAN_URL"] == "http://lectern.local:8080"
+    )
+
+    # Without an address the overlay refuses to start rather than publish on every interface.
+    result = compose_config(ENV_EXAMPLE, LAN)
+    assert result.returncode != 0 and "LECTERN_LAN_BIND" in result.stderr
+
+
 def test_env_example_documents_every_compose_variable():
-    used = set(re.findall(r"\$\{(\w+)", COMPOSE.read_text()))
+    used = set(re.findall(r"\$\{(\w+)", COMPOSE.read_text() + LAN.read_text()))
     documented = {
         line.split("=", 1)[0]
         for line in ENV_EXAMPLE.read_text().splitlines()

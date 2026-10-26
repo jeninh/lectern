@@ -325,7 +325,13 @@ def set_device_download_cap(
 def koplugin_defaults(auth: Auth, settings: SettingsDep) -> dict:
     """The address a new zip would carry: LECTERN_DEVICE_URL, else the detected Tailscale IP."""
     url, source = koplugin.default_server_url(settings)
-    return {"server_url": url, "source": source, "port": settings.port}
+    return {
+        "server_url": url,
+        "source": source,
+        "port": settings.port,
+        # Also put into the zip: the plugin prefers it at home (docs/home-network.md).
+        "lan_url": koplugin.home_url(settings),
+    }
 
 
 def _own_plugin_device(db, user: User, device_id: str) -> tuple[SyncKey, AppPassword]:
@@ -380,6 +386,7 @@ def download_koplugin(
             device_id=f"k{key.id}",
             label=key.label,
             expires_at=iso(boot.expires_at) or "",
+            lan_url=koplugin.home_url(settings),
         ),
         secret=secret,
     )

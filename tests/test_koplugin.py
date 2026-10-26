@@ -157,6 +157,7 @@ def test_server_address_validation_and_default(client, owner, kindle, settings, 
         "server_url": "http://100.88.1.2:8080",
         "source": "tailscale",
         "port": 8080,
+        "lan_url": None,  # home Wi-Fi access is off by default
     }
     files = unzip(get_zip(client, owner["csrf"], kindle["id"], None))
     assert (
@@ -195,7 +196,16 @@ def test_bootstrap_is_single_use_and_rotates_both_credentials(client, owner, kin
     r = bootstrap(client, secret)
     assert r.status_code == 200, r.text
     creds = r.json()
-    assert set(creds) == {"username", "device_id", "label", "userkey", "app_password", "server_url"}
+    assert set(creds) == {
+        "username",
+        "device_id",
+        "label",
+        "userkey",
+        "app_password",
+        "server_url",
+        "lan_url",
+    }
+    assert creds["lan_url"] is None  # home Wi-Fi access is off by default
     assert creds["username"] == "owner" and creds["label"] == "Kindle PW5"
     assert creds["server_url"] == SERVER and creds["device_id"] == kindle["id"]
     # KOReader sends its userkey as is; the new OPDS password works over Basic.
@@ -726,3 +736,101 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     assert "set up as device Kindle PW5" in logged
     for value in (secret, s["userkey"], s["app_password"], code):
         assert value not in logged
+
+
+@needs_lua
+def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settings, tmp_path):
+    """Home Wi-Fi access (docs/home-network.md): the plugin keeps both addresses, uses the home
+    one when the Lectern there proves it is this device's, and otherwise Tailscale, without
+    ever sending a credential to whatever else answers at that private address."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    http, base = live["http"], live["base"]
+    port = base.rsplit(":", 1)[1]
+    # The same server under a second name stands in for the home address (the LAN listener
+    # itself refuses loopback; tests/test_lan.py covers it).
+    home = f"http://localhost:{port}"
+    settings.lan_port, settings.lan_url = 18081, home
+
+    seen: list[tuple[str, str, dict]] = []
+
+    class Impostor(BaseHTTPRequestHandler):
+        """Another network's machine at the same private address: answers everything."""
+
+        def _answer(self):
+            seen.append((self.command, self.path, dict(self.headers)))
+            body = b'{"proof": "' + b"0" * 64 + b'"}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = do_PUT = _answer
+
+        def log_message(self, *args):
+            pass
+
+    impostor = ThreadingHTTPServer(("127.0.0.1", 0), Impostor)
+    threading.Thread(target=impostor.serve_forever, daemon=True).start()
+    impostor_url = f"http://127.0.0.1:{impostor.server_address[1]}"
+
+    dev = http.post("/api/devices", json={"label": "Kindle"}).json()
+    z = http.post(f"/api/devices/{dev['device']['id']}/koplugin", json={"server_url": base})
+    root = tmp_path / "koreader"
+    (root / "plugins").mkdir(parents=True)
+    (root / "settings").mkdir()
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        zf.extractall(root / "plugins")
+    plugin, sdir = root / "plugins" / "lectern.koplugin", root / "settings"
+
+    # First start at home: set up over the home address, and KOReader is set to it.
+    out = lua(plugin, sdir, "setup")
+    assert out["paired"]
+    s = out["settings"]
+    assert s["server_url"] == base and s["lan_url"] == home and s["active_url"] == home
+    assert out["kosync"]["custom_server"] == home + "/"
+    assert out["opds"][0]["url"] == home + "/opds" and len(out["opds"]) == 2
+    with session_factory()() as db:
+        assert db.scalar(select(DeviceBootstrap.used_ip)) == "127.0.0.1"
+
+    # Away: something else answers at the home address and fails the proof. Tailscale is used,
+    # and the impostor saw only the nonce check, never a credential.
+    settings.lan_url = impostor_url
+    away = tmp_path / "away"
+    shutil.copytree(sdir, away)
+    lectern_lua = away / "lectern.lua"
+    lectern_lua.write_text(lectern_lua.read_text().replace(home, impostor_url))
+    out = lua(plugin, away, "route")
+    assert out["active"] == base and out["status"] is True
+    assert out["settings"]["active_url"] == base
+    assert out["kosync"]["custom_server"] == base + "/"
+    assert out["opds"][0]["url"] == base + "/opds" and len(out["opds"]) == 2  # moved, not added
+    assert seen and all(m == "POST" and p == "/koplugin/hello" for m, p, _ in seen)
+    for _, _, headers in seen:
+        lowered = {k.lower(): v for k, v in headers.items()}
+        assert "authorization" not in lowered and "x-auth-key" not in lowered
+        sent = json.dumps(headers)
+        assert s["app_password"] not in sent and s["userkey"] not in sent
+
+    # Home address unreachable: Tailscale, quietly.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    settings.lan_url = dead
+    lectern_lua.write_text(lectern_lua.read_text().replace(impostor_url, dead))
+    out = lua(plugin, away, "route")
+    assert out["active"] == base and out["status"] is True
+
+    # Back home: the home address again.
+    settings.lan_url = home
+    out = lua(plugin, sdir, "route")
+    assert out["active"] == home and out["kosync"]["custom_server"] == home + "/"
+
+    # Home Wi-Fi access turned off on the server: the plugin forgets the address.
+    settings.lan_port = 0
+    out = lua(plugin, sdir, "route")
+    assert out["status"] is True and out["settings"]["lan_url"] == ""
+    out = lua(plugin, sdir, "route")
+    assert out["active"] == base and out["kosync"]["custom_server"] == base + "/"
+    impostor.shutdown()

@@ -147,6 +147,25 @@ package.preload["logger"] = function()
 end
 package.preload["gettext"] = function() return function(s) return s end end
 
+-- KOReader's ffi/sha2 (pure Lua, hex digests), here through openssl: the plugin's own
+-- logic is under test, not the hash.
+package.preload["ffi/sha2"] = function()
+    local function q(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
+    local function run(cmd)
+        local f = io.popen(cmd)
+        local r = f:read("*a")
+        f:close()
+        return r:match("^(%x+)")
+    end
+    local sha2 = {}
+    sha2.sha256 = function(m) return run("printf %s " .. q(m) .. " | openssl dgst -sha256 -r") end
+    sha2.hmac = function(hash, key, m)
+        assert(hash == sha2.sha256)
+        return run("printf %s " .. q(m) .. " | openssl dgst -sha256 -hmac " .. q(key) .. " -r")
+    end
+    return sha2
+end
+
 -- kosync and OPDS as KOReader loads them: the instance caches its settings table (kosync in
 -- a class-level LuaSettings object), so the plugin must edit those, not just the files.
 local function fake_kosync()
@@ -308,6 +327,16 @@ elseif command == "sync-now" then
         out.outbox_after_push = #p.core:outbox()
         out.tasks_after_push = #UI.tasks
     end
+elseif command == "route" then
+    -- Home Wi-Fi or Tailscale: what the next request uses, and what KOReader is set to.
+    NET.online, NET.connected = true, true
+    local p = make(false)
+    p:onNetworkConnected()
+    run_tasks()
+    out.active = p.core:activeUrl()
+    out.status = p.core:status() ~= nil
+    out.kosync = read_settings("kosync.lua").settings
+    out.opds = read_settings("opds.lua").servers
 end
 out.log = LOG
 out.settings = read_settings("lectern.lua")

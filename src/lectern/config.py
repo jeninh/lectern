@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     # e.g. http://100.101.102.103:8080. Empty = this machine's Tailscale IP on `port`, detected.
     device_url: str = Field(default="")
 
+    # Opt-in home Wi-Fi access (docs/home-network.md): a second listener on this port, which
+    # answers only private (RFC 1918, link-local, ULA) addresses and only the device protocols
+    # (OPDS, KOReader sync, the plugin). 0 = off. deploy/tailscale/lan.yaml publishes it on the
+    # host's LAN address; never forward it on the router.
+    lan_port: int = Field(default=0, ge=0, le=65535)
+    # The address e-readers use at home, e.g. http://192.168.1.20:8080 or
+    # http://lectern.local:8080; put into plugin zips next to the Tailscale address.
+    lan_url: str = Field(default="")
+
     # Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For is believed, e.g.
     # "127.0.0.1" for `tailscale serve` on the same host or in a sidecar sharing the network
     # namespace. Empty = trust nobody (default).
@@ -218,6 +227,31 @@ class Settings(BaseSettings):
             return normalize_server_url(v)
         except ValueError as exc:
             raise ValueError("LECTERN_DEVICE_URL must look like http://100.x.y.z:8080") from exc
+
+    @field_validator("lan_url")
+    @classmethod
+    def _valid_lan_url(cls, v: str) -> str:
+        if not v.strip():
+            return ""
+        from lectern.lan import normalize_lan_url
+
+        try:
+            return normalize_lan_url(v)
+        except ValueError as exc:
+            raise ValueError(
+                "LECTERN_LAN_URL must be http://<private IP or name.local>:<port>, "
+                "e.g. http://192.168.1.20:8080"
+            ) from exc
+
+    @model_validator(mode="after")
+    def _lan_port_is_separate(self) -> Settings:
+        if self.lan_port and self.lan_port == self.port:
+            raise ValueError("LECTERN_LAN_PORT must differ from LECTERN_PORT")
+        return self
+
+    @property
+    def lan_enabled(self) -> bool:
+        return self.lan_port > 0
 
     @model_validator(mode="after")
     def _window_has_room(self) -> Settings:
