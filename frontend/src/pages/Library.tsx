@@ -223,7 +223,7 @@ export function LibraryPage() {
   /** Dragging a selected item drags the selection; an unselected one, just itself. */
   const dragFor = (key: string) =>
     dragProps(
-      !reader && !s.selecting,
+      !reader && !s.armed,
       () => (s.isSelected(key) ? selectionItems() : key[0] === "s" ? { shelves: [Number(key.slice(1))], works: null, workCount: 0, from } : { shelves: [], works: { work_ids: [Number(key.slice(1))] }, workCount: 1, from }),
       () => (s.isSelected(key) ? describe(pickedShelves.length, pickedBooks) : key[0] === "s" ? shelves.find((x) => shelfKey(x.id) === key)?.name ?? "" : works.find((w) => workKey(w.id) === key)?.title ?? ""),
     );
@@ -253,7 +253,7 @@ export function LibraryPage() {
           <>
             {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
             {keys.length > 0 && (
-              <button className="btn ghost" aria-pressed={s.selecting} onClick={() => (s.selecting ? s.exit() : s.setSelecting(true))} title={`Click to select, ${MOD}-click to add, Shift-click for a range, ${MOD} A for all`}>
+              <button className="btn ghost" aria-pressed={s.selecting} onClick={() => (s.selecting ? s.exit() : s.setSelecting(true))} title={`Click a book's circle to select it (or ${MOD}-click); while selecting, clicks add and remove. Shift-click for a range, ${MOD} A for all`}>
                 <Select /> {s.selecting ? "Done" : "Select"}
               </button>
             )}
@@ -397,7 +397,7 @@ export function LibraryPage() {
           aria-multiselectable="true"
           aria-rowcount={win.rows}
           aria-colcount={columns}
-          data-has-selection={s.count > 0 || s.selecting || undefined}
+          data-has-selection={s.selecting || undefined}
           style={{ paddingTop: win.padTop, paddingBottom: win.padBottom }}
           {...s.scopeProps}
         >
@@ -418,7 +418,7 @@ export function LibraryPage() {
       )}
 
       <BulkBar
-          open={s.count > 0 || s.selecting}
+          open={s.selecting}
           ready={!s.sel.all || !!viewInfo}
           count={s.count}
           books={pickedBooks}
@@ -477,8 +477,9 @@ export function LibraryPage() {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** One book in the Library grid or list: a grid cell, selected with the pointer or keyboard
- * (lib/useSelection), opened with Enter, a double-click, or a tap. */
+/** One book in the Library grid or list: a grid cell (lib/useSelection). A click or tap opens
+ * it; its circle, a long press, or a modifier click selects it, and while anything is selected
+ * clicks toggle and Enter opens. */
 function BookCell({ work: w, q, grid, cell, col, drag }: { work: Work; q: string; grid: boolean; cell: CellProps; col: number; drag: ReturnType<typeof dragProps> }) {
   const label = `${w.title} by ${w.author}${w.progress ? `, ${percent(w.progress.percentage)} read` : ""}`;
   const pick = (

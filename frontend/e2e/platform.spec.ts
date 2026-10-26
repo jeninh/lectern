@@ -10,7 +10,7 @@ test.describe("on a Mac", () => {
   });
 
   test("Cmd toggles and Cmd+A selects all; Ctrl+click and Ctrl+A are not ours", async ({ page }) => {
-    await book(page, "Book 001").click();
+    await book(page, "Book 001").click({ modifiers: ["Meta"] });
     await book(page, "Book 003").click({ modifiers: ["Meta"] });
     expect(await selectedTitles(page)).toEqual(["Book 001", "Book 003"]);
     // Ctrl+click is a secondary click on a Mac: the selection stays as it was.
@@ -40,9 +40,15 @@ test.describe("on a touch screen", () => {
     await cell.dispatchEvent("click", { detail: 1, clientX: at.clientX, clientY: at.clientY });
   }
 
-  test("long press starts selection mode, taps toggle, Done leaves, a tap opens", async ({ page }) => {
+  test("a tap opens; long press starts selection mode, taps toggle, the last tap off or Done leaves", async ({ page }) => {
     await signIn(page);
     await expect(book(page, "Book 001")).toBeVisible();
+    // Not selecting: a tap opens, and the circles stay hidden (no hover on touch).
+    await expect(book(page, "Book 001").locator("[data-sel-toggle]")).toBeHidden();
+    await touch(book(page, "Book 001"));
+    await expect(page.getByRole("dialog", { name: "Book 001" })).toBeVisible();
+    await page.goBack();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     // A press that moves (a scroll) is not a long press.
     const cell = book(page, "Book 002");
     const box = (await cell.boundingBox())!;
@@ -61,7 +67,19 @@ test.describe("on a touch screen", () => {
     await touch(book(page, "Book 002"));
     expect(await selectedTitles(page)).toEqual(["Book 003", "Book 004"]);
     await expect(page.getByTestId("selection-bar")).toBeInViewport();
+    await expect(book(page, "Book 001").locator("[data-sel-toggle]")).toBeVisible();
     await page.screenshot({ path: "test-results/touch-selection.png" });
+    // Tapping the last ones off leaves selection mode: the next tap opens.
+    await touch(book(page, "Book 003"));
+    await touch(book(page, "Book 004"));
+    await expect(page.getByTestId("selection-bar")).toHaveCount(0);
+    await touch(book(page, "Book 005"));
+    await expect(page.getByRole("dialog", { name: "Book 005" })).toBeVisible();
+    await page.goBack();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await touch(book(page, "Book 002"), 650);
+    await touch(book(page, "Book 003"));
 
     await page.getByRole("button", { name: "Done" }).click();
     await expect(page.getByTestId("selection-bar")).toHaveCount(0);

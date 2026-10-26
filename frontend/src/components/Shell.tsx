@@ -252,7 +252,8 @@ export function Shell({ children }: { children: ReactNode }) {
         </dl>
         <h3 className="detail-h">Selecting books, uploads, and trash</h3>
         <dl className="shortcut-list">
-          <dt>Click</dt><dd>Select one (double-click or <kbd>Enter</kbd> opens it)</dd>
+          <dt>Click</dt><dd>Open a book or shelf; click its circle to start selecting, then clicks add or remove (<kbd>Enter</kbd> still opens). In Trash and uploads, select one</dd>
+          <dt><kbd>Enter</kbd></dt><dd>Open the focused one</dd>
           <dt><kbd>{MOD}</kbd> click</dt><dd>Add or remove one</dd>
           <dt><kbd>Shift</kbd> click</dt><dd>Select a range; with <kbd>{MOD}</kbd>, add the range</dd>
           <dt><kbd>{MOD}</kbd><kbd>A</kbd></dt><dd>Select everything in this view, loaded or not</dd>
@@ -260,7 +261,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <dt><kbd>Home</kbd> <kbd>End</kbd></dt><dd>Start or end of the row; with <kbd>{MOD}</kbd> (or <kbd>{MOD}</kbd> + arrows), of everything</dd>
           <dt><kbd>Space</kbd></dt><dd>Select or deselect the focused one</dd>
           <dt>Drag</dt><dd>Onto a shelf (in the grid, the path above it, or the sidebar) to move there; hold <kbd>{MOD === "⌘" ? "⌥" : "Alt"}</kbd> to add instead</dd>
-          <dt>Long press</dt><dd>On a touch screen: start selecting, then tap to add</dd>
+          <dt>Long press</dt><dd>On a touch screen: start selecting, then tap to add or remove</dd>
           <dt><kbd>?</kbd></dt><dd>This list</dd>
         </dl>
       </Sheet>

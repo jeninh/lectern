@@ -226,14 +226,18 @@ read-aloud EPUB).
   verified copy when it crosses filesystems); renaming tracks renames files. Bytes, SHA-256,
   and KOReader document ids are unchanged, so device sync keeps working. Text or audio changes
   re-queue alignment with the same model.
-- **Selecting many.** The Library grid and list (any shelf or filter), Trash, and Review
-  before filing select like a desktop file manager: click selects one, `⌘` (Mac) or `Ctrl`
-  (elsewhere) + click adds or removes one, `Shift` + click selects a range (`⌘/Ctrl` + `Shift`
-  adds it), arrows move in two dimensions (`Shift` extends, `⌘/Ctrl` + arrow and `Home`/`End`
-  jump), `Space` toggles, `Enter` or a double-click opens, `Esc` clears, and dragging across
-  empty space draws a selection rectangle. `⌘/Ctrl A` selects the whole view, including books
-  the page has not drawn yet: the bar says **All N selected** and the server resolves that
-  view itself, refusing if the view no longer holds exactly those books. On a touch screen, press and hold a book to start selecting, then tap to add.
+- **Selecting many.** The Library grid and list (any shelf or filter) work like Google Photos:
+  a click or tap opens a book or shelf until you start selecting with its circle (shown on
+  hover, and on every card while selecting) or, on a touch screen, a long press. While
+  anything is selected, a click or tap anywhere on a card adds or removes it; `Enter` (or
+  **Open** in a shelf's menu) still opens, and deselecting the last one or `Esc` leaves
+  selection mode. Trash and Review before filing select like a desktop file manager, where a
+  click selects one. Everywhere, `⌘` (Mac) or `Ctrl` (elsewhere) + click adds or removes one,
+  `Shift` + click selects a range (`⌘/Ctrl` + `Shift` adds it), arrows move in two dimensions
+  (`Shift` extends, `⌘/Ctrl` + arrow and `Home`/`End` jump), `Space` toggles, `Esc` clears,
+  and dragging across empty space draws a selection rectangle. `⌘/Ctrl A` selects the whole
+  view, including books the page has not drawn yet: the bar says **All N selected** and the
+  server resolves that view itself, refusing if the view no longer holds exactly those books.
 - **Bulk edit.** The selection bar sets author or series, adds or removes tags and shelves
   (up to 500 books), sends to a device (200), queues alignment after a confirmation (50; books
   already aligned are skipped), or trashes many books at once, with one Undo for the batch.
