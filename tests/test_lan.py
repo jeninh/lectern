@@ -183,6 +183,27 @@ def test_pairing_answers_with_the_tailscale_address_too(app, client, owner, kind
     assert r.json()["lan_url"] == LAN_URL
 
 
+@pytest.mark.parametrize(
+    "url", ["http://192.168.1.20:8080", "http://10.1.2.3:8080", "http://lectern.local:8080"]
+)
+def test_the_zips_fallback_address_cannot_be_a_home_address(client, owner, kindle, url):
+    """The plugin uses the zip's address without a check; the home one only after it."""
+    r = get_zip(client, owner["csrf"], kindle["id"], url)
+    assert r.status_code == 422 and r.json()["detail"] == "server_url_is_home"
+
+
+def test_device_url_cannot_be_a_home_address_while_lan_access_is_on(tmp_path):
+    with pytest.raises(ValidationError):
+        Settings(
+            data_dir=tmp_path,
+            lan_port=LAN_PORT,
+            lan_url=LAN_URL,
+            device_url="http://192.168.1.20:8080",
+        )
+    off = Settings(data_dir=tmp_path, device_url="http://192.168.1.20:8080")  # LAN off: as before
+    assert off.device_url == "http://192.168.1.20:8080"
+
+
 def test_zip_status_and_defaults_carry_the_home_address(client, owner, kindle):
     device = unzip(get_zip(client, owner["csrf"], kindle["id"]))
     text = device["lectern.koplugin/lectern_device.lua"].decode()

@@ -89,9 +89,16 @@ It is **off by default**. Turn it on only if you need it.
 ## The KOReader plugin
 
 The zip carries the Tailscale address (*Server address for the e-reader*) and the home address.
+At home the plugin uses the home address for **setup, pairing, progress sync, and Books sent to
+this device**. KOReader's **OPDS catalogue** (Search → OPDS catalog → Lectern) always uses the
+Tailscale address: while it is open, KOReader's catalogue browser keeps its own copies of
+links and the catalogue password that the plugin cannot take back when the device leaves
+home. Without Tailscale, get books onto the e-reader with **Send to device** in Lectern and
+**Tools → Lectern → Books sent to this device**.
+
 The home address is trusted only after a check, and only until the next start, wake from
 sleep, or network change. At each of those the plugin goes back to the Tailscale address at
-once (KOReader's own Progress sync and catalogue settings included), then checks the home
+once (KOReader's own Progress sync settings included), then checks the home
 address a few seconds later; it also checks again on **Sync now** and every 10 minutes. The
 check: the plugin asks the home address to prove it is this device's Lectern: it sends a random nonce, and Lectern answers with
 an HMAC of the nonce keyed by the SHA-256 of a secret the device holds (its catalogue password,
@@ -100,11 +107,17 @@ answer, and nobody else can. Only then does the plugin send credentials there. I
 at a friend's, a different machine may well have the same private address, and the plugin
 does not send it anything secret. It uses Tailscale instead.
 
-A home address entered under **Pair with a code** is treated the same way: the plugin keeps
-Lectern's Tailscale address as the fallback and uses the home one only after the check.
+The Tailscale address is the fallback, used without a check, so it can never be a home
+address: Lectern refuses a home-network address as the zip's *Server address*, and
+**Pair with a code** over the home address keeps the Tailscale address Lectern reports (or the
+one the plugin already had). If neither is known, pairing stops with *Not paired* and asks
+for the Tailscale address instead. If a device ends up with no trusted address at all (for
+example its stored address is itself a home-network one), the plugin removes its credentials
+from KOReader's Progress sync and catalogue settings until an address is trusted again, rather
+than pointing them at a placeholder.
 
-When the choice changes, the plugin rewrites KOReader's Progress sync server and the Lectern
-OPDS entry, so KOReader's own sync and catalogue follow. **Tools → Lectern → status** shows both
+When the choice changes, the plugin rewrites KOReader's Progress sync server, so KOReader's
+own sync follows. **Tools → Lectern → status** shows both
 addresses and which one is in use. If the home address stops answering mid-session, the next
 request retries over Tailscale.
 

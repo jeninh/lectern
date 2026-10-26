@@ -790,7 +790,9 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
     s = out["settings"]
     assert s["server_url"] == base and s["lan_url"] == home and s["active_url"] == home
     assert out["kosync"]["custom_server"] == home + "/"
-    assert out["opds"][0]["url"] == home + "/opds" and len(out["opds"]) == 2
+    # The catalogue stays on Tailscale: KOReader's open OPDS browser keeps copies of links and
+    # credentials that the plugin cannot take back when it leaves home.
+    assert out["opds"][0]["url"] == base + "/opds" and len(out["opds"]) == 2
     with session_factory()() as db:
         assert db.scalar(select(DeviceBootstrap.used_ip)) == "127.0.0.1"
 
@@ -809,7 +811,7 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
     assert out["active"] == base and out["status"] is True
     assert out["settings"].get("active_url", "") == ""
     assert out["kosync"]["custom_server"] == base + "/"
-    assert out["opds"][0]["url"] == base + "/opds" and len(out["opds"]) == 2  # moved, not added
+    assert out["opds"][0]["url"] == base + "/opds" and len(out["opds"]) == 2
     assert seen and all(m == "POST" and p == "/koplugin/hello" for m, p, _ in seen)
     for _, _, headers in seen:
         lowered = {k.lower(): v for k, v in headers.items()}
@@ -861,4 +863,38 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
         sent = json.dumps(headers).lower()
         assert "authorization" not in sent and "x-auth-key" not in sent
         assert s["app_password"].lower() not in sent and s["userkey"].lower() not in sent
+
+    # A stored fallback that is itself a home-network address (a zip made while home Wi-Fi
+    # access was off, with a private LECTERN_DEVICE_URL) and a home address that fails the
+    # check: KOReader's own sync and catalogue lose their credentials instead of pointing at
+    # an unverified host (a placeholder name is no barrier; DNS can answer anything).
+    stale = tmp_path / "stale-fallback"
+    shutil.copytree(paired, stale)
+    lectern_lua = stale / "lectern.lua"
+    lectern_lua.write_text(
+        lectern_lua.read_text()
+        .replace(f'"{base}"', '"http://192.168.7.7:8080"')
+        .replace(impostor_url, dead)
+    )
+    seen.clear()
+    out = lua(plugin, stale, "route")
+    assert out.get("active") is None and out["status"] is False
+    assert "userkey" not in out["kosync"] and "custom_server" not in out["kosync"]
+    lectern_entry = [e for e in out["opds"] if e.get("lectern_device")]
+    assert lectern_entry and "password" not in lectern_entry[0]
+    assert "192.168.7.7" not in json.dumps(out["opds"])
+
+    # Pairing over the home address with no Tailscale address known (the server detects none,
+    # the plugin has no zip file): refused, rather than keeping the home address as fallback.
+    bare = tmp_path / "bare-plugin"
+    shutil.copytree(plugin, bare)
+    (bare / "lectern_device.lua").unlink(missing_ok=True)
+    (bare / "lectern_bootstrap.txt").unlink(missing_ok=True)
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    code = http.post(f"/api/devices/{dev['device']['id']}/pairing-code").json()["code"]
+    settings.lan_url = home
+    out = lua(bare, fresh, "pair", home, "owner", code)
+    assert out["message"].startswith("Not paired"), out["message"]
+    assert not out["paired"] and "server_url" not in out["settings"]
     impostor.shutdown()

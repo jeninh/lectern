@@ -78,6 +78,12 @@ def normalize_lan_url(value: str) -> str:
     return url
 
 
+def is_home_address(url: str) -> bool:
+    """A private IP or ``.local`` host (any scheme): what the plugin never trusts unverified."""
+    host = urlsplit(url).hostname or ""
+    return is_private_ip(host) or (host.endswith(".local") and len(host) > len(".local"))
+
+
 def proof(key_hash: str, nonce: str) -> str:
     """HMAC-SHA256 of the nonce, keyed by the hex SHA-256 of the device's secret."""
     return hmac.new(key_hash.encode(), (PROOF_CONTEXT + nonce).encode(), hashlib.sha256).hexdigest()

@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from lectern import koplugin
+from lectern import koplugin, lan
 from lectern.models import (
     AppPassword,
     BookFile,
@@ -378,6 +378,10 @@ def download_koplugin(
         server_url = koplugin.normalize_server_url(raw)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_server_url") from exc
+    if koplugin.home_url(settings) and lan.is_home_address(server_url):
+        # The zip's address is the plugin's unverified fallback; the home address is added
+        # separately and used only after the plugin verified it (docs/home-network.md).
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "server_url_is_home")
     boot, secret = koplugin.mint_bootstrap(db, key, server_url)
     data = koplugin.build_zip(
         device_lua=koplugin.device_config_lua(

@@ -138,7 +138,7 @@ function HomeNetworkCard() {
           </div>
           <p className="sub" style={{ marginTop: 10 }}>
             Only e-readers use it, over plain http on your own network. The web app, passkeys, and AI apps stay on the Tailscale address. KOReader plugin zips carry both
-            addresses and use this one at home, after checking it really is this Lectern.
+            addresses and use this one at home for progress sync and books sent to the device, after checking it really is this Lectern; the OPDS catalogue stays on Tailscale.
           </p>
         </>
       ) : (

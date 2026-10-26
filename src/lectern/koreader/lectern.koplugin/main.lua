@@ -225,7 +225,7 @@ function Lectern.kosyncFields(t, config)
 end
 
 function Lectern.opdsEntry(servers, config)
-    local url = config.server_url .. "/opds"
+    local url = config.opds_url .. "/opds"
     local entry
     for _, s in ipairs(servers) do
         if s.lectern_device == config.device_id or s.url == url then entry = s break end
@@ -241,11 +241,30 @@ function Lectern.opdsEntry(servers, config)
     entry.lectern_device = config.device_id
 end
 
+--- No trusted address: KOReader's own sync and the Lectern catalogue entry lose their
+-- credentials (a placeholder host is no barrier; any DNS can answer it). The plugin keeps
+-- them and writes them back once an address is trusted again.
+function Lectern:disarmKOReader(config)
+    self:editKOSync(function(t)
+        if t.username == config.username then t.userkey = nil t.custom_server = nil end
+    end)
+    self:editOPDS(function(servers)
+        for _, s in ipairs(servers) do
+            if s.lectern_device == config.device_id then s.password = nil s.username = nil end
+        end
+    end)
+end
+
 function Lectern:configureKOReader(config)
-    if not config.server_url or not config.userkey then return end
+    if not config.userkey then return end
+    if not config.server_url then return self:disarmKOReader(config) end
     local inst = self:editKOSync(function(t) Lectern.kosyncFields(t, config) end)
     if inst and inst.registerEvents then pcall(inst.registerEvents, inst) end
-    self:editOPDS(function(servers) Lectern.opdsEntry(servers, config) end)
+    if config.opds_url then
+        self:editOPDS(function(servers) Lectern.opdsEntry(servers, config) end)
+    else
+        self:disarmKOReader({ username = "\0", device_id = config.device_id })
+    end
     if config.options.offline_mode == "wifi" and Device:hasWifiToggle() then
         G_reader_settings:saveSetting("wifi_enable_action", "turn_on")
     end
@@ -550,6 +569,7 @@ function Lectern:doPair(server, username, code)
         ok = _("Paired. Progress sync and the Lectern catalogue are set up."),
         invalid = _("That code did not work. Codes last 5 minutes and allow 5 tries; show a new one in Lectern if needed."),
         rate_limited = _("Too many tries. Wait a few minutes, then try again."),
+        no_fallback = _("Not paired: Lectern did not say its Tailscale address, and the home Wi-Fi address cannot stand in for it. Show a new code in Lectern and pair with the Tailscale address (http://100.x.y.z:8080) as Server."),
     })[result] or _("Lectern is not reachable. Check Wi-Fi and Tailscale, then try again.")
     UIManager:show(InfoMessage:new{ text = text, timeout = result == "ok" and 4 or nil })
 end

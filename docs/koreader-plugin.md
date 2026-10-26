@@ -167,8 +167,10 @@ later does not ask for it again.
 With [home Wi-Fi access](home-network.md) on, the zip also carries Lectern's home address
 (`LECTERN_LAN_URL`). The plugin uses it whenever the Lectern there proves it is this device's
 server (`POST /koplugin/hello`, a nonce answered with an HMAC keyed by the hash of the device's
-own secret), and Tailscale otherwise, so a Kindle without Tailscale syncs at home. It never
-sends a credential to an address that failed that check.
+own secret), and Tailscale otherwise, so a Kindle without Tailscale syncs at home: setup,
+pairing, progress sync, and Books sent to this device. The OPDS catalogue entry always uses the
+Tailscale address. The plugin sends a credential to the home address only after that check
+passed on the current network.
 
 ## Tailscale on the e-reader
 

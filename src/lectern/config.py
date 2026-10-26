@@ -247,6 +247,13 @@ class Settings(BaseSettings):
     def _lan_port_is_separate(self) -> Settings:
         if self.lan_port and self.lan_port == self.port:
             raise ValueError("LECTERN_LAN_PORT must differ from LECTERN_PORT")
+        from lectern.lan import is_home_address
+
+        if self.lan_port and self.lan_url and self.device_url and is_home_address(self.device_url):
+            raise ValueError(
+                "LECTERN_DEVICE_URL must be the Tailscale address while home Wi-Fi access is on; "
+                "the home address goes in LECTERN_LAN_URL"
+            )
         return self
 
     @property

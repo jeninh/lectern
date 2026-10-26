@@ -85,8 +85,9 @@ export function KOReaderPlugin({ device, onChanged }: { device: Device; onChange
         </p>
         {defaults?.lan_url && (
           <p className="hint">
-            The zip also carries Lectern’s home Wi-Fi address, <code>{defaults.lan_url}</code>. At home the plugin uses it, after checking it really is your Lectern, so the
-            e-reader syncs without Tailscale; elsewhere it uses the address above.
+            The zip also carries Lectern’s home Wi-Fi address, <code>{defaults.lan_url}</code>. At home the plugin uses it for progress sync and
+            Books sent to this device, after checking it really is your Lectern, so the e-reader syncs without Tailscale. The OPDS catalogue and everything away from home
+            use the address above, which must be the Tailscale one.
           </p>
         )}
         {insecureServerUrl(server) && (
