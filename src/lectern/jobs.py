@@ -15,7 +15,15 @@ External workers that advertise the ``transcode`` capability may run these jobs 
 each track is an input named ``track-<track_id>``, the worker uploads every rendition as an
 artifact and then a result naming them, and the server publishes them exactly as the local
 runner does. While such a worker is online the local runner leaves new jobs to it for
-``LECTERN_LOCAL_DEFER_SECONDS``, then runs them itself (the Raspberry Pi fallback).
+``LECTERN_LOCAL_DEFER_SECONDS``, then runs them itself (the Raspberry Pi fallback): one track
+at a time, at the lowest CPU priority, on one thread, under a memory cap
+(``LECTERN_TRANSCODE_MEMORY_LIMIT_MB``). A server without ffmpeg never claims them.
+
+With neither (no ffmpeg here, no transcoding worker online) nothing is queued:
+:func:`transcoder_unavailable` says why, ``POST /api/works/{id}/transcode`` answers
+``503 no_transcoder``, and a job already queued reports the same message until a worker
+calls in. The owner can turn copies off for the library (``instance_settings``) or one work
+(``works.data_saver_enabled``); :func:`delete_renditions` removes a work's copies.
 """
 
 from __future__ import annotations
@@ -81,6 +89,114 @@ def active_job(db: Session, work_id: int, kind: str = TRANSCODE) -> Job | None:
     )
 
 
+def generation_off(db: Session, work: Work) -> str | None:
+    """Why no data-saver copies may be made for ``work``, or ``None`` when they may."""
+    from lectern import instance
+
+    if not instance.get(db, "data_saver_enabled"):
+        return "data_saver_off"
+    if not work.data_saver_enabled:
+        return "data_saver_off_for_work"
+    return None
+
+
+def local_transcoder(settings: Settings) -> bool:
+    """Whether this server makes renditions itself (ffmpeg is installed)."""
+    return shutil.which(settings.ffmpeg_path) is not None
+
+
+def transcoder_unavailable(db: Session, settings: Settings, now=None) -> dict | None:
+    """``None`` when something can make renditions: ffmpeg on this server, or an external
+    worker that advertises ``transcode`` and is online and not paused. Otherwise why not."""
+    if local_transcoder(settings) or queue.capability_online(db, queue.TRANSCODE, now):
+        return None
+    return {
+        "reason": "no_transcoder",
+        "message": "ffmpeg is not installed on this server and no worker that can transcode "
+        f"(lectern worker with ffmpeg) has connected in the last {queue.WORKER_SEEN_S // 60} "
+        "minutes, so a data-saver copy cannot be made.",
+    }
+
+
+def cancel_transcode(db: Session, job: Job) -> None:
+    """Cancel a live transcode job. A local run stops publishing (``_publish_variant`` needs
+    the lease); a worker's result is refused (``queue.hold_lease``). Caller commits."""
+    # Conditional on the row, not this session's copy: a job that finished meanwhile stays
+    # finished (its renditions are published).
+    db.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status.in_(JOB_ACTIVE_STATUSES))
+        .values(
+            status=JobStatus.CANCELLED,
+            lease_token_hash=None,
+            lease_expires_at=None,
+            heartbeat_at=None,
+            finished_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.expire(job)
+
+
+def cancel_all_transcodes(db: Session) -> int:
+    """Cancel every live transcode job (the owner turned data saver off). Caller commits."""
+    jobs = db.scalars(
+        select(Job).where(Job.kind == TRANSCODE, Job.status.in_(JOB_ACTIVE_STATUSES))
+    ).all()
+    for job in jobs:
+        cancel_transcode(db, job)
+    return len(jobs)
+
+
+def delete_renditions(db: Session, settings: Settings, work: Work) -> int:
+    """Cancel the work's transcode job and delete every rendition in its ``derived/audio``
+    folder (stale ones of replaced tracks too). Originals are not touched. Returns the bytes
+    freed. Caller commits; the copies can be made again."""
+    from lectern.fsops import LIBRARY_LOCK
+
+    job = active_job(db, work.id)
+    if job is not None:
+        cancel_transcode(db, job)
+        db.commit()
+    freed = 0
+    with LIBRARY_LOCK:
+        db.refresh(work)
+        folder = settings.library_dir / work.dir_path / "derived" / "audio"
+        if not folder.is_dir() or folder.is_symlink():
+            return 0
+        for p in folder.iterdir():
+            rendition = p.suffix.lstrip(".") in EXT.values()
+            sidecar = p.name.endswith(".sha256") or p.name.endswith(".tmp")
+            if p.is_symlink() or not p.is_file() or not (rendition or sidecar):
+                continue
+            if rendition:
+                freed += p.stat().st_size
+            p.unlink(missing_ok=True)
+    return freed
+
+
+def rendition_sizes(settings: Settings, work: Work, tracks) -> tuple[int, int, int]:
+    """``(tracks with a rendition, their originals' bytes, the renditions' bytes)``."""
+    have = original = low = 0
+    for t in tracks:
+        found = find_variant(settings.library_dir, work, t.sha256)
+        if found is not None:
+            have += 1
+            original += t.size
+            low += found[0].stat().st_size
+    return have, original, low
+
+
+def auto_enqueue(db: Session, settings: Settings, work: Work) -> Job | None:
+    """After an audiobook import with ``LECTERN_AUDIO_LOW_AUTO``: queue renditions when the
+    library and the work allow them and something can make them; otherwise nothing is queued
+    (the owner can make them later). Caller commits."""
+    if generation_off(db, work) or transcoder_unavailable(db, settings):
+        log.info("no data-saver copy queued for work %s: off or no transcoder", work.id)
+        return None
+    return enqueue_transcode(db, settings, work)
+
+
 def enqueue_transcode(
     db: Session, settings: Settings, work: Work, user_id: int | None = None
 ) -> Job | None:
@@ -119,9 +235,19 @@ def enqueue_transcode(
     return job
 
 
-def _ffmpeg_args(ffmpeg: str, src: Path, dest: Path, codec: str, kbps: int) -> list[str]:
-    args = [ffmpeg, "-nostdin", "-v", "error", "-y", "-i", str(src),
-            "-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1"]  # fmt: skip
+def _ffmpeg_args(
+    ffmpeg: str, src: Path, dest: Path, codec: str, kbps: int, *, threads: int | None = None
+) -> list[str]:
+    """One track, same timeline: the first audio stream from 0 s, nothing trimmed or padded.
+    Encoder priming is recorded in the container (an MP4 edit list, Ogg pre-skip), so players
+    start at the same sample as the original (docs/contracts.md, "seek tolerance")."""
+    args = [ffmpeg, "-nostdin", "-v", "error", "-y"]
+    if threads:
+        args += ["-threads", str(threads)]
+    args += ["-i", str(src),
+             "-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1"]  # fmt: skip
+    if threads:
+        args += ["-threads", str(threads)]
     if codec == "opus":
         args += ["-c:a", "libopus", "-b:a", f"{kbps}k", "-vbr", "on", "-f", "ogg"]
     else:
@@ -129,17 +255,43 @@ def _ffmpeg_args(ffmpeg: str, src: Path, dest: Path, codec: str, kbps: int) -> l
     return [*args, str(dest)]
 
 
+def _throttle(memory_mb: int):
+    """``preexec_fn`` for the server's own ffmpeg: lowest CPU priority, no core dumps, and
+    the address space capped (best effort where the platform refuses a limit). Only plain
+    system calls run in the forked child: ``resource`` is imported here, in the parent."""
+    import resource
+
+    def limit() -> None:
+        limits = [(resource.RLIMIT_CORE, 0)]
+        if memory_mb:
+            limits.append((resource.RLIMIT_AS, memory_mb * 1024 * 1024))
+        for which, value in limits:
+            try:
+                resource.setrlimit(which, (value, value))
+            except (ValueError, OSError):
+                pass
+        try:
+            os.nice(19)
+        except OSError:
+            pass
+
+    return limit
+
+
 def transcode_track(settings: Settings, src: Path, dest: Path, codec: str, kbps: int) -> None:
-    if shutil.which(settings.ffmpeg_path) is None:
+    """Render one track on this server (the Raspberry Pi fallback), throttled so playback and
+    sync stay responsive: one thread, ``nice`` 19, ``LECTERN_TRANSCODE_MEMORY_LIMIT_MB``."""
+    if not local_transcoder(settings):
         raise RuntimeError("ffmpeg is not installed")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     try:
         res = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            _ffmpeg_args(settings.ffmpeg_path, src, tmp, codec, kbps),
+            _ffmpeg_args(settings.ffmpeg_path, src, tmp, codec, kbps, threads=1),
             capture_output=True,
             timeout=6 * 3600,
             check=False,
+            preexec_fn=_throttle(settings.transcode_memory_limit_mb),
         )
         if res.returncode != 0:
             raise RuntimeError(res.stderr.decode(errors="replace")[-500:] or "ffmpeg failed")
@@ -196,6 +348,10 @@ def run_transcode(db: Session, settings: Settings, job: Job) -> None:
     done = 0
     try:
         for item in payload.get("tracks", []):
+            db.refresh(job)
+            if job.status != JobStatus.LEASED:
+                log.info("transcode job %s stopped: %s", job.id, job.status.value)
+                return  # cancelled (data saver turned off, copies deleted) meanwhile
             track = db.get(AudioTrack, item["track_id"])
             if track is None or track.sha256 != item["sha256"] or work is None:
                 continue  # track replaced or removed since enqueue
@@ -225,6 +381,9 @@ def run_transcode(db: Session, settings: Settings, job: Job) -> None:
         job.finished_at = utcnow()
         db.commit()
         return
+    db.refresh(job)
+    if job.status != JobStatus.LEASED:
+        return
     job.status = JobStatus.SUCCEEDED
     job.result = {"done": done, "total": len(payload.get("tracks", []))}
     job.finished_at = utcnow()
@@ -252,12 +411,15 @@ def _publish_variant(db, settings, job, work, sha256: str, codec: str, scratch: 
 
 def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
     """Run every queued in-process job now. Returns how many ran. Conversions (``pdf2epub``)
-    never wait for a transcode worker: they are claimed first, without the deferral."""
+    never wait for a transcode worker: they are claimed first, without the deferral.
+    Transcodes run here only with ffmpeg; otherwise they wait for an external worker (and
+    say so, :func:`transcoder_unavailable`)."""
+    transcodes = local_transcoder(settings)
     n = 0
     while True:
         with session_factory() as db:
             claimed = claim(db, kinds=(PDF2EPUB,))
-            if claimed is None:
+            if claimed is None and transcodes:
                 claimed = claim(db, defer_s=settings.local_defer_seconds)
             if claimed is None:
                 return n

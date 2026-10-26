@@ -11,7 +11,6 @@ import base64
 import pytest
 import sqlalchemy as sa
 from alembic import command
-from sqlalchemy.orm import Session
 from tests.conftest import (
     ORIGIN,
     OWNER_PASSWORD,
@@ -278,17 +277,33 @@ def test_deleting_a_shelf_with_things_in_it(client, lib):
     assert tree(client)["Inner"]["id"] == inner and tree(client)["Inner"]["work_count"] == 1
 
 
+def insert_as_of(conn, model, **values) -> None:
+    """Insert a row into the table as the database has it now (an older revision): the given
+    values, and the model's Python defaults for the other columns that exist."""
+    table = sa.Table(model.__tablename__, sa.MetaData(), autoload_with=conn)
+    row = {}
+    for col in table.columns:
+        current = model.__table__.c.get(col.name)
+        if col.name in values:
+            row[col.name] = values[col.name]
+        elif current is not None and current.default is not None:
+            arg = current.default.arg
+            row[col.name] = arg(None) if callable(arg) else arg
+    conn.execute(table.insert().values(**row))
+
+
 def test_existing_shelves_become_top_level_and_downgrade_keeps_them(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'm.db'}")
     cfg = alembic_config(str(engine.url))
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
         command.upgrade(cfg, "0013")
-    with Session(engine) as db:  # the users table is the same before and after
+    with engine.begin() as conn:  # rows as of 0013: later migrations add columns to both
         for uid, name in ((1, "owner"), (2, "mia")):
-            db.add(User(id=uid, username=name, role=Role.OWNER, webauthn_user_handle=b"h" * 32))
-        db.add(Work(id=1, title="T", sort_title="t", author="A", sort_author="a", dir_path="t"))
-        db.commit()
+            insert_as_of(conn, User, id=uid, username=name, role=Role.OWNER.name,
+                         webauthn_user_handle=b"h" * 32)  # fmt: skip
+        insert_as_of(conn, Work, id=1, title="T", sort_title="t", author="A", sort_author="a",
+                     dir_path="t")  # fmt: skip
     with engine.begin() as conn:
         for sid, owner, name in ((1, 1, "Kids"), (2, 1, "Classics"), (3, 2, "Kids")):
             conn.execute(

@@ -87,12 +87,15 @@ def _preferences(user: User) -> dict:
     return {
         "show_technical_details": user.show_technical_details,
         "auto_file_imports": user.auto_file_imports,
+        "data_saver": user.data_saver,
     }
 
 
 class PreferencesIn(BaseModel):
     show_technical_details: bool | None = None
     auto_file_imports: bool | None = None
+    # The account's default; a device can choose otherwise in its player.
+    data_saver: bool | None = None
 
 
 @router.post("/me/preferences")
@@ -104,6 +107,8 @@ def update_preferences(auth: AuthCsrf, db: DbDep, body: PreferencesIn) -> dict:
         if auth.user.role == Role.READER:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
         auth.user.auto_file_imports = body.auto_file_imports
+    if body.data_saver is not None:
+        auth.user.data_saver = body.data_saver
     db.commit()
     return {"preferences": _preferences(auth.user)}
 

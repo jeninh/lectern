@@ -7,7 +7,7 @@ import { Sheet } from "../components/Sheet";
 import { WorkersCard } from "../components/WorkersCard";
 import { PageTitle } from "../components/Shell";
 import { del, get, post, put } from "../lib/api";
-import { absoluteTime, relativeTime } from "../lib/format";
+import { absoluteTime, bytes, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { Invite, User } from "../lib/types";
 import { CapForm } from "./Devices";
@@ -43,6 +43,73 @@ function LibrarySettingsCard() {
           <span aria-hidden="true" />
         </button>
       </div>
+    </section>
+  );
+}
+
+interface DataSaverStatus {
+  enabled: boolean;
+  codec: string;
+  bitrate_kbps: number;
+  auto: boolean;
+  local_ffmpeg: boolean;
+  worker_online: boolean;
+  unavailable: { message: string } | null;
+  audiobooks: number;
+  with_copies: number;
+  original_bytes: number;
+  low_bytes: number;
+  jobs: { queued: number; running: number };
+}
+
+/** Data-saver copies for the whole library: the switch, what makes them, and what they save. */
+function DataSaverCard() {
+  const { toast, refreshMe } = useStore();
+  const [s, setS] = useState<DataSaverStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => get<DataSaverStatus>("/api/admin/data-saver").then(setS, () => {}), []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  const flip = async () => {
+    if (!s) return;
+    setBusy(true);
+    try {
+      await put("/api/library-settings", { data_saver_enabled: !s.enabled });
+      await Promise.all([refreshMe(), load()]);
+      toast(s.enabled ? "Data-saver copies turned off. Existing copies stay until deleted." : "Data-saver copies turned on.");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const maker = !s ? "" : s.worker_online
+    ? `A connected worker makes them${s.local_ffmpeg ? "; this server takes over when it is away or slow" : ""}.`
+    : s.local_ffmpeg
+      ? "This server makes them with ffmpeg, one file at a time at low priority."
+      : "";
+  return (
+    <section className="card" id="data-saver" aria-labelledby="dsadm-h" style={{ marginTop: 18 }}>
+      <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+        <div>
+          <h2 id="dsadm-h">Data-saver copies</h2>
+          <p className="sub" id="dsadm-sub">
+            Smaller {s ? `${s.bitrate_kbps} kb/s ${s.codec.toUpperCase()}` : ""} copies of audiobooks for phones and offline downloads, kept next to the originals, which are never changed. {maker} Each book can opt out in its editor. On by default.
+          </p>
+        </div>
+        <button type="button" role="switch" className="switch" aria-checked={!!s?.enabled} aria-labelledby="dsadm-h" aria-describedby="dsadm-sub" onClick={flip} disabled={busy || !s}>
+          <span aria-hidden="true" />
+        </button>
+      </div>
+      {s && (
+        <p className="hint" id="dsadm-status">
+          {s.with_copies} of {s.audiobooks} {s.audiobooks === 1 ? "audiobook has" : "audiobooks have"} a copy
+          {s.low_bytes > 0 ? `: ${bytes(s.low_bytes)} instead of ${bytes(s.original_bytes)} (${bytes(Math.max(0, s.original_bytes - s.low_bytes))} saved)` : ""}.
+          {s.jobs.queued + s.jobs.running > 0 ? ` ${s.jobs.running} being made, ${s.jobs.queued} waiting.` : ""}
+          {s.unavailable ? ` ${s.unavailable.message}` : ""}
+        </p>
+      )}
     </section>
   );
 }
@@ -122,6 +189,7 @@ export function AdminPage() {
       <InvitesCard />
       <WorkersCard />
       <LibrarySettingsCard />
+      <DataSaverCard />
       <BackupsCard />
       {me?.user.role === "owner" && <OfflineModeCard />}
       {me?.user.role === "owner" && <ElevenLabsCard />}

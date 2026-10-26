@@ -277,9 +277,9 @@ class InboxWatcher:
                 db.rollback()
                 raise
             if self.settings is not None and self.settings.audio_low_auto:
-                from lectern.jobs import enqueue_transcode
+                from lectern.jobs import auto_enqueue
 
-                enqueue_transcode(db, self.settings, result.work)
+                auto_enqueue(db, self.settings, result.work)
                 db.commit()
         log.info(
             "ingested audio %s -> %s/%s (%s work #%d%s)",

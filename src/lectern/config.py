@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     audio_low_bitrate_kbps: int = Field(default=64, ge=16, le=192)
     # Queue a data-saver rendition automatically after every audiobook import.
     audio_low_auto: bool = False
+    # The server's own transcodes (the Raspberry Pi fallback) run one track at a time, at the
+    # lowest CPU priority, on one thread, with ffmpeg's address space capped at this many MiB
+    # (0 = no cap of our own). External workers use their own limits.
+    transcode_memory_limit_mb: int = Field(default=1024, ge=0)
 
     # Alignment (text <-> audio). The in-process worker runs only when faster-whisper is
     # installed (`lectern[align]`); a weak host sets LECTERN_ALIGN_LOCAL_WORKER=0 and runs

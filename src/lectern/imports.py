@@ -744,9 +744,9 @@ def file(
     ensure_text_sentences(db, library, work.id)
     align_jobs.refresh_work(db, library, work)
     if audio and settings.audio_low_auto:
-        from lectern.jobs import enqueue_transcode
+        from lectern.jobs import auto_enqueue
 
-        enqueue_transcode(db, settings, work)
+        auto_enqueue(db, settings, work)
     imp.status, imp.work_id, imp.filed_at, imp.auto_filed = (
         ImportStatus.FILED,
         work.id,

@@ -150,6 +150,7 @@ class WorkPatch(BaseModel):
     primary_file_id: int | None = None
     playback_default: PlaybackDefault = None
     readalong_enabled: bool | None = None
+    data_saver_enabled: bool | None = None
     tracks: list[TrackEdit] | None = Field(default=None, max_length=5000)
     remove_file_ids: list[int] = Field(default_factory=list, max_length=200)
     remove_track_ids: list[int] = Field(default_factory=list, max_length=5000)
@@ -551,6 +552,14 @@ def save(
     if patch.readalong_enabled is not None:
         record("readalong_enabled", work.readalong_enabled, patch.readalong_enabled)
         work.readalong_enabled = patch.readalong_enabled
+    if patch.data_saver_enabled is not None:
+        record("data_saver_enabled", work.data_saver_enabled, patch.data_saver_enabled)
+        work.data_saver_enabled = patch.data_saver_enabled
+        if not patch.data_saver_enabled:
+            from lectern.jobs import active_job, cancel_transcode
+
+            if (job := active_job(db, work.id)) is not None:
+                cancel_transcode(db, job)
 
     if patch.tracks is not None:
         current = [t for t in old_tracks if t.id in tracks]
@@ -705,6 +714,8 @@ def undo(
         work.playback_default = b["playback_default"]
     if "readalong_enabled" in b:
         work.readalong_enabled = b["readalong_enabled"]
+    if "data_saver_enabled" in b:
+        work.data_saver_enabled = b["data_saver_enabled"]
     if "tracks" in b:
         current = {t.id: t for t in ordered_tracks(db, work.id)}
         plan = []

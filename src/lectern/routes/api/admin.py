@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 
-from lectern import backups, egress, instance, offline_mode
+from lectern import backups, egress, instance, offline_mode, queue
 from lectern.db import session_factory
 from lectern.models import AuditLog, Role, User, utcnow
 from lectern.routes.api.serializers import iso, user_json
@@ -165,6 +165,47 @@ def server_settings(auth: OwnerRead, settings: SettingsDep) -> dict:
         "audio_low_codec": settings.audio_low_codec,
         "audio_low_bitrate_kbps": settings.audio_low_bitrate_kbps,
         "audio_low_auto": settings.audio_low_auto,
+        "transcode_memory_limit_mb": settings.transcode_memory_limit_mb,
+    }
+
+
+@router.get("/data-saver")
+def data_saver_status(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict:
+    """Data-saver copies across the library: on or off, what can make them, what exists and
+    what it saves, and the jobs still to run (Admin; the switch is ``PUT /api/library-settings``)."""
+    from lectern import jobs
+    from lectern.models import JOB_ACTIVE_STATUSES, AudioTrack, Job, Work
+
+    tracks: dict[int, list] = {}
+    for t in db.scalars(select(AudioTrack)):
+        tracks.setdefault(t.work_id, []).append(t)
+    works = covered = original = low = 0
+    for work in db.scalars(
+        select(Work).where(Work.id.in_(list(tracks)), Work.trashed_at.is_(None))
+    ):
+        works += 1
+        have, o, lo = jobs.rendition_sizes(settings, work, tracks[work.id])
+        covered += 1 if have else 0
+        original, low = original + o, low + lo
+    active = db.scalars(
+        select(Job.status).where(Job.kind == jobs.TRANSCODE, Job.status.in_(JOB_ACTIVE_STATUSES))
+    ).all()
+    return {
+        "enabled": instance.get(db, "data_saver_enabled"),
+        "codec": settings.audio_low_codec,
+        "bitrate_kbps": settings.audio_low_bitrate_kbps,
+        "auto": settings.audio_low_auto,
+        "local_ffmpeg": jobs.local_transcoder(settings),
+        "worker_online": queue.capability_online(db, queue.TRANSCODE),
+        "unavailable": jobs.transcoder_unavailable(db, settings),
+        "audiobooks": works,
+        "with_copies": covered,
+        "original_bytes": original,
+        "low_bytes": low,
+        "jobs": {
+            "queued": sum(1 for s in active if s.value == "queued"),
+            "running": sum(1 for s in active if s.value == "leased"),
+        },  # fmt: skip
     }
 
 

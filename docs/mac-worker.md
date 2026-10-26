@@ -109,7 +109,7 @@ only to a worker that has its capability ([contracts](contracts.md#capabilities-
 | --- | --- | --- |
 | `align` | **mlx-whisper** on the GPU (`mlx-community/whisper-<model>-mlx`), same windows and matcher as the CPU engine. Falls back to faster-whisper on the CPU when MLX cannot load (no Metal device, blocked download) or fails mid-job; the window is redone and the rest of the run stays on the CPU | The server's local worker, if built with `LECTERN_EXTRAS=align` |
 | `tts-kokoro` | **Kokoro-82M** (`kokoro` package, PyTorch on MPS), one sentence at a time so every sentence's timing is exact; chapters encoded with ffmpeg | Piper on the Pi (the generated-audiobooks feature decides when to fall back) |
-| `transcode` | ffmpeg (data-saver renditions) | ffmpeg on the server |
+| `transcode` | ffmpeg (data-saver renditions), installed by the one-command installer | ffmpeg on the server, one track at a time at `nice` 19 on one thread under `LECTERN_TRANSCODE_MEMORY_LIMIT_MB`; with neither, the player and editor say a copy cannot be made |
 | `tts-elevenlabs` | never: server only, the ElevenLabs key never leaves the server | the server |
 | `ocr` | reserved | — |
 

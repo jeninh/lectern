@@ -88,7 +88,7 @@ def enable(client, csrf, on=True):
 
 def test_off_by_default_and_only_the_owner_turns_it_on(client, owner, fake):
     csrf = owner["csrf"]
-    assert client.get("/api/me").json()["library_settings"] == {"metadata_lookup_enabled": False}
+    assert client.get("/api/me").json()["library_settings"]["metadata_lookup_enabled"] is False
     r = api_post(client, "/api/metadata/lookup", csrf, {"isbn": "9780441478125"})
     assert r.status_code == 403 and r.json()["detail"] == "lookup_disabled"
     assert fake.urls == []  # nothing left the server
@@ -101,7 +101,7 @@ def test_off_by_default_and_only_the_owner_turns_it_on(client, owner, fake):
         == 403
     )
     assert client.get("/api/library-settings").json() == {
-        "settings": {"metadata_lookup_enabled": False},
+        "settings": {"metadata_lookup_enabled": False, "data_saver_enabled": True},
         "can_change": False,
     }
     csrf = login(client, "owner", "correct horse battery staple")

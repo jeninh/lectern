@@ -9,6 +9,7 @@ import { canPrompt, isStandalone, onInstallChange, platformOf, promptInstall } f
 import { cancel, type Choice, defaultChoice, lowWorthIt, download, DownloadError, downloading, manifestFor, mb, type OfflineManifest, plannedBytes, remove, storageInfo, type StorageInfo } from "../lib/offline/store";
 import { applyUpdate, flush, onSync, onUpdateReady, resolveConflict, syncState, type SyncState } from "../lib/offline/sync";
 import type { QueuedPosition } from "../lib/offline/queue";
+import { deviceDataSaver } from "../lib/player";
 import { useStore } from "../lib/store";
 import type { Work } from "../lib/types";
 import { Check, Download, Sync } from "./Icons";
@@ -193,10 +194,9 @@ export function DownloadButton({ work }: { work: Work }) {
 }
 
 export function DownloadSheet({ work, open, onClose }: { work: Work; open: boolean; onClose: () => void }) {
-  const { offlineBooks, toast, online } = useStore();
+  const { offlineBooks, toast, online, me } = useStore();
   const have = offlineBooks.find((b) => b.id === work.id);
   const [fullQuality, setFullQuality] = useLocalStorage<boolean>("lectern.offline.fullQuality", false);
-  const [dataSaver] = useLocalStorage<boolean>("lectern.dataSaver", false);
   const [m, setM] = useState<OfflineManifest | null>(null);
   const [choice, setChoice] = useState<Choice | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -211,6 +211,8 @@ export function DownloadSheet({ work, open, onClose }: { work: Work; open: boole
     manifestFor(work.id).then(
       (x) => {
         setM(x);
+        // Data saver on here (this device's choice, else the account's) keeps it the default.
+        const dataSaver = deviceDataSaver() ?? !!me?.preferences.data_saver;
         setChoice(have?.choice ?? defaultChoice(x, fullQuality && !dataSaver));
       },
       (e) => setErr((e as Error).message),

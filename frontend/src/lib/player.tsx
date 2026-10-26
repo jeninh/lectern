@@ -32,7 +32,10 @@ interface Player {
   loading: boolean;
   rate: number;
   sleep: Sleep;
+  /** Whether data saver is in effect here: this device's choice, else the account's default. */
   dataSaver: boolean;
+  /** This device's own choice, or null when it follows the account (Security page). */
+  dataSaverDevice: boolean | null;
   usingLow: boolean;
   handoff: HandoffCandidate | null;
   open: (work: Work, opts?: { autoplay?: boolean; at?: number }) => Promise<void>;
@@ -44,7 +47,8 @@ interface Player {
   skip: (delta: number) => void;
   setRate: (r: number) => void;
   setSleep: (s: "chapter" | number | null) => void;
-  setDataSaver: (v: boolean) => Promise<void>;
+  /** Choose for this device; null follows the account's default again. */
+  setDataSaver: (v: boolean | null) => Promise<void>;
   nextChapter: () => void;
   prevChapter: () => void;
   acceptHandoff: () => void;
@@ -75,6 +79,18 @@ function writeMark(id: number, m: Mark) {
   }
 }
 
+/** This device's data-saver choice (null: follow the account). Read when needed, so a sheet
+ * opened later sees a change the player made. */
+export const DATA_SAVER_KEY = "lectern.dataSaver";
+export function deviceDataSaver(): boolean | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(DATA_SAVER_KEY) || "null");
+    return typeof v === "boolean" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 export function chaptersOf(tracks: Track[]): GlobalChapter[] {
   const flat = tracks.flatMap((tr) =>
     (tr.chapters.length ? tr.chapters : [{ title: `Part ${tr.position + 1}`, start_s: 0 }]).map((c) => ({ title: c.title, start: tr.offset_s + c.start_s })),
@@ -90,7 +106,7 @@ export function trackAt(tracks: Track[], t: number): number {
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
-  const { deviceName, toast } = useStore();
+  const { deviceName, toast, me } = useStore();
   const audio = useRef<HTMLAudioElement | null>(null);
   const [work, setWork] = useState<Work | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -99,7 +115,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
   const [rate, setRateState] = useLocalStorage<number>("lectern.playbackRate", 1);
-  const [dataSaver, setDataSaverState] = useLocalStorage<boolean>("lectern.dataSaver", false);
+  const [dataSaverDevice, setDataSaverState] = useLocalStorage<boolean | null>(DATA_SAVER_KEY, null);
+  const dataSaver = dataSaverDevice ?? !!me?.preferences.data_saver;
   const [sleep, setSleepState] = useState<Sleep>(null);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [usingLow, setUsingLow] = useState(false);
@@ -243,9 +260,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (audio.current) audio.current.volume = 1;
   }, [chapter]);
 
-  const setDataSaver = useCallback(async (v: boolean) => {
+  const setDataSaver = useCallback(async (v: boolean | null) => {
     const w = state.current.work;
-    if (v && w && !state.current.local) {
+    if ((v ?? !!me?.preferences.data_saver) && w && !state.current.local) {
       // A data-saver copy may have been made since the tracks were loaded.
       try {
         const tr = await get<TracksResponse>(`/api/works/${w.id}/tracks`);
@@ -258,7 +275,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
     }
     setDataSaverState(v);
-  }, [setDataSaverState]);
+  }, [setDataSaverState, me?.preferences.data_saver]);
   // Switching renditions keeps the place (timings are the same in both).
   useEffect(() => {
     const el = audio.current;
@@ -442,8 +459,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [handoff, work, t]);
 
   const value = useMemo<Player>(
-    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, sleep, dataSaver, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
-    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, sleep, dataSaver, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
+    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
+    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
   );
   void index;
   return (

@@ -70,8 +70,9 @@ Open a book and tap **Download**. Choose what to keep:
 - **Book (EPUB)** and/or **PDF**.
 - **Audiobook**, as **data saver** (the ~64 kb/s copy the server makes with ffmpeg, see the
   README) or **full quality**. Data saver is the default when the book has one and it is
-  smaller; the **Full quality** switch remembers your choice. If the player's data-saver
-  preference is on, data saver stays the default. Without a data-saver copy, full quality is
+  smaller; the **Full quality** switch remembers your choice. If data saver is on for this
+  device (its player switch, or your account's setting in Security when the device has not
+  chosen), data saver stays the default. Without a data-saver copy, full quality is
   the only option (an owner or member can make one from the player).
 - **Read-along**: the sentence list with audio times and the chapter text, when the book is
   aligned (needs the EPUB and the audiobook).
