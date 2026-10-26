@@ -169,6 +169,8 @@ stream and transcribed in overlapping windows, so memory stays flat however long
 Models are cached under `<LECTERN_DATA_DIR>/models` (the server) or the Hugging Face cache
 (workers; `--models-dir` to change it). The image sets `HF_HOME=/data/huggingface` so the
 read-only container can download into its data volume.
+In offline mode the server never downloads one: run `lectern prepare-models` (or Admin →
+Offline mode → Download models now) first ([offline-mode.md](offline-mode.md)).
 
 ## Matching
 

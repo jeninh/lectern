@@ -28,7 +28,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from lectern import __version__
+from lectern import __version__, egress
 
 ORIGIN = "https://api.elevenlabs.io"
 HOST = "api.elevenlabs.io"
@@ -44,6 +44,8 @@ BACKOFF_MAX_S = 60.0
 CHUNK_MAX_CHARS = 2000
 # Credits per character when /v1/models does not say (Flash and Turbo bill half).
 _HALF_RATE = ("eleven_flash", "eleven_turbo")
+
+OFFLINE_MESSAGE = "unavailable while Lectern is in offline mode (Admin → Offline mode)"
 
 # (method, path_and_query, headers, body) -> (status, headers, body)
 Transport = Callable[[str, str, dict, bytes | None], tuple[int, dict, bytes]]
@@ -87,6 +89,8 @@ def https_transport(method: str, path: str, headers: dict, body: bytes | None):
     except ElevenLabsError:
         raise
     except (TimeoutError, urllib.error.URLError, OSError, ssl.SSLError) as exc:
+        if isinstance(getattr(exc, "reason", exc), egress.OfflineError):
+            raise ElevenLabsError("offline", OFFLINE_MESSAGE) from exc
         raise ElevenLabsError(
             "network", f"could not reach ElevenLabs: {exc}", retryable=True
         ) from exc
@@ -138,6 +142,8 @@ class Client:
         attempt = 0
         while True:
             rheaders: dict = {}
+            if egress.offline():  # retries included: turning offline mode on stops the next one
+                raise ElevenLabsError("offline", OFFLINE_MESSAGE)
             headers["xi-api-key"] = self._key()
             try:
                 status, rheaders, data = self._transport(method, path, headers, raw)

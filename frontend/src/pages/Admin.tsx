@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Copy, Link2, Plus, Users as UsersIcon } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
-import { BackupsCard } from "../components/Maintenance";
+import { BackupsCard, OfflineModeCard } from "../components/Maintenance";
 import { Sheet } from "../components/Sheet";
 import { WorkersCard } from "../components/WorkersCard";
 import { PageTitle } from "../components/Shell";
@@ -123,6 +123,7 @@ export function AdminPage() {
       <WorkersCard />
       <LibrarySettingsCard />
       <BackupsCard />
+      {me?.user.role === "owner" && <OfflineModeCard />}
       {me?.user.role === "owner" && <ElevenLabsCard />}
       <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for @${capFor.username}` : ""} variant="dialog" labelledBy="ucap-title">
         {capFor && (

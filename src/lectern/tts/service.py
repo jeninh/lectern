@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from lectern import integrations, queue
+from lectern import egress, integrations, queue
 from lectern.align.tracks import sync_tracks, work_tracks
 from lectern.config import Settings
 from lectern.ingest import formats
@@ -215,10 +215,12 @@ def catalog(db: Session, settings: Settings, user: User) -> dict:
         {
             "id": eng.ELEVENLABS,
             "name": "ElevenLabs",
-            "available": el_ok and user.role == Role.OWNER,
+            "available": el_ok and user.role == Role.OWNER and not egress.offline(),
             "runs_on": "server" if el_ok else None,
             "note": (
-                "Your ElevenLabs account. The book's text is sent to ElevenLabs."
+                "Unavailable: Lectern is in offline mode (Admin → Offline mode)."
+                if egress.offline()
+                else "Your ElevenLabs account. The book's text is sent to ElevenLabs."
                 if el_ok
                 else "Add your ElevenLabs API key in Admin → Integrations."
             ),

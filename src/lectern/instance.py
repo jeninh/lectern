@@ -7,8 +7,11 @@ from sqlalchemy.orm import Session
 from lectern.models import InstanceSetting
 
 # key -> default. Metadata lookup sends titles, authors, and ISBNs to Open Library and Google
-# Books, so it is off until the owner turns it on.
-DEFAULTS: dict[str, bool] = {"metadata_lookup_enabled": False}
+# Books, so it is off until the owner turns it on. Offline mode (lectern.offline_mode) refuses
+# every outbound internet connection.
+DEFAULTS: dict[str, bool] = {"metadata_lookup_enabled": False, "offline_mode": False}
+# The library settings editors see and the owner changes through /api/library-settings.
+LIBRARY = ("metadata_lookup_enabled",)
 
 
 def get(db: Session, key: str) -> bool:
@@ -17,7 +20,7 @@ def get(db: Session, key: str) -> bool:
 
 
 def all_settings(db: Session) -> dict[str, bool]:
-    return {k: get(db, k) for k in DEFAULTS}
+    return {k: get(db, k) for k in LIBRARY}
 
 
 def set_value(db: Session, key: str, value: bool, user_id: int) -> None:

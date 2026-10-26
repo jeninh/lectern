@@ -1,4 +1,4 @@
-"""Owner-only user management, audit log, and backups."""
+"""Owner-only user management, audit log, backups, and offline mode."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 
-from lectern import backups
+from lectern import backups, egress, instance, offline_mode
 from lectern.db import session_factory
 from lectern.models import AuditLog, Role, User, utcnow
 from lectern.routes.api.serializers import iso, user_json
@@ -262,3 +262,51 @@ def run_backup_now(request: Request, auth: OwnerWrite, db: DbDep, settings: Sett
         daemon=True,
     ).start()
     return {**_backup_view(db, settings), "running": True}
+
+
+# --- offline mode (docs/offline-mode.md) ------------------------------------------------------------
+
+
+@router.get("/offline-mode")
+def offline_mode_view(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict:
+    return offline_mode.report(db, settings)
+
+
+class OfflineModeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+@router.put("/offline-mode")
+def set_offline_mode(
+    request: Request, auth: OwnerWrite, db: DbDep, settings: SettingsDep, body: OfflineModeIn
+) -> dict:
+    if offline_mode.forced(settings) and not body.enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, "offline_forced")
+    if instance.get(db, offline_mode.KEY) != body.enabled:
+        instance.set_value(db, offline_mode.KEY, body.enabled, auth.user.id)
+        audit.record(
+            db,
+            "settings.change",
+            actor_user_id=auth.user.id,
+            target=offline_mode.KEY,
+            ip=client_ip(request),
+            detail="on" if body.enabled else "off",
+        )
+        db.commit()
+    offline_mode.apply(db, settings)
+    return offline_mode.report(db, settings)
+
+
+@router.post("/offline-mode/prepare", status_code=status.HTTP_202_ACCEPTED)
+def prepare_models(request: Request, auth: OwnerWrite, db: DbDep, settings: SettingsDep) -> dict:
+    """Download the alignment model and TTS voices now (`lectern prepare-models` in a child
+    process); poll GET /api/admin/offline-mode for its progress."""
+    if egress.offline():
+        raise HTTPException(status.HTTP_409_CONFLICT, "offline")
+    if not offline_mode.start_prepare(getattr(request.app.state, "prepare_command", None)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "prepare_running")
+    audit.record(db, "offline.prepare", actor_user_id=auth.user.id, ip=client_ip(request))
+    db.commit()
+    return offline_mode.report(db, settings)

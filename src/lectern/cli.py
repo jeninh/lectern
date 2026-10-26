@@ -13,6 +13,8 @@
 - ``lectern backup [--list]``: back up now with the settings saved in Admin, or list backups.
 - ``lectern restore [SNAPSHOT]``: restore a backup with the server stopped; ``--resume`` or
   ``--undo`` an interrupted one (docs/backups.md).
+- ``lectern prepare-models``: download the alignment model and TTS voices ahead of time, so
+  offline mode still aligns and narrates (docs/offline-mode.md).
 """
 
 from __future__ import annotations
@@ -44,6 +46,8 @@ def serve() -> None:
         # request.client stays the socket peer; lectern.security.proxy applies forwarding
         # headers itself, and only for peers listed in LECTERN_TRUSTED_PROXIES.
         proxy_headers=False,
+        # Not uvloop: its sockets bypass the audit hook offline mode relies on (lectern.egress).
+        loop="asyncio",
         log_level=settings.log_level.lower(),
         access_log=False,
     )
@@ -450,6 +454,12 @@ def _hardware() -> dict:
     }
 
 
+def prepare_models(args: argparse.Namespace) -> None:
+    from lectern.offline_mode import run_cli
+
+    run_cli(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lectern", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command")
@@ -565,6 +575,15 @@ def build_parser() -> argparse.ArgumentParser:
         "in <data>/pre-restore-*/library/ (LECTERN_RESTORE_KEEP_REPLACED=0)",
     )
     r.add_argument("--restic-password-file", type=Path, help="the restic password you saved")
+
+    from lectern.offline_mode import add_arguments as prepare_arguments
+
+    prepare_arguments(
+        sub.add_parser(
+            "prepare-models",
+            help="download the alignment model and TTS voices for offline mode",
+        )
+    )
     return parser
 
 
@@ -577,6 +596,13 @@ def main(argv: list[str] | None = None) -> None:
         level=os.environ.get("LECTERN_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.command in ("align-transcribe", "align-bench", "backup", "restore"):
+        # Beside the server, on its machine: LECTERN_OFFLINE=1 holds here too (prepare-models
+        # checks it itself; the worker commands must reach their server).
+        from lectern import egress
+        from lectern.config import get_settings
+
+        egress.enforce(get_settings().offline)
     if args.command in ("worker", "worker-agent"):
         import faulthandler
 
@@ -593,6 +619,7 @@ def main(argv: list[str] | None = None) -> None:
         "align-bench": align_bench,
         "backup": backup,
         "restore": restore,
+        "prepare-models": prepare_models,
     }[args.command](args)
 
 
