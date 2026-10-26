@@ -29,6 +29,8 @@ from lectern.models import BookFile, Job, JobStatus, Work
 from lectern.ocr import child, engine
 from lectern.ocr import jobs as ocr
 from lectern.ocr.words import FLAG_BREAK, FLAG_HYPHEN, from_tsv
+from lectern.pdftext import extract
+from lectern.pdftext.document import build_document
 from lectern.worker.runners import OcrRunner
 
 HAVE_TESSERACT = engine.probe()[0] is not None and "eng" in engine.probe()[1]
@@ -239,6 +241,14 @@ def test_a_scan_is_recognised_into_a_searchable_copy_and_the_original_is_untouch
     first = page["words"][0]
     assert first[0] == "Chapter" and 0 < first[1] < first[3] < page["w"]
     assert 0 < first[2] < first[4] < page["h"] and first[2] > page["h"] / 2  # near the top
+    # ...which the PDF text layout step turns into the canonical text document unchanged
+    raw = extract.RawDoc([extract._page(p) for p in doc["pages"]], [tuple(t) for t in doc["toc"]])
+    canonical = build_document(raw, book.sha256)
+    assert canonical["status"] == "ready"
+    section = canonical["sections"][0]
+    assert "lighthouse keeper climbed the stairs" in section["text"]
+    assert "until morning" in section["text"]
+    assert section["words"][0][:3] == [0, 7, 0]  # "Chapter", boxed on the first page
 
     r = client.get(f"/api/files/{book.id}/ocr/pdf")
     assert r.status_code == 200 and r.content == searchable.read_bytes()

@@ -98,7 +98,7 @@ Both are removed when their PDF leaves the work.
 ## Read-along on scans (with the PDF text work)
 
 The words file has exactly the shape of the PDF text reader's pages (`lectern.pdftext.extract`,
-PR #34, [pdf-read-along.md](pdf-read-along.md) once merged): per page `{index, w, h, x0, y0,
+[pdf-read-along.md](pdf-read-along.md)): per page `{index, w, h, x0, y0,
 rotation, label, chars, map_errors, words: [[text, x0, y0, x1, y1, size, flags]]}`, boxes in PDF
 user space (points, origin bottom left, before `/Rotate`), flags 1 = line-end hyphen and 2 =
 line break, plus the outline as `toc`. Each word's box spans its line, as PDFium's loose boxes
@@ -106,7 +106,7 @@ do. So the same layout step (running heads and page numbers, columns, dehyphenat
 can build the same canonical text document from it, with `status: "ready"`, and sentences,
 positions, alignment, narration, and the read-along overlay then work on scans unchanged.
 
-Still to do once PR #34 is merged (a small hookup, not part of this change): store a scan's
+Still to do (a small hookup, not part of this change): store a scan's
 text from this file; mark the document as `ready` from the recognised text rather than by the
 text-layer rule (a sparse scan, such as a picture book, would otherwise stay `needs_ocr`); and
 record the OCR engine and language in the document, so a new recognition is a new text and an
