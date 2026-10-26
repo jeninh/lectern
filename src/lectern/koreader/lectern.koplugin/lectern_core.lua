@@ -36,15 +36,25 @@ Core.ROUTE_TTL = 600 -- seconds a home/Tailscale choice is trusted before it is 
 -- fallback: the fallback is used without a check, and another network may have a different
 -- machine at the same private address.
 function Core.homeLike(url)
-    local host = type(url) == "string" and url:lower():match("^https?://([^/]+)") or nil
-    if not host then return false end
-    local v6 = host:match("^%[([^%]]+)%]")
-    if v6 then return v6:match("^fe[89ab]") ~= nil or v6:match("^f[cd]") ~= nil end
-    host = host:gsub(":%d+$", "")
-    if host:match("%.local$") then return true end
-    local a, b = host:match("^(%d+)%.(%d+)%.%d+%.%d+$")
-    a, b = tonumber(a), tonumber(b)
-    if not a then return false end
+    if type(url) ~= "string" then return false end
+    local auth = url:lower():match("^%a+://([^/?#]*)")
+    if not auth or auth:find("@", 1, true) then return true end -- unparseable: not trusted
+    -- Any IPv6 literal (mapped IPv4, link-local, unique-local; Tailscale's own are ULA too).
+    if auth:sub(1, 1) == "[" then return true end
+    local host = auth:gsub(":%d*$", ""):gsub("%.+$", "") -- port, DNS-root dots
+    if host == "" or host == "local" or host:match("%.local$") then return true end
+    local numeric = host:match("^[%d.]+$") or host:match("%.%d+$") or host:match("^0x")
+        or host:match("%.0x")
+    if not numeric then return false end
+    -- Numeric hosts must be canonical dotted quads; anything else (10.1, 0x0a.1, 010.0.0.1)
+    -- resolves to some IPv4 address in the socket library, so it is never trusted.
+    local q = { host:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
+    if #q ~= 4 then return true end
+    for k = 1, 4 do
+        if (#q[k] > 1 and q[k]:sub(1, 1) == "0") or tonumber(q[k]) > 255 then return true end
+        q[k] = tonumber(q[k])
+    end
+    local a, b = q[1], q[2]
     return a == 10 or (a == 172 and b >= 16 and b <= 31) or (a == 192 and b == 168)
         or (a == 169 and b == 254)
 end
@@ -194,7 +204,14 @@ function Core:lanUrl()
     return d and d.lan_url
 end
 
+--- Once a home address was ever known, a home-like Tailscale fallback stays untrusted for good,
+-- even after the server stops announcing one (it could have been the home address itself).
+function Core:homeSeen()
+    return self.store:readSetting("lan_seen") == true or self:lanUrl() ~= nil
+end
+
 function Core:saveLanUrl(value)
+    if self:lanUrl() or str(value) then self.store:saveSetting("lan_seen", true) end
     -- "" remembers "the server has none" (so the zip's address is not used again).
     self.store:saveSetting("lan_url", str(value) or "")
     self.store:delSetting("active_url")
@@ -260,9 +277,8 @@ end
 -- The home address is never used unverified, and never as the fallback: a fallback that is a
 -- home address (only possible before setup, from a zip) gives no route until the check passes.
 function Core:route(force)
-    local remote, lan = self:serverUrl(), self:lanUrl()
+    local remote, lan = self:fallbackUrl(), self:lanUrl()
     if not lan then return remote end
-    remote = self:fallbackUrl()
     local now = self.now()
     if not force and self._route_at and now - self._route_at < Core.ROUTE_TTL then
         return self._route
@@ -285,7 +301,7 @@ end
 -- no fallback that may be used without a check).
 function Core:fallbackUrl()
     local remote, lan = self:serverUrl(), self:lanUrl()
-    if lan and (remote == lan or Core.homeLike(remote)) then return nil end
+    if remote and (remote == lan or (self:homeSeen() and Core.homeLike(remote))) then return nil end
     return remote
 end
 
@@ -326,7 +342,7 @@ function Core:applyCredentials(payload, server_url)
         return false
     end
     local lan = str(payload.lan_url) or self:lanUrl()
-    if lan and (server_url == lan or Core.homeLike(server_url)) then
+    if server_url == lan or ((lan or self:homeSeen()) and Core.homeLike(server_url)) then
         self:log("warn", "refused a home-network address as the Tailscale address")
         return false
     end
@@ -458,9 +474,10 @@ function Core:pair(server_url, username, code)
         -- The Tailscale fallback: the server's own Tailscale address, else the address entered,
         -- else the one known before; never a home-network address (it is used without a check).
         local lan = str(data.lan_url) or self:lanUrl()
+        local seen = lan or self:homeSeen()
         local remote
         for _, candidate in ipairs({ str(data.server_url) or false, server_url, self:serverUrl() or false }) do
-            if candidate and not (lan and (candidate == lan or Core.homeLike(candidate))) then
+            if candidate and candidate ~= lan and not (seen and Core.homeLike(candidate)) then
                 remote = candidate
                 break
             end

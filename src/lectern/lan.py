@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import re
 from urllib.parse import urlsplit
 
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -78,10 +79,29 @@ def normalize_lan_url(value: str) -> str:
     return url
 
 
+_NUMERIC = re.compile(r"^[0-9.]+$|\.[0-9]+$|^0x|\.0x")
+
+
 def is_home_address(url: str) -> bool:
-    """A private IP or ``.local`` host (any scheme): what the plugin never trusts unverified."""
-    host = urlsplit(url).hostname or ""
-    return is_private_ip(host) or (host.endswith(".local") and len(host) > len(".local"))
+    """What the plugin never uses as its unverified (Tailscale) fallback: a private IPv4, any
+    IPv6 literal, a ``.local`` name, or anything it cannot classify, such as a non-canonical
+    numeric host (``10.1`` resolves to 10.0.0.1). Mirrors ``Core.homeLike`` in
+    lectern_core.lua; tests/test_lan.py runs both over the same cases."""
+    parts = urlsplit(url.lower())
+    netloc = parts.netloc
+    if not parts.scheme or "@" in netloc:
+        return True
+    if netloc.startswith("["):
+        return True
+    host = re.sub(r":[0-9]*$", "", netloc).rstrip(".")
+    if not host or host == "local" or host.endswith(".local"):
+        return True
+    if not _NUMERIC.search(host):
+        return False
+    quad = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)", host)
+    if not quad or any((len(q) > 1 and q[0] == "0") or int(q) > 255 for q in quad.groups()):
+        return True
+    return is_private_ip(host)
 
 
 def proof(key_hash: str, nonce: str) -> str:

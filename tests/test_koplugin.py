@@ -754,6 +754,15 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
 
     seen: list[tuple[str, str, dict]] = []
 
+    def bare_plugin() -> Path:
+        """The plugin files without a zip's device file or setup secret."""
+        bare = tmp_path / "bare-plugin"
+        if not bare.exists():
+            shutil.copytree(plugin, bare)
+            (bare / "lectern_device.lua").unlink(missing_ok=True)
+            (bare / "lectern_bootstrap.txt").unlink(missing_ok=True)
+        return bare
+
     class Impostor(BaseHTTPRequestHandler):
         """Another network's machine at the same private address: answers everything."""
 
@@ -884,12 +893,40 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
     assert lectern_entry and "password" not in lectern_entry[0]
     assert "192.168.7.7" not in json.dumps(out["opds"])
 
+    # The server stops announcing a home address (lan_url: null) while the stored fallback is
+    # itself home-like: it stays untrusted for good, so KOReader's sync and catalogue lose
+    # their credentials and nothing is sent to it. ("127.1" is how a shortened IPv4 alias of
+    # this server looks; the classifier treats it like any home address.)
+    alias = f"http://127.1:{port}"
+    downgraded = tmp_path / "downgraded"
+    shutil.copytree(paired, downgraded)
+    lectern_lua = downgraded / "lectern.lua"
+    lectern_lua.write_text(
+        lectern_lua.read_text().replace(f'"{base}"', f'"{alias}"').replace(impostor_url, home)
+    )
+    settings.lan_port, settings.lan_url = 18081, home
+    out = lua(plugin, downgraded, "route")
+    assert out["status"] is True and out["active"] == home  # verified home, as before
+    settings.lan_port = 0  # the next status announces lan_url: null
+    out = lua(plugin, downgraded, "route")
+    assert out["settings"]["lan_url"] == "" and out["settings"]["lan_seen"] is True
+    assert "userkey" not in out["kosync"] and "custom_server" not in out["kosync"]
+    out = lua(plugin, downgraded, "route")
+    assert out.get("active") is None and out["status"] is False  # no request went out
+    assert "userkey" not in out["kosync"]
+
+    # Pairing through such an alias of the home address is refused as well.
+    settings.lan_port, settings.lan_url = 18081, home
+    aliased = tmp_path / "aliased"
+    aliased.mkdir()
+    code = http.post(f"/api/devices/{dev['device']['id']}/pairing-code").json()["code"]
+    out = lua(bare_plugin(), aliased, "pair", alias, "owner", code)
+    assert out["message"].startswith("Not paired"), out["message"]
+    assert not out["paired"]
+
     # Pairing over the home address with no Tailscale address known (the server detects none,
     # the plugin has no zip file): refused, rather than keeping the home address as fallback.
-    bare = tmp_path / "bare-plugin"
-    shutil.copytree(plugin, bare)
-    (bare / "lectern_device.lua").unlink(missing_ok=True)
-    (bare / "lectern_bootstrap.txt").unlink(missing_ok=True)
+    bare = bare_plugin()
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     code = http.post(f"/api/devices/{dev['device']['id']}/pairing-code").json()["code"]

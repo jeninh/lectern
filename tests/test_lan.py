@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import os
+import shutil
+import subprocess
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,8 +24,10 @@ from sqlalchemy import select, update
 from tests.conftest import ORIGIN, api_post
 from tests.test_koplugin import add_device, basic, get_zip, ko, secret_of, unzip
 
+from lectern import lan as lan_module
 from lectern.config import Settings
 from lectern.db import session_factory
+from lectern.lan import is_home_address
 from lectern.models import AuditLog, DeviceBootstrap, utcnow
 
 LAN_URL = "http://192.168.1.20:8080"
@@ -183,8 +190,78 @@ def test_pairing_answers_with_the_tailscale_address_too(app, client, owner, kind
     assert r.json()["lan_url"] == LAN_URL
 
 
+# One table for both classifiers (lectern.lan.is_home_address, Core.homeLike in the plugin):
+# True = never trusted as the unverified Tailscale fallback. Expected values follow the rule
+# "private IPv4, any IPv6 literal, .local, or not canonically classifiable", not either code.
+HOME_CASES = [
+    ("http://192.168.7.7:8080", True),
+    ("http://10.0.0.1:8080", True),
+    ("http://172.16.0.1", True),
+    ("http://172.31.255.255:80", True),
+    ("http://169.254.1.1:8080", True),
+    ("http://lectern.local:8080", True),
+    ("http://lectern.local.:8080", True),  # DNS-root dot
+    ("http://LECTERN.LOCAL..:8080", True),
+    ("http://[::ffff:192.168.7.7]:8080", True),  # IPv4-mapped IPv6
+    ("http://[fd7a:115c:a1e0::1]:8080", True),
+    ("http://[fe80::1]:8080", True),
+    ("http://10.1:8080", True),  # inet_aton: 10.0.0.1
+    ("http://192.168.1:8080", True),
+    ("http://3232237319:8080", True),  # one-number IPv4
+    ("http://0x0a.0.0.1:8080", True),
+    ("http://010.0.0.1:8080", True),  # octal in inet_aton
+    ("http://user@100.101.102.103:8080", True),
+    ("http://:8080", True),
+    ("http://100.101.102.103:8080", False),  # the tailnet
+    ("http://100.101.102.103.:8080", False),
+    ("http://8.8.8.8:8080", False),
+    ("http://172.32.0.1:8080", False),
+    ("http://192.169.0.1:8080", False),
+    ("http://lectern.tail1234.ts.net", False),
+    ("https://lectern.example.:443", False),
+]
+
+
+@pytest.mark.parametrize(("url", "home"), HOME_CASES)
+def test_python_home_classifier(url, home):
+    assert is_home_address(url) is home
+
+
+def test_plugin_home_classifier_agrees_on_every_case():
+    luajit = shutil.which("luajit")
+    if not luajit:
+        if os.environ.get("LUAJIT_REQUIRED"):
+            pytest.fail("LUAJIT_REQUIRED is set but luajit is not installed")
+        pytest.skip("luajit not installed")
+    plugin = Path(lan_module.__file__).parent / "koreader" / "lectern.koplugin"
+    script = (
+        f"package.path = {json.dumps(str(plugin) + '/?.lua;')} .. package.path "
+        "local Core = require('lectern_core') "
+        "for line in io.lines() do io.write(tostring(Core.homeLike(line)), '\\n') end"
+    )
+    run = subprocess.run(
+        [luajit, "-e", script],
+        input="\n".join(u for u, _ in HOME_CASES) + "\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    got = run.stdout.split()
+    assert dict(zip([u for u, _ in HOME_CASES], got, strict=True)) == {
+        u: str(h).lower() for u, h in HOME_CASES
+    }
+
+
 @pytest.mark.parametrize(
-    "url", ["http://192.168.1.20:8080", "http://10.1.2.3:8080", "http://lectern.local:8080"]
+    "url",
+    [
+        "http://192.168.1.20:8080",
+        "http://10.1.2.3:8080",
+        "http://lectern.local:8080",
+        "http://lectern.local.:8080",
+        "http://10.1:8080",
+        "http://[::ffff:192.168.1.20]:8080",
+    ],
 )
 def test_the_zips_fallback_address_cannot_be_a_home_address(client, owner, kindle, url):
     """The plugin uses the zip's address without a check; the home one only after it."""

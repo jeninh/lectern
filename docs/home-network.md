@@ -114,7 +114,11 @@ one the plugin already had). If neither is known, pairing stops with *Not paired
 for the Tailscale address instead. If a device ends up with no trusted address at all (for
 example its stored address is itself a home-network one), the plugin removes its credentials
 from KOReader's Progress sync and catalogue settings until an address is trusted again, rather
-than pointing them at a placeholder.
+than pointing them at a placeholder. "Home-network address" is meant broadly here: private
+IPv4, any IPv6 address, `.local` names (with or without a trailing dot), and numeric forms
+such as `10.1` that a network library would turn into a private address. Once a device has
+known a home address, a fallback like that stays untrusted even if Lectern later stops
+announcing a home address; pair again with the Tailscale address to fix it.
 
 When the choice changes, the plugin rewrites KOReader's Progress sync server, so KOReader's
 own sync follows. **Tools → Lectern → status** shows both
