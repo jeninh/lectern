@@ -78,6 +78,8 @@ export function ListeningPage() {
   );
 }
 
+const CHAPTER_WINDOW = 8;
+
 function NowPlaying({ onChanged }: { onChanged: () => void }) {
   const p = usePlayer();
   const { canUpload, toast, me } = useStore();
@@ -95,6 +97,26 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
   const lowSize = info?.tracks.reduce((s, t) => s + (t.variants.low?.size ?? 0), 0) ?? 0;
   const origSize = info?.tracks.reduce((s, t) => s + t.size, 0) ?? 0;
   const ebook = bookFiles(w).length > 0;
+
+  // The chapter list flows in the page (no scroll box of its own, which would trap scrolling);
+  // a long one shows a few chapters around the current one until "Show all". The window moves
+  // only when the current chapter leaves it, and never while focus is in the list, so a focused
+  // row is not unmounted under the keyboard.
+  const [allChapters, setAllChapters] = useState(false);
+  const [windowStart, setWindowStart] = useState(0);
+  const [focusInList, setFocusInList] = useState(false);
+  const long = p.chapters.length > CHAPTER_WINDOW + 2;
+  const windowed = long && !allChapters;
+  const at = p.chapter ? p.chapters.indexOf(p.chapter) : 0;
+  useEffect(() => {
+    setAllChapters(false);
+    setWindowStart(0);
+  }, [w.id]);
+  const from = windowed ? Math.max(0, Math.min(windowStart, p.chapters.length - CHAPTER_WINDOW)) : 0;
+  useEffect(() => {
+    if (windowed && !focusInList && (at < from || at >= from + CHAPTER_WINDOW)) setWindowStart(Math.max(0, at - 2));
+  }, [windowed, focusInList, at, from]);
+  const shownChapters = windowed ? p.chapters.slice(from, from + CHAPTER_WINDOW) : p.chapters;
 
   const transcode = async () => {
     try {
@@ -158,8 +180,16 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
       <div className="np-cols">
         <section aria-labelledby="ch-h">
           <h3 id="ch-h">Chapters</h3>
-          <ol className="chapters">
-            {p.chapters.map((c, i) => {
+          <ol
+            className="chapters"
+            id="np-chapters"
+            start={from + 1}
+            aria-label={windowed ? `Chapters ${from + 1}–${from + shownChapters.length} of ${p.chapters.length}` : undefined}
+            onFocus={() => setFocusInList(true)}
+            onBlur={(e) => setFocusInList(e.currentTarget.contains(e.relatedTarget as Node | null))}
+          >
+            {shownChapters.map((c, j) => {
+              const i = from + j;
               const current = p.chapter === c;
               return (
                 <li key={i}>
@@ -172,6 +202,11 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
               );
             })}
           </ol>
+          {long && (
+            <button className="linklike" onClick={() => setAllChapters(!allChapters)} aria-expanded={allChapters} aria-controls="np-chapters" style={{ marginTop: 8 }}>
+              {allChapters ? "Show fewer chapters" : `Show all ${p.chapters.length} chapters`}
+            </button>
+          )}
         </section>
         <section aria-labelledby="files-h">
           <h3 id="files-h">Files</h3>

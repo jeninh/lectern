@@ -3116,8 +3116,9 @@ pre.ra-b {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 360px;
-  overflow-y: auto;
+  /* Not a scroll box of its own: one nested in the page traps wheel, trackpad, and touch
+     scrolling (issue #36). Long lists show a window around the current chapter instead. */
+  overflow: clip;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface);

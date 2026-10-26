@@ -8,7 +8,7 @@ import { defineConfig, devices } from "@playwright/test";
 //   Chromium (e2e/serve.py, :8765; helpers in e2e/helpers.ts).
 const PORT = Number(process.env.E2E_PORT ?? 8765);
 const DESKTOP = ["folders", "library", "platform", "review", "trash"].map((n) => `${n}.spec.ts`);
-const PHONES = ["app", "offline", "pdfreadalong", "sync"].map((n) => `${n}.spec.ts`);
+const PHONES = ["app", "listening", "offline", "pdfreadalong", "sync"].map((n) => `${n}.spec.ts`);
 
 export default defineConfig({
   testDir: "e2e",
