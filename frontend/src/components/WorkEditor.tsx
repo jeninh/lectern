@@ -239,6 +239,17 @@ function LookupPanel({ state, metadata, onApply }: { state: EditorState; metadat
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  if (state.lookup_offline && state.lookup_enabled) {
+    return (
+      <p className="hint lookup-off">
+        <Sparkle width={14} height={14} />
+        <span>
+          Metadata suggestions are unavailable: Lectern is in offline mode and makes no internet connections.
+          {me?.user.role === "owner" && <> See <Link to="/app/admin#offline-mode">Admin → Offline mode</Link>.</>}
+        </span>
+      </p>
+    );
+  }
   if (!state.lookup_enabled) {
     return (
       <p className="hint lookup-off">

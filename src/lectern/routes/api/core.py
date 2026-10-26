@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
-from lectern import instance
+from lectern import egress, instance
 from lectern.access import can_edit_library, shelf_permission, visible_shelf_ids, visible_works
 from lectern.models import (
     UPLOAD_CHUNK_MAX_BYTES,
@@ -66,6 +66,8 @@ def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
             "max_active": settings.upload_max_active,
         },
         "library_settings": instance.all_settings(db),
+        # Offline mode (docs/offline-mode.md): no outbound internet connections at all.
+        "offline_mode": egress.offline(),
         "can_edit": can_edit_library(auth.user),
         # The installed app keeps downloads and this identity offline until ``until`` (server
         # clock; ``now`` lets it correct for its own), then deletes them (docs/offline.md).

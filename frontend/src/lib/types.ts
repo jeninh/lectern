@@ -29,6 +29,32 @@ export interface Me {
   /** Server clock now, and until when the installed app may keep downloads and this identity
    * without reaching the server (docs/offline.md#privacy). */
   offline?: { now: string; until: string };
+  /** Offline mode (docs/offline-mode.md): the server makes no internet connections. */
+  offline_mode?: boolean;
+}
+
+export interface OfflineFeature {
+  id: string;
+  name: string;
+  contacts: string[];
+  /** Set up to contact the internet (it would, with offline mode off). */
+  on: boolean;
+  /** On, and refused because offline mode is on. */
+  blocked: boolean;
+  when: string;
+}
+
+export interface OfflineModeView {
+  on: boolean;
+  /** LECTERN_OFFLINE=1: Admin cannot turn it off. */
+  forced: boolean;
+  features: OfflineFeature[];
+  models: {
+    align: { local: boolean; model: string; ready: boolean; downloaded: string[] };
+    kokoro: { local: boolean; ready: boolean };
+    piper: { installed: boolean; voices: string[] };
+  };
+  prepare: { running: boolean; ok: boolean | null; started_at: string | null; finished_at: string | null; log: string[] };
 }
 
 export interface BackupView {
@@ -627,6 +653,8 @@ export interface EditorState {
   folder: { dir_path: string; pending: boolean };
   last_revision: { id: number; created_at: string | null; actor: string | null; changed: string[]; undoable: boolean } | null;
   lookup_enabled: boolean;
+  /** Offline mode is on: suggestions cannot be fetched. */
+  lookup_offline?: boolean;
 }
 
 export interface AlignmentInfo {

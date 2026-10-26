@@ -16,6 +16,8 @@ services:
       LECTERN_TRUSTED_PROXIES: ${LECTERN_TRUSTED_PROXIES:-}
       # Only for Cloudflare Tunnel with the connector alone in LECTERN_TRUSTED_PROXIES.
       LECTERN_TRUST_CF_CONNECTING_IP: ${LECTERN_TRUST_CF_CONNECTING_IP:-0}
+      # 1 = offline mode: no outbound internet connections from Lectern (docs/offline-mode.md).
+      LECTERN_OFFLINE: ${LECTERN_OFFLINE:-0}
     volumes:
       - lectern-data:/data
       - ./library:/library

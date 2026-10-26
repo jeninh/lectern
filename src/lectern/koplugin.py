@@ -44,6 +44,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
+from lectern import egress
 from lectern.config import Settings
 from lectern.models import (
     AppPassword,
@@ -80,7 +81,7 @@ PAIRING_DIGITS = 6
 # Tailscale hands out addresses from the CGNAT range; 100.100.100.100 is its resolver, which
 # tailscaled routes through the tailnet interface in kernel TUN mode.
 TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
-TAILSCALE_PROBE = ("100.100.100.100", 53)
+TAILSCALE_PROBE = egress.TAILSCALE_PROBE  # the one UDP connect offline mode allows
 
 
 # --- server address ---------------------------------------------------------------------------

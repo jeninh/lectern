@@ -84,7 +84,8 @@ class TrackAudio:
 
 
 class TranscriptionUnavailable(RuntimeError):
-    """faster-whisper is not installed in this environment."""
+    """faster-whisper is not installed in this environment, or (offline mode) its model is not
+    downloaded."""
 
 
 def transcription_available() -> bool:
@@ -357,10 +358,24 @@ class Transcriber:
                 kwargs["cpu_threads"] = self.threads
             if self.download_root:
                 kwargs["download_root"] = str(self.download_root)
+            from lectern import egress
+
+            if egress.offline():
+                kwargs["local_files_only"] = True  # never a download (docs/offline-mode.md)
             log.info(
                 "loading whisper model %s (%s/%s)", self.model_name, self.device, self.compute_type
             )
-            self._model = WhisperModel(self.model_name, **kwargs)
+            try:
+                self._model = WhisperModel(self.model_name, **kwargs)
+            except Exception as exc:
+                if not egress.offline():
+                    raise
+                raise TranscriptionUnavailable(
+                    f"offline mode is on and the {self.model_name} model could not be loaded "
+                    f"from the data directory: {exc}. If it is not downloaded, use Admin → "
+                    "Offline mode → Download models or `lectern prepare-models --align-model "
+                    f"{self.model_name}`"
+                ) from exc
         return self._model
 
     def _window_words(

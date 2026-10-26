@@ -44,7 +44,7 @@ from pydantic import (
     model_validator,
 )
 
-from lectern import __version__
+from lectern import __version__, egress
 from lectern.ingest.epub import normalize_isbn
 from lectern.security.ratelimit import SlidingWindowLimiter
 from lectern.workmeta import Metadata, strip_controls
@@ -160,8 +160,9 @@ def http_get(url: str) -> bytes:
         raise LookupError_("rate_limited" if exc.code == 429 else "unavailable") from None
     except TimeoutError:
         raise LookupError_("timeout") from None
-    except (urllib.error.URLError, OSError, ssl.SSLError):
-        raise LookupError_("unavailable") from None
+    except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
+        refused = isinstance(getattr(exc, "reason", exc), egress.OfflineError)
+        raise LookupError_("offline" if refused else "unavailable") from None
 
 
 # --- providers --------------------------------------------------------------------------------

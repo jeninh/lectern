@@ -97,6 +97,15 @@ class _TokenCapture(logging.Handler):
             self.token = m.group(1)
 
 
+@pytest.fixture(autouse=True)
+def _online_again():
+    """Offline mode is process-wide (lectern.egress); no test leaves it on for the next."""
+    yield
+    from lectern import egress
+
+    egress.enforce(False)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(

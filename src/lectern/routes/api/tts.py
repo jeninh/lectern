@@ -21,7 +21,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from lectern import integrations
+from lectern import egress, integrations
 from lectern.models import Role, WorkerCredential
 from lectern.routes.api.align import server_capabilities
 from lectern.routes.api.readalong import visible_work
@@ -256,6 +256,7 @@ class PreviewIn(BaseModel):
 def elevenlabs_status(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict:
     out = integrations.status(db, settings, integrations.ELEVENLABS)
     out["endpoint"] = el.ORIGIN
+    out["offline"] = egress.offline()
     out["usage"] = _usage(db)
     return out
 

@@ -75,6 +75,8 @@ services:
       # Only used by an image built with `align` (docs/alignment.md); on a Pi: base, core count.
       LECTERN_ALIGN_MODEL: ${LECTERN_ALIGN_MODEL:-small}
       LECTERN_ALIGN_THREADS: ${LECTERN_ALIGN_THREADS:-0}
+      # 1 = offline mode: no outbound internet connections from Lectern (docs/offline-mode.md).
+      LECTERN_OFFLINE: ${LECTERN_OFFLINE:-0}
     # Create data and library yourself, owned by LECTERN_UID:LECTERN_GID. Docker would
     # otherwise create them owned by root, and Lectern could not write to them.
     volumes:

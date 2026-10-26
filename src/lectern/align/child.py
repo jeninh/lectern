@@ -138,6 +138,9 @@ def main() -> None:
     )
     _own_stdout()
     _confine()
+    from lectern import egress
+
+    egress.enforce_from_env()  # the server's offline mode holds here too
     spec = json.loads(sys.stdin.read())
     from lectern.align.transcribe import TranscriptionUnavailable
 
