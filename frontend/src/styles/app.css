@@ -5428,3 +5428,73 @@ table.compare td:first-child {
 .queue-job .hint {
   overflow-wrap: anywhere;
 }
+
+/* --- Read-along on PDF pages (docs/pdf-read-along.md) ------------------------------------- */
+.pdf-page-wrap {
+  position: relative;
+  flex: none;
+}
+.pdf-page-wrap[data-pickable] {
+  cursor: pointer;
+}
+.pdf-ra-marks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pdf-ra-mark {
+  position: absolute;
+  border-radius: 3px;
+  background: rgb(255 196 0 / 0.34);
+  box-shadow: 0 0 0 1px rgb(214 150 0 / 0.45);
+  mix-blend-mode: multiply;
+  transition: left var(--dur) var(--ease), top var(--dur) var(--ease), width var(--dur) var(--ease);
+}
+.reader[data-reader-theme="dark"] .pdf-ra-mark {
+  background: rgb(120 170 255 / 0.3);
+  box-shadow: 0 0 0 1px rgb(150 190 255 / 0.55);
+  mix-blend-mode: screen;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pdf-ra-mark {
+    transition: none;
+  }
+}
+.pages-reader:has(.pdf-ra-bar) {
+  grid-template-rows: auto auto 1fr auto auto;
+}
+.pages-reader .pdf-ra-bar {
+  grid-row: 4;
+}
+.pages-reader:has(.pdf-ra-bar) .reader-foot {
+  grid-row: 5;
+}
+.pdf-ra-bar {
+  display: grid;
+  grid-template-columns: auto auto auto auto minmax(80px, 1fr) auto auto;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--reader-ink) 12%, transparent);
+  background: color-mix(in srgb, var(--reader-bg) 92%, var(--reader-ink));
+}
+.pdf-ra-bar input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.ra-play.sm {
+  width: 38px;
+  height: 38px;
+}
+.ra-play.sm svg {
+  width: 18px;
+  height: 18px;
+}
+@media (max-width: 560px) {
+  .pdf-ra-bar {
+    grid-template-columns: auto auto auto 1fr auto;
+  }
+  .pdf-ra-bar .ra-time {
+    display: none;
+  }
+}

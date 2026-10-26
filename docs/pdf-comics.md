@@ -104,13 +104,17 @@ has its own **Read**.
 ![A comic as a two-page spread](screenshots/formats-comic-spread.png)
 ![A comic on a phone](screenshots/formats-comic-mobile.png)
 
-## Not available without an EPUB
+## Text PDFs, scanned PDFs, and comics
 
-Text–audio alignment, read-along, and the read-aloud (EPUB 3 Media Overlay) export are built on
-the EPUB's text. PDFs and comics have pages, not text, so for a work without an EPUB the work
-card says **"Read-along needs an EPUB edition"**, the read-aloud status is `unavailable` with
-reason `needs_epub`, and no alignment is queued. A work with both an EPUB and a PDF aligns its
-EPUB as before.
+A **text PDF** has a text layer Lectern reads: alignment, generated audiobooks, and read-along
+on its pages work on it ([pdf-read-along.md](pdf-read-along.md)). A **scanned PDF** (page
+images with no text) is marked *needs OCR* and only views and syncs pages until text
+recognition ([issue #17](https://github.com/jeninh/lectern/issues/17)) gives it text.
+**Comics** have pictures, not text: their card says read-along and narration need an EPUB or a
+text PDF, the read-aloud status is `unavailable` with reason `needs_epub`, and no alignment is
+queued. The **narrated EPUB** (EPUB 3 Media Overlay) export is made from an EPUB edition only. A
+work with both an EPUB and a PDF aligns its EPUB as before, and read-along also works on the
+PDF's pages.
 
 ![Read-along unavailable on a comic](screenshots/formats-comic-library-detail.png)
 

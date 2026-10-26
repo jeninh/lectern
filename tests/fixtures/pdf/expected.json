@@ -1,0 +1,46 @@
+{
+ "title": "The Keeper of Small Lights",
+ "chapters": [
+  {
+   "title": "Chapter One",
+   "paragraphs": [
+    "Every evening at dusk, Wren climbed the ninety-one steps of the lighthouse and lit the lamp that kept the fishing boats off the rocks. Her grandfather had done it for fifty years, and his father before him, and nobody in the village remembered a night when the light had failed.",
+    "The well-known story was that the lamp had never once gone out. Wren knew better. On the night of the great storm the wick had drowned in its own oil, and her grandfather had held a candle in the window for six hours until his fingers blistered. The boats came home anyway. He never told the village.",
+    "“A light is a promise,” he said to her once, “not a machine. You keep it with whatever you have in your hands.” She thought about that often, polishing the brass, trimming the wick, counting the boats as they came in from the fishing grounds beyond the reef.",
+    "In the spring a letter arrived from the harbour office. It explained, in careful official language, that an electric beacon would be installed at the end of the summer, and that the lighthouse would no longer be required."
+   ]
+  },
+  {
+   "title": "Chapter Two",
+   "paragraphs": [
+    "Wren read the letter twice and then folded it into a small square. She did not argue with it. Instead she began to write down everything the lighthouse had taught her: how the fog rolls in before a change in the weather, how the gulls go quiet an hour before a squall, how a lamp should be trimmed so that it burns without smoke.",
+    "By August the notebook was full. The beacon arrived on a barge, a grey box with a blinking eye, and the engineers fixed it to the rocks in an afternoon. It was efficient and tireless and it did not need anyone at all.",
+    "On the last night Wren lit the old lamp one final time. Down in the harbour the fishermen saw both lights burning side by side, the new one steady and the old one flickering, and one by one they took off their caps."
+   ]
+  }
+ ],
+ "field_notes": [
+  "These notes were kept during a single season on the northern shore, where the tide pools freeze at the edges in March and the first warblers return in the middle of April. They are not a scientific record. They are a list of things that were noticed, written down before they could be forgotten, in the order in which they happened.",
+  "The first entry concerns a heron that stood in the same shallow pool every morning for eleven days. It caught nothing that anyone saw. On the twelfth day it was gone, and the pool had a thin skin of ice that cracked like glass when a pebble was thrown onto it. Nobody could say whether the heron had known the cold was coming or had simply grown tired of waiting for a fish that never arrived in that particular pool, which was the smallest of the seven along the path to the old pier.",
+  "The second entry is about the light. In late April the sun rises over the water at an angle that turns the whole bay copper for about four minutes. If you are not looking at that moment you will miss it entirely, and most people do."
+ ],
+ "facts": {
+  "two-column.pdf": {
+   "pages": 3,
+   "chapter_pages": [
+    0,
+    2
+   ],
+   "hyphenated_lines": 5
+  },
+  "plain.pdf": {
+   "pages": 3
+  },
+  "scanned.pdf": {
+   "pages": 2
+  },
+  "low-text.pdf": {
+   "pages": 3
+  }
+ }
+}

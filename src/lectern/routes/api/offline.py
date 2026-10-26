@@ -35,10 +35,12 @@ from lectern.models import (
     AlignmentStatus,
     AudioTrack,
     FileKind,
+    PdfText,
     Sentence,
     Work,
     utcnow,
 )
+from lectern.pdftext.store import text_pdf
 from lectern.progress import replay_wins
 from lectern.routes.api.serializers import iso
 from lectern.security import audit
@@ -117,6 +119,14 @@ def revision(db, work: Work) -> str:
         [(t.id, t.sha256) for t in _tracks(db, work.id)],
         [al.id, al.status.value, al.sentence_count, al.audio_fingerprint] if al else None,
         list(sentences),
+        # a PDF read again, or projected onto a new sentence list, moves its highlight boxes
+        sorted(
+            db.execute(
+                select(PdfText.file_id, PdfText.text_sha256, PdfText.projected_key).where(
+                    PdfText.work_id == work.id
+                )
+            ).all()
+        ),
     ]
     return hashlib.sha256(json.dumps(payload, default=str).encode()).hexdigest()[:32]
 
@@ -192,9 +202,10 @@ def manifest(db, settings, work: Work) -> dict:
         }
         if tracks
         else None,
-        # Read-along works offline when the EPUB and an alignment with matched sentences exist.
+        # Read-along works offline when the text (an EPUB, or a text PDF read along on its
+        # pages) and an alignment with matched sentences exist.
         "readalong": bool(
-            epub is not None
+            (epub is not None or text_pdf(db, work.id) is not None)
             and tracks
             and al is not None
             and al.status == AlignmentStatus.SUCCEEDED

@@ -118,6 +118,12 @@ accepted by `/api/worker/*`.
 
 ## Text extraction
 
+A work's text is its EPUB, or, for a work with only a text PDF, the PDF's canonical text
+document ([pdf-read-along.md](pdf-read-along.md)), whose sections are read exactly like spine
+items. Such a job has `text_source: "pdf"` and the `align-pdf` capability: the built-in worker
+and `lectern worker` (Pi, Mac, desktop) from this release advertise it, older workers never claim it, and a
+credential allowed `align` may also claim `align-pdf`. Its inputs are `text` instead of `epub`.
+
 `lectern.align.text` walks the OPF spine with lxml. Each spine item becomes a
 `lectern.textmap.SpineText`: exactly the frozen normalised text of
 `lectern.positions.normalize_spine_text` (body only, `script`/`style` dropped, whitespace runs

@@ -8,7 +8,9 @@ Starts from an empty data directory every time, seeds it, and serves the built a
   the projects never share positions or downloads), each with a shelf holding both books;
 - *The Gift of the Magi*: EPUB, a 77 s narration with a data-saver copy, and its alignment
   (the repository's test fixture), so download, offline listening, and read-along work;
-- *Field Notes*, a 6-page PDF, used for page positions and for revoking a book.
+- *Field Notes*, a 6-page PDF, used for page positions and for revoking a book;
+- *The Keeper of Small Lights*, a two-column text PDF (tests/fixtures/pdf) with a generated
+  narration (a tone per sentence standing in for Piper), for read-along on PDF pages.
 
 Passwords are ``E2E_PASSWORD``. Plain HTTP on localhost: browsers treat it as a secure
 context, so service workers and passkeys (rp_id ``localhost``) work.
@@ -86,6 +88,7 @@ def seed(settings) -> None:
     w.add_metadata({"/Title": "Field Notes", "/Author": "June Park"})
     with open(settings.inbox_path / "field-notes.pdf", "wb") as f:
         w.write(f)
+    shutil.copy(ROOT / "tests" / "fixtures" / "pdf" / "two-column.pdf", settings.inbox_path / "keeper.pdf")
 
     with session_factory()() as db:
         work, _book, _ = ingest_epub(
@@ -143,6 +146,7 @@ def seed(settings) -> None:
     )
     for _ in range(4):
         watcher.scan_once()
+    keeper_id = narrate_keeper(settings)
     with session_factory()() as db:
         pdf_id = db.scalar(select(Work.id).where(Work.title == "Field Notes"))
         assert pdf_id, "the PDF was not filed"
@@ -155,10 +159,43 @@ def seed(settings) -> None:
             db.add_all(
                 [ShelfItem(shelf_id=shelf.id, work_id=magi_id, position=0),
                  ShelfItem(shelf_id=shelf.id, work_id=pdf_id, position=1),
+                 ShelfItem(shelf_id=shelf.id, work_id=keeper_id, position=2),
                  ShelfGrant(shelf_id=shelf.id, user_id=reader.id,
                             permission=ShelfPermission.VIEW, granted_by=owner.id)]
             )  # fmt: skip
         db.commit()
+
+
+def narrate_keeper(settings) -> int:
+    """Read the Keeper PDF's text layer, then narrate it the way Make an audiobook does, with a
+    stand-in voice: a quiet tone per sentence, so the audio is real and its timings exact."""
+    import math
+    import struct
+
+    from sqlalchemy import select
+    from tests.test_tts import FakeSynth, _piper_voice, _runner
+
+    from lectern.db import session_factory
+    from lectern.models import User, Work
+    from lectern.pdftext.store import sweep
+    from lectern.tts.service import AudiobookIn, enqueue
+
+    class Tone(FakeSynth):
+        def sentence(self, text: str) -> bytes:
+            n = len(text) * 1200  # about 13 characters a second at 16 kHz
+            return b"".join(struct.pack("<h", int(800 * math.sin(i / 8))) for i in range(n))
+
+    sweep(session_factory(), settings.library_dir)
+    _piper_voice(settings)
+    with session_factory()() as db:
+        work = db.scalar(select(Work).where(Work.title == "The Keeper of Small Lights"))
+        assert work, "the Keeper PDF was not filed"
+        owner = db.scalar(select(User).where(User.username == "owner"))
+        enqueue(db, settings, work, AudiobookIn(engine="piper", voice="en_US-test-low"), owner)
+        db.commit()
+        keeper_id = work.id
+    assert _runner(settings, {"piper"}, Tone()).run_once(), "the narration did not run"
+    return keeper_id
 
 
 class LogoutFaults:

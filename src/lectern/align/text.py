@@ -57,7 +57,13 @@ def iter_spine_items(epub: Path) -> Iterator[SpineItem]:
     larger than ``MAX_ITEM_BYTES``, or not parseable, and once the items read so far add up
     to ``MAX_TOTAL_BYTES``. Server and worker use this same function, so both agree on every
     item's text length. Only an unreadable package (no OPF/spine) raises.
+
+    A PDF's canonical text document (:mod:`lectern.pdftext.document`) is read the same way:
+    its sections are the spine items, so alignment and narration work on PDFs unchanged.
     """
+    if _is_text_document(epub):
+        yield from _document_items(epub)
+        return
     hrefs = read_spine(epub, strict=False)
     total = 0
     with zipfile.ZipFile(epub) as zf:
@@ -71,6 +77,23 @@ def iter_spine_items(epub: Path) -> Iterator[SpineItem]:
                 raw = b""
             total += len(raw)
             yield SpineItem(i, href, SpineText(raw))
+
+
+def _is_text_document(path: Path) -> bool:
+    from lectern.pdftext.document import is_text_document
+
+    with open(path, "rb") as f:
+        return is_text_document(f.read(1))
+
+
+def _document_items(path: Path) -> Iterator[SpineItem]:
+    import json
+
+    from lectern.pdftext.document import section_texts
+
+    doc = json.loads(path.read_bytes())
+    for i, text in enumerate(section_texts(doc)):
+        yield SpineItem(i, f"pdf-section-{i}", text)  # type: ignore[arg-type]
 
 
 def read_spine_items(epub: Path) -> list[SpineItem]:
@@ -97,7 +120,7 @@ def spine_lengths(epub: Path) -> list[int]:
     Items are parsed one at a time and dropped, so memory stays at one item's worth."""
     try:
         return [len(item.text.text) for item in iter_spine_items(epub)]
-    except (EpubError, zipfile.BadZipFile, OSError):
+    except (EpubError, zipfile.BadZipFile, OSError, ValueError):
         return []
 
 
