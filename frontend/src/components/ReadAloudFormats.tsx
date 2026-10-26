@@ -4,6 +4,7 @@ import { ApiError, post } from "../lib/api";
 import { bytes } from "../lib/format";
 import { PDF, READALONG_NEEDS_EPUB, hasEpub, readerPath } from "../lib/formats";
 import { alignmentHint, buildReadAloud, readAloudStatus, retryAlignment } from "../lib/readalong";
+import { inAppDocUrl } from "../lib/help";
 import { useStore } from "../lib/store";
 import type { PdfTextState, ReadAloudStatus, Work } from "../lib/types";
 import { Book, Download, Headphones, Sync } from "./Icons";
@@ -190,7 +191,7 @@ function ReadAloudRows({ work, active }: { work: Work; active: boolean }) {
           <strong>Read-along</strong>{" "}
           <span className="hint" aria-live="polite" title={showAlign ? align.detail ?? undefined : undefined}>
             {hint}
-            {showAlign && align.docsUrl && <> · <a href={align.docsUrl} target="_blank" rel="noreferrer">How to turn on alignment</a></>}
+            {showAlign && align.docsUrl && <> · <Link to={inAppDocUrl(align.docsUrl)}>How to turn on alignment</Link></>}
             {error && ` · ${error}`}
           </span>
           {showAlign && align.progress != null && (

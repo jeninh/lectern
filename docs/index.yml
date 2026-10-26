@@ -1,0 +1,89 @@
+# The in-app Docs tab (/app/docs) is built from this list and the Markdown files beside it.
+# Every docs/*.md must appear here exactly once; `npm test` (frontend/src/lib/__tests__/docs.test.ts)
+# fails otherwise, and also when an internal link, anchor, or screenshot does not resolve.
+#
+# Sections and pages appear in the order listed. For each page:
+#   file         the Markdown file in docs/ (its slug in the app is the name without .md)
+#   title        shown in the sidebar, breadcrumbs, and search
+#   description  one line for the Docs overview and search
+#   icon         one of the names in DOC_ICONS (frontend/src/lib/docs.ts)
+#   audience     everyone (default), members (owners and members; hidden from readers), or owner
+sections:
+  - title: Getting started
+    docs:
+      - file: pi-setup.md
+        title: Raspberry Pi setup
+        description: From a blank SD card to a working Lectern, with updates, devices, backups, and troubleshooting.
+        icon: home
+        audience: members
+      - file: deploy-tailscale.md
+        title: Tailscale
+        description: Private HTTPS on your tailnet with nothing published on the LAN or the Internet.
+        icon: shield
+        audience: members
+
+  - title: Devices
+    docs:
+      - file: koreader-plugin.md
+        title: Kindle and Kobo (KOReader plugin)
+        description: Connect an e-reader without typing passwords; progress sync and the catalogue.
+        icon: devices
+      - file: offline.md
+        title: Phone app (PWA)
+        description: Install Lectern on a phone, download books, and read and listen offline.
+        icon: download
+      - file: device-queues.md
+        title: Sending books to a device
+        description: Queue a book at the top of one e-reader's catalogue.
+        icon: send
+
+  - title: Reading and audio
+    docs:
+      - file: read-aloud.md
+        title: Read-along
+        description: Read and listen at once, in the browser or as a narrated EPUB.
+        icon: headphones
+      - file: alignment.md
+        title: Alignment
+        description: Line up an EPUB with its audiobook so positions move between formats.
+        icon: sync
+      - file: tts.md
+        title: Generated audiobooks
+        description: Narrate a book with Piper, Kokoro, or ElevenLabs.
+        icon: sparkle
+      - file: pdf-comics.md
+        title: PDFs and comics
+        description: PDFs and CBZ comics next to EPUBs and audiobooks.
+        icon: book
+      - file: kindle.md
+        title: Kindle books (MOBI and AZW3)
+        description: DRM-free MOBI and AZW3 books are converted to EPUB on arrival.
+        icon: book
+
+  - title: AI and automation
+    docs:
+      - file: mcp.md
+        title: AI access (MCP)
+        description: Let AI apps add, search, and organise books with a scoped AI key.
+        icon: key
+      - file: mac-worker.md
+        title: Mac worker
+        description: Run alignment and narration on a Mac's GPU for a Raspberry Pi server.
+        icon: gear
+        audience: members
+
+  - title: Admin
+    docs:
+      - file: backups.md
+        title: Backups and restore
+        description: Nightly encrypted backups, and restoring from one.
+        icon: shield
+        audience: owner
+
+  - title: Reference
+    docs:
+      - file: contracts.md
+        title: Contracts
+        description: The schema and interfaces the features build on.
+        icon: toc
+        audience: members

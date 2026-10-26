@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { helpPath } from "../lib/help";
 import { get, post, put } from "../lib/api";
 import { absoluteTime, bytes, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
@@ -145,7 +147,7 @@ export function BackupsCard() {
         </span>
       </label>
       <p className="hint">
-        Backups go into an encrypted restic repository in the backup folder; after the first night only changes are stored. Its password is in <code>{t.restic_password_file}</code>: save a copy in your password manager, because without it the backups cannot be read. Restoring is a command on the host with Lectern stopped; see <code>docs/backups.md</code>.
+        Backups go into an encrypted restic repository in the backup folder; after the first night only changes are stored. Its password is in <code>{t.restic_password_file}</code>: save a copy in your password manager, because without it the backups cannot be read. Restoring is a command on the host with Lectern stopped; see <Link to={helpPath("restore")}>Restore</Link>.
       </p>
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <button type="button" className="btn" onClick={runNow} disabled={view.running || !t.writable || !t.restic_available}>{view.running ? "Backing up…" : "Back up now"}</button>

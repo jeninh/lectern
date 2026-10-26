@@ -9,7 +9,7 @@ import { usePlayer } from "../lib/player";
 import { CommandPalette } from "./CommandPalette";
 import { NotificationBell, UploadTray } from "./Notifications";
 import { MiniPlayer } from "./Player";
-import { Devices, Download, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
+import { Book, Devices, Download, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
 import { clearDevice } from "../lib/offline/store";
 import { ConflictPrompt, OfflineBanner, OfflineStatus, UpdateReady } from "./Offline";
 import { Sheet } from "./Sheet";
@@ -39,6 +39,7 @@ const MANAGE: NavEntry[] = [
   { to: "/app/activity", label: "Activity", icon: <Pulse />, keys: "g a" },
 ];
 const ADMIN: NavEntry = { to: "/app/admin", label: "Admin", icon: <Gear />, keys: "g u" };
+const DOCS: NavEntry = { to: "/app/docs", label: "Docs", icon: <Book />, keys: "g i" };
 const TRASH: NavEntry = { to: "/app/trash", label: "Trash", icon: <Trash /> };
 
 
@@ -124,6 +125,7 @@ export function Shell({ children }: { children: ReactNode }) {
     { keys: "g s", handler: () => nav("/app/security") },
     { keys: "g a", handler: () => nav("/app/activity") },
     { keys: "g u", handler: () => isOwner && nav("/app/admin") },
+    { keys: "g i", handler: () => nav("/app/docs") },
   ]);
 
   const manage = [...MANAGE, ...(canEdit ? [TRASH] : []), ...(isOwner ? [ADMIN] : [])];
@@ -167,6 +169,7 @@ export function Shell({ children }: { children: ReactNode }) {
           {manage.map((n) => <NavItem key={n.to} n={n} collapsed={collapsed} />)}
         </nav>
         <div className="sidebar-footer">
+          <NavItem n={DOCS} collapsed={collapsed} />
           <button className="nav-item" onClick={() => setHelpOpen(true)} title={collapsed ? "Keyboard shortcuts (?)" : undefined}>
             <Help />
             <span className="label">Shortcuts</span>
@@ -197,6 +200,10 @@ export function Shell({ children }: { children: ReactNode }) {
           <div className="title-slot" ref={setSlot} />
           <OfflineStatus />
           <NotificationBell />
+          {/* Phones have no sidebar and a full tab bar, so Docs sits beside search. */}
+          <NavLink to="/app/docs" className="icon-btn mobile-only" aria-label="Docs">
+            <Book />
+          </NavLink>
           <button className="icon-btn mobile-only" onClick={() => setPaletteOpen(true)} aria-label="Search books, pages, and actions">
             <Search />
           </button>
@@ -246,6 +253,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <dt><kbd>G</kbd> then <kbd>S</kbd></dt><dd>Security</dd>
           <dt><kbd>G</kbd> then <kbd>A</kbd></dt><dd>Activity</dd>
           {isOwner && <><dt><kbd>G</kbd> then <kbd>U</kbd></dt><dd>Admin</dd></>}
+          <dt><kbd>G</kbd> then <kbd>I</kbd></dt><dd>Docs</dd>
           <dt><kbd>T</kbd></dt><dd>Toggle light / dark</dd>
           <dt><kbd>[</kbd></dt><dd>Collapse or expand the sidebar</dd>
           <dt><kbd>Esc</kbd></dt><dd>Clear the selection; close a sheet, menu, or the palette</dd>

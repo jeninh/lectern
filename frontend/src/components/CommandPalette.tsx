@@ -12,10 +12,11 @@ import { Cover } from "./Cover";
 import { folderSummary } from "./Folders";
 import { usePlayer } from "../lib/player";
 import { bookFiles, hitPath, readerPath } from "../lib/formats";
-import { Devices, Download, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
+import { Book, Devices, Download, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
-type Group = "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "In books";
-const ORDER: Group[] = ["Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings"];
+type Group = "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books";
+const ORDER: Group[] = ["Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings", "Docs"];
+type DocsModule = typeof import("../lib/docsData");
 
 interface Item {
   id: string;
@@ -29,6 +30,8 @@ interface Item {
   work?: Work;
   /** A passage found inside a book (the "In books" section, below everything else). */
   hit?: TextHit;
+  /** Score when the label does not match (a docs hit found in the text under a heading). */
+  score?: number;
   run: () => void;
 }
 
@@ -45,6 +48,7 @@ export function CommandPalette() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [text, setText] = useState<TextSearch | null>(null);
   const [searching, setSearching] = useState(false);
+  const [docs, setDocs] = useState<DocsModule | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const restore = useRef<HTMLElement | null>(null);
@@ -66,6 +70,8 @@ export function CommandPalette() {
     const undoInert = makeBackgroundInert();
     setSel(0);
     input.current?.focus();
+    // The docs load with the palette ("Docs: backups"); the module is precached like the app.
+    import("../lib/docsData").then(setDocs).catch(() => {});
     get<{ devices: Device[] }>("/api/devices")
       .then((d) => setDevices(d.devices.filter((x) => !x.revoked_at)))
       .catch(() => {});
@@ -114,6 +120,7 @@ export function CommandPalette() {
       { id: "p-dl", group: "Pages", label: "Downloads", keywords: "offline phone saved storage", hint: "G O", icon: <Download />, run: () => go("/app/downloads") },
       { id: "a-signout", group: "Actions", label: "Sign out", keywords: "log out logout leave", icon: <Logout />, run: () => { close(); logout(clearDevice); } },
       { id: "p-act", group: "Pages", label: "Activity", keywords: "audit log", hint: "G A", icon: <Pulse />, run: () => go("/app/activity") },
+      { id: "p-docs", group: "Pages", label: "Docs", keywords: "help documentation guide manual how to", hint: "G I", icon: <Book />, run: () => go("/app/docs") },
       ...(isOwner ? [{ id: "p-admin", group: "Pages" as Group, label: "Admin", keywords: "users members", hint: "G U", icon: <Gear />, run: () => go("/app/admin") }] : []),
 
       { id: "s-pk", group: "Settings", label: "Passkeys", keywords: "webauthn face id touch id security key", icon: <Key />, run: () => go("/app/security#passkeys") },
@@ -152,6 +159,20 @@ export function CommandPalette() {
     ];
 
     const needle = q.trim();
+    if (docs && needle) {
+      const visible = docs.DOCS.filter((d) => docs.canSee(d.audience, me?.user.role));
+      for (const d of visible) {
+        all.push({ id: `doc-${d.slug}`, group: "Docs", label: `Docs: ${d.title}`, detail: d.section, keywords: d.description, icon: <Book />, run: () => go(docs.docPath(d.slug)) });
+      }
+      // "docs: restore" searches the docs only; any other query also finds docs by their text.
+      const words = needle.replace(/^docs?(?::|\s)\s*/i, "");
+      if (words.length >= 3) {
+        for (const h of docs.searchDocs(visible, words, 8)) {
+          if (!h.id) continue;
+          all.push({ id: `doc-${h.doc.slug}#${h.id}`, group: "Docs", label: h.heading, detail: h.doc.title, keywords: `docs ${h.doc.title}`, score: h.score - 40, icon: <Book />, run: () => go(docs.docPath(h.doc.slug, h.id)) });
+        }
+      }
+    }
     let picked: { item: Item; score: number }[];
     if (!needle) {
       // Without a query: actions, a few recent books, and pages.
@@ -163,7 +184,7 @@ export function CommandPalette() {
         .map((item) => {
           const main = fuzzyScore(needle, item.label);
           const extra = fuzzyScore(needle, `${item.label} ${item.detail ?? ""} ${item.keywords ?? ""}`);
-          const score = main ?? (extra == null ? null : extra - 8);
+          const score = main ?? (extra == null ? item.score ?? null : extra - 8);
           return score == null ? null : { item, score };
         })
         .filter((x): x is { item: Item; score: number } => x !== null)
@@ -179,7 +200,7 @@ export function CommandPalette() {
       .sort((a, b) => (needle ? b[1].best - a[1].best : 0) || ORDER.indexOf(a[0]) - ORDER.indexOf(b[0]))
       .map(([group, g]) => ({ group, items: g.items }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, works, shelves, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing]);
+  }, [q, works, shelves, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing, docs]);
 
   // "In books": passages, asked of the server as you type (debounced). The previous answer
   // stays on screen until the next one arrives, so the list does not jump while typing.
@@ -253,7 +274,7 @@ export function CommandPalette() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={onKey}
-            placeholder="Search books and their text, shelves, authors, settings…"
+            placeholder="Search books and their text, shelves, authors, settings, docs…"
             role="combobox"
             aria-expanded="true"
             aria-haspopup="listbox"
