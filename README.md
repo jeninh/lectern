@@ -184,7 +184,11 @@ heads, page numbers, hyphenation and columns sorted out) into sentences with the
 pages, so alignment, **Make an audiobook**, and **read-along on the PDF's pages** (highlight,
 page following, click to play, dark mode, offline) work on it. Scanned PDFs are marked *needs
 OCR*; the narrated EPUB export stays EPUB-only. Details:
-[`docs/pdf-read-along.md`](docs/pdf-read-along.md).
+[`docs/pdf-read-along.md`](docs/pdf-read-along.md). A text PDF can also be converted into a
+reflowable **EPUB edition of the same book** — **Convert to EPUB…** in its detail view. The
+PDF's own page numbers are kept as a `page-list` (so "page 143" still matches on the Kindle or
+in KOReader), progress and read-along carry over, and the original PDF stays. Details:
+[`docs/pdf-epub.md`](docs/pdf-epub.md).
 
 ## Kindle books
 

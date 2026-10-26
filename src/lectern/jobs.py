@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from lectern import queue
 from lectern.config import Settings
 from lectern.models import JOB_ACTIVE_STATUSES, AudioTrack, Job, JobStatus, Work, utcnow
+from lectern.pdf2epub.build import PDF2EPUB
 from lectern.security.tokens import new_secret, sha256_hex
 
 log = logging.getLogger("lectern.jobs")
@@ -250,14 +251,22 @@ def _publish_variant(db, settings, job, work, sha256: str, codec: str, scratch: 
 
 
 def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
-    """Run every queued in-process job now. Returns how many ran."""
+    """Run every queued in-process job now. Returns how many ran. Conversions (``pdf2epub``)
+    never wait for a transcode worker: they are claimed first, without the deferral."""
     n = 0
     while True:
         with session_factory() as db:
-            claimed = claim(db, defer_s=settings.local_defer_seconds)
+            claimed = claim(db, kinds=(PDF2EPUB,))
+            if claimed is None:
+                claimed = claim(db, defer_s=settings.local_defer_seconds)
             if claimed is None:
                 return n
-            run_transcode(db, settings, claimed[0])
+            if claimed[0].kind == PDF2EPUB:
+                from lectern.pdf2epub import jobs as pdf2epub
+
+                pdf2epub.run(db, settings, claimed[0])
+            else:
+                run_transcode(db, settings, claimed[0])
             n += 1
 
 
