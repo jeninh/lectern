@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { MakeAudiobookRow } from "../components/MakeAudiobook";
+import { ConvertPdfRow } from "../components/ConvertPdfRow";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
@@ -646,6 +647,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
         <h3 style={{ margin: "0 0 8px", fontSize: 14, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Read-along</h3>
         <ul className="slots">
           {(epub || work.files.some((f) => f.media_type === PDF)) && !work.audio && canUpload && <MakeAudiobookRow work={work} />}
+          {work.files.some((f) => f.media_type === PDF) && canUpload && <ConvertPdfRow work={work} />}
           <ReadAloudFormats work={work} active />
         </ul>
       </div>

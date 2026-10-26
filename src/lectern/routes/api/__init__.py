@@ -16,6 +16,7 @@ from lectern.routes.api import (
     notifications,
     offline,
     pages,
+    pdf2epub,
     pdftext,
     queues,
     readalong,
@@ -50,3 +51,4 @@ router.include_router(pdftext.router)
 router.include_router(align.router)
 router.include_router(worker.router)
 router.include_router(tts.router)
+router.include_router(pdf2epub.router)
