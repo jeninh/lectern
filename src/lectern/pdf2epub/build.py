@@ -22,6 +22,7 @@ edition carries the reflowable text and the pagination.
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from xml.sax.saxutils import escape, quoteattr
 
@@ -30,6 +31,15 @@ FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 CONVERTED_NAME = "book-converted-from-pdf.epub"
 REPORT_NAME = "pdf2epub-report.json"
 NAV_NAME = "nav.xhtml"
+
+# Characters XML 1.0 forbids outright (PDF-sourced text and /PageLabels can carry them).
+_XML_BAD = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _xml_text(text: str) -> str:
+    """PDF-sourced text made XML-safe: control characters dropped, the rest escaped."""
+    return escape(_XML_BAD.sub("", text))
+
 
 XHTML_HEAD = (
     '<?xml version="1.0" encoding="utf-8"?>\n'
@@ -69,44 +79,44 @@ def _page_starts(section: dict) -> list[tuple[int, int]]:
     return out
 
 
-def _markers(sections: list[dict]) -> list[list[tuple[int, int, int]]]:
-    """Per section, its pagebreak markers as ``(char offset, page, page index)``, sorted by
-    offset. Each page is claimed by the first section containing any word of it (reading
-    order), so every page has at most one marker and marker ids are unique."""
+def _markers(sections: list[dict]) -> list[list[tuple[int, int]]]:
+    """Per section, its pagebreak markers as ``(char offset, page)``, sorted by offset. Each
+    page is claimed by the first section containing any word of it (reading order), so every
+    page has at most one marker and marker ids are unique."""
     claimed: set[int] = set()
     out = []
     for section in sections:
         starts = _page_starts(section)
         fallback = int(section.get("page_start") or 0)
-        mine: list[tuple[int, int, int]] = []
+        mine: list[tuple[int, int]] = []
         for offset, page in starts or [(0, fallback)]:
             if page in claimed:
                 continue
             claimed.add(page)
-            mine.append((offset, page, page))
+            mine.append((offset, page))
         mine.sort()
         out.append(mine)
     return out
 
 
 def _section_xhtml(
-    section: dict, index: int, lang: str, labels: list[str], markers: list[tuple[int, int, int]]
+    section: dict, index: int, lang: str, labels: list[str], markers: list[tuple[int, int]]
 ) -> bytes:
     """One section's XHTML: its title as ``h1``, blocks as ``h2``/``p``, with the section's
     pagebreak markers inline in the text flow (before the piece of text they open)."""
     cuts = [m[0] for m in markers]
-    marks = {offset: page for offset, page, _pid in markers}
+    marks = dict(markers)
 
     def block(btext: str, offset: int, tag: str) -> str:
         parts: list[str] = []
         for start, end in _spans(len(btext), offset, cuts):
-            piece = escape(btext[start - offset : end - offset])
+            piece = _xml_text(btext[start - offset : end - offset])
             page = marks.get(start)
             if page is not None:
                 # An empty inline marker: the pagination stays metadata, never text.
+                label = _XML_BAD.sub("", labels[page])
                 piece = (
-                    f'<span epub:type="pagebreak" id="page-{page + 1}"'
-                    f" title={quoteattr(labels[page])}/>"
+                    f'<span epub:type="pagebreak" id="page-{page + 1}" title={quoteattr(label)}/>'
                 ) + piece
             parts.append(piece)
         return f"<{tag}>{''.join(parts)}</{tag}>"
@@ -120,14 +130,14 @@ def _section_xhtml(
     # The section's own first heading block is its title: it must not print twice.
     title_block = blocks[0][1] == "h" and text[first_start:first_stop].strip() == title.strip()
     if not title_block:
-        body.append(f"<h1>{escape(title)}</h1>")
+        body.append(f"<h1>{_xml_text(title)}</h1>")
     for b, end in zip(blocks, ends, strict=True):
         start, kind = int(b[0]), b[1]
         stop = end - 1 if end < len(text) else end  # the joining space is no block's
         if stop > start:
             body.append(block(text[start:stop], start, "h2" if kind == "h" else "p"))
     return (
-        XHTML_HEAD.format(lang=escape(lang), title=escape(title))
+        XHTML_HEAD.format(lang=escape(lang), title=_xml_text(title))
         + "\n".join(body)
         + "\n</body>\n</html>\n"
     ).encode()
@@ -168,9 +178,9 @@ def build_epub(
 
     per_section = _markers(sections)
     page_list = [
-        (f"s{i + 1}.xhtml", f"page-{pid + 1}", labels[page])
+        (f"s{i + 1}.xhtml", f"page-{page + 1}", labels[page])
         for i, marks in enumerate(per_section)
-        for _offset, page, pid in marks
+        for _offset, page in marks
     ]
 
     files: list[tuple[str, bytes]] = []
@@ -204,18 +214,18 @@ def build_epub(
 def _nav_doc(
     title: str, lang: str, sections: list[dict], page_list: list[tuple[str, str, str]]
 ) -> bytes:
-    head = XHTML_HEAD.format(lang=escape(lang), title=escape(f"{title} — Contents"))
-    lines = [f'<nav epub:type="toc" id="toc"><h1>{escape(title)}</h1><ol>']
+    head = XHTML_HEAD.format(lang=escape(lang), title=_xml_text(f"{title} — Contents"))
+    lines = [f'<nav epub:type="toc" id="toc"><h1>{_xml_text(title)}</h1><ol>']
     for i, section in enumerate(sections):
         lines.append(
             f'<li><a href="s{i + 1}.xhtml">'
-            f"{escape(section.get('title') or f'Section {i + 1}')}</a></li>"
+            f"{_xml_text(section.get('title') or f'Section {i + 1}')}</a></li>"
         )
     lines.append("</ol></nav>")
     if page_list:
         lines.append('<nav epub:type="page-list" id="page-list" hidden="hidden"><ol>')
         lines += [
-            f'<li><a href="{escape(href)}#{pid}">{escape(label)}</a></li>'
+            f'<li><a href="{escape(href)}#{pid}">{_xml_text(label)}</a></li>'
             for href, pid, label in page_list
         ]
         lines.append("</ol></nav>")
@@ -236,18 +246,18 @@ def _opf(
 ) -> bytes:
     metadata = [
         f'<dc:identifier id="uid">urn:sha256:{pdf_sha256}</dc:identifier>',
-        f"<dc:title>{escape(title)}</dc:title>",
-        f"<dc:creator>{escape(author)}</dc:creator>",
+        f"<dc:title>{_xml_text(title)}</dc:title>",
+        f"<dc:creator>{_xml_text(author)}</dc:creator>",
         f"<dc:language>{escape(language)}</dc:language>",
-        f"<dc:description>EPUB edition converted from the PDF file {escape(source_name)} "
+        f"<dc:description>EPUB edition converted from the PDF file {_xml_text(source_name)} "
         "by Lectern; the original PDF is kept.</dc:description>",
-        f"<dc:source>{escape(source_name)}</dc:source>",
+        f"<dc:source>{_xml_text(source_name)}</dc:source>",
         # Where the page numbers come from: this PDF's pagination.
         f'<meta property="pageBreakSource">urn:sha256:{pdf_sha256}</meta>',
         f'<meta property="dcterms:modified">{MODIFIED}</meta>',
     ]
     if isbn:
-        metadata.insert(1, f'<dc:identifier id="isbn">urn:isbn:{escape(isbn)}</dc:identifier>')
+        metadata.insert(1, f'<dc:identifier id="isbn">urn:isbn:{_xml_text(isbn)}</dc:identifier>')
     if has_cover:
         metadata.append('<meta name="cover" content="cover-image"/>')
     lines = [

@@ -133,7 +133,7 @@ def test_chapters_headings_and_the_first_page_of_every_page():
     # every page has exactly one marker, and the page list anchors to all of them
     text = spine_text(epub)
     ids = re.findall(r'id="page-(\d+)"', text)
-    assert sorted(set(ids)) == ["1", "2", "3"] and len(ids) == len(ids) == 3
+    assert sorted(set(ids)) == ["1", "2", "3"] and len(ids) == 3
     assert nav.count("<li><a href=") == len(names) + 3  # toc (all sections) + page list
     assert report["sections"] == len(names)
 
@@ -198,7 +198,7 @@ def _pdf_work(settings, name: str) -> tuple[int, int]:
 def test_convert_publishes_an_edition_and_moves_the_works_text(client, owner, settings):
     _file_id, work_id = _pdf_work(settings, "labels.pdf")
     r = api_post(client, f"/api/works/{work_id}/pdf-epub", owner["csrf"])
-    assert r.status_code == 200 and r.json()["status"] == "queued"
+    assert r.status_code == 202 and r.json()["status"] == "queued"
     again = api_post(client, f"/api/works/{work_id}/pdf-epub", owner["csrf"])
     assert again.json()["job_id"] == r.json()["job_id"]  # one live job per work
 
@@ -237,7 +237,7 @@ def test_convert_publishes_an_edition_and_moves_the_works_text(client, owner, se
     st = client.get(f"/api/works/{work_id}/pdf-epub").json()
     assert st["eligible"] is True and st["edition"] is None
     r = api_post(client, f"/api/works/{work_id}/pdf-epub", owner["csrf"])
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert run_pending(session_factory(), settings) == 1
     assert path.is_file()
 

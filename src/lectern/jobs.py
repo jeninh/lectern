@@ -472,7 +472,11 @@ def recover_local_leases(db: Session) -> int:
     """Jobs the in-process runner held when the server stopped go back to the queue."""
     res = db.execute(
         update(Job)
-        .where(Job.kind == TRANSCODE, Job.status == JobStatus.LEASED, Job.leased_by_id.is_(None))
+        .where(
+            Job.kind.in_((TRANSCODE, PDF2EPUB)),
+            Job.status == JobStatus.LEASED,
+            Job.leased_by_id.is_(None),
+        )
         .values(status=JobStatus.QUEUED, lease_token_hash=None, lease_expires_at=None)
     )
     db.commit()

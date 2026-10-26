@@ -82,7 +82,7 @@ def state(auth: Viewer, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
     }
 
 
-@router.post("/works/{work_id}/pdf-epub")
+@router.post("/works/{work_id}/pdf-epub", status_code=status.HTTP_202_ACCEPTED)
 def convert(
     request: Request, auth: Manager, db: DbDep, settings: SettingsDep, work_id: int
 ) -> dict:

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
   cancelPdfJob,
@@ -22,28 +22,32 @@ export function ConvertPdfRow({ work }: { work: Work }) {
   const { refreshLibrary, toast } = useStore();
   const [st, setSt] = useState<PdfEpubState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const wasRunning = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       const next = await pdfEpubState(work.id);
-      setSt((prev) => {
-        if (prev?.job && prev.job.status !== "succeeded" && next.job?.status === "succeeded" && next.edition) {
-          toast(`The converted EPUB of ${work.title} is ready.`);
-          refreshLibrary().catch(() => {});
-        }
-        return next;
-      });
+      setSt(next);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [work.id, work.title, refreshLibrary, toast]);
+  }, [work.id]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
   const job = st?.job;
   const running = job?.status === "queued" || job?.status === "leased";
+  // Side effects live in an effect on the succeeded transition, not inside a setSt
+  // updater (React may invoke updaters twice in development).
+  useEffect(() => {
+    if (wasRunning.current && !running && job?.status === "succeeded" && st?.edition) {
+      toast(`The converted EPUB of ${work.title} is ready.`);
+      refreshLibrary().catch(() => {});
+    }
+    wasRunning.current = running;
+  });
   useEffect(() => {
     if (!running) return;
     const id = window.setInterval(refresh, POLL_MS);

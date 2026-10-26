@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from lectern import queue
 from lectern.config import Settings
@@ -142,7 +142,7 @@ def run(db: Session, settings: Settings, job: Job) -> None:
             isbn=work.isbn,
             cover_jpeg=_cover(settings, work),
         )
-        _publish(db, settings, job, work, epub, report)
+        published = _publish(db, settings, job, work, epub, report)
     except Exception as exc:  # noqa: BLE001 - recorded on the job
         log.warning("pdf2epub job %s failed: %s", job.id, exc)
         db.rollback()
@@ -153,11 +153,18 @@ def run(db: Session, settings: Settings, job: Job) -> None:
         db.commit()
         return
     job = db.get(Job, job.id)
-    if job.status == JobStatus.LEASED:  # not claimed away or finished by _publish's guard
-        job.status = JobStatus.SUCCEEDED
+    if job.status == JobStatus.LEASED:  # not claimed away, cancelled, or finished meanwhile
+        if published is None:
+            job.status = JobStatus.FAILED
+            job.error = "the work was trashed (or the job superseded) during the publish"
+        else:
+            # Recorded after the publish (like transcode's): a cancel committing between the
+            # publish and this transition leaves the edition, but never reports a result.
+            job.result = {"file": CONVERTED_NAME, "sha256": published, "report": report}
+            job.status = JobStatus.SUCCEEDED
         job.finished_at = utcnow()
         db.commit()
-    log.info("pdf2epub job %s: work %s converted (%s)", job.id, work.id, (job.result or {}).get("file"))  # fmt: skip
+    log.info("pdf2epub job %s: work %s converted (%s)", job.id, work.id, CONVERTED_NAME)  # fmt: skip
 
 
 def _cover(settings: Settings, work: Work) -> bytes | None:
@@ -170,9 +177,10 @@ def _cover(settings: Settings, work: Work) -> bytes | None:
 
 def _publish(
     db: Session, settings: Settings, job: Job, work: Work, epub: bytes, report: dict
-) -> None:
+) -> str | None:
     """Stage the EPUB outside the library, then publish file, row, and report under the
-    library lock, re-reading the work's folder (an edit may rename or trash it meanwhile)."""
+    library lock, re-reading the work's folder (an edit may rename or trash it meanwhile).
+    Returns the published file's SHA-256, or None when the guard bailed."""
     from lectern.fsops import LIBRARY_LOCK, move_file
 
     scratch = settings.data_dir / "tmp" / f"{job.id}-{CONVERTED_NAME}"
@@ -187,7 +195,7 @@ def _publish(
             db.refresh(work)
             db.refresh(job)
             if work.trashed_at is not None or job.status != JobStatus.LEASED:
-                return
+                return None
             work_dir = settings.library_dir / work.dir_path
             work_dir.mkdir(parents=True, exist_ok=True)
             dest = work_dir / CONVERTED_NAME
@@ -199,6 +207,7 @@ def _publish(
             move_file(report_scratch, report_dest)
             from lectern.ingest.hashing import sha256_file
 
+            digest = sha256_file(dest)
             existing = converted_file(db, work.id)
             if existing is not None:
                 db.delete(existing)
@@ -210,18 +219,14 @@ def _publish(
                     rel_path=CONVERTED_NAME,
                     media_type=formats.EPUB,
                     size=dest.stat().st_size,
-                    sha256=sha256_file(dest),
+                    sha256=digest,
                 )
             )
             # The work's text is this EPUB the moment the row exists: move the sentence list
             # and every stored position onto it now (the PDF↔EPUB projection carries them).
             pdf_store.ensure_pdf_sentences(db, settings.library_dir, work)
-            job.result = {
-                "file": CONVERTED_NAME,
-                "sha256": sha256_file(dest),
-                "report": report,
-            }
             db.commit()
+            return digest
     finally:
         scratch.unlink(missing_ok=True)
         report_scratch.unlink(missing_ok=True)
@@ -245,18 +250,3 @@ def remove(db: Session, settings: Settings, work: Work) -> bool:
 
 # The in-process runner claims this kind too; never offered to external workers.
 queue.register(queue.KindHandler(kind=PDF2EPUB, capability=lambda _payload: PDF2EPUB, remote=False))
-
-
-def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
-    """Run every queued conversion now (the local runner calls the shared one, which claims
-    transcodes as well; this claims only ours). Returns how many ran."""
-    from lectern.jobs import claim
-
-    n = 0
-    while True:
-        with session_factory() as db:
-            claimed = claim(db, kinds=(PDF2EPUB,))
-            if claimed is None:
-                return n
-            run(db, settings, claimed[0])
-        n += 1
