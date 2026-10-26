@@ -7,14 +7,14 @@ import { makeBackgroundInert } from "../lib/hooks";
 import { relativeTime } from "../lib/format";
 import { fuzzyScore } from "../lib/fuzzy";
 import { useStore } from "../lib/store";
-import type { Device, Work } from "../lib/types";
+import type { Device, TextHit, TextSearch, Work } from "../lib/types";
 import { Cover } from "./Cover";
 import { folderSummary } from "./Folders";
 import { usePlayer } from "../lib/player";
-import { bookFiles, readerPath } from "../lib/formats";
+import { bookFiles, hitPath, readerPath } from "../lib/formats";
 import { Devices, Download, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
-type Group = "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings";
+type Group = "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "In books";
 const ORDER: Group[] = ["Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings"];
 
 interface Item {
@@ -27,8 +27,14 @@ interface Item {
   hint?: string;
   icon?: JSX.Element;
   work?: Work;
+  /** A passage found inside a book (the "In books" section, below everything else). */
+  hit?: TextHit;
   run: () => void;
 }
+
+// Full-text search inside books: after a pause in typing, for three characters or more.
+const TEXT_MIN = 3;
+const TEXT_DEBOUNCE_MS = 250;
 
 export function CommandPalette() {
   const { paletteOpen, setPaletteOpen, works, shelves, me, resolvedTheme, setTheme, setHelpOpen, canUpload, canEdit, pickBooks, pickFolder, imports, setReviewOpen, openEditor } = useStore();
@@ -37,6 +43,8 @@ export function CommandPalette() {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [text, setText] = useState<TextSearch | null>(null);
+  const [searching, setSearching] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const restore = useRef<HTMLElement | null>(null);
@@ -173,7 +181,43 @@ export function CommandPalette() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, works, shelves, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing]);
 
-  const flat = groups.flatMap((g) => g.items);
+  // "In books": passages, asked of the server as you type (debounced). The previous answer
+  // stays on screen until the next one arrives, so the list does not jump while typing.
+  useEffect(() => {
+    if (!paletteOpen || q.trim().length < TEXT_MIN) {
+      setText(null);
+      setSearching(false);
+      return;
+    }
+    let live = true;
+    setSearching(true);
+    const t = window.setTimeout(() => {
+      // A trailing space means the last word is finished; otherwise it matches as a prefix.
+      get<TextSearch>(`/api/search/text?q=${encodeURIComponent(q.trim())}&limit=6&partial=${/\s$/.test(q) ? "false" : "true"}`)
+        .then((d) => live && setText(d))
+        .catch(() => live && setText({ results: [], too_broad: false }))
+        .finally(() => live && setSearching(false));
+    }, TEXT_DEBOUNCE_MS);
+    return () => {
+      live = false;
+      window.clearTimeout(t);
+    };
+  }, [q, paletteOpen]);
+
+  const shown = useMemo(() => {
+    const hits = (text?.results ?? []).map<Item>((h, n) => ({
+      id: `t${n}-${h.work_id}`,
+      group: "In books",
+      label: h.title,
+      hit: h,
+      work: works.find((w) => w.id === h.work_id),
+      run: () => go(hitPath(h)),
+    }));
+    return hits.length ? [...groups, { group: "In books" as Group, items: hits }] : groups;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups, text, works]);
+  const flat = shown.flatMap((g) => g.items);
+  const textNote = q.trim().length < TEXT_MIN || text?.results.length ? null : searching ? "Searching inside books…" : text?.too_broad ? "Too many passages match. Add another word." : null;
 
   useEffect(() => setSel(0), [q]);
   useEffect(() => {
@@ -209,27 +253,27 @@ export function CommandPalette() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={onKey}
-            placeholder="Search books, shelves, authors, devices, settings…"
+            placeholder="Search books and their text, shelves, authors, settings…"
             role="combobox"
             aria-expanded="true"
             aria-haspopup="listbox"
             aria-controls="palette-list"
             aria-activedescendant={flat[sel] ? `opt-${flat[sel].id}` : undefined}
             aria-autocomplete="list"
-            aria-label="Search books, authors, devices, settings, and actions"
+            aria-label="Search books, text inside books, authors, devices, settings, and actions"
             spellCheck={false}
             autoComplete="off"
           />
           <kbd aria-hidden="true">esc</kbd>
         </div>
         <div id="palette-list" role="listbox" ref={listRef} aria-label="Results">
-          {flat.length === 0 && (
+          {flat.length === 0 && !textNote && !searching && (
             <div className="palette-empty" role="presentation">
               <strong>No matches for “{q}”</strong>
               <span>Try an author’s surname, a device name, or “passkey”.</span>
             </div>
           )}
-          {groups.map((g) => (
+          {shown.map((g) => (
             <div key={g.group} role="group" aria-labelledby={`pg-${g.group}`}>
               <div className="group" id={`pg-${g.group}`} role="presentation">{g.group}</div>
               {g.items.map((it) => {
@@ -245,11 +289,22 @@ export function CommandPalette() {
                       onClick={it.run}
                       className="option"
                     >
-                      {it.work ? <Cover work={it.work} /> : <span className="opt-icon">{it.icon}</span>}
-                      <div className="meta">
-                        <span className="opt-label">{it.label}</span>
-                        {it.detail && <span className="opt-detail">{it.detail}</span>}
-                      </div>
+                      {it.work ? <Cover work={it.work} /> : <span className="opt-icon">{it.icon ?? <Reader />}</span>}
+                      {it.hit ? (
+                        <div className="meta passage">
+                          <span className="opt-label">{it.label}{it.hit.page ? <span className="opt-detail"> · page {it.hit.page}</span> : null}</span>
+                          <span className="opt-snippet">
+                            {it.hit.snippet.before && "…"}
+                            {it.hit.snippet.parts.map(([t, m], k) => (m ? <mark key={k}>{t}</mark> : <span key={k}>{t}</span>))}
+                            {it.hit.snippet.after && "…"}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="meta">
+                          <span className="opt-label">{it.label}</span>
+                          {it.detail && <span className="opt-detail">{it.detail}</span>}
+                        </div>
+                      )}
                       {it.hint && <kbd aria-hidden="true">{it.hint}</kbd>}
                     </div>
                 );
@@ -257,6 +312,12 @@ export function CommandPalette() {
             </div>
           ))}
         </div>
+        {textNote && (
+          <div className="palette-note" role="status">
+            <span className="group">In books</span>
+            {textNote}
+          </div>
+        )}
         <div className="foot" aria-hidden="true">
           <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
           <span><kbd>↵</kbd> open</span>

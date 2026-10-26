@@ -14,7 +14,8 @@ import { relativeTime } from "../lib/format";
 import { pickHandoff } from "../lib/handoff";
 import { useLocalStorage } from "../lib/hooks";
 import { useStore } from "../lib/store";
-import { offsetOf, rangeAt } from "../lib/textpos";
+import { hitTarget } from "../lib/formats";
+import { offsetOf, rangeAt, rangeBetween } from "../lib/textpos";
 import type { HandoffCandidate, Work, WorkProgressResponse } from "../lib/types";
 import { PageReader } from "./PageReader";
 
@@ -63,6 +64,32 @@ export function bookCss(s: ReaderSettings, resolved: Exclude<ReaderTheme, "auto"
     ${resolved === "dark" ? "img { filter: brightness(.9); }" : ""}
     ${font}
   `;
+}
+
+const FOUND = "lectern-found";
+
+/** Mark a search match in a section's document (the CSS Custom Highlight API where the
+ * browser has it, else the selection), and return its range for the reader to show. */
+function highlight(doc: Document, start: number, end: number): Range | null {
+  const range = rangeBetween(doc, start, end);
+  if (!range) return null;
+  const win = doc.defaultView as (Window & { Highlight?: new (...r: Range[]) => unknown; CSS?: { highlights?: Map<string, unknown> } }) | null;
+  if (win?.Highlight && win.CSS?.highlights) {
+    // Its own rule, not the book CSS: the reader injects that only into documents with a <head>.
+    if (!doc.getElementById(FOUND)) {
+      const style = doc.createElementNS("http://www.w3.org/1999/xhtml", "style");
+      style.id = FOUND;
+      style.textContent = `::highlight(${FOUND}) { background-color: rgb(255 196 0 / 0.42); }`;
+      (doc.head ?? doc.documentElement).append(style);
+    }
+    win.CSS.highlights.set(FOUND, new win.Highlight(range));
+  }
+  else {
+    const sel = doc.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }
+  return range;
 }
 
 interface TocItem {
@@ -123,6 +150,9 @@ export function ReaderPage() {
 function EpubReader() {
   const { id: idParam } = useParams();
   const id = Number(idParam);
+  // Opened from a search hit ("In books" in Cmd/Ctrl+K): start at the match, highlighted.
+  const [search] = useSearchParams();
+  const target = useRef(hitTarget(search));
   const nav = useNavigate();
   const { works, resolvedTheme, deviceName, toast, now } = useStore();
   const [settings, setSettings] = useLocalStorage<ReaderSettings>("lectern.reader", DEFAULTS);
@@ -234,7 +264,11 @@ function EpubReader() {
         applySettings();
 
         const mark = readMark(id);
-        if (mark?.cfi) await v.init({ lastLocation: mark.cfi });
+        const hit = target.current;
+        if (hit) {
+          await v.init({ showTextStart: true });
+          await v.renderer.goTo({ index: hit.spine_index, anchor: (doc) => highlight(doc, hit.char, hit.char + hit.length) ?? doc.body });
+        } else if (mark?.cfi) await v.init({ lastLocation: mark.cfi });
         else if (prog.source === "web" && prog.raw) await v.init({ lastLocation: prog.raw });
         else if (prog.text) {
           await v.init({ showTextStart: true });
@@ -243,7 +277,8 @@ function EpubReader() {
         if (cancelled) return;
         if (!mark && prog.received_at) writeMark(id, { cfi: "", seenAt: prog.received_at });
         const here = view.current ? lastFraction() ?? 0 : null;
-        setHandoff(mark ? pickHandoff(prog, { seenAt: mark.seenAt }, { device: deviceName, mode: "read", here }) : null);
+        // A search hit is where the person asked to be; no hand-off prompt over it.
+        setHandoff(mark && !hit ? pickHandoff(prog, { seenAt: mark.seenAt }, { device: deviceName, mode: "read", here }) : null);
         setLoading(false);
         window.setTimeout(() => (ready.current = true), 600);
       } catch (e) {
