@@ -93,8 +93,10 @@ def is_home_address(url: str) -> bool:
         return True
     if netloc.startswith("["):
         return True
-    host = re.sub(r":[0-9]*$", "", netloc).rstrip(".")
-    if not host or host == "local" or host.endswith(".local"):
+    host = re.sub(r":[0-9]+$", "", netloc).rstrip(".")
+    if not re.fullmatch(r"[a-z0-9.-]+", host):  # named port, bare IPv6, odd characters
+        return True
+    if host == "local" or host.endswith(".local"):
         return True
     if not _NUMERIC.search(host):
         return False

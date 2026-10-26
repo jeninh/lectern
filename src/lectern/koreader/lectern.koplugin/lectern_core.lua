@@ -41,8 +41,12 @@ function Core.homeLike(url)
     if not auth or auth:find("@", 1, true) then return true end -- unparseable: not trusted
     -- Any IPv6 literal (mapped IPv4, link-local, unique-local; Tailscale's own are ULA too).
     if auth:sub(1, 1) == "[" then return true end
-    local host = auth:gsub(":%d*$", ""):gsub("%.+$", "") -- port, DNS-root dots
-    if host == "" or host == "local" or host:match("%.local$") then return true end
+    -- Only a plain host name or dotted IPv4 with an optional numeric port is classified;
+    -- anything else (a named port such as :http-alt, unbracketed IPv6, odd characters) is
+    -- something the socket library may still resolve, so it is never trusted.
+    local host = auth:gsub(":%d+$", ""):gsub("%.+$", "") -- port, DNS-root dots
+    if not host:match("^[%w%-%.]+$") then return true end
+    if host == "local" or host:match("%.local$") then return true end
     local numeric = host:match("^[%d.]+$") or host:match("%.%d+$") or host:match("^0x")
         or host:match("%.0x")
     if not numeric then return false end
@@ -465,8 +469,18 @@ function Core:bootstrap()
     return postpone(code and ("HTTP " .. code) or (err or "offline"))
 end
 
+--- ``scheme://host[:port]`` with a plain host name, dotted IPv4, or bracketed IPv6 and an
+-- optional numeric port; nothing else is accepted as a server address.
+function Core.validServerUrl(url)
+    if type(url) ~= "string" then return false end
+    local host = url:match("^https?://([%w%-%.]+)$") or url:match("^https?://([%w%-%.]+):%d+$")
+    if host then return true end
+    return url:match("^https?://%[[%x:%.]+%]:%d+$") ~= nil or url:match("^https?://%[[%x:%.]+%]$") ~= nil
+end
+
 --- Lectern → Pair: a 6-digit code from the web app. Returns "ok", "invalid", or "retry".
 function Core:pair(server_url, username, code)
+    if not Core.validServerUrl(server_url) then return "invalid_server" end
     local code_status, data, err = self:request("POST", "/koplugin/pair", {
         server_url = server_url, json = { username = username, code = code }, timeout = { 5, 15 },
     })

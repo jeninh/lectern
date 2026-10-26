@@ -697,6 +697,11 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     path = Path(out["downloaded"])
     assert path.name == "Alpha - Ann (2).epub" and zipfile.is_zipfile(path)
     assert (sdir / "books" / "Alpha - Ann.epub").read_bytes() == b"my annotated copy"
+    # Delivery is recorded once the server finished sending, which can trail the client a moment.
+    for _ in range(50):
+        if http.get(f"/api/device-queues/{pw_id}").json()["pending"] == []:
+            break
+        time.sleep(0.1)
     assert http.get(f"/api/device-queues/{pw_id}").json()["pending"] == []
 
     # Re-pairing after a reset with a code from the web app.
@@ -914,6 +919,15 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
     out = lua(plugin, downgraded, "route")
     assert out.get("active") is None and out["status"] is False  # no request went out
     assert "userkey" not in out["kosync"]
+
+    # Malformed server addresses the socket library would still resolve (a service-name port,
+    # unbracketed IPv6) are refused before any request.
+    aliased_bad = tmp_path / "aliased-bad"
+    aliased_bad.mkdir()
+    for bad in ("http://127.1:http-alt", "http://lectern.local:http-alt", f"http://::1:{port}"):
+        out = lua(bare_plugin(), aliased_bad, "pair", bad, "owner", "123456")
+        assert out["message"].startswith("Enter the server address"), (bad, out["message"])
+        assert not out["paired"]
 
     # Pairing through such an alias of the home address is refused as well.
     settings.lan_port, settings.lan_url = 18081, home

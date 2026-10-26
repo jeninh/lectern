@@ -560,7 +560,7 @@ function Lectern:doPair(server, username, code)
     server = (server or ""):gsub("%s", ""):gsub("/+$", "")
     username = (username or ""):gsub("^%s+", ""):gsub("%s+$", "")
     code = (code or ""):gsub("%D", "")
-    if not server:match("^https?://[^/]+$") or username == "" or #code ~= 6 then
+    if not Core.validServerUrl(server) or username == "" or #code ~= 6 then
         UIManager:show(InfoMessage:new{ text = _("Enter the server address (http://100.x.y.z:8080, or Lectern's home Wi-Fi address), your username and the 6-digit code.") })
         return
     end

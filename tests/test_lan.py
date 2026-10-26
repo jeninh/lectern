@@ -212,6 +212,13 @@ HOME_CASES = [
     ("http://010.0.0.1:8080", True),  # octal in inet_aton
     ("http://user@100.101.102.103:8080", True),
     ("http://:8080", True),
+    ("http://192.168.7.7:http-alt", True),  # service-name port
+    ("http://lectern.local:http-alt", True),
+    ("http://lectern.tail1234.ts.net:http-alt", True),
+    ("http://fd00::1:8080", True),  # unbracketed IPv6
+    ("http://::1:8080", True),
+    ("http://lectern_x.example:8080", True),
+    ("http://lectern.example:", True),
     ("http://100.101.102.103:8080", False),  # the tailnet
     ("http://100.101.102.103.:8080", False),
     ("http://8.8.8.8:8080", False),
