@@ -6,8 +6,8 @@ import { DocMarkdown } from "../components/DocMarkdown";
 import { EmptyState } from "../components/EmptyState";
 import { Book, Devices, Download, Gear, Headphones, Home, Key, Search, Send, Shield, Sparkle, Sync, Toc } from "../components/Icons";
 import { PageTitle } from "../components/Shell";
-import { canSee, docPath, searchDocs, type Doc, type DocIcon } from "../lib/docs";
-import { DOC_FILES, DOCS } from "../lib/docsData";
+import { canSee, docPath, searchDocs, slugify, type Doc, type DocIcon } from "../lib/docs";
+import { DOCS } from "../lib/docsData";
 import { fold } from "../lib/fuzzy";
 import { useStore } from "../lib/store";
 
@@ -83,13 +83,16 @@ function useActiveHeading(ids: string[]): string | null {
 
 export default function DocsPage() {
   const { slug } = useParams();
-  const { hash } = useLocation();
+  // key changes on every navigation, so clicking the anchor already in the address scrolls again.
+  const { hash, key } = useLocation();
   const nav = useNavigate();
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
   const { me } = useStore();
   const role = me?.user.role;
   const visible = useMemo(() => DOCS.filter((d) => canSee(d.audience, role)), [role]);
+  // Links to docs this person cannot open render as plain text instead of a dead end.
+  const visibleFiles = useMemo(() => new Set(visible.map((d) => d.file)), [visible]);
   const doc = slug ? DOCS.find((d) => d.slug === slug) ?? null : null;
   const allowed = !!doc && canSee(doc.audience, role);
   const hits = useMemo(() => (q.trim() ? searchDocs(visible, q, 30) : []), [visible, q]);
@@ -102,7 +105,7 @@ export default function DocsPage() {
     const id = decodeURIComponent(hash.slice(1));
     const raf = requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ block: "start" }));
     return () => cancelAnimationFrame(raf);
-  }, [slug, hash, q]);
+  }, [slug, hash, q, key]);
 
   const setQuery = (v: string) => setParams(v ? { q: v } : {}, { replace: true });
 
@@ -155,7 +158,7 @@ export default function DocsPage() {
           </details>
         )}
         <div className="doc-body">
-          <DocMarkdown tokens={doc.tokens} files={DOC_FILES} />
+          <DocMarkdown tokens={doc.tokens} files={visibleFiles} />
         </div>
         <nav className="docs-pager" aria-label="Previous and next">
           {prev ? (
@@ -181,8 +184,8 @@ export default function DocsPage() {
     body = (
       <div className="docs-overview">
         {bySection(visible).map(([section, docs]) => (
-          <section key={section} aria-labelledby={`ds-${section}`}>
-            <h2 id={`ds-${section}`}>{section}</h2>
+          <section key={section} aria-labelledby={`ds-${slugify(section)}`}>
+            <h2 id={`ds-${slugify(section)}`}>{section}</h2>
             <div className="docs-cards">
               {docs.map((d) => (
                 <Link key={d.slug} to={docPath(d.slug)} className="docs-card">

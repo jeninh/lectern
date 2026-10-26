@@ -44,6 +44,14 @@ describe("docs/index.yml", () => {
     expect(mdFiles.filter((f) => !listed.includes(f)), "in docs/ but not in docs/index.yml").toEqual([]);
   });
 
+  it("starts every doc with its only h1 (the app shows the manifest title in its place)", () => {
+    for (const d of docs) {
+      const h1s = d.tokens.filter((t) => t.type === "heading_open" && t.tag === "h1");
+      expect(h1s.length, d.file).toBe(1);
+      expect(d.tokens[0].type === "heading_open" && d.tokens[0].tag === "h1", d.file).toBe(true);
+    }
+  });
+
   it("gives every page a title, description, known icon, and known audience", () => {
     for (const s of manifest.sections) {
       expect(s.title, "section title").toBeTruthy();
