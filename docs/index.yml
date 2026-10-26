@@ -59,6 +59,10 @@ sections:
         title: Read-along for PDFs
         description: Text PDFs get alignment, generated audiobooks, positions, and read-along on the pages.
         icon: headphones
+      - file: pdf-epub.md
+        title: PDF to EPUB conversion
+        description: Give a text PDF a reflowable EPUB edition, keeping the PDF's page numbers.
+        icon: book
       - file: kindle.md
         title: Kindle books (MOBI and AZW3)
         description: DRM-free MOBI and AZW3 books are converted to EPUB on arrival.
