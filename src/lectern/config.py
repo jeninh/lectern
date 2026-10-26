@@ -167,6 +167,10 @@ class Settings(BaseSettings):
     # Optional: what 1000 ElevenLabs credits cost you, to show a money estimate (0 = credits only).
     elevenlabs_price_per_1000_credits: float = Field(default=0.0, ge=0.0)
 
+    # Offline mode (docs/offline-mode.md): refuse every outbound internet connection from the
+    # server. On here, it cannot be turned off in Admin; off, the owner may still turn it on there.
+    offline: bool = False
+
     log_level: str = "INFO"
 
     @field_validator("base_url")

@@ -56,6 +56,9 @@ worker online; it waits, and starts when one connects.
        --download-dir /data/tts/piper en_US-lessac-medium
    ```
 
+   or `docker compose exec lectern lectern prepare-models --piper-voice en_US-lessac-medium`
+   (also what Admin → Offline mode → Download models now fetches when no voice is installed;
+   see [offline-mode.md](offline-mode.md)).
    Voices are listed at <https://huggingface.co/rhasspy/piper-voices>; check each voice's
    licence before you share what you make. `low` voices are fastest, `medium` sound better.
 

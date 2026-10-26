@@ -3,7 +3,7 @@ import { get, post, put } from "../lib/api";
 import { absoluteTime, bytes, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
-import type { BackupView } from "../lib/types";
+import type { BackupView, OfflineFeature, OfflineModeView } from "../lib/types";
 
 /** "03:00" in the browser's time zone for a UTC hour today (DST and half-hour zones included). */
 export function localHourLabel(hourUtc: number, now = new Date()): string {
@@ -149,6 +149,106 @@ export function BackupsCard() {
       </p>
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <button type="button" className="btn" onClick={runNow} disabled={view.running || !t.writable || !t.restic_available}>{view.running ? "Backing up…" : "Back up now"}</button>
+      </div>
+    </section>
+  );
+}
+
+/** Offline mode (docs/offline-mode.md): one switch that refuses every outbound internet
+ * connection, what would otherwise contact the internet, and downloading models ahead of time. */
+export function OfflineModeCard() {
+  const { toast, refreshMe } = useStore();
+  const [view, setView] = useState<OfflineModeView | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => get<OfflineModeView>("/api/admin/offline-mode").then(setView), []);
+  useEffect(() => {
+    load().catch(() => {});
+  }, [load]);
+  useVisiblePolling(() => {
+    if (view?.prepare.running) load().catch(() => {});
+  }, 2000);
+  const flip = async () => {
+    if (!view) return;
+    setBusy(true);
+    try {
+      setView(await put<OfflineModeView>("/api/admin/offline-mode", { enabled: !view.on }));
+      await refreshMe();
+      toast(view.on ? "Offline mode turned off." : "Offline mode on: Lectern makes no internet connections.");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const prepare = async () => {
+    try {
+      setView(await post<OfflineModeView>("/api/admin/offline-mode/prepare"));
+      toast("Downloading models…");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
+  if (!view) {
+    return (
+      <section className="card" id="offline-mode" style={{ marginTop: 18 }}>
+        <h2>Offline mode</h2>
+        <div className="hint">Loading…</div>
+      </section>
+    );
+  }
+  const { models: m, prepare: p } = view;
+  const status = (f: OfflineFeature) =>
+    f.blocked ? <span className="badge warn">blocked</span> : f.on ? <span className="badge accent">on</span> : <span className="badge">off</span>;
+  return (
+    <section className="card" id="offline-mode" aria-labelledby="off-h" style={{ marginTop: 18 }}>
+      <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+        <div>
+          <h2 id="off-h">Offline mode</h2>
+          <p className="sub" id="off-sub">
+            Guarantees that this server never contacts the internet: every outbound connection is refused, whatever asks for it. Readers, devices, and workers still reach Lectern as before. For a guarantee that also covers ffmpeg and the operating system, add the firewall rules in <code>docs/offline-mode.md</code>.
+          </p>
+        </div>
+        <Switch on={view.on} busy={busy || view.forced} labelledBy="off-h" describedBy="off-sub" onFlip={flip} />
+      </div>
+      {view.forced && (
+        <div className="alert ok" style={{ marginBottom: 12 }}>
+          <code>LECTERN_OFFLINE=1</code> is set on the server, so offline mode stays on.
+        </div>
+      )}
+      <table className="list" style={{ marginBottom: 14 }}>
+        <thead>
+          <tr><th scope="col">What contacts the internet</th><th scope="col">Where</th><th scope="col">Now</th></tr>
+        </thead>
+        <tbody>
+          {view.features.map((f) => (
+            <tr key={f.id}>
+              <td><strong>{f.name}</strong><div className="hint">{f.when}</div></td>
+              <td>{f.contacts.map((h) => <div key={h}><code>{h}</code></div>)}</td>
+              <td>{status(f)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <dl className="kv" style={{ marginBottom: 14 }}>
+        <dt>Alignment model</dt>
+        <dd>{!m.align.local ? <span className="hint">this server does not align</span> : m.align.ready ? <><span className="badge ok">downloaded</span> {m.align.model}</> : <><span className="badge warn">not downloaded</span> {m.align.model}</>}</dd>
+        <dt>Kokoro voices</dt>
+        <dd>{!m.kokoro.local ? <span className="hint">not run on this server</span> : m.kokoro.ready ? <span className="badge ok">downloaded</span> : <span className="badge warn">not downloaded</span>}</dd>
+        <dt>Piper voices</dt>
+        <dd>{!m.piper.installed ? <span className="hint">Piper is not installed</span> : m.piper.voices.length ? m.piper.voices.join(", ") : <span className="badge warn">none</span>}</dd>
+      </dl>
+      {p.finished_at && !p.running && (
+        <div className={`alert ${p.ok ? "ok" : "error"}`} role={p.ok ? undefined : "alert"} style={{ marginBottom: 12 }}>
+          {p.ok ? "Models downloaded" : "The download failed"} {relativeTime(p.finished_at)}.
+          {!p.ok && p.log.length > 0 && <> <code>{p.log[p.log.length - 1]}</code></>}
+        </div>
+      )}
+      {p.running && p.log.length > 0 && <p className="hint" aria-live="polite">{p.log[p.log.length - 1]}</p>}
+      <p className="hint">
+        Download what this server needs to align and narrate without the internet before you turn offline mode on (the same as <code>lectern prepare-models</code>). Models go into the data directory.
+      </p>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button type="button" className="btn" onClick={prepare} disabled={view.on || p.running} title={view.on ? "Turn offline mode off to download" : undefined}>{p.running ? "Downloading…" : "Download models now"}</button>
       </div>
     </section>
   );

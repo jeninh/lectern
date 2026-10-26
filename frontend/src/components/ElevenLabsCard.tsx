@@ -33,6 +33,11 @@ export function ElevenLabsCard() {
       <p className="sub">
         Use your own ElevenLabs account for “Make an audiobook”. Your key is encrypted on this server and never shown again. Lectern contacts only {st?.endpoint ?? "https://api.elevenlabs.io"}, and only when you test the key, list voices, play a sample, estimate, or start a narration you confirmed. A narration sends the chosen chapters’ text to ElevenLabs.
       </p>
+      {st?.offline && (
+        <div className="alert warn" style={{ marginBottom: 10 }}>
+          Unavailable: Lectern is in offline mode (Admin → Offline mode), so nothing is sent to ElevenLabs.
+        </div>
+      )}
       {st?.configured ? (
         <div className="stack" style={{ gap: 8 }}>
           <div>
@@ -42,7 +47,7 @@ export function ElevenLabsCard() {
           </div>
           <div className="hint">Last 30 days: {st.usage.characters.toLocaleString()} characters, {Math.round(st.usage.credits).toLocaleString()} credits{st.last_used_at ? ` · last used ${absoluteTime(st.last_used_at)}` : ""}.</div>
           <div className="row" style={{ gap: 8 }}>
-            <button className="btn sm" disabled={busy} onClick={() => run(testElevenLabs, "Key tested.")}>Test</button>
+            <button className="btn sm" disabled={busy || st.offline} onClick={() => run(testElevenLabs, "Key tested.")}>Test</button>
             <button className="btn sm danger" disabled={busy} onClick={() => run(revokeElevenLabs, "ElevenLabs key removed.")}>Remove key</button>
           </div>
         </div>

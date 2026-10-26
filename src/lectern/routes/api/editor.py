@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import covergen, editing, idempotency, instance, lookup, trash
+from lectern import covergen, editing, egress, idempotency, instance, lookup, trash
 from lectern.access import can_see_work, shelf_perms, visible_path
 from lectern.align import jobs as align_jobs
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS
@@ -197,6 +197,7 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
             else None
         ),
         "lookup_enabled": instance.get(db, "metadata_lookup_enabled"),
+        "lookup_offline": egress.offline(),
     }
 
 
@@ -827,6 +828,8 @@ def metadata_lookup(request: Request, auth: Editor, db: DbDep, body: lookup.Quer
     """Suggestions only; applying them is an ordinary, field-by-field edit."""
     if not instance.get(db, "metadata_lookup_enabled"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "lookup_disabled")
+    if egress.offline():
+        raise HTTPException(status.HTTP_409_CONFLICT, "lookup_offline")
     if not request.app.state.limiters["lookup"].allow(f"user:{auth.user.id}"):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
     result = lookup.lookup(body, request.app.state.lookup_fetch)

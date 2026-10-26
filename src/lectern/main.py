@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 
-from lectern import __version__, backups, mcp_server
+from lectern import __version__, backups, egress, mcp_server, offline_mode
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
@@ -99,6 +99,8 @@ def create_app(
     ``LECTERN_BACKGROUND_JOBS`` (tests run without threads and drive them by hand)."""
     settings = settings or get_settings()
     _configure_logging(settings)
+    # Before anything can open a connection; the owner's Admin switch is read at startup.
+    egress.enforce(settings.offline)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -116,6 +118,11 @@ def create_app(
         upgrade_to_head(engine)
         settings.resolve_secret_key()
         with session_factory()() as db:
+            if offline_mode.apply(db, settings):
+                log.warning(
+                    "offline mode is on: every outbound internet connection is refused%s",
+                    " (LECTERN_OFFLINE=1)" if settings.offline else " (Admin → Offline mode)",
+                )
             token = ensure_setup_token(db, settings)
         if token:
             print_setup_banner(token, settings)

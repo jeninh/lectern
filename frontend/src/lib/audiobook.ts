@@ -107,6 +107,8 @@ export interface ElevenLabsStatus {
   last_test_detail: string | null;
   last_used_at: string | null;
   endpoint: string;
+  /** Offline mode is on: nothing is sent to ElevenLabs. */
+  offline?: boolean;
   usage: { days: number; characters: number; credits: number };
 }
 

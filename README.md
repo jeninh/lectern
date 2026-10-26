@@ -82,6 +82,15 @@ metadata and cover, optionally the library files, into an encrypted restic repos
 `LECTERN_BACKUP_PATH` (a USB drive on a Pi, not the SD card). Restore with `lectern restore`:
 [docs/backups.md](docs/backups.md).
 
+## Offline mode
+
+One switch guarantees the server makes no outbound internet connections: Admin → Offline mode,
+or `LECTERN_OFFLINE=1`. Every outbound connection is refused at one choke point; metadata
+suggestions and ElevenLabs show as unavailable. Admin lists everything that would contact the
+internet and whether it is on, and **Download models now** (`lectern prepare-models`) fetches
+the alignment model and TTS voices first, so alignment and narration still work. Firewall
+rules for a hard, network-level guarantee: [docs/offline-mode.md](docs/offline-mode.md).
+
 ## Library
 
 The Library is a file manager for your books. **Folders** (the default) shows your top-level
