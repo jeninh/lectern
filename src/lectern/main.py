@@ -17,6 +17,7 @@ from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
 from lectern.jobs import JobRunner, housekeeping
+from lectern.lan import LANGuard
 from lectern.lookup import http_get as lookup_http_get
 from lectern.migrate import upgrade_to_head
 from lectern.readaloud.cache import ReadAloudBuilder
@@ -226,6 +227,8 @@ def create_app(
         "koplugin_pair_user": SlidingWindowLimiter(limit=10, window_seconds=15 * 60),
         "koplugin_code": SlidingWindowLimiter(limit=10, window_seconds=60),
         "koplugin_audit": SlidingWindowLimiter(limit=1, window_seconds=60),
+        # home-address checks (POST /koplugin/hello), per address: one per network change.
+        "koplugin_hello": SlidingWindowLimiter(limit=30, window_seconds=60),
         # Optional metadata suggestions (outbound to Open Library / Google Books), per user.
         "lookup": SlidingWindowLimiter(limit=10, window_seconds=60),
         # AI apps on /mcp: failed AI keys per address, requests per valid key, and tool calls
@@ -243,6 +246,9 @@ def create_app(
     app.state.readaloud = ReadAloudBuilder()
 
     app.add_middleware(SecurityHeadersMiddleware)
+    if settings.lan_enabled:
+        # Outermost: the home Wi-Fi listener refuses before anything else runs (lectern.lan).
+        app.add_middleware(LANGuard, lan_port=settings.lan_port)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app_assets = STATIC_DIR / "app" / "assets"
     if app_assets.is_dir():

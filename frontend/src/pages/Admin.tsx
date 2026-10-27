@@ -114,6 +114,43 @@ function DataSaverCard() {
   );
 }
 
+/** Opt-in home Wi-Fi access for e-readers (docs/home-network.md): read-only, set in the deployment. */
+function HomeNetworkCard() {
+  const [lan, setLan] = useState<{ enabled: boolean; url: string | null } | null>(null);
+  useEffect(() => {
+    get<{ lan: { enabled: boolean; url: string | null } }>("/api/admin/settings")
+      .then((d) => setLan(d.lan))
+      .catch(() => {});
+  }, []);
+  if (!lan) return null;
+  return (
+    <section className="card" id="home-network" aria-labelledby="lan-h" style={{ marginTop: 18 }}>
+      <h2 id="lan-h">Home Wi-Fi access</h2>
+      <p className="status" role="status">
+        <span className={`status-dot ${lan.enabled ? "ok" : "off"}`} aria-hidden="true" />
+        {lan.enabled ? <>On{lan.url ? <> · <code>{lan.url}</code></> : " · address not set (LECTERN_LAN_URL)"}</> : "Off"}
+      </p>
+      {lan.enabled ? (
+        <>
+          <div className="alert warn" role="note">
+            Anyone on your home Wi-Fi can reach this address and try to sign in as a device: the catalogue, progress sync, and plugin pairing.
+            The same passwords, rate limits, and alerts apply, and it answers only private home-network addresses. Never forward this port on your router.
+          </div>
+          <p className="sub" style={{ marginTop: 10 }}>
+            Only e-readers use it, over plain http on your own network. The web app, passkeys, and AI apps stay on the Tailscale address. KOReader plugin zips carry both
+            addresses and use this one at home for progress sync and books sent to the device, after checking it really is this Lectern; the OPDS catalogue stays on Tailscale.
+          </p>
+        </>
+      ) : (
+        <p className="sub">
+          E-readers reach Lectern only through Tailscale. To let them sync at home without Tailscale, add <code>deploy/tailscale/lan.yaml</code> to the deployment (see
+          docs/home-network.md). Anyone on your home Wi-Fi could then reach Lectern’s device sign-in.
+        </p>
+      )}
+    </section>
+  );
+}
+
 export function AdminPage() {
   const { toast, me } = useStore();
   const [users, setUsers] = useState<User[] | null>(null);
@@ -192,6 +229,7 @@ export function AdminPage() {
       <DataSaverCard />
       <BackupsCard />
       {me?.user.role === "owner" && <OfflineModeCard />}
+      {me?.user.role === "owner" && <HomeNetworkCard />}
       {me?.user.role === "owner" && <ElevenLabsCard />}
       <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for @${capFor.username}` : ""} variant="dialog" labelledBy="ucap-title">
         {capFor && (

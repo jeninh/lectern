@@ -121,6 +121,7 @@ const MESSAGES: Record<string, string> = {
   internal_error: "an unexpected server error",
   not_found: "it no longer exists",
   work_busy: "a read-aloud build is using it",
+  server_url_is_home: "That is a home Wi-Fi address. Enter Lectern's Tailscale address here (http://100.x.y.z:8080); the zip adds the home address by itself.",
   invalid_server_url: "Enter the address as http://100.x.y.z:8080 (no path).",
   server_url_required: "Lectern could not find its Tailscale address. Enter it, e.g. http://100.101.102.103:8080.",
   device_revoked: "This device was revoked. Add it again to set up the plugin.",

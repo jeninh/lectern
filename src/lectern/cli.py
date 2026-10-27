@@ -38,19 +38,29 @@ def serve() -> None:
     from lectern.config import get_settings
 
     settings = get_settings()
-    uvicorn.run(
-        "lectern.main:app_factory",
-        factory=True,
-        host=settings.host,
-        port=settings.port,
-        # request.client stays the socket peer; lectern.security.proxy applies forwarding
-        # headers itself, and only for peers listed in LECTERN_TRUSTED_PROXIES.
-        proxy_headers=False,
-        # Not uvloop: its sockets bypass the audit hook offline mode relies on (lectern.egress).
-        loop="asyncio",
-        log_level=settings.log_level.lower(),
-        access_log=False,
-    )
+
+    def config(port: int) -> uvicorn.Config:
+        return uvicorn.Config(
+            "lectern.main:app_factory",
+            factory=True,
+            host=settings.host,
+            port=port,
+            # request.client stays the socket peer; lectern.security.proxy applies forwarding
+            # headers itself, and only for peers listed in LECTERN_TRUSTED_PROXIES.
+            proxy_headers=False,
+            # Not uvloop: its sockets bypass the audit hook offline mode relies on (lectern.egress).
+            loop="asyncio",
+            log_level=settings.log_level.lower(),
+            access_log=False,
+        )
+
+    main = config(settings.port)
+    sockets = [main.bind_socket()]
+    if settings.lan_enabled:
+        # The home Wi-Fi listener (docs/home-network.md): the same app, which tells the two
+        # apart by the local port and lets lectern.lan.LANGuard restrict this one.
+        sockets.append(config(settings.lan_port).bind_socket())
+    uvicorn.Server(main).run(sockets=sockets)
 
 
 def _transcriber_args(p: argparse.ArgumentParser) -> None:

@@ -3,6 +3,8 @@
 ``POST /koplugin/bootstrap``  one-time setup secret from the zip -> the device's credentials
 ``POST /koplugin/pair``       username + 6-digit code from the web app -> the same
 ``GET  /koplugin/status``     HTTP Basic with the device's app password: who it is, its queue
+``POST /koplugin/hello``      device id + nonce -> proof that this is the device's Lectern, so the
+                              plugin can trust the home Wi-Fi address (lectern.lan)
 
 Failures say as little as possible (one error code each), and the audit log records why.
 Secrets, codes, and issued credentials never reach the log stream or the audit log.
@@ -15,10 +17,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import device_queue, koplugin
+from lectern import device_queue, koplugin, lan
 from lectern.models import BookFile, FileKind, SyncKey, User, Work, utcnow
 from lectern.routes.api.serializers import iso
-from lectern.security.deps import DbDep, OpdsUser
+from lectern.security.deps import DbDep, OpdsUser, SettingsDep
 from lectern.security.sessions import client_ip
 
 router = APIRouter(prefix="/koplugin")
@@ -37,7 +39,7 @@ class BootstrapIn(BaseModel):
 
 
 @router.post("/bootstrap", include_in_schema=False)
-def bootstrap(request: Request, db: DbDep, body: BootstrapIn) -> dict:
+def bootstrap(request: Request, db: DbDep, settings: SettingsDep, body: BootstrapIn) -> dict:
     ip = client_ip(request)
     if not request.app.state.limiters["koplugin"].allow(f"ip:{ip or '?'}"):
         if _audit_refusal(request, f"bootstrap:{ip}"):
@@ -63,7 +65,7 @@ def bootstrap(request: Request, db: DbDep, body: BootstrapIn) -> dict:
         "retry" if result.reason == "retry" else None,
     )
     db.commit()
-    return result.payload
+    return {**result.payload, "lan_url": koplugin.home_url(settings)}
 
 
 class PairIn(BaseModel):
@@ -72,7 +74,7 @@ class PairIn(BaseModel):
 
 
 @router.post("/pair", include_in_schema=False)
-def pair(request: Request, db: DbDep, body: PairIn) -> dict:
+def pair(request: Request, db: DbDep, settings: SettingsDep, body: PairIn) -> dict:
     """Limits: per address (one device guessing for many people) counts every request; per
     username (many addresses guessing for one person) counts only wrong guesses at a live code
     and is checked without being charged, so junk requests, unknown names, and requests while
@@ -119,7 +121,30 @@ def pair(request: Request, db: DbDep, body: PairIn) -> dict:
     limiters["koplugin_pair_user"].reset(user_key)
     koplugin.record(db, "koplugin.paired", active, result.label, ip)
     db.commit()
-    return result.payload
+    # The Tailscale address too, so a device paired over the home address keeps a fallback
+    # that is not the home address (the plugin never uses that one unverified).
+    remote = koplugin.default_server_url(settings)[0]
+    return {**result.payload, "server_url": remote, "lan_url": koplugin.home_url(settings)}
+
+
+class HelloIn(BaseModel):
+    device_id: str = Field(min_length=2, max_length=12)
+    nonce: str = Field(pattern=r"^[0-9a-f]{32,128}$")
+    setup: bool = False
+
+
+@router.post("/hello", include_in_schema=False)
+def hello(request: Request, db: DbDep, body: HelloIn) -> dict:
+    """Prove to a device that this is its Lectern before it sends a credential to the home
+    Wi-Fi address (docs/home-network.md). Unauthenticated by design: the answer is an HMAC of
+    the device's own nonce under a key only this server and the device have."""
+    ip = client_ip(request)
+    if not request.app.state.limiters["koplugin_hello"].allow(f"ip:{ip or '?'}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
+    key = koplugin.hello_key(db, body.device_id, setup=body.setup)
+    if key is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown_device")
+    return {"proof": lan.proof(key, body.nonce)}
 
 
 def _file_json(f: BookFile) -> dict:
@@ -133,7 +158,7 @@ def _file_json(f: BookFile) -> dict:
 
 
 @router.get("/status", include_in_schema=False)
-def plugin_status(request: Request, user: OpdsUser, db: DbDep) -> dict:
+def plugin_status(request: Request, user: OpdsUser, db: DbDep, settings: SettingsDep) -> dict:
     """What the plugin shows under Lectern → Connection status and Books sent here."""
     pw = request.state.app_password
     key = db.get(SyncKey, pw.sync_key_id) if pw.sync_key_id else None
@@ -162,6 +187,8 @@ def plugin_status(request: Request, user: OpdsUser, db: DbDep) -> dict:
         "username": user.username,
         "device": {"id": f"k{key.id}" if key else f"p{pw.id}", "label": pw.label},
         "server_time": iso(utcnow()),
+        # The plugin keeps its home address in step with the server (null: LAN access is off).
+        "lan_url": koplugin.home_url(settings),
         "last_sync_at": iso(key.last_used_at) if key else None,
         "queue": {"pending": total, "items": items},
     }

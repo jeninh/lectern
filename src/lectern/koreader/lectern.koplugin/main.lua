@@ -4,6 +4,9 @@ First start: trades the one-time setup secret in lectern_bootstrap.txt for this 
 credentials, writes KOReader's Progress sync (kosync) server, username and key and an OPDS
 catalogue entry, and deletes the secret. Without network it retries quietly with backoff.
 
+With home Wi-Fi access on (docs/home-network.md) it knows two addresses and uses the home one
+whenever the Lectern there proves it is this device's server, Tailscale otherwise.
+
 Then: automatic progress sync through KOReader's own kosync plugin (pull on open, push on
 close and suspend, and every N page turns), with pushes that cannot reach the server kept in
 an outbox and retried quietly once Wi-Fi (and Tailscale) is back, instead of prompting to turn
@@ -72,6 +75,21 @@ function Lectern:init()
     }
     self.retry_attempt = 0
     self.retry_task = function() self:retry() end
+    -- Home Wi-Fi or Tailscale (docs/home-network.md): checked again after start, wake, and
+    -- network changes, and every Core.ROUTE_TTL while KOReader runs.
+    self.route_task = function()
+        if not self.core:isPaired() or not self.core:lanUrl() then return end
+        self.core:route(true)
+        UIManager:scheduleIn(Core.ROUTE_TTL, self.route_task)
+    end
+    if not Lectern._started then
+        -- First start of this KOReader process: the device may be on another network than when
+        -- it last ran, so the home address is not trusted until it proves itself again.
+        Lectern._started = true
+        self:recheckHome(3)
+    elseif self.core:lanUrl() then
+        UIManager:scheduleIn(Core.ROUTE_TTL, self.route_task)
+    end
     if self.ui and self.ui.menu then
         self.ui.menu:registerToMainMenu(self)
     end
@@ -207,7 +225,7 @@ function Lectern.kosyncFields(t, config)
 end
 
 function Lectern.opdsEntry(servers, config)
-    local url = config.server_url .. "/opds"
+    local url = config.opds_url .. "/opds"
     local entry
     for _, s in ipairs(servers) do
         if s.lectern_device == config.device_id or s.url == url then entry = s break end
@@ -223,11 +241,30 @@ function Lectern.opdsEntry(servers, config)
     entry.lectern_device = config.device_id
 end
 
+--- No trusted address: KOReader's own sync and the Lectern catalogue entry lose their
+-- credentials (a placeholder host is no barrier; any DNS can answer it). The plugin keeps
+-- them and writes them back once an address is trusted again.
+function Lectern:disarmKOReader(config)
+    self:editKOSync(function(t)
+        if t.username == config.username then t.userkey = nil t.custom_server = nil end
+    end)
+    self:editOPDS(function(servers)
+        for _, s in ipairs(servers) do
+            if s.lectern_device == config.device_id then s.password = nil s.username = nil end
+        end
+    end)
+end
+
 function Lectern:configureKOReader(config)
-    if not config.server_url or not config.userkey then return end
+    if not config.userkey then return end
+    if not config.server_url then return self:disarmKOReader(config) end
     local inst = self:editKOSync(function(t) Lectern.kosyncFields(t, config) end)
     if inst and inst.registerEvents then pcall(inst.registerEvents, inst) end
-    self:editOPDS(function(servers) Lectern.opdsEntry(servers, config) end)
+    if config.opds_url then
+        self:editOPDS(function(servers) Lectern.opdsEntry(servers, config) end)
+    else
+        self:disarmKOReader({ username = "\0", device_id = config.device_id })
+    end
     if config.options.offline_mode == "wifi" and Device:hasWifiToggle() then
         G_reader_settings:saveSetting("wifi_enable_action", "turn_on")
     end
@@ -340,20 +377,38 @@ function Lectern:retry()
     self:flush()
 end
 
+--- Back to the Tailscale address now (KOReader's own sync and catalogue too), and check the
+-- home address again in ``delay`` seconds.
+function Lectern:recheckHome(delay)
+    self.core:forgetHome()
+    if self.core:lanUrl() then
+        UIManager:unschedule(self.route_task)
+        UIManager:scheduleIn(delay, self.route_task)
+    end
+end
+
+function Lectern:onNetworkDisconnected()
+    self.core:forgetHome()
+end
+
 function Lectern:onNetworkConnected()
     -- Tailscale may need a few seconds after Wi-Fi to bring the tailnet up.
     self.retry_attempt = 0
+    self:recheckHome(3)
     if self.setup_pending or #self.core:outbox() > 0 then
         self:scheduleRetry(3)
     end
 end
 
 function Lectern:onResume()
+    -- Woken up, maybe elsewhere (Wi-Fi managed outside KOReader sends no network events).
+    self:recheckHome(5)
     if #self.core:outbox() > 0 then self:retrySoon(5) end
 end
 
 function Lectern:onCloseWidget()
     UIManager:unschedule(self.retry_task)
+    UIManager:unschedule(self.route_task)
     self.retry_pending = false
 end
 
@@ -366,6 +421,7 @@ function Lectern:syncNow()
         if self.core:bootstrapSecret() then return self:trySetup(true) end
         return self:showPair()
     end
+    self.core:route(true)
     local k = self.ui and self.ui.kosync
     if k and self.ui.document then self:queueCurrent(k) end
     local sent, left, why = self:flush()
@@ -454,7 +510,12 @@ end
 function Lectern:showStatus()
     local lines = {}
     local function add(k, v) lines[#lines + 1] = k .. ": " .. tostring(v) end
-    add(_("Server"), self.core:serverUrl() or _("unknown"))
+    add(_("Server"), self.core:activeUrl() or _("unknown"))
+    local lan = self.core:lanUrl()
+    if lan then
+        add(_("Home Wi-Fi address"), lan .. (self.core:activeUrl() == lan and _(" (in use)") or ""))
+        add(_("Tailscale address"), self.core:serverUrl() or _("unknown"))
+    end
     add(_("Account"), self.core:username() or _("unknown"))
     add(_("Device"), self.store:readSetting("label") or "—")
     local function show()
@@ -499,8 +560,8 @@ function Lectern:doPair(server, username, code)
     server = (server or ""):gsub("%s", ""):gsub("/+$", "")
     username = (username or ""):gsub("^%s+", ""):gsub("%s+$", "")
     code = (code or ""):gsub("%D", "")
-    if not server:match("^https?://[^/]+$") or username == "" or #code ~= 6 then
-        UIManager:show(InfoMessage:new{ text = _("Enter the server address (http://100.x.y.z:8080), your username and the 6-digit code.") })
+    if not Core.validServerUrl(server) or username == "" or #code ~= 6 then
+        UIManager:show(InfoMessage:new{ text = _("Enter the server address (http://100.x.y.z:8080, or Lectern's home Wi-Fi address), your username and the 6-digit code.") })
         return
     end
     local result = self.core:pair(server, username, code)
@@ -508,6 +569,7 @@ function Lectern:doPair(server, username, code)
         ok = _("Paired. Progress sync and the Lectern catalogue are set up."),
         invalid = _("That code did not work. Codes last 5 minutes and allow 5 tries; show a new one in Lectern if needed."),
         rate_limited = _("Too many tries. Wait a few minutes, then try again."),
+        no_fallback = _("Not paired: Lectern did not say its Tailscale address, and the home Wi-Fi address cannot stand in for it. Show a new code in Lectern and pair with the Tailscale address (http://100.x.y.z:8080) as Server."),
     })[result] or _("Lectern is not reachable. Check Wi-Fi and Tailscale, then try again.")
     UIManager:show(InfoMessage:new{ text = text, timeout = result == "ok" and 4 or nil })
 end

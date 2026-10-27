@@ -9,7 +9,9 @@ is reachable from your phone, laptop, and e-reader anywhere, at
 `https://lectern.<your-tailnet>.ts.net`, with **no port opened on your router, nothing
 published on your LAN, and nothing on the public Internet**. HTTPS is handled for you, so
 passkeys work. Only devices signed in to your Tailscale network (your *tailnet*) can even see
-the server.
+the server. (E-readers can optionally also sync over your home Wi-Fi without Tailscale; that
+publishes one port on the Pi's LAN address and is off unless you turn it on:
+[home-network.md](home-network.md).)
 
 How it works: Tailscale gives each of your devices a private address (`100.x.y.z`) and an
 encrypted connection between them, through any router or firewall, without configuration.
@@ -573,7 +575,8 @@ works, `docker volume rm lectern_lectern-data lectern_tailscale-state`.
   tailnet user; Lectern ignores them, by design. A borrowed or stolen tailnet device gets as
   far as the login page.
 - **Nothing is public.** The Compose file publishes no ports and uses `tailscale serve`, which
-  is tailnet-only. Do **not** use `tailscale funnel`, which would put Lectern on the public
+  is tailnet-only. The optional [home Wi-Fi access](home-network.md) overlay publishes one port
+  on the Pi's LAN address for e-readers; never forward it on your router. Do **not** use `tailscale funnel`, which would put Lectern on the public
   Internet with no Tailscale login in front; nothing in this guide needs it.
 - **Your tailnet's access rules apply.** Tailscale's default policy lets every device on a
   tailnet reach every other one, which is right for a household. You can tighten it in
