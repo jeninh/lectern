@@ -120,7 +120,10 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
   const { deviceName, now, resolvedTheme } = useStore();
   // Opened from a search hit ("In books" in Cmd/Ctrl+K): that page, with the match marked.
   const [search] = useSearchParams();
-  const jumpTo = useRef({ page: Number(search.get("page")) || 0, find: search.get("find") ?? "" });
+  const findPage = Number(search.get("page")) || 0;
+  const findText = search.get("find") ?? "";
+  const jumpTo = useRef({ page: findPage, find: findText });
+  const lastJump = useRef(`${findPage}|${findText}`);
   const [info, setInfo] = useState<PagesInfo | null>(null);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -187,6 +190,18 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
       pdf.current = null;
     };
   }, [fileId, workId]);
+
+  // Another search hit in this same PDF while it is open: the viewer stays mounted, so turn
+  // to that page now (a hit chosen while it is still opening is picked up by the open above).
+  useEffect(() => {
+    const key = `${findPage}|${findText}`;
+    if (key === lastJump.current) return;
+    lastJump.current = key;
+    jumpTo.current = { page: findPage, find: findText };
+    if (!findPage || loading || !latest.current.total) return;
+    setHandoff(null);
+    setPage(clampPage(findPage, latest.current.total));
+  }, [findPage, findText, loading]);
 
   // Stage size, for fitting.
   useEffect(() => {
@@ -496,7 +511,7 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
             <div className="pages-spread" data-count={display.length} dir="ltr">
               {display.map((n) =>
                 info?.url ? (
-                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} find={n === jumpTo.current.page ? jumpTo.current.find : ""} onPick={readalong ? pick : undefined} onMarked={keepInView} />
+                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} find={n === findPage ? findText : ""} onPick={readalong ? pick : undefined} onMarked={keepInView} />
                 ) : (
                   <ComicPage key={n} fileId={fileId} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} />
                 ),
@@ -622,7 +637,8 @@ function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMar
       });
       task = r;
       await r.promise.catch(() => {});
-      if (!find || cancelled) return setFound([]);
+      setFound([]);
+      if (!find || cancelled) return;
       // The match's boxes, from pdf.js's own reading of the page's text (no text layer is
       // rendered): each item's baseline origin and width, in viewport pixels.
       const items = (await page.getTextContent()).items.filter((it): it is PdfTextItem => "str" in it);

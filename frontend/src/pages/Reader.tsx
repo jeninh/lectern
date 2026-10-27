@@ -153,6 +153,8 @@ function EpubReader() {
   // Opened from a search hit ("In books" in Cmd/Ctrl+K): start at the match, highlighted.
   const [search] = useSearchParams();
   const target = useRef(hitTarget(search));
+  const atKey = `${search.get("at") ?? ""}|${search.get("len") ?? ""}`;
+  const lastAt = useRef(atKey);
   const nav = useNavigate();
   const { works, resolvedTheme, deviceName, toast, now } = useStore();
   const [settings, setSettings] = useLocalStorage<ReaderSettings>("lectern.reader", DEFAULTS);
@@ -316,6 +318,20 @@ function EpubReader() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(s), theme]);
   useEffect(applySettings, [applySettings]);
+
+  // Another search hit in this same book while it is open: the reader stays mounted, so go
+  // there now (a hit chosen while it is still opening is picked up by the open above).
+  useEffect(() => {
+    if (atKey === lastAt.current) return;
+    lastAt.current = atKey;
+    const hit = hitTarget(search);
+    target.current = hit;
+    const v = view.current;
+    if (!hit || !v || loading) return;
+    setHandoff(null);
+    v.renderer.goTo({ index: hit.spine_index, anchor: (doc) => highlight(doc, hit.char, hit.char + hit.length) ?? doc.body }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [atKey, loading]);
 
   // "Use the other device's" in a sync conflict (components/Offline.tsx): go there.
   useEffect(() => {

@@ -55,6 +55,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import zipfile
 import zlib
 from bisect import bisect_left, bisect_right
@@ -473,7 +474,7 @@ def index_work(con: sqlite3.Connection, settings: Settings, work_id: int, want: 
                         break
             except FileNotFoundError:
                 raise _Transient(f"{s.rel_path} is missing") from None
-            except (EpubError, zipfile.BadZipFile, ValueError, OSError) as exc:
+            except (EpubError, zipfile.BadZipFile, zlib.error, ValueError, OSError) as exc:
                 errors.append(f"{s.rel_path}: {type(exc).__name__}")
         con.execute(
             "INSERT INTO indexed (work_id, source, chunks, chars, error, indexed_at) "
@@ -581,7 +582,9 @@ def query_terms(q: str) -> list[str]:
     """The words of a query, as the index tokenises them. Raises :class:`QueryError`."""
     if len(q) > MAX_QUERY_CHARS:
         raise QueryError("query_too_long", f"Searches are at most {MAX_QUERY_CHARS} characters.")
-    terms = _TERM.findall(q)
+    # NFC first: a decomposed accent (e + U+0300, as macOS input can send) is a word
+    # boundary to the pattern and would split "père" into "pe" and "re".
+    terms = _TERM.findall(unicodedata.normalize("NFC", q))
     if len(terms) > MAX_TERMS:
         raise QueryError("too_many_words", f"Searches are at most {MAX_TERMS} words.")
     return terms

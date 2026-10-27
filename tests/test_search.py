@@ -143,6 +143,8 @@ def test_typing_accents_and_words_anywhere(client, owner, settings, moby):
     # Diacritics fold both ways.
     (hit,) = find(client, "cafe creme")["results"]
     assert hit["match"] == "café"
+    # a decomposed accent (e + U+0301) is the same word, not two
+    assert find(client, "cre\u0301me bru\u0302le\u0301e")["results"][0]["match"] == "crème brûlée"
     # Not a phrase, but every word in one passage: still found, after phrases.
     (hit,) = find(client, "spleen driving")["results"]
     assert hit["spine_index"] == 1 and hit["match"] == "driving"
