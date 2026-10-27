@@ -24,7 +24,68 @@
   "The first entry concerns a heron that stood in the same shallow pool every morning for eleven days. It caught nothing that anyone saw. On the twelfth day it was gone, and the pool had a thin skin of ice that cracked like glass when a pebble was thrown onto it. Nobody could say whether the heron had known the cold was coming or had simply grown tired of waiting for a fish that never arrived in that particular pool, which was the smallest of the seven along the path to the old pier.",
   "The second entry is about the light. In late April the sun rises over the water at an angle that turns the whole bay copper for about four minutes. If you are not looking at that moment you will miss it entirely, and most people do."
  ],
+ "structured": {
+  "drop_paragraph": "The harbour was quiet that morning. Wren walked along the old stone pier and counted the boats: there were eleven, which was one fewer than the day before, and the missing one was the Heron.",
+  "italic": [
+   "old stone pier",
+   "Heron"
+  ],
+  "bold": [
+   "eleven"
+  ],
+  "captions": [
+   "Figure 1. The harbour at dawn.",
+   "Table 1. Boats in the harbour.",
+   "Figure 2. A compass rose."
+  ],
+  "footnotes": [
+   [
+    "Every boat that left was recorded in the harbour book.",
+    "1",
+    "The harbour book is kept in the office."
+   ],
+   [
+    "Its pages agree with the old chart.",
+    "2",
+    "The chart dates from 1888."
+   ]
+  ],
+  "table": [
+   [
+    "Boat",
+    "Crew",
+    "Catch"
+   ],
+   [
+    "Heron",
+    "4",
+    "120 kg"
+   ],
+   [
+    "Gull",
+    "3",
+    "85 kg"
+   ]
+  ],
+  "poem": [
+   "The lamp is lit, the tide is low,",
+   "the boats come in from sea;",
+   "and every light the keeper keeps",
+   "is kept for you and me."
+  ],
+  "list": [
+   "Trim the wick.",
+   "Polish the brass.",
+   "Count the boats."
+  ],
+  "quote": "A light is a promise, not a machine. You keep it with whatever you have in your hands.",
+  "equation": "α + β = γ",
+  "plate_page": 4
+ },
  "facts": {
+  "structured.pdf": {
+   "pages": 4
+  },
   "two-column.pdf": {
    "pages": 3,
    "chapter_pages": [

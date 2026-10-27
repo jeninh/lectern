@@ -896,3 +896,61 @@ def test_an_ocrd_scan_converts_to_an_epub_labelled_as_ocr_that_takes_part_in_rea
     # ...and it can be deleted like any converted edition (the scan and its OCR stay).
     assert api_delete(client, f"/api/works/{work.id}/pdf-epub", owner["csrf"]).status_code == 200
     assert not path.exists() and ocr.words_path(settings.library_dir, work, book.sha256).is_file()
+
+
+def test_an_ocrd_scan_goes_through_analyse_review_convert_and_a_new_recognition_redoes_it(
+    client, owner, settings, scanned, tmp_path
+):
+    """Issue #63 on scans: the structure analysis, review rules, page images, and EPUBCheck work
+    on recognised text, and recognising again invalidates the analysis but keeps the rules."""
+    from tests.test_pdf2epub import epubcheck
+
+    book, work = scanned
+    base = f"/api/works/{work.id}/pdf-epub"
+    pdf_sweep(session_factory(), settings.library_dir)
+    assert api_post(client, f"{base}/analyse", owner["csrf"]).status_code == 409  # no text yet
+
+    fake_ocr(settings, book, work)
+    pdf_sweep(session_factory(), settings.library_dir)
+    assert api_post(client, f"{base}/analyse", owner["csrf"]).status_code == 202
+    assert run_pending(session_factory(), settings) == 1
+    a = client.get(f"{base}/analysis").json()
+    # the page images under the recognised text are the scan, not figures
+    assert a["summary"]["figures"] == 0 and a["summary"]["flagged_pages"] == []
+    assert [p["page"] for p in a["pages"]] == [1, 2]
+    assert all("text from OCR" in p["reasons"] and p["confidence"] < 1 for p in a["pages"])
+    img = client.get(f"{base}/preview/1.jpg")
+    assert img.status_code == 200 and img.content[:2] == b"\xff\xd8"
+
+    rules = {"page_images": [2]}
+    assert api_post(client, base, owner["csrf"], json={"rules": rules}).status_code == 202
+    assert run_pending(session_factory(), settings) == 1
+    st = client.get(base).json()
+    assert st["job"]["status"] == "succeeded", st["job"]
+    assert (st["report"]["source"], st["report"]["page_images"]) == ("ocr", [2])
+    path = settings.library_dir / work.dir_path / CONVERTED_NAME
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        body = " ".join(z.read(n).decode() for n in names if re.match(r"OEBPS/s\d+", n))
+    assert "OEBPS/images/page-2.jpg" in names
+    assert "lighthouse keeper climbed the stairs every night" in body
+    visible = re.sub(r"<[^>]*>", " ", body)  # tags, and the alt text with them, removed
+    assert "the old tower on the rocks" not in visible  # page 2 is its image, its text the alt
+    assert re.search(r'alt="Page 2: [^"]*the old tower on the rocks', body)
+    assert '<meta name="lectern:source" content="ocr"/>' in _opf(path)
+    copy = tmp_path / "ocr-structured.epub"
+    copy.write_bytes(path.read_bytes())
+    epubcheck(copy)
+
+    # Recognised again: the stored analysis is of the old text, so it is gone from the review;
+    # converting again analyses the new text and keeps the confirmed rules.
+    fake_ocr(settings, book, work, "fra")
+    pdf_sweep(session_factory(), settings.library_dir)
+    st = client.get(base).json()
+    assert (st["outdated"], st["analysed"], st["eligible"]) == (True, False, True)
+    assert client.get(f"{base}/analysis").status_code == 409
+    assert api_post(client, base, owner["csrf"]).status_code == 202
+    assert run_pending(session_factory(), settings) >= 1
+    st = client.get(base).json()
+    assert (st["outdated"], st["analysed"]) == (False, True)
+    assert st["report"]["ocr"]["language"] == "fra" and st["report"]["page_images"] == [2]

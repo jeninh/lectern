@@ -66,7 +66,7 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 | `upload` (default) | add books to Review before filing; owners and members only | `upload_book`, `list_pending_imports`, `cancel_import` |
 | `file` (default): “Can file books (confirm imports)” | file reviewed imports **this key uploaded** into the library; owners and members only | `confirm_import`, and auto-filing a certain match from `upload_book` |
 | `read` | search, book details, alignment status, your progress, your shelves | `search_library`, `get_book`, `list_recent`, `list_shelves` |
-| `organize` | shelves, send to device, alignment, metadata | `add_to_shelf`, `remove_from_shelf`, `create_shelf`, `move_shelf`, `send_to_device`, `list_device_queue`, `start_alignment`, `job_status`, `edit_metadata` |
+| `organize` | shelves, send to device, alignment, metadata, PDF → EPUB | `add_to_shelf`, `remove_from_shelf`, `create_shelf`, `move_shelf`, `send_to_device`, `list_device_queue`, `start_alignment`, `job_status`, `edit_metadata`, `analyse_pdf_conversion`, `convert_pdf_to_epub` |
 
 - A key belongs to one person and acts **as them**: the same role and visibility checks as
   the web app. Readers only see books on shelves shared with them and cannot add books, so a
@@ -165,6 +165,10 @@ under Devices → AI tools → Edit.`
 - `start_alignment`, `job_status`: queue text–audio alignment for a book with an EPUB and an
   audiobook and follow its progress and ETA ([alignment.md](alignment.md)). PDF and CBZ have
   no text, so a book without an EPUB cannot be aligned.
+- `analyse_pdf_conversion`, `convert_pdf_to_epub`: convert a text PDF to an EPUB edition in
+  two steps (docs/pdf-epub.md): the first analyses the PDF and returns the detected rules
+  with their evidence (and the converted text of chosen pages); the second converts with the
+  rules the person approved. Follow either job with `job_status`.
 - `edit_metadata`: change fields with the editor's validation (lengths, language tag, dates,
   and no control characters). `expected_version` from `get_book` refuses the edit if the book
   changed since. Each edit is a revision you can undo in the web editor.
