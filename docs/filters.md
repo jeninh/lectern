@@ -81,8 +81,9 @@ format:epub,pdf -has:audio author:"Tolstoy" year:1850..1900 progress:<50% war
 | Cleanup | `needs` | `ocr`: a scanned PDF with no text layer and no finished OCR |
 
 `has:author` is false for "Unknown Author". `is:duplicate` is a book with the same title and
-author as another book you can see (accents, case, and spacing ignored), or one the importer
-flagged as a possible match that nobody has decided on yet. Only books you can see are compared.
+author as another book you can see (accents, case, and spacing ignored) unless someone marked
+the pair as different books, or one the importer or the hourly duplicate scan flagged as a
+possible duplicate that nobody has decided on yet. Only books you can see are compared.
 
 `is:offline` is known only to the device: the web app sends the ids it holds, so the filter
 means "on this device". Elsewhere (smart shelves on OPDS, MCP) it matches nothing.
