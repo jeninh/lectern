@@ -830,6 +830,14 @@ def test_shelf_sync_respects_visibility_and_ownership(home):
     assert st["queue"]["items"] == [] and sorted(st["remove"]) == sorted(
         [ids["Alpha"], ids["Bravo"]]
     )
+    # The followed shelf is hidden from rex now: its other settings can still be changed
+    # (keeping it), but no other hidden shelf can be picked.
+    api_delete(
+        owner.http, f"/api/shelves/{smart['id']}/grants/{home['users']['rex']['id']}", owner.csrf
+    )
+    r = follow(rex, boox["id"], smart["id"], cleanup=True, auto_download=True)
+    assert r.status_code == 200 and r.json()["app_password"]["auto_download"] is True
+    assert follow(rex, boox["id"], private["id"]).status_code == 404
     # The owner's own device is unaffected by rex's follow.
     assert pending_titles(owner, kobo["id"]) == []
     # A revoked device can no longer be set.
@@ -851,3 +859,15 @@ def test_a_large_shelf_is_queued_a_batch_at_a_time(home, monkeypatch):
     file_id = home["files"]["Alpha"][0]
     owner.http.get(f"/opds/files/{file_id}/download", headers=kobo["headers"])
     assert titles(feed(owner.http, "/opds/queue", kobo["headers"])) == ["Charlie", "Delta"]
+
+
+def test_sending_a_followed_book_by_hand_keeps_it_through_clean_up(home):
+    owner, ids = home["owner"], home["ids"]
+    kobo = owner.devices["Kobo"]
+    shelf = api_post(owner.http, "/api/shelves", owner.csrf, {"name": "Follow"}).json()
+    api_post(owner.http, f"/api/shelves/{shelf['id']}/items", owner.csrf, {"work_id": ids["Alpha"]})
+    follow(owner, kobo["id"], shelf["id"], cleanup=True)
+    assert statuses(owner.queue(kobo["id"], ids["Alpha"])) == {ids["Alpha"]: "already_queued"}
+    api_delete(owner.http, f"/api/shelves/{shelf['id']}/items/{ids['Alpha']}", owner.csrf)
+    st = plugin_status(owner, kobo)
+    assert st["remove"] == [] and [i["title"] for i in st["queue"]["items"]] == ["Alpha"]

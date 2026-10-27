@@ -502,11 +502,13 @@ end
 
 --- Quietly check the queue: delete copies of books that left the followed shelf (clean-up)
 -- and, with Auto-download on in Lectern, download up to Core.AUTO_BATCH queued books, one per
--- UI tick, stopping at the first failure (offline, or Lectern's hourly cap: 429). Automatic
+-- UI tick, stopping at the first failure (offline, or Lectern's hourly cap: 429); not while a
+-- book is open, since downloads block the UI. Automatic
 -- checks happen at most once per Core.FETCH_MIN, and only with Sync automatically on;
 -- ``status`` (from Sync now) skips both and the request. Never prompts. Returns how many books
 -- it is downloading and how many it deleted.
 function Lectern:autoFetch(status)
+    local forced = status ~= nil
     if not status then
         UIManager:unschedule(self.fetch_task)
         if not self:managed() then return 0, 0 end
@@ -526,7 +528,10 @@ function Lectern:autoFetch(status)
     if deleted > 0 and self.ui and self.ui.file_chooser then
         pcall(self.ui.file_chooser.refreshPath, self.ui.file_chooser)
     end
-    local items = status.auto_download == true
+    -- Downloads block the UI, so a quiet check leaves them while a book is open; Sync now
+    -- (``forced``) and the next check in the file browser get them.
+    local reading = not forced and self.ui and self.ui.document ~= nil
+    local items = status.auto_download == true and not reading
         and self.core:toDownload(status.queue and status.queue.items, Core.AUTO_BATCH) or {}
     local planned = #items
     local dir = self:downloadDir()

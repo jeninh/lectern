@@ -68,7 +68,8 @@ shelf trickles onto the e-reader instead of arriving in one go.
 
 **What the shelf never touches.**
 
-- A book sent by hand is never cleaned up, even when it is not on the shelf.
+- A book sent by hand is never cleaned up, even when it is not on the shelf, or was already
+  waiting because of the shelf when it was sent.
 - A book a person took off the queue (**Remove** in **Open queue**) is not queued again by the
   shelf; **Queue again** from **Recently** brings it back.
 - A followed book that left the shelf (clean-up) and comes back is queued again.
@@ -86,7 +87,9 @@ Each check:
 1. deletes the copies it downloaded of books that left the followed shelf (clean-up on), and
 2. with **Download queued books automatically** on, downloads up to 3 queued books it has no
    copy of yet into KOReader's download folder, one after the other, as **Books sent to this
-   device** does by hand. A refused download (offline, or `429` when the device's hourly
+   device** does by hand. Downloads pause the screen for a moment, so automatic checks
+   leave them while a book is open; the next check in the file browser, or **Sync now**,
+   downloads them. A refused download (offline, or `429` when the device's hourly
    download limit is reached) stops the batch until the next check.
 
 The plugin keeps a list of the files it downloaded (`downloads` in `settings/lectern.lua`).

@@ -341,11 +341,14 @@ def set_shelf_sync(
     if row.revoked_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "device_revoked")
     shelf = db.get(Shelf, body.shelf_id) if body.shelf_id is not None else None
+    follow = db.get(DeviceFollow, row.id)
+    # Keeping the shelf already followed is allowed even if it is now hidden (it then holds
+    # nothing), so the other settings can still be changed; picking a new one needs to see it.
+    keeps = follow is not None and follow.shelf_id == body.shelf_id
     if body.shelf_id is not None and (
-        shelf is None or shelf_permission(db, auth.user, shelf) is None
+        shelf is None or (not keeps and shelf_permission(db, auth.user, shelf) is None)
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "shelf_not_found")
-    follow = db.get(DeviceFollow, row.id)
     if shelf is None:
         if follow is not None:
             db.delete(follow)
@@ -360,7 +363,11 @@ def set_shelf_sync(
         actor_user_id=auth.user.id,
         target=row.label,
         ip=client_ip(request),
-        detail=(f"shelf {shelf.name}" if shelf else "no shelf")
+        detail=(
+            f"shelf {shelf.name}"
+            if shelf and shelf_permission(db, auth.user, shelf)
+            else ("a hidden shelf" if shelf else "no shelf")
+        )
         + (", clean-up" if shelf and body.cleanup else "")
         + (", auto-download" if body.auto_download else ""),
     )

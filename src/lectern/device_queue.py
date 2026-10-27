@@ -173,6 +173,17 @@ def enqueue(db: Session, actor: User, t: Target, work_ids: list[int], ip: str | 
         )
         changed = db.execute(stmt).rowcount
         if not changed:
+            # Waiting already; sent by hand now, so the followed shelf no longer cleans it up.
+            db.execute(
+                update(DeviceQueueItem)
+                .where(
+                    DeviceQueueItem.app_password_id == t.pw.id,
+                    DeviceQueueItem.work_id == work_id,
+                    DeviceQueueItem.followed.is_(True),
+                )
+                .values(followed=False)
+                .execution_options(synchronize_session=False)
+            )
             results.append({"work_id": work_id, "status": "already_queued"})
             continue
         status = "queued" if before is None else "requeued"
