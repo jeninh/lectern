@@ -449,6 +449,7 @@ def test_a_lease_lost_before_publishing_is_handed_back(
     assert not ocr.has_output(settings.library_dir, work, book.sha256)
 
 
+@needs_tesseract
 def test_a_retry_resumes_from_stored_batches(client, owner, settings, scanned, monkeypatch):
     book, work = scanned
     job_id = _queue(client, owner, book)
@@ -486,6 +487,7 @@ def test_books_past_the_word_cap_are_truncated(client, owner, settings, scanned,
         ocr.read_batches(src, {0: path})
 
 
+@needs_tesseract
 def test_a_worker_cannot_make_the_server_parse_a_huge_batch(
     client, owner, settings, scanned, app, monkeypatch
 ):
