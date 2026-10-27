@@ -162,7 +162,7 @@ other household members nor the owner, and their owner sees them only while they
 book (a book unshared from a reader takes its highlights out of their view until it is shared
 again; trashed books hide them). They are not in the catalogue (OPDS) or available to AI apps
 (MCP). Lectern and the plugin never log their text or notes, only counts. They are stored in
-`lectern.db` (`annotations`, migration `0019`), so [backups](backups.md) and restore include them.
+`lectern.db` (`annotations`, migration `0022`), so [backups](backups.md) and restore include them.
 
 ## Security
 

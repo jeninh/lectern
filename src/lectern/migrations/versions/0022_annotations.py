@@ -1,7 +1,7 @@
 """KOReader highlights and notes (``annotations``, lectern.annotations)
 
-Revision ID: 0019_annotations
-Revises: 0018_library_filters
+Revision ID: 0022_annotations
+Revises: 0021_email_in
 Create Date: 2026-10-27
 
 """
@@ -11,8 +11,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0019_annotations"
-down_revision = "0018_library_filters"
+revision = "0022_annotations"
+down_revision = "0021_email_in"
 branch_labels = None
 depends_on = None
 

@@ -1405,7 +1405,7 @@ class EmailInbox(Base):
 
 
 class Annotation(Base):
-    """A highlight (and its note) made in KOReader, pulled in by the plugin (migration 0019,
+    """A highlight (and its note) made in KOReader, pulled in by the plugin (migration 0022,
     :mod:`lectern.annotations`, docs/koreader-plugin.md#highlights-and-notes).
 
     Private to ``user_id``: nobody else sees it, and its owner only while the work its document
