@@ -470,7 +470,7 @@ export function LibraryPage() {
           <button aria-pressed={view === "grid"} onClick={() => setView("grid")} aria-label="Grid" title="Grid"><GridIcon /></button>
           <button aria-pressed={view === "list"} onClick={() => setView("list")} aria-label="List" title="List"><ListIcon /></button>
         </div>
-        <span className="sr-only" aria-live="polite">{filtering ? `${filtered.length} ${filtered.length === 1 ? "book" : "books"} shown` : ""}</span>
+        <span className="sr-only" aria-live="polite">{filtering ? (chipsOn ? `${filtered.length} ${filtered.length === 1 ? "book" : "books"} shown` : `${filtered.length} of ${here.length} books shown`) : ""}</span>
       </div>
       {typedError && <p id="lib-q-error" className="field-error typed-error" role="status">{typedError}</p>}
       {smartHere && current && (
