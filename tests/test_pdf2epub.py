@@ -24,12 +24,16 @@ from lectern.db import session_factory
 from lectern.ingest.hashing import sha256_file
 from lectern.jobs import run_pending
 from lectern.models import BookFile, Job, JobStatus, Sentence, Work
+from lectern.pdf2epub import probe, structure
 from lectern.pdf2epub.build import (
     CONVERTED_NAME,
     ConversionError,
     build_epub,
     page_labels,
+    preview,
+    regions,
 )
+from lectern.pdf2epub.rules import ChapterRule, PageNumbers, Rules, defaults
 from lectern.pdftext import extract
 from lectern.pdftext.document import build_document
 
@@ -167,6 +171,163 @@ def test_cover_and_isbn_carry_into_the_edition():
         assert "urn:isbn:9780000000002" in opf
 
 
+# --- structure (issue #63): figures, tables, footnotes, maths, verse, styles, page images -------
+
+S = EXPECTED["structured"]
+
+
+def analysed(name: str = "structured.pdf") -> tuple[dict, dict]:
+    doc = read(name)
+    return doc, structure.analyse(doc, probe.scan(FIX / name))
+
+
+def convert_structured(rules: Rules | None = None, tmp: Path | None = None) -> tuple[bytes, dict]:
+    doc, st = analysed()
+    rules = rules if rules is not None else defaults(st)
+    out = Path(tmp or "/tmp") / "lectern-structured-images"
+    out.mkdir(parents=True, exist_ok=True)
+    names = probe.render(FIX / "structured.pdf", regions(doc, st, rules), out)
+    images = {n: (out / n).read_bytes() for n in names}
+    return build_epub(doc, title="T", author="A", language="en", source_name="structured.pdf",
+                      pdf_sha256=doc["pdf_sha256"], structure=st, rules=rules,
+                      images=images)  # fmt: skip
+
+
+def files(epub: bytes) -> dict[str, str]:
+    with zipfile.ZipFile(io.BytesIO(epub)) as zf:
+        return {n[len("OEBPS/") :]: zf.read(n).decode("utf-8", "replace")
+                for n in zf.namelist() if n.startswith("OEBPS/")}  # fmt: skip
+
+
+def flat(html: str) -> str:
+    """Text with tags removed and spaces collapsed."""
+    return " ".join(re.sub(r"<[^>]+>", "", html).split())
+
+
+def test_styles_drop_caps_lists_quotes_and_verse(tmp_path):
+    epub, report = convert_structured(tmp=tmp_path)
+    f = files(epub)
+    s1, s2, s3 = f["s1.xhtml"], f["s2.xhtml"], f["s3.xhtml"]
+    # the drop cap rejoins its word, and the paragraph reads as printed
+    para = next(p for p in re.findall(r"<p>(.*?)</p>", s1, re.S) if "dropcap" in p)
+    assert flat(para) == S["drop_paragraph"]
+    for phrase in S["italic"]:
+        assert f"<i>{phrase}</i>" in s1
+    for phrase in S["bold"]:
+        assert f"<b>{phrase}</b>" in s1
+    assert "<b>Chapter" not in s1  # a heading is not bold twice
+    items = re.findall(r"<li>(.*?)</li>", s3)
+    assert "<ul>" in s3 and [flat(i) for i in items] == S["list"]
+    quote = re.search(r"<blockquote><p>(.*?)</p></blockquote>", s3, re.S)
+    assert quote and flat(quote.group(1)) == S["quote"]
+    verse = re.search(r'<p class="verse">(.*?)</p>', s2, re.S)
+    assert verse and [flat(x) for x in verse.group(1).split("<br/>")] == S["poem"]
+    # nothing else became verse, a list, or a quote
+    assert report["converted"]["verse"] == 1 and report["converted"]["lists"] == 1
+    assert report["converted"]["quotes"] == 1
+
+
+def test_figures_tables_maths_and_footnotes(tmp_path):
+    epub, report = convert_structured(tmp=tmp_path)
+    f = files(epub)
+    s1, s2, s3 = f["s1.xhtml"], f["s2.xhtml"], f["s3.xhtml"]
+    # a photo with its caption, placed between the text above and below it
+    fig = re.search(r'<figure id="[^"]+"><img src="images/([^"]+)" alt="([^"]*)"/>'
+                    r"<figcaption>(.*?)</figcaption></figure>", s1)  # fmt: skip
+    assert fig and flat(fig.group(3)) == S["captions"][0] and fig.group(1).endswith(".jpg")
+    assert s1.index("missing one was the") < fig.start() < s1.index("The fog lifted")
+    assert f[f"images/{fig.group(1)}"]
+    # a ruled grid is an HTML table, header row included, its caption the table's
+    table = re.search(r"<table[^>]*>(.*?)</table>", s2, re.S).group(1)
+    rows = [[flat(c) for c in re.findall(r"<t[hd]>(.*?)</t[hd]>", r)]
+            for r in re.findall(r"<tr>(.*?)</tr>", table)]  # fmt: skip
+    assert rows == S["table"] and "<th>" in table
+    assert flat(re.search(r"<caption>(.*?)</caption>", table).group(1)) == S["captions"][1]
+    assert "Boat Heron" not in flat(s2)  # the cells left the text flow
+    # footnote markers link to asides at the chapter's end; the notes left the body text
+    for text, mark, note in S["footnotes"]:
+        ref = re.search(
+            rf'<sup><a epub:type="noteref" href="#([^"]+)" id="[^"]+">{mark}</a></sup>', s2
+        )
+        assert ref, mark
+        aside = re.search(rf'<aside epub:type="footnote" id="{ref.group(1)}">(.*?)</aside>', s2)
+        assert aside and flat(aside.group(1)) == f"{mark} {note}"
+        assert flat(s2).index(text) < flat(s2).index(f"{mark} {note}")
+    assert s2.rindex("</aside>") > s2.index('class="verse"')  # at the end of the chapter
+    # maths: an image of the region, its text as alt
+    math = re.search(r'<div class="math"[^>]*><img src="images/([^"]+)" alt="([^"]*)"/>', s3)
+    assert math and math.group(2).startswith(S["equation"])
+    # a vector drawing is a figure too, its labels as alt
+    assert re.search(r'<img src="images/[^"]+\.png" alt="N"/><figcaption><i>'
+                     + re.escape(S["captions"][2]), s3)  # fmt: skip
+    assert report["converted"]["figures"] == 2 and report["converted"]["footnotes"] == 2
+
+
+def test_a_low_confidence_page_is_kept_as_an_image_and_can_be_reflowed(tmp_path):
+    doc, st = analysed()
+    plate = S["plate_page"]
+    flagged = [p["page"] for p in st["pages"] if p["flagged"]]
+    assert flagged == [plate]  # the picture page, not the pages of text
+    assert defaults(st).page_images == [plate]
+    epub, report = convert_structured(tmp=tmp_path)
+    s3 = files(epub)["s3.xhtml"]
+    page = re.search(rf'<figure class="page-image"[^>]*><span epub:type="pagebreak" '
+                     rf'id="page-{plate}"[^>]*/><img src="images/page-{plate}.jpg"', s3)  # fmt: skip
+    assert page and report["page_images"] == [plate]
+    # the person decides otherwise: the page is reflowed, its caption as text
+    epub, report = convert_structured(Rules(page_images=[]), tmp=tmp_path)
+    s3 = files(epub)["s3.xhtml"]
+    assert "page-image" not in s3 and 'id="page-4"' in s3 and report["page_images"] == []
+    assert any("low-confidence page(s) [4]" in w for w in report["warnings"])
+
+
+def test_rules_change_the_conversion(tmp_path):
+    doc, st = analysed()
+    # footnotes right after their paragraph, tables as images, no page numbers
+    rules = Rules(footnotes="popup", tables="image", maths="text",
+                  page_numbers=PageNumbers(keep=False), page_images=[])  # fmt: skip
+    epub, report = convert_structured(rules, tmp=tmp_path)
+    f = files(epub)
+    s2, s3 = f["s2.xhtml"], f["s3.xhtml"]
+    assert s2.index("<aside") < s2.index("<figure")  # notes before the table that follows
+    assert "<table" not in s2 and S["captions"][1] in flat(s2)
+    assert 'class="math"' not in s3 and "α + β = γ" in s3
+    assert "pagebreak" not in "".join(f.values()) and "pageBreakSource" not in f["content.opf"]
+    # footnotes left inline: no links, the notes stay text
+    epub, _ = convert_structured(Rules(footnotes="inline"), tmp=tmp_path)
+    s2 = files(epub)["s2.xhtml"]
+    assert "noteref" not in s2 and S["footnotes"][0][2] in flat(s2)
+    # rename and merge chapters
+    rules = Rules(
+        chapters=[ChapterRule(index=0, title="Harbour"), ChapterRule(index=2, merge=True)]
+    )
+    epub, report = convert_structured(rules, tmp=tmp_path)
+    f = files(epub)
+    assert report["sections"] == 2 and "s3.xhtml" not in f
+    assert "<h2>Harbour</h2>" in f["s1.xhtml"] and "Chapter Three" in f["s2.xhtml"]
+    assert ">Harbour</a>" in f["nav.xhtml"]
+
+
+def test_the_preview_shows_each_pages_converted_text():
+    doc, st = analysed()
+    pages = preview(doc, st, defaults(st), [2, 4])
+    assert [p["page"] for p in pages] == [2, 4]
+    two, four = pages
+    assert S["poem"][0] in two["html"] and "<table" in two["html"]
+    assert four["as_image"] and four["confidence"] < 0.6 and 'class="ph"' in four["html"]
+    assert "<img" not in two["html"] + four["html"]  # the preview never loads images
+
+
+def test_text_pdfs_without_structure_convert_as_before():
+    doc, st = analysed("plain.pdf")
+    assert not st["zones"] and not st["notes"] and not any(p["flagged"] for p in st["pages"])
+    a, _ = convert("plain.pdf")
+    b, _ = build_epub(doc, title=EXPECTED["title"], author="Ada Marlow", language="en",
+                      source_name="plain.pdf", pdf_sha256=doc["pdf_sha256"], structure=st,
+                      rules=defaults(st))  # fmt: skip
+    assert flat(spine_text(a)) == flat(spine_text(b))
+
+
 # --- EPUBCheck (CI pins and requires it; see .github/workflows/ci.yml) ---------------------------
 
 
@@ -174,6 +335,22 @@ def test_cover_and_isbn_carry_into_the_edition():
 def test_the_converted_edition_is_a_valid_epub(name):
     epub, _report = convert(name)
     out = Path("/tmp") / f"lectern-{name}.epub"
+    out.write_bytes(epub)
+    epubcheck(out)
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        None,
+        Rules(footnotes="popup", tables="image", page_images=[]),
+        Rules(page_images=[1, 2, 3, 4]),
+    ],
+    ids=["defaults", "popup-notes-table-images", "every-page-an-image"],
+)
+def test_the_structured_edition_is_a_valid_epub(rules, tmp_path):
+    epub, _report = convert_structured(rules, tmp=tmp_path)
+    out = tmp_path / "structured.epub"
     out.write_bytes(epub)
     epubcheck(out)
 
@@ -274,6 +451,50 @@ def test_a_failed_job_is_reported_and_retryable(client, owner, settings):
 def test_a_work_without_a_text_pdf_cannot_convert(client, owner, settings):
     st = client.get("/api/works/999999/pdf-epub")
     assert st.status_code == 404
+
+
+def test_analyse_review_preview_then_convert_with_rules(client, owner, settings):
+    _file_id, work_id = _pdf_work(settings, "structured.pdf")
+    base = f"/api/works/{work_id}/pdf-epub"
+    assert client.get(f"{base}/analysis").status_code == 409  # not analysed yet
+    r = api_post(client, f"{base}/analyse", owner["csrf"])
+    assert r.status_code == 202
+    assert run_pending(session_factory(), settings) == 1
+    st = client.get(base).json()
+    assert st["analysed"] and st["job"]["mode"] == "analyse" and st["edition"] is None
+    a = client.get(f"{base}/analysis").json()
+    assert a["summary"]["footnotes"] == 2 and a["summary"]["flagged_pages"] == [S["plate_page"]]
+    assert [c["title"] for c in a["chapters"]] == ["Chapter One", "Chapter Two", "Chapter Three"]
+    assert a["rules"]["page_images"] == [S["plate_page"]] and a["rules"] == a["defaults"]
+    assert S["plate_page"] in a["preview_pages"]
+    img = client.get(f"{base}/preview/{S['plate_page']}.jpg")
+    assert img.status_code == 200 and img.content[:2] == b"\xff\xd8"
+    assert client.get(f"{base}/preview/999.jpg").status_code == 404
+    p = api_post(client, f"{base}/preview", owner["csrf"],
+                 json={"pages": [2], "rules": {"footnotes": "inline"}}).json()  # fmt: skip
+    assert "noteref" not in p["pages"][0]["html"] and p["pages"][0]["image"] is True
+
+    rules = {"footnotes": "popup", "page_images": []}
+    r = api_post(client, base, owner["csrf"], json={"rules": rules})
+    assert r.status_code == 202
+    assert run_pending(session_factory(), settings) == 1
+    st = client.get(base).json()
+    assert st["job"]["status"] == "succeeded" and st["edition"] is not None
+    assert st["report"]["rules"]["footnotes"] == "popup" and st["report"]["page_images"] == []
+    # the rules are saved with the edition: the review sheet and a re-run start from them
+    assert client.get(f"{base}/analysis").json()["rules"]["footnotes"] == "popup"
+    assert api_post(client, base, owner["csrf"]).status_code == 409  # already converted
+    r = api_post(client, base, owner["csrf"], json={"reconvert": True})
+    assert r.status_code == 202 and run_pending(session_factory(), settings) == 1
+    st = client.get(base).json()
+    assert st["report"]["rules"]["footnotes"] == "popup"
+    with session_factory()() as db:
+        work = db.get(Work, work_id)
+        epub = (settings.library_dir / work.dir_path / CONVERTED_NAME).read_bytes()
+    assert any(n.startswith("OEBPS/images/") for n in zipfile.ZipFile(io.BytesIO(epub)).namelist())
+    # removing the edition takes the saved rules and the analysis with it
+    assert api_delete(client, base, owner["csrf"]).status_code == 200
+    assert client.get(base).json()["analysed"] is False
 
 
 def test_a_server_without_ffmpeg_still_converts(client, owner, settings, monkeypatch):

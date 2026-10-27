@@ -52,6 +52,8 @@ TOOL_SCOPES = {
     "start_alignment": "organize",
     "job_status": "organize",
     "edit_metadata": "organize",
+    "analyse_pdf_conversion": "organize",
+    "convert_pdf_to_epub": "organize",
 }
 ARGS = {
     "upload_book": {"filename": "x.epub", "content_base64": base64.b64encode(b"PK").decode()},
@@ -66,6 +68,8 @@ ARGS = {
     "start_alignment": {"book_id": 1},
     "job_status": {"book_id": 1},
     "edit_metadata": {"book_id": 1, "changes": {"publisher": "P"}},
+    "analyse_pdf_conversion": {"book_id": 1},
+    "convert_pdf_to_epub": {"book_id": 1},
 }
 
 

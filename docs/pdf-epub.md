@@ -1,7 +1,8 @@
 # PDF → EPUB conversion
 
 A work with a text PDF, or a scan once text recognition has run ([ocr.md](ocr.md)), can gain a
-reflowable EPUB edition: **Convert to EPUB…** in its detail view queues a conversion job. The original PDF
+reflowable EPUB edition: **Convert to EPUB…** in its detail view analyses the PDF, shows the rules it will
+convert with, and converts once you confirm them. The original PDF
 stays; the EPUB is a separate edition of the same work (`book-converted-from-pdf.epub`), and
 removing it takes nothing else with it.
 
@@ -27,25 +28,73 @@ Progress, bookmarks, and read-along carry over: the work's text timeline moves t
 and the existing PDF↔EPUB sentence projection keeps the PDF's positions meaningful (the
 reader can switch editions without losing their place).
 
-## What it does not have (yet)
+## Analyse, review the rules, convert
 
-The conversion is deliberately text-first. Not converted in this version: images and
-figures, tables, footnotes as `noteref` asides, drop caps, poetry mode, inline styles, and
-math (issue #28's later bullets). A scanned PDF is refused until OCR has given it text.
+1. **Analyse** (a quick job, no edition yet): the pages are read in the sandboxed PDF child for
+   type styles, images, and drawn lines, and the structure is found: figures, tables, maths,
+   footnotes, drop caps, verse, lists, block quotes, and a confidence score for every page.
+2. **Review**: a sheet lists every rule in plain words, with a control for each, and a
+   side-by-side preview of sample pages (the PDF page beside its converted text) that follows
+   your edits:
+   - page numbers: the numbering found (e.g. "i–xii, then 1–340"), keep or drop, an offset;
+   - chapters: rename, or join a chapter to the one before; the heading sizes found;
+   - footnotes: at the end of each chapter, after their paragraph (pop-ups), or left as text;
+   - figures (keep or leave out), tables (simple grids as HTML tables and complex ones as
+     images, all as images, or plain text), maths (images with the text as alt, or text);
+   - verse: detected automatically and/or on given pages; inline styles on or off;
+   - pages to keep as images (low-confidence pages start selected) and pages to leave out
+     (a printed cover, copyright page, or index).
+
+   **Convert with these rules** works straight away with the detected defaults.
+3. **Convert**: the edition is built with the confirmed rules, which are saved with it
+   (`derived/pdf2epub-rules.json`). **Edit rules…** on a converted book re-opens the sheet
+   and re-converts.
+
+The same flow is available to AI apps over MCP: `analyse_pdf_conversion` returns the
+detected rules (and converted text of chosen pages), `convert_pdf_to_epub` takes the rules
+the person approved.
+
+## What the conversion keeps beyond the text
+
+- **Inline styles**: italic, bold, small caps, superscripts and subscripts; a drop cap is
+  rejoined to its word.
+- **Figures**: embedded images and vector drawings, rendered from their region of the page,
+  with their captions as `figcaption` and any labels as alt text.
+- **Tables**: a ruled grid becomes an HTML table (header row as `th`, caption as `caption`);
+  anything less regular is an image of its region with its text as alt.
+- **Footnotes**: small notes at the foot of a page matched to the raised marker in the body
+  become `noteref` links and `aside epub:type="footnote"`.
+- **Maths** and anything else that does not reflow: an image of the region, its text as alt.
+- **Verse, lists, block quotes**: line breaks kept for verse; bulleted and numbered lists;
+  indented passages as `blockquote`.
+- **Page images**: a page kept as an image replaces its text with the page rendered whole
+  (its text as alt), so a plate, a map, or a page the extractor reads badly stays faithful.
+
+The report (`derived/pdf2epub-report.json`) adds what was converted, each page's confidence
+and reasons, and a warning for low-confidence pages that were reflowed anyway.
 
 ## Scans (OCR)
 
 A scan's edition is built from its recognised text (issue #62) and says so: the package
 description names the OCR engine and language, a `<meta name="lectern:source"
 content="ocr"/>` marks it, the contents page carries a note, and the report has `source:
-"ocr"`, `ocr: {engine, language}` and a warning to expect recognition errors. When the PDF's
-text changes after a conversion (the scan was recognised again), `GET
-/api/works/{id}/pdf-epub` says `outdated: true` and converting again replaces the edition.
+"ocr"`, `ocr: {engine, language}` and a warning to expect recognition errors. The analysis
+and review work the same way. A scan has no type styles to read, so it gets no italics or
+footnote markers, and each page's confidence also counts the OCR (the review sheet says
+"text from OCR"). When the PDF's text changes after a conversion (the scan was recognised
+again), `GET /api/works/{id}/pdf-epub` says `outdated: true`, the stored analysis no longer
+matches, and converting again re-analyses the new text and replaces the edition with the
+saved rules.
+
+## Not yet
+
+Columns, running headers, and paragraph joins are decided by the text extractor for every
+reader of the PDF's text, so the review sheet reports them but does not change them.
 
 ## Running it
 
-The job runs on the server (a Raspberry Pi included — it only needs the already-extracted
-text, so it is quick and is never sent to a worker). It appears in the shared jobs list with
+The jobs run on the server (a Raspberry Pi included — they need the already-extracted text
+and a sandboxed look at the pages, and are never sent to a worker). It appears in the shared jobs list with
 cancel and retry like any other job.
 
 ## Many books at once

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
+  analysePdf,
   cancelPdfJob,
   convertHint,
   convertPdf,
@@ -9,23 +10,31 @@ import {
   removePdfEpub,
   retryPdf,
   type PdfEpubState,
+  type PdfRules,
 } from "../lib/pdf2epub";
 import { useStore } from "../lib/store";
 import type { Work } from "../lib/types";
 import { Book } from "./Icons";
+import { PdfReviewSheet } from "./PdfReviewSheet";
 
 const POLL_MS = 3000;
 
 /**
- * "Convert to EPUB" row for a work with a text PDF (or a scan OCR has given text): queues the
- * conversion, follows the job (progress, Cancel, Retry), and once it exists, offers the
- * converted edition for removal, or to convert again when the PDF's text has changed since.
+ * "Convert to EPUB" row for a work with a text PDF: analyses the PDF (a quick job), opens the
+ * review sheet with the detected rules and a side-by-side preview, queues the conversion with
+ * the confirmed rules, follows the job (progress, Cancel, Retry), and once the edition exists,
+ * offers "Edit rules…" (re-convert) and removal. A scan converts once OCR has given it text;
+ * when the PDF's text changed since the conversion (the scan was recognised again), the row
+ * says the edition is out of date and offers "Convert again…" (analysis of the new text, then
+ * the review with the saved rules).
  */
 export function ConvertPdfRow({ work }: { work: Work }) {
   const { refreshLibrary, toast } = useStore();
   const [st, setSt] = useState<PdfEpubState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const wasRunning = useRef(false);
+  const [review, setReview] = useState(false);
+  const reviewAfterAnalysis = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -45,9 +54,14 @@ export function ConvertPdfRow({ work }: { work: Work }) {
   // Side effects live in an effect on the succeeded transition, not inside a setSt
   // updater (React may invoke updaters twice in development).
   useEffect(() => {
-    if (wasRunning.current && !running && job?.status === "succeeded" && st?.edition) {
-      toast(`The converted EPUB of ${work.title} is ready.`);
-      refreshLibrary().catch(() => {});
+    if (wasRunning.current && !running && job?.status === "succeeded") {
+      if (job.mode === "analyse") {
+        if (reviewAfterAnalysis.current) setReview(true);
+        reviewAfterAnalysis.current = false;
+      } else if (st?.edition) {
+        toast(`The converted EPUB of ${work.title} is ready.`);
+        refreshLibrary().catch(() => {});
+      }
     }
     wasRunning.current = running;
   });
@@ -70,14 +84,30 @@ export function ConvertPdfRow({ work }: { work: Work }) {
     }
   };
 
+  // Review first: open the sheet when the analysis is current, else analyse and open it after.
+  const startReview = () => {
+    if (st.analysed) {
+      setReview(true);
+      return;
+    }
+    reviewAfterAnalysis.current = true;
+    act(() => analysePdf(work.id), "Could not analyse the PDF");
+  };
+  const confirm = async (rules: PdfRules) => {
+    await convertPdf(work.id, { rules, reconvert: !!st.edition });
+    setReview(false);
+    await refresh();
+  };
+
   let hint = convertHint(st.source);
   let action = (
-    <button className="btn sm" onClick={() => act(() => convertPdf(work.id), "Could not start the conversion")}>
+    <button className="btn sm" onClick={startReview}>
       Convert to EPUB…
     </button>
   );
   if (running) {
-    hint = job!.status === "queued" ? "Queued: converting" : "Converting…";
+    const analysing = job!.mode === "analyse";
+    hint = job!.status === "queued" ? (analysing ? "Queued: analysing the PDF" : "Queued: converting") : analysing ? "Analysing the PDF…" : "Converting…";
     action = <button className="btn sm ghost" onClick={() => act(() => cancelPdfJob(job!.id), "Could not cancel")}>Cancel</button>;
   } else if (job && (job.status === "failed" || job.status === "cancelled")) {
     hint = job.status === "cancelled" ? "Conversion cancelled" : `Conversion failed: ${job.error ?? "unknown error"}`;
@@ -88,7 +118,11 @@ export function ConvertPdfRow({ work }: { work: Work }) {
     );
   } else if (st.edition) {
     hint = editionHint(st);
-    const remove = (
+    action = (
+      <div className="slot-actions">
+      <button className={`btn sm${st.outdated ? "" : " ghost"}`} onClick={startReview}>
+        {st.outdated ? "Convert again…" : "Edit rules…"}
+      </button>
       <button
         className="btn sm ghost"
         onClick={() =>
@@ -104,16 +138,7 @@ export function ConvertPdfRow({ work }: { work: Work }) {
       >
         Remove
       </button>
-    );
-    action = st.outdated ? (
-      <div className="row">
-        <button className="btn sm" onClick={() => act(() => convertPdf(work.id), "Could not start the conversion")}>
-          Convert again
-        </button>
-        {remove}
       </div>
-    ) : (
-      remove
     );
   }
 
@@ -131,6 +156,9 @@ export function ConvertPdfRow({ work }: { work: Work }) {
         )}
       </span>
       {action}
+      {review && (
+        <PdfReviewSheet workId={work.id} title={work.title} open={review} onClose={() => setReview(false)} onConvert={confirm} reconvert={!!st.edition} />
+      )}
     </li>
   );
 }
