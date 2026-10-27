@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import HTTPException, RequestValidationError
@@ -45,6 +46,17 @@ from lectern.uploads import sweep as upload_sweep
 log = logging.getLogger("lectern")
 
 STATIC_DIR = TEMPLATES_DIR.parent / "static"
+
+
+class PublicStatic(StaticFiles):
+    """/static, public: the sign-in pages' stylesheet and script, and the voice samples. Never
+    app/, the built web app: /app serves it, and parts of it are for signed-in people only
+    (doc-text.json by role, doc-media), so they must not be reachable around that check."""
+
+    def lookup_path(self, path: str):
+        if Path(path).parts[:1] == ("app",):
+            return "", None
+        return super().lookup_path(path)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -257,7 +269,7 @@ def create_app(
     if settings.lan_enabled:
         # Outermost: the home Wi-Fi listener refuses before anything else runs (lectern.lan).
         app.add_middleware(LANGuard, lan_port=settings.lan_port)
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", PublicStatic(directory=str(STATIC_DIR)), name="static")
     app_assets = STATIC_DIR / "app" / "assets"
     if app_assets.is_dir():
         app.mount("/app/assets", StaticFiles(directory=str(app_assets)), name="app-assets")

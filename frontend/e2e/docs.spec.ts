@@ -75,6 +75,12 @@ test("a reader's browser never receives the docs hidden from readers", async ({ 
   const direct = await page.request.get("/app/doc-text");
   expect(direct.status()).toBe(200);
   bodies.push(direct.text());
+  // The built file behind it is not public under /static, signed in or not.
+  expect((await page.request.get("/static/app/doc-text.json")).status()).toBe(404);
+  const anon = await page.context().browser()!.newContext({ baseURL: base });
+  expect((await anon.request.get("/static/app/doc-text.json")).status()).toBe(404);
+  expect((await anon.request.get("/static/app/doc-media/backups-admin.png")).status()).toBe(404);
+  await anon.close();
 
   const received = (await Promise.all(bodies)).join("\n");
   const docs = fileURLToPath(new URL("../../docs", import.meta.url));

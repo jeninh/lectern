@@ -387,8 +387,27 @@ def test_doc_text_sends_only_the_docs_a_role_may_see(client, owner, tmp_path, mo
     r = client.get("/app/doc-text")
     assert r.json() == {"sections": [{"title": "A", "docs": [doc("all.md")]}]}
     assert "backups" not in r.text and "ops.md" not in r.text
-    client.cookies.clear()
-    assert client.get("/app/doc-text").status_code == 401
+    # The built file itself is never public: /static does not serve the app's folder (nor its
+    # doc-media screenshots), for a reader or for no session at all.
+    built = APP_DIR / "doc-text.json"
+    made_dir = not APP_DIR.exists()
+    made = not built.exists()
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    if made:
+        built.write_text(json.dumps(text))
+    try:
+        for path in ("/static/app/doc-text.json", "/static/app/../app/doc-text.json",
+                     "/static//app/doc-text.json", "/static/./app/doc-text.json"):  # fmt: skip
+            assert client.get(path).status_code == 404, path
+        client.cookies.clear()
+        assert client.get("/static/app/doc-text.json").status_code == 404
+        assert client.get("/app/doc-text").status_code == 401
+        assert client.get("/static/lectern.css").status_code == 200  # the rest stays public
+    finally:
+        if made:
+            built.unlink()
+        if made_dir:
+            APP_DIR.rmdir()
 
 
 def test_sign_out_clears_site_data_and_book_frames_are_allowed(client, owner):
