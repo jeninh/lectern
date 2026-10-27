@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { normalizedText, offsetOf, pointAt } from "../textpos";
+import { normalizedText, offsetOf, pointAt, rangeBetween } from "../textpos";
 
 // Spine item 2 of tests/fixtures/magi (Project Gutenberg #7256, public domain) and the
 // server's normalised length and hand-checked sentence spans for it (sentence_map.json).
@@ -43,5 +43,20 @@ describe("text positions match lectern.positions.normalize_spine_text", () => {
     expect(offsetOf(d, two, 3)).toBe(14); // UTF-16 offset 3 is after "😀 "; the emoji is one char
     expect(offsetOf(d, d.getElementsByTagName("p")[1], 0)).toBe(12);
     expect(pointAt(d, 99)!.node.data).toBe("😀 Two"); // clamped to the end
+  });
+});
+
+describe("rangeBetween (search matches)", () => {
+  it("covers exactly the normalised span, across elements and collapsed whitespace", () => {
+    // normalised: "LoomingsCall me Ishmael. 😀 Some years ago" (no space between h1 and p)
+    const d = parse(`<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Loomings</h1><p>Call  me <em>Ish</em>mael.\n 😀 Some years ago</p></body></html>`);
+    const text = normalizedText(d);
+    const at = (s: string) => text.indexOf(s);
+    expect(rangeBetween(d, at("Call me Ishmael"), at("Call me Ishmael") + 15)!.toString()).toBe("Call  me Ishmael");
+    expect(rangeBetween(d, at("Loomings"), at("Loomings") + 8)!.toString()).toBe("Loomings");
+    // a surrogate pair is one character on the timeline and two UTF-16 units in the DOM
+    expect(rangeBetween(d, at("😀"), at("😀") + 1)!.toString()).toBe("😀");
+    expect(rangeBetween(d, at("😀"), at("😀") + 6)!.toString()).toBe("😀 Some");
+    expect(rangeBetween(d, text.length + 5, text.length + 9)).toBeNull();
   });
 });

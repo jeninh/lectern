@@ -129,8 +129,8 @@ class Maintenance:
 
 
 def start_services(session_factory: sessionmaker, settings: Settings) -> list:
-    """Housekeeping and maintenance always; the in-process worker only when its engine is
-    available."""
+    """Housekeeping, maintenance, and the search indexer always; the in-process worker only
+    when its engine is available."""
     from lectern.align.transcribe import Transcriber
 
     with session_factory() as db:
@@ -142,9 +142,12 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
         ocr_jobs.recover_local(db)
         # nothing is being published yet: every staged result copy is a leftover
         queue.sweep_staging(db, settings.library_dir, everything=True)
+    from lectern.search import SearchIndexer
+
     started: list = [
         Housekeeping(session_factory, settings),
         Maintenance(session_factory, settings),
+        SearchIndexer(session_factory, settings),
     ]
     missing = jobs.local_engine_missing(settings)
     if missing is None:

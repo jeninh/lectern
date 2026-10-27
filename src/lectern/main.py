@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 
-from lectern import __version__, backups, egress, mcp_server, offline_mode
+from lectern import __version__, backups, egress, mcp_server, offline_mode, search
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
@@ -116,6 +116,7 @@ def create_app(
     async def _serve(app: FastAPI):
         engine = init_engine(settings)
         upgrade_to_head(engine)
+        search.init(settings)
         settings.resolve_secret_key()
         with session_factory()() as db:
             if offline_mode.apply(db, settings):
@@ -203,6 +204,10 @@ def create_app(
         # Resumable upload chunks (<= 50 MiB each): generous enough for a LAN, still bounded.
         "uploads": SlidingWindowLimiter(
             limit=settings.rate_limit_per_minute * 4, window_seconds=60
+        ),
+        # Full-text searches per user (the Cmd/Ctrl+K palette, debounced as you type).
+        "search": SlidingWindowLimiter(
+            limit=settings.search_requests_per_minute, window_seconds=60
         ),
         # Sleep-timer rewind points that need ffmpeg (cache misses), per user.
         "rewind": SlidingWindowLimiter(limit=20, window_seconds=60),

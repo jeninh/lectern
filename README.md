@@ -117,6 +117,15 @@ path above the grid (**Library › Kids › Picture books**), and bookmarks all 
 
 ![The Library as folders](docs/screenshots/library-folders.png)
 
+## Search inside books
+
+Cmd/Ctrl+K also searches the text of your books: **In books**, below the other results, lists
+matching passages with the words marked. Choosing one opens the EPUB at that spot, or the PDF
+at that page, with the match highlighted. People find only passages in books they can see,
+and never in the Trash. The index is a separate file (`data/search.db`) that a background
+thread keeps up to date as books are added, edited, trashed, and restored. It is built for a
+Raspberry Pi: see [`docs/search.md`](docs/search.md).
+
 ## Adding books
 
 Owners and members add books from the web app: **Add books** in the Library (its menu also has

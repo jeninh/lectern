@@ -128,6 +128,29 @@ export interface AuthorName {
   sort?: string | null;
 }
 
+/** A passage found by full-text search (GET /api/search/text, lectern.search). */
+export interface TextHit {
+  work_id: number;
+  title: string;
+  author: string;
+  format: "epub" | "pdf";
+  file_id: number;
+  /** The first match, as the book has it. */
+  match: string;
+  snippet: { parts: [string, boolean][]; before: boolean; after: boolean };
+  /** EPUB: the match on the reader's text timeline. */
+  spine_index?: number;
+  char?: number;
+  length?: number;
+  /** PDF: 1-based page. */
+  page?: number;
+}
+
+export interface TextSearch {
+  results: TextHit[];
+  too_broad: boolean;
+}
+
 export interface Work {
   id: number;
   title: string;

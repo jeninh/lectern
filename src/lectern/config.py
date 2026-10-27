@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     upload_max_active: int = 5
     upload_session_ttl_seconds: int = 24 * 60 * 60
 
+    # Full-text search inside books (lectern.search, docs/search.md). The index is a derived
+    # file, <data>/search.db, kept up to date by a background thread that looks for added,
+    # changed, trashed, and restored books every search_poll_seconds (with background_jobs).
+    search_poll_seconds: float = Field(default=10.0, ge=0.5)
+    # Text indexed per book (all its files together); the rest of a longer book is not found.
+    search_max_chars_per_work: int = Field(default=5_000_000, ge=10_000)
+    # Searches per minute per person (the Cmd/Ctrl+K palette asks as you type, debounced).
+    search_requests_per_minute: int = Field(default=120, ge=1)
+    # A search that takes longer than this is stopped and answered "too broad".
+    search_time_budget_ms: int = Field(default=2000, ge=50)
+
     # Download caps and alerts. Caps count whole-file transfers (EPUB, original audio, the web
     # reader's copy) in the last hour; 0 disables a cap. Per-user and per-device overrides live
     # on users / app_passwords.
