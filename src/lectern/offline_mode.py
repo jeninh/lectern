@@ -23,7 +23,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from lectern import egress, instance, integrations
+from lectern import egress, email_in, instance, integrations
 from lectern.config import Settings
 
 KEY = "offline_mode"
@@ -123,6 +123,7 @@ def features(db: Session, settings: Settings, models_: dict | None = None) -> li
     m = models_ or models(settings)
     offline = egress.offline()
     el = integrations.status(db, settings, integrations.ELEVENLABS)
+    mail, _problems = email_in.load(settings)
     align, kokoro = m["align"], m["kokoro"]
     rows = [
         {
@@ -168,6 +169,26 @@ def features(db: Session, settings: Settings, models_: dict | None = None) -> li
                 else "Kokoro's weights and voices are downloaded; narrating needs no internet."
                 if kokoro["local"]
                 else "Kokoro does not run on this server."
+            ),
+        },
+        {
+            "id": "article_saving",
+            "name": "Saving web articles",
+            "contacts": ["the web pages people save"],
+            "on": True,
+            "when": "When someone saves a web article: that page and its images are "
+            "downloaded (public internet addresses only).",
+        },
+        {
+            "id": "email_in",
+            "name": "Email-in",
+            "contacts": ["the mailbox set in .env"],
+            "on": mail is not None,
+            "when": (
+                f"Every {mail.poll_s / 60:g} minutes: Lectern signs in to the mailbox over IMAP "
+                "with TLS and reads new mail sent to people's email-in addresses."
+                if mail is not None
+                else "Not set up (LECTERN_EMAIL_IN in .env)."
             ),
         },
     ]

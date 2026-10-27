@@ -7,7 +7,7 @@ from functools import cached_property, lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from lectern.security.proxy import Network, parse_networks
@@ -208,6 +208,27 @@ class Settings(BaseSettings):
     ocr_memory_limit_mb: int = Field(default=1536, ge=256, le=65536)
     # Threads Tesseract may use for one page (OMP_THREAD_LIMIT).
     ocr_threads: int = Field(default=1, ge=1, le=64)
+
+    # Email-in (docs/ingest-paths.md): poll one dedicated mailbox (Gmail or Fastmail) over
+    # IMAP with TLS and an app password, for books people mail to their own address. Outbound
+    # only: no mail server here. Off unless LECTERN_EMAIL_IN=1 and host, user, and password are
+    # set. Strings on purpose: lectern.email_in.load() checks them, so a missing or mistyped
+    # value keeps email-in off and is named in Admin instead of stopping the server. The
+    # password is never logged or shown.
+    email_in: str = ""
+    email_in_host: str = ""
+    email_in_port: str = ""  # default 993
+    email_in_user: str = ""
+    email_in_password: SecretStr = SecretStr("")
+    # The mailbox's address, for people's <local>+<tag>@<domain> addresses (default: the user).
+    email_in_address: str = ""
+    email_in_mailbox: str = ""  # default INBOX
+    email_in_poll_minutes: str = ""  # default 5
+    email_in_max_mb: str = ""  # default 25: larger messages and attachments are refused
+    # Sender filter: allowlist (default) or blocklist, and its entries (addresses or @domain,
+    # comma-separated). Set here, it wins over Admin → Email-in, which then shows it read-only.
+    email_in_sender_mode: str = ""
+    email_in_senders: str = ""
 
     log_level: str = "INFO"
 

@@ -988,6 +988,9 @@ class Import(Base):
     ai_key_id: Mapped[int | None] = mapped_column(
         ForeignKey("ai_keys.id", ondelete="SET NULL"), default=None
     )
+    # Migration 0019: put the filed work on this shelf (email-in's destination shelf). No
+    # foreign key: a shelf deleted before filing is skipped with a notice (lectern.imports).
+    shelf_id: Mapped[int | None] = mapped_column(Integer, default=None)
     version: Mapped[int] = mapped_column(Integer, default=1)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
@@ -1374,3 +1377,28 @@ class PdfSentence(Base):
     page_end: Mapped[int] = mapped_column(Integer)
     boxes: Mapped[list] = mapped_column(JSON)
     epub_n: Mapped[int | None] = mapped_column(Integer, default=None)
+
+
+# --- Email-in (migration 0019, issue #67) ----------------------------------------------------
+
+
+class EmailInbox(Base):
+    """A person's email-in address and the senders it accepts (lectern.email_in).
+
+    The address is ``<local>+<token>@<domain>`` of the configured mailbox: one mailbox the
+    server polls, with a hard-to-guess tag per person. Mail is accepted only when it is
+    addressed to exactly one such tag and its sender passes the sender filter; its book
+    attachments then wait for review in that person's imports, like an upload.
+    """
+
+    __tablename__ = "email_inboxes"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    token: Mapped[str] = mapped_column(String(32), unique=True)
+    # The shelf emailed books are put on when filed. No foreign key on purpose: a deleted
+    # shelf must stay visible as "gone" (a notice, then no shelf), not silently become NULL.
+    shelf_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)

@@ -1073,6 +1073,8 @@ def _opf(book: Book, meta: dict, manifest: list[tuple[str, str, str, str]]) -> b
             lines.append(f"<dc:{key}>{escape(meta[key])}</dc:{key}>")
     for s in meta["subjects"]:
         lines.append(f"<dc:subject>{escape(s)}</dc:subject>")
+    if meta.get("source"):
+        lines.append(f"<dc:source>{escape(meta['source'])}</dc:source>")
     lines.append(f'<meta property="dcterms:modified">{MODIFIED}</meta>')
     if book.cover:
         lines.append('<meta name="cover" content="cover-image"/>')
@@ -1091,11 +1093,12 @@ def _opf(book: Book, meta: dict, manifest: list[tuple[str, str, str, str]]) -> b
     return "\n".join(lines).encode("utf-8")
 
 
-def write_epub(book: Book, header: Header, sha256: str, out: Path) -> None:
-    """Names are already safe (:data:`_SAFE_NAME`), so they go into the OPF unescaped."""
+def write_epub(book: Book, meta: dict, out: Path) -> None:
+    """Write ``book`` with the package metadata ``meta`` (the keys :func:`_metadata` returns,
+    plus an optional ``source``). Names are already safe (:data:`_SAFE_NAME`), so they go
+    into the OPF unescaped. Saved web articles (lectern.article) are written here too."""
     if not any(linear for _n, linear in book.spine):
         raise FormatError("not_mobi", "no text")
-    meta = _metadata(header, sha256)
     lang = meta["language"]
     _fix_links(book)
     files: list[tuple[str, bytes]] = []
@@ -1186,7 +1189,7 @@ def build(src: Path, out: Path) -> dict:
         _build_mobi7(book, unpacked / "mobi7", header)
     else:
         raise FormatError("not_mobi", "nothing unpacked (print replica or dictionary?)")
-    write_epub(book, header, h.hexdigest(), out)
+    write_epub(book, _metadata(header, h.hexdigest()), out)
     return {"ok": True, "documents": len(book.spine)}
 
 
