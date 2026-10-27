@@ -14,4 +14,10 @@ to. The original PDF is never touched; the result is a separate edition of the s
 :mod:`lectern.pdf2epub.jobs` queues and runs the conversion as a job (``kind =
 "pdf2epub"``) with the shared progress, cancel, and retry (routes/api/pdf2epub.py); it also
 writes a conversion report (``derived/pdf2epub-report.json``).
+
+Issue #63 adds the page structure: :mod:`lectern.pdf2epub.probe` reads styled runs, images,
+and drawn lines (and renders regions) in the sandboxed PDF child,
+:mod:`lectern.pdf2epub.structure` finds figures, tables, maths, footnotes, drop caps, and page
+confidence, and :mod:`lectern.pdf2epub.rules` holds the rules a person reviews before the
+conversion (analyse → review rules → convert, docs/pdf-epub.md).
 """

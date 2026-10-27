@@ -1,7 +1,13 @@
-// PDF → EPUB conversion (issue #28): turn a work's text PDF into a reflowable EPUB edition,
-// with the PDF's own page numbers kept as metadata (a page-list nav the Kindle and KOReader
-// can show). The original PDF is kept; the EPUB is a separate edition. A scanned PDF converts
-// once OCR has given it text (issue #62), and its edition is labelled as generated from OCR.
+// PDF → EPUB conversion (issues #28, #63): turn a work's text PDF into a reflowable EPUB
+// edition, with the PDF's own page numbers kept as metadata (a page-list nav the Kindle and
+// KOReader can show). The original PDF is kept; the EPUB is a separate edition. A scanned PDF
+// converts once OCR has given it text (issue #62), and its edition is labelled as generated
+// from OCR.
+//
+// The flow is analyse → review rules → convert: an analysis job finds the structure (figures,
+// tables, footnotes, maths, page confidence), the review sheet shows the detected rules with a
+// side-by-side preview (PDF page beside its converted text), and the conversion runs with the
+// rules the person confirmed. The rules are saved with the edition for a re-run.
 
 import { del, get, post } from "./api";
 
@@ -18,12 +24,17 @@ export interface PdfEpubReport {
   warnings: string[];
   pages_without_text: number[];
   unlinked_pages: number[];
+  flagged_pages?: number[];
+  page_images?: number[];
+  converted?: Record<string, number>;
+  rules?: PdfRules;
 }
 
 export interface PdfEpubJob {
   id: number;
   status: "queued" | "leased" | "succeeded" | "failed" | "cancelled";
   error: string | null;
+  mode?: "analyse" | "convert";
   sections: number | null;
 }
 
@@ -34,10 +45,75 @@ export interface PdfEpubState {
   job: PdfEpubJob | null;
   edition: { file: string; size: number; sha256: string; added_at: string } | null;
   report: PdfEpubReport | null;
+  analysed?: boolean;
   /** The work's text PDF: its own text layer, or OCR of a scan. */
   source: "text_layer" | "ocr" | null;
   /** The edition was built from an older text (the scan was recognised again). */
   outdated: boolean;
+}
+
+export interface PdfRules {
+  version: 1;
+  page_numbers: { keep: boolean; offset: number };
+  chapters: { index: number; title: string | null; merge: boolean }[];
+  verse: "auto" | "off";
+  verse_pages: number[];
+  footnotes: "end" | "popup" | "inline";
+  figures: "keep" | "drop";
+  tables: "auto" | "image" | "text";
+  maths: "image" | "text";
+  styles: boolean;
+  page_images: number[];
+  drop_pages: number[];
+}
+
+export interface PageConfidence {
+  page: number;
+  confidence: number;
+  flagged: boolean;
+  reasons: string[];
+  figures: number;
+  tables: number;
+  maths: number;
+  content: boolean;
+}
+
+export interface PdfAnalysis {
+  summary: {
+    pages: number;
+    flagged_pages: number[];
+    figures: number;
+    tables: number;
+    complex_tables: number;
+    maths: number;
+    footnotes: number;
+    dropcaps: number;
+    styled_words: number;
+  };
+  body_size: number;
+  page_numbers: { source: "page_labels" | "physical"; ranges: { scheme: string; first: string; last: string; pages: [number, number] }[] };
+  running_heads_removed: number;
+  columns_pages: number;
+  chapters: { index: number; title: string; page_start: number; page_end: number; from_outline: boolean }[];
+  headings: { size: number; level: number; count: number; example: string }[];
+  footnotes: { page: number; marker: string; text: string }[];
+  zones: { id: string; page: number; kind: "figure" | "table" | "math"; complex: boolean; photo: boolean }[];
+  matter: { page: number; kind: "cover" | "copyright" | "index" }[];
+  pages: PageConfidence[];
+  preview_pages: number[];
+  rules: PdfRules;
+  defaults: PdfRules;
+}
+
+export interface PreviewPage {
+  page: number;
+  label: string;
+  confidence: number | null;
+  reasons: string[];
+  as_image: boolean;
+  dropped: boolean;
+  html: string;
+  image: boolean;
 }
 
 /** What the "EPUB from PDF" row says about the converted edition. */
@@ -50,6 +126,8 @@ export function editionHint(st: Pick<PdfEpubState, "report" | "outdated">): stri
   if (r?.page_list_entries) {
     hint += `, page numbers ${r.labels_source === "page_labels" ? "from the PDF's page labels" : "1…" + r.pages}`;
   }
+  const images = r?.page_images?.length ?? 0;
+  if (images) hint += `, ${images} page${images === 1 ? "" : "s"} as images`;
   if (st.outdated) hint += " · out of date: the PDF's text changed since";
   return hint;
 }
@@ -57,16 +135,101 @@ export function editionHint(st: Pick<PdfEpubState, "report" | "outdated">): stri
 /** The hint before converting: a scan's text comes from OCR, so the edition will too. */
 export const convertHint = (source: PdfEpubState["source"]) =>
   source === "ocr"
-    ? "Reflowable text from the OCR of the scan (expect recognition errors), the PDF's own page numbers kept; the PDF stays"
-    : "Reflowable text, the PDF's own page numbers kept; the PDF stays";
+    ? "Reflowable text from the OCR of the scan (expect recognition errors), figures and tables, the PDF's own page numbers kept; the PDF stays"
+    : "Reflowable text, figures, tables, and footnotes, the PDF's own page numbers kept; the PDF stays";
 
 export const pdfEpubState = (workId: number) => get<PdfEpubState>(`/api/works/${workId}/pdf-epub`);
-export const convertPdf = (workId: number) =>
-  post<{ status: string; job_id: number }>(`/api/works/${workId}/pdf-epub`);
+export const convertPdf = (workId: number, body?: { rules?: PdfRules; reconvert?: boolean }) =>
+  post<{ status: string; job_id: number }>(`/api/works/${workId}/pdf-epub`, body ?? {});
+export const analysePdf = (workId: number) =>
+  post<{ status: string; job_id: number }>(`/api/works/${workId}/pdf-epub/analyse`);
+export const pdfAnalysis = (workId: number) => get<PdfAnalysis>(`/api/works/${workId}/pdf-epub/analysis`);
+export const previewPdfEpub = (workId: number, pages: number[], rules: PdfRules) =>
+  post<{ pages: PreviewPage[] }>(`/api/works/${workId}/pdf-epub/preview`, { pages, rules });
+export const previewImageUrl = (workId: number, page: number) => `/api/works/${workId}/pdf-epub/preview/${page}.jpg`;
 export const retryPdf = (workId: number) =>
   post<{ status: string; job_id: number }>(`/api/works/${workId}/pdf-epub/retry`);
 export const removePdfEpub = (workId: number) => del<{ removed: boolean }>(`/api/works/${workId}/pdf-epub`);
 export const cancelPdfJob = (jobId: number) => post<unknown>(`/api/jobs/${jobId}/cancel`);
+
+// --- pure helpers (tested in __tests__/pdf2epub.test.ts) ------------------------------------
+
+/** "1-3, 7" → [1, 2, 3, 7]: sorted, unique, within 1…max. Throws on anything else. */
+export function parsePages(text: string, max: number): number[] {
+  const out = new Set<number>();
+  for (const part of text.split(/[,\s]+/).filter(Boolean)) {
+    const m = /^(\d+)(?:[-–](\d+))?$/.exec(part);
+    if (!m) throw new Error(`"${part}" is not a page or a range like 3-7`);
+    const a = Number(m[1]);
+    const b = m[2] ? Number(m[2]) : a;
+    if (a < 1 || b < a || b > max) throw new Error(`${part}: pages run from 1 to ${max}`);
+    if (b - a > 10000) throw new Error(`${part}: too many pages`);
+    for (let p = a; p <= b; p++) out.add(p);
+  }
+  return [...out].sort((x, y) => x - y);
+}
+
+/** [1, 2, 3, 7] → "1-3, 7". */
+export function formatPages(pages: number[]): string {
+  const sorted = [...new Set(pages)].sort((x, y) => x - y);
+  const parts: string[] = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    parts.push(j > i ? `${sorted[i]}-${sorted[j]}` : `${sorted[i]}`);
+    i = j + 1;
+  }
+  return parts.join(", ");
+}
+
+/** The detected numbering in words: "i–ii, then 5–340". */
+export function numberingSummary(a: PdfAnalysis): string {
+  const runs = a.page_numbers.ranges.map((r) => (r.first === r.last ? r.first : `${r.first}–${r.last}`));
+  if (!runs.length) return "No pages";
+  const text = runs.length > 4 ? `${runs.slice(0, 4).join(", then ")}, …` : runs.join(", then ");
+  return a.page_numbers.source === "page_labels" ? `${text} (the PDF's own page labels)` : `${text} (no page labels: physical pages)`;
+}
+
+/** Each rule in plain language, as the review sheet's summary shows it. */
+export function ruleSummary(a: PdfAnalysis, r: PdfRules): string[] {
+  const s = a.summary;
+  const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  const lines: string[] = [];
+  lines.push(r.page_numbers.keep ? `Page numbers kept: ${numberingSummary(a)}${r.page_numbers.offset ? `, shifted by ${r.page_numbers.offset}` : ""}` : "Page numbers left out");
+  const merged = r.chapters.filter((c) => c.merge).length;
+  const renamed = r.chapters.filter((c) => c.title).length;
+  lines.push(`${plural(a.chapters.length - merged, "chapter")} ${a.chapters.some((c) => c.from_outline) ? "from the PDF's bookmarks" : "from headings"}${renamed ? `, ${renamed} renamed` : ""}${merged ? `, ${merged} merged` : ""}`);
+  if (s.footnotes) lines.push(`${plural(s.footnotes, "footnote")}: ${{ end: "at the end of each chapter", popup: "after their paragraph (pop-ups)", inline: "left as text" }[r.footnotes]}`);
+  if (s.figures) lines.push(`${plural(s.figures, "figure")}: ${r.figures === "keep" ? "kept as images with captions" : "left out (captions kept)"}`);
+  if (s.tables)
+    lines.push(`${plural(s.tables, "table")}: ${{ auto: s.complex_tables ? `simple ones as tables, ${s.complex_tables} complex as images` : "as HTML tables", image: "as images", text: "as plain text" }[r.tables]}`);
+  if (s.maths) lines.push(`${plural(s.maths, "formula", "formulas")}: ${r.maths === "image" ? "as images, text as alt" : "as text"}`);
+  lines.push(r.verse === "auto" ? `Verse detected automatically${r.verse_pages.length ? `, and on pages ${formatPages(r.verse_pages)}` : ""}` : r.verse_pages.length ? `Verse only on pages ${formatPages(r.verse_pages)}` : "No verse");
+  lines.push(r.styles ? "Italic, bold, small caps, and superscripts kept" : "Plain text (no inline styles)");
+  if (r.page_images.length) lines.push(`Pages kept as images: ${formatPages(r.page_images)}`);
+  if (r.drop_pages.length) lines.push(`Pages left out: ${formatPages(r.drop_pages)}`);
+  return lines;
+}
+
+/** The page shown first in the preview: the first flagged page, else the first sample. */
+export function firstPreviewPage(a: PdfAnalysis): number | null {
+  return a.summary.flagged_pages.find((p) => a.preview_pages.includes(p)) ?? a.preview_pages[0] ?? null;
+}
+
+/** A self-contained, script-free document for the converted side of the preview iframe. */
+export function previewDoc(html: string): string {
+  return (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+    "body{font:16px/1.5 Georgia,serif;margin:12px;color:#222;background:#fff}" +
+    ".sc{font-variant:small-caps}p.verse{margin-left:2em}blockquote{margin:1em 2em}" +
+    "table{border-collapse:collapse}th,td{border:1px solid #888;padding:2px 6px}" +
+    "aside{font-size:.9em;border-top:1px solid #ccc;margin-top:.5em}figcaption,.caption{font-style:italic;font-size:.9em}" +
+    ".ph{display:block;border:1px dashed #999;padding:8px;color:#555;background:#f6f6f6;font:13px/1.4 sans-serif}" +
+    "</style></head><body>" +
+    (html || "<p style=\"color:#777;font:13px sans-serif\">Nothing from this page is in the edition.</p>") +
+    "</body></html>"
+  );
+}
 
 // --- many books at once: the Library's selection bar (issue #61) --------------------------------
 
@@ -90,6 +253,7 @@ export const CONVERT_REASONS: Record<string, string> = {
   converted: "already an EPUB",
   unsupported: "no PDF to convert",
   no_text_pdf: "no text in the PDF yet (a scan needs OCR first)",
+  analysing: "being analysed for review; convert it from its details",
   not_found: "no longer exists",
   internal_error: "an unexpected server error",
   pdf_changed: "the PDF changed while it was queued",

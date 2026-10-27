@@ -97,6 +97,8 @@ You act as one person, with only their permissions and only the scopes their AI 
 - Organize: add_to_shelf / remove_from_shelf, create_shelf / move_shelf,
   send_to_device / list_device_queue,
   start_alignment / job_status, edit_metadata.
+- A text PDF can gain an EPUB edition: analyse_pdf_conversion shows the detected rules,
+  the person approves or edits them, then convert_pdf_to_epub.
 - Only EPUB has text: alignment, read-along, and read-aloud need an EPUB. PDF and comics are
   page-based and cannot be aligned. CBR is not supported; ask the person to convert it to CBZ.
 - DRM-free MOBI and AZW3 files are converted to EPUB when uploaded. DRM-protected ones are
@@ -1129,6 +1131,67 @@ def edit_metadata(
         }
 
 
+def analyse_pdf_conversion(
+    ctx: Context,
+    book_id: int,
+    pages: Annotated[
+        list[Annotated[int, Field(ge=1, le=10_000)]] | None,
+        Field(max_length=6, description="Pages whose converted text to show (1-based)."),
+    ] = None,
+) -> dict:
+    """Step 1 of PDF → EPUB conversion: analyse a book's text PDF. If no current analysis
+    exists this queues one and returns the job (call again when job_status says it is done).
+    Otherwise returns the detected rules (page numbers, chapters, headings, footnotes,
+    figures, tables, maths, low-confidence pages to keep as images, front/back matter) with
+    their evidence, and the converted text of `pages`. Show the rules to the person; then
+    convert_pdf_to_epub with the rules they approve. Scope: organize."""
+    from lectern.routes.api import pdf2epub as routes
+
+    with _call(ctx, "analyse_pdf_conversion", "organize") as c:
+        c.require_editor("convert books")
+        work = _visible(c.db, c.user, book_id)
+        if routes._analysis(c.db, c.settings, work) is None:
+            return {
+                "analysed": False,
+                **routes.analyse(c.request, c.auth, c.db, c.settings, book_id),
+            }
+        out = routes.analysis(c.auth, c.db, c.settings, book_id)
+        out.pop("zones", None)
+        out["pages"] = [p for p in out["pages"] if p.get("flagged")][:50]
+        if pages:
+            out["preview"] = routes.preview(
+                c.auth, c.db, c.settings, book_id, routes.PreviewIn(pages=pages)
+            )["pages"]
+        return {"analysed": True, **out}
+
+
+def convert_pdf_to_epub(
+    ctx: Context,
+    book_id: int,
+    rules: Annotated[
+        dict | None,
+        Field(
+            description="The rules from analyse_pdf_conversion, edited as approved; omit "
+            "for the detected defaults."
+        ),
+    ] = None,
+    reconvert: Annotated[bool, Field(description="Replace an existing converted edition.")] = False,
+) -> dict:
+    """Step 2: convert a book's text PDF into a separate reflowable EPUB edition with the
+    approved rules (the PDF stays). Returns the job; follow it with job_status. Scope:
+    organize."""
+    from lectern.pdf2epub.rules import Rules
+    from lectern.routes.api import pdf2epub as routes
+
+    with _call(ctx, "convert_pdf_to_epub", "organize") as c:
+        c.require_editor("convert books")
+        _visible(c.db, c.user, book_id)
+        body = routes.ConvertIn(
+            rules=Rules.model_validate(rules) if rules is not None else None, reconvert=reconvert
+        )
+        return routes.convert(c.request, c.auth, c.db, c.settings, book_id, body)
+
+
 _TOOLS: list[tuple[Any, ToolAnnotations]] = [
     (upload_book, WRITE),
     (list_pending_imports, READ),
@@ -1147,4 +1210,6 @@ _TOOLS: list[tuple[Any, ToolAnnotations]] = [
     (start_alignment, WRITE),
     (job_status, READ),
     (edit_metadata, WRITE),
+    (analyse_pdf_conversion, WRITE),
+    (convert_pdf_to_epub, WRITE),
 ]
