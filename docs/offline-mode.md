@@ -89,10 +89,14 @@ install nftables` if it is missing) and runs as a service:
 Description=Lectern offline mode firewall rules
 After=docker.service
 Requires=docker.service
+PartOf=docker.service
+# Never give up: a dockerd restart ends the script, and it must come back.
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/home/pi/lectern/deploy/offline-firewall.sh lectern-tailscale-tailscale-1 1000
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

@@ -18,6 +18,9 @@ set -u
 CONTAINER=${1:?usage: offline-firewall.sh CONTAINER [UID]}
 UID_MATCH=${2:+meta skuid $2 }
 
+# Without nft every apply would fail while the service looked healthy.
+command -v nft >/dev/null 2>&1 || { echo "nft is not installed: sudo apt install nftables" >&2; exit 1; }
+
 rules() {
 	cat <<EOF
 table inet lectern_offline {
@@ -34,7 +37,7 @@ EOF
 WAITING=0
 
 apply() {
-	if ! pid=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER" 2>/dev/null) || [ "${pid:-0}" -le 0 ]; then
+	if ! pid=$(docker inspect --type container -f '{{.State.Pid}}' "$CONTAINER" 2>/dev/null) || [ "${pid:-0}" -le 0 ]; then
 		# A typo in the name would otherwise look exactly like a container that is not up yet.
 		if [ "$WAITING" = 0 ]; then
 			echo "waiting for container $CONTAINER: it does not exist or is not running (check the name with docker ps)" >&2
@@ -59,3 +62,5 @@ SINCE=$(date +%s)
 apply
 docker events --since "$SINCE" --filter type=container --filter event=start --filter "container=$CONTAINER" |
 	while read -r _; do apply; done
+# docker events ended (dockerd stopped or restarted): exit non-zero so the service restarts.
+exit 1
