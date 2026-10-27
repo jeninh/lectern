@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Link } from "react-router-dom";
+import { helpPath } from "../lib/help";
 import { Check, Close, Pencil, Sparkle } from "./Icons";
 import { OverflowMenu } from "./Menu";
 import { Sheet } from "./Sheet";
@@ -57,7 +59,7 @@ export function AIToolsSection() {
         <button className="btn sm" onClick={() => setConnecting(true)}><Sparkle /> Connect an AI app</button>
       </div>
       <p className="hint" style={{ marginTop: 0 }}>
-        AI apps on your tailnet, like Claude Desktop or Claude Code, can add and organize books for you. Each gets its own key that acts as you, only with the permissions you choose. It can never download books or audio, or change accounts or settings.
+        AI apps on your tailnet, like Claude Desktop or Claude Code, can add and organize books for you. Each gets its own key that acts as you, only with the permissions you choose. It can never download books or audio, or change accounts or settings. <Link to={helpPath("aiConnect")}>How it works</Link>
       </p>
       {data && active.length === 0 ? (
         <p className="ai-empty">No AI apps connected.</p>

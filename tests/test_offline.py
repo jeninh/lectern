@@ -348,6 +348,8 @@ def test_pwa_files_are_public_and_the_app_is_not(client):
         assert client.get(bad).status_code in (401, 404), bad
     # The app itself and every API still need the session.
     assert client.get("/app/downloads", follow_redirects=False).status_code in (303, 401)
+    # So do the Docs tab's screenshots (docs/screenshots, copied in by the build).
+    assert client.get("/app/doc-media/backups-admin.png").status_code == 401
     assert client.get("/api/me").status_code == 401
 
 
