@@ -509,6 +509,128 @@ def test_proxy_resolution(monkeypatch):
     assert cond.resolve_proxy("system", "") == "http://env:1"
 
 
+SCUTIL_SCHOOL = """<dictionary> {
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : 169.254/16
+    2 : lectern.home.example
+  }
+  ExcludeSimpleHostnames : 1
+  HTTPSEnable : 1
+  HTTPSPort : 3128
+  HTTPSProxy : proxy.school
+  __SCOPED__ : <dictionary> {
+    en0 : <dictionary> {
+      ExceptionsList : <array> {
+        0 : only.scoped
+      }
+      ExcludeSimpleHostnames : 0
+      HTTPSProxy : scoped.proxy
+    }
+  }
+}"""
+
+
+@pytest.mark.parametrize(
+    ("host", "pattern", "match"),
+    [
+        ("mac.local", "*.local", True),
+        ("local.example", "*.local", False),
+        ("a.example.com", "example.com", True),
+        ("example.com", ".example.com", True),
+        ("badexample.com", "example.com", False),
+        ("169.254.3.4", "169.254/16", True),
+        ("169.25.3.4", "169.254/16", False),
+        ("10.1.2.3", "10.0.0.0/8", True),
+        ("ten.example", "10.0.0.0/8", False),
+        ("192.168.4.20", "192.168.*", True),
+        ("fd00::1", "fd00::/8", True),
+        ("anything", "*", True),
+        ("lectern.example", "lectern.example:8443", True),
+        ("::1", "[::1]", True),
+        ("::1", "[::1]:8080", True),
+        ("fd00::1", "fd00::1", True),
+    ],
+)
+def test_proxy_exception_patterns(host, pattern, match):
+    assert cond.matches_exception(host, pattern) is match
+
+
+def _routed(opts, url: str) -> str:
+    """Which way ``http_options``' client sends ``url``: ``direct`` or ``proxied``."""
+    import httpx
+
+    t = opts["transport"]
+    t.direct = httpx.MockTransport(lambda r: httpx.Response(200, text="direct"))
+    t.proxied = httpx.MockTransport(lambda r: httpx.Response(200, text="proxied"))
+    with httpx.Client(**opts) as c:
+        return c.get(url).text
+
+
+def test_requests_to_the_tailnet_skip_the_proxy(monkeypatch):
+    """A school proxy cannot reach a tailnet address, so Lectern on the tailnet is reached
+    directly; a public server (Funnel, Cloudflare Tunnel) and model hosts still use the proxy."""
+    names = {"lectern.tail1234.ts.net": ["100.101.102.103"], "v6.ts.net": ["fd7a:115c:a1e0::5"],
+             "lectern.example": ["203.0.113.7"]}  # fmt: skip
+    monkeypatch.setattr(cond, "_resolve", lambda host: names.get(host, []))
+    monkeypatch.setenv("NO_PROXY", "lectern.example")
+    opts = cond.http_options("http://proxy.school:3128", None)
+    assert opts["trust_env"] is False and "proxy" not in opts
+    t = opts["transport"]
+    assert _routed(opts, "https://100.101.102.103/api/worker/claim") == "direct"
+    assert _routed(opts, "https://lectern.tail1234.ts.net/api/worker/claim") == "direct"
+    assert _routed(opts, "https://v6.ts.net/") == "direct"
+    assert _routed(opts, "https://100.128.0.1/") == "proxied"  # just outside 100.64.0.0/10
+    # an explicit URL ignores NO_PROXY; a name that does not resolve goes to the proxy
+    assert _routed(opts, "https://lectern.example/") == "proxied"
+    assert _routed(opts, "https://huggingface.co/") == "proxied"
+    # Tailscale connects after the worker started: the name is looked up again after ttl
+    t.ttl = 0
+    names["lectern.example"] = ["100.64.0.9"]
+    assert _routed(opts, "https://lectern.example/") == "direct"
+
+
+def test_system_proxy_honors_the_macos_exception_list(monkeypatch):
+    for var in ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(cond, "_scutil_proxy", lambda: SCUTIL_SCHOOL)
+    monkeypatch.setattr(cond, "_resolve", lambda host: ["198.51.100.4"])
+    assert cond.parse_scutil_exceptions(SCUTIL_SCHOOL) == (
+        ["*.local", "169.254/16", "lectern.home.example"], True)  # fmt: skip
+    # per-interface (__SCOPED__) settings are not the system's
+    assert cond.parse_scutil_proxy(SCUTIL_SCHOOL) == "http://proxy.school:3128"
+    scoped_only = """<dictionary> {
+  ExcludeSimpleHostnames : 0
+  HTTPSEnable : 0
+  __SCOPED__ : <dictionary> {
+    en0 : <dictionary> {
+      ExceptionsList : <array> {
+        0 : only.scoped
+      }
+      ExcludeSimpleHostnames : 1
+      HTTPSEnable : 1
+      HTTPSProxy : scoped.proxy
+    }
+  }
+}"""
+    assert cond.parse_scutil_exceptions(scoped_only) == ([], False)
+    assert cond.parse_scutil_proxy(scoped_only) is None
+    opts = cond.http_options("system", None)
+    assert _routed(opts, "https://lectern.home.example/") == "direct"
+    assert _routed(opts, "https://pi.local/") == "direct"
+    assert _routed(opts, "https://169.254.1.1/") == "direct"
+    assert _routed(opts, "https://pi/") == "direct"  # ExcludeSimpleHostnames
+    assert _routed(opts, "https://lectern.elsewhere.example/") == "proxied"
+    # HTTPS_PROXY overrides the macOS proxy (as the agent's own apply_network_env sets it);
+    # the exception list and NO_PROXY still apply
+    monkeypatch.setenv("HTTPS_PROXY", "http://env:1")
+    monkeypatch.setenv("NO_PROXY", "lectern.elsewhere.example")
+    opts = cond.http_options("system", None)
+    assert _routed(opts, "https://lectern.elsewhere.example/") == "direct"
+    assert _routed(opts, "https://pi.local/") == "direct"
+    assert _routed(opts, "https://huggingface.co/") == "proxied"
+
+
 def test_config_and_key_are_private_and_toggles_round_trip(tmp_path):
     cfg = wcfg.update_config(tmp_path, server="https://l.example", only_on_wifi=True)
     assert wcfg.load_config(tmp_path).only_on_wifi and cfg.server == "https://l.example"
@@ -1124,7 +1246,6 @@ def test_an_extra_ca_is_trusted_in_addition_to_the_public_roots(tmp_path):
 def test_proxy_none_ignores_environment_proxies(monkeypatch, tmp_path):
     monkeypatch.setenv("HTTPS_PROXY", "http://env:1")
     assert cond.http_options("none", None) == {"proxy": None, "verify": True, "trust_env": False}
-    assert "trust_env" not in cond.http_options("system", None)
     env = cond.network_env("none", None, tmp_path)
     assert env["HTTPS_PROXY"] is None and env["NO_PROXY"] == "*"
 

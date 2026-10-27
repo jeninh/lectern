@@ -233,6 +233,14 @@ models), so it works there:
   `system` (default: `HTTPS_PROXY`, else the macOS proxy settings from System Settings →
   Network → Proxies; automatic proxy configuration (PAC) files are not evaluated), `none`, or a
   URL such as `http://proxy.school.example:3128`.
+- **Lectern on the tailnet skips the proxy.** A request to a Tailscale address
+  (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), or to a name that resolves to one right now (your
+  `*.ts.net` name while Tailscale is connected), goes direct: no school proxy can reach the
+  tailnet. The check repeats every minute, so a worker started before Tailscale connected
+  switches once it has. A name that resolves publicly (Tailscale off, Funnel or Cloudflare
+  Tunnel) still goes through the proxy. With `system`, hosts in the macOS exception list
+  ("Bypass proxy settings for these Hosts & Domains", and "Exclude simple hostnames") and in
+  `NO_PROXY` go direct too.
 - **TLS inspection.** `ca_bundle` / `--ca-bundle /path/school-ca.pem` trusts the network's
   certificate *in addition to* the public roots, so the same Mac still works at home.
   Without it the worker fails with a certificate error, by design: it never turns
