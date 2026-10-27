@@ -160,6 +160,16 @@ def test_migration_0005_upgrades_and_downgrades(tmp_path):
     assert NEW_TABLES <= set(sa.inspect(engine).get_table_names())
 
 
+def test_migrations_have_a_single_head(tmp_path):
+    """Two revisions with the same parent leave two heads, and ``upgrade_to_head`` fails."""
+    from alembic.script import ScriptDirectory
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'heads.db'}")
+    cfg = alembic_config(str(engine.url))
+    assert len(ScriptDirectory.from_config(cfg).get_heads()) == 1
+    upgrade_to_head(engine)
+
+
 # --- model constraints -------------------------------------------------------------------
 
 
