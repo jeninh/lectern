@@ -57,10 +57,22 @@ export function statusText(item: MetaSuggestionItem): string {
 
 /** Review wording for a possible duplicate: an upload that looks like a book you have, or
  * two books already in the library. */
-export function duplicateCopy(s: Pick<MatchSuggestion, "origin">): { question: string; newLabel: string; keep: string; merge: string } {
+export function duplicateCopy(s: Pick<MatchSuggestion, "origin">): { question: string; newLabel: string; keptLabel: string; keep: string; merge: string } {
   return s.origin === "library"
-    ? { question: "Are these the same book?", newLabel: "newer", keep: "Not duplicates — ignore", merge: "Same book — merge" }
-    : { question: "Is the new upload the same book?", newLabel: "new", keep: "Different books", merge: "Same book — merge" };
+    ? { question: "Are these the same book?", newLabel: "newer · merged in", keptLabel: "kept", keep: "Not duplicates — ignore", merge: "Same book — merge" }
+    : { question: "Is the new upload the same book?", newLabel: "new", keptLabel: "", keep: "Different books", merge: "Same book — merge" };
+}
+
+/** What merging a library pair keeps and drops (lectern.duplicates.carry_over, then the
+ * merge): shown on the card, so nobody merges without knowing. Uploads need no note. */
+export function mergeNote(s: { origin?: MatchSuggestion["origin"]; work: { title: string }; candidate: { title: string } }): string | null {
+  if (s.origin !== "library") return null;
+  const gone = `“${s.work.title}”`;
+  return (
+    `Merging keeps “${s.candidate.title}”. ${gone} goes: its files, shelves, and reading progress move over (a listening position only if the kept book has no audio), ` +
+    `and its details fill only fields the kept book leaves empty. ` +
+    `Discarded with it: its other details, its edit history, and anything made for it (a narrated audiobook, read-along alignment, text layer, books waiting to be sent to a device).`
+  );
 }
 
 /** The Library banner: "2 uploads might belong to … · 3 possible duplicates". */

@@ -36,7 +36,9 @@ log = logging.getLogger("lectern.autometa")
 FIELDS = ("description", "series", "series_index", "isbn", "tags")
 PROVIDERS = ("openlibrary", "googlebooks")
 PER_TICK = 3  # works looked up per runner tick (the provider limit still applies)
-MAX_ATTEMPTS = 5  # tries for a work that keeps hitting a rate limit
+# Tries for a work that keeps hitting a rate limit: one per runner tick (5 s), so this spans
+# well over the providers' 60 s limit window before giving up.
+MAX_ATTEMPTS = 30
 TITLE_MATCH = 85
 OPEN = ("queued",)  # waiting for the runner
 REVIEW = ("ready",)  # waiting for a person
@@ -222,7 +224,7 @@ def run_pending(session_factory: sessionmaker, fetch: Callable[[str], bytes] | N
                 db.execute(
                     update(MetadataSuggestion)
                     .where(MetadataSuggestion.id == row.id)
-                    .values(status="error", error="internal_error")
+                    .values(status="error", error="internal_error", updated_at=utcnow())
                 )
                 db.commit()
             done += 1

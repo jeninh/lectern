@@ -14,7 +14,7 @@ import { DownloadButton } from "../components/Offline";
 import { OverflowMenu, type MenuAction } from "../components/Menu";
 import { BulkBar, type BulkTarget } from "../components/BulkBar";
 import { MetadataReview } from "../components/MetadataReview";
-import { duplicateBanner, duplicateCopy } from "../lib/autometa";
+import { duplicateBanner, duplicateCopy, mergeNote } from "../lib/autometa";
 import { Breadcrumbs, canNestIn, DeleteShelfDialog, dragProps, FolderCell, folderSummary, FolderPicker, ShelfNameDialog } from "../components/Folders";
 import { del, get, post, put } from "../lib/api";
 import { clausesOf, extractChips, formatQuery, SORTS, type Clause } from "../lib/filters";
@@ -973,9 +973,10 @@ function SuggestionReview({ items, onResolved, onScan }: { items: MatchSuggestio
             <div style={tintStyle(s.candidate)}>
               <Cover work={s.candidate} />
               <strong>{s.candidate.title}</strong>
-              <span className="hint">{s.candidate.author} · {label(s.candidate)}</span>
+              <span className="hint">{[s.candidate.author, label(s.candidate), duplicateCopy(s).keptLabel].filter(Boolean).join(" · ")}</span>
             </div>
           </div>
+          {mergeNote(s) && <p className="hint" style={{ marginTop: 0 }} data-testid="merge-note">{mergeNote(s)}</p>}
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn ghost" onClick={() => act(s, "dismiss")}>{duplicateCopy(s).keep}</button>
             <button className="btn primary" onClick={() => act(s, "merge")}>{duplicateCopy(s).merge}</button>

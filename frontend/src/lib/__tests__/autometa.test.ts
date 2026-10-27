@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { duplicateBanner, duplicateCopy, fixSummary, offered, statusText, toggle } from "../autometa";
+import { duplicateBanner, duplicateCopy, fixSummary, mergeNote, offered, statusText, toggle } from "../autometa";
 import type { MetaSuggestionItem } from "../types";
 
 const item = (over: Partial<MetaSuggestionItem>): MetaSuggestionItem => ({
@@ -56,6 +56,15 @@ describe("duplicate review", () => {
     expect(duplicateCopy({ origin: "library" }).keep).toBe("Not duplicates — ignore");
     expect(duplicateCopy({ origin: "ingest" }).keep).toBe("Different books");
     expect(duplicateCopy({}).question).toMatch(/new upload/); // rows from before the scan existed
+  });
+
+  it("says which copy a library merge keeps and what it discards", () => {
+    const note = mergeNote({ origin: "library", work: { title: "Kim (2)" }, candidate: { title: "Kim" } });
+    expect(note).toMatch(/^Merging keeps “Kim”\. “Kim \(2\)” goes/);
+    expect(note).toMatch(/fill only fields the kept book leaves empty/);
+    expect(note).toMatch(/Discarded with it: .*edit history/);
+    expect(mergeNote({ origin: "ingest", work: { title: "a" }, candidate: { title: "b" } })).toBeNull();
+    expect(duplicateCopy({ origin: "library" }).keptLabel).toBe("kept");
   });
 
   it("counts each kind in the banner", () => {

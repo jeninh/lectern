@@ -975,6 +975,9 @@ def apply_metadata_suggestion(
         meta = metadata_of(work)
         for f in body.fields:
             meta[f] = row.fields[f]["value"]
+        if "series_index" in body.fields and not meta["series"]:
+            # A number without its series would be dropped silently on save.
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "series_required")
         try:
             result, journal = _save(
                 request, auth, db, settings, work, WorkPatch(version=body.version, metadata=meta)

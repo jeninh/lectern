@@ -328,3 +328,80 @@ def test_duplicate_merge_uses_the_existing_merge_path(client, owner, settings):
         assert db.get(Work, b) is None
         assert len(db.get(Work, a).files) == 2
     assert api_post(client, "/api/suggestions/scan", csrf).json() == {"found": 0}
+
+
+def test_duplicate_merge_keeps_what_the_owner_set_on_the_newer_copy(client, owner, settings):
+    """Regression: merging a library pair once dropped the newer copy's description, tags,
+    series, reading position, and finished state."""
+    from datetime import datetime, timedelta
+
+    from lectern.models import ReadingState, User, WorkProgress, utcnow
+
+    csrf = owner["csrf"]
+    a = add_book(settings, "a", "First Book", ["Author One"], isbn="9780441478125")
+    b = add_book(settings, "b", "Completely Unlike", ["Author Two"])
+    long_ago = datetime(2025, 1, 2, 3, 4, 5, tzinfo=datetime.now().astimezone().tzinfo)
+    with session_factory()() as db:
+        uid = db.query(User).one().id
+        older, newer = db.get(Work, a), db.get(Work, b)
+        older.description, older.tags, older.series, older.publisher = None, None, None, "Kept"
+        newer.isbn, newer.description, newer.tags = "9780441478125", "Owner's notes.", ["Fav"]
+        newer.series, newer.series_index, newer.publisher = "Saga", 2.0, "Not this one"
+        db.add(
+            WorkProgress(
+                user_id=uid, work_id=b, sentence_n=1, sentence_offset=3, source="web", raw="1:3"
+            )
+        )
+        db.flush()
+        state = db.get(ReadingState, (uid, b))
+        state.fraction, state.started_at, state.finished_at = 1.0, long_ago, long_ago
+        state.last_read_at = long_ago
+        db.commit()
+    assert api_post(client, "/api/suggestions/scan", csrf).json() == {"found": 1}
+    (s,) = client.get("/api/suggestions").json()["suggestions"]
+    assert api_post(client, f"/api/suggestions/{s['id']}/merge", csrf).status_code == 200
+    with session_factory()() as db:
+        assert db.get(Work, b) is None
+        w = db.get(Work, a)
+        # Empty fields filled from the newer copy; a field the kept copy had stays its own.
+        assert (w.description, w.tags, w.series, w.series_index) == (
+            "Owner's notes.",
+            ["Fav"],
+            "Saga",
+            2.0,
+        )
+        assert w.publisher == "Kept" and w.isbn == "9780441478125"
+        p = db.query(WorkProgress).filter_by(user_id=uid).one()
+        assert (p.work_id, p.sentence_n, p.sentence_offset, p.raw) == (a, 1, 3, "1:3")
+        st = db.get(ReadingState, (uid, a))
+        assert st is not None and st.fraction == 1.0
+        assert st.finished_at == long_ago and st.started_at == long_ago
+        assert st.last_read_at == long_ago and st.last_read_at < utcnow() - timedelta(days=1)
+
+
+def test_duplicate_merge_keeps_the_earliest_start_and_finish_when_both_were_read(
+    client, owner, settings
+):
+    from datetime import datetime, timedelta
+
+    from lectern.models import ReadingState, User
+
+    csrf = owner["csrf"]
+    a = add_book(settings, "a", "First Book", ["Author One"], isbn="9780441478125")
+    b = add_book(settings, "b", "Completely Unlike", ["Author Two"])
+    t0 = datetime(2025, 1, 1, tzinfo=datetime.now().astimezone().tzinfo)
+    with session_factory()() as db:
+        uid = db.query(User).one().id
+        db.get(Work, b).isbn = "9780441478125"
+        db.add(ReadingState(user_id=uid, work_id=a, fraction=0.5, last_read_at=t0,
+                            started_at=t0 + timedelta(days=5), finished_at=None))  # fmt: skip
+        db.add(ReadingState(user_id=uid, work_id=b, fraction=1.0, last_read_at=t0,
+                            started_at=t0, finished_at=t0 + timedelta(days=2)))  # fmt: skip
+        db.commit()
+    api_post(client, "/api/suggestions/scan", csrf)
+    (s,) = client.get("/api/suggestions").json()["suggestions"]
+    assert api_post(client, f"/api/suggestions/{s['id']}/merge", csrf).status_code == 200
+    with session_factory()() as db:
+        st = db.get(ReadingState, (uid, a))
+        assert st.started_at == t0 and st.finished_at == t0 + timedelta(days=2)
+        assert st.fraction == 0.5  # the kept copy's own position stands

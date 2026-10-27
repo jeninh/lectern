@@ -12,11 +12,16 @@ Each pair found becomes a ``match_suggestions`` row (``origin = "library"``) in 
 review list as ingest's: *Merge* uses the existing merge path (the newer work into the older
 one) and *Ignore* dismisses it. Any pair that already has a row, open or resolved, either way
 round, is never flagged again, so an ignored pair stays ignored.
+
+Merging a library pair (:func:`carry_over`, then the ingest merge) also keeps what someone
+set on the copy that goes: its metadata fills the kept copy's empty fields, and each person's
+reading position and reading state move over when they have none on the kept copy.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from itertools import combinations
 
 from rapidfuzz import fuzz
@@ -30,7 +35,16 @@ from lectern.ingest.matching import (
     clean_title,
     sort_title,
 )
-from lectern.models import AudioTrack, BookFile, MatchSuggestion, Work
+from lectern.models import (
+    AudioTrack,
+    BookFile,
+    MatchSuggestion,
+    ProgressSource,
+    ReadingState,
+    Work,
+    WorkProgress,
+)
+from lectern.workmeta import apply_metadata, metadata_of
 
 MAX_NEW = 500  # pairs flagged per scan; the rest wait for the next one
 MAX_GROUP = 20  # works sharing one ISBN or file that are paired up
@@ -125,3 +139,69 @@ def scan(db: Session) -> int:
             break
     db.flush()
     return added
+
+
+# Identity (kept from the target) and the ISBN (``merge_work`` moves it) are not filled here.
+_KEEP = ("title", "sort_title", "authors", "isbn")
+
+
+def _empty(v: object) -> bool:
+    return v is None or v == "" or v == []
+
+
+def carry_over(db: Session, source: Work, target: Work) -> Callable[[], None]:
+    """Before merging library duplicate ``source`` into ``target``: fill each empty target
+    metadata field from the source, and move each person's reading state and text position
+    to the target when they have none there (a state on both keeps the earliest start and
+    finish). Audio positions are left to ``merge_work``, which moves them only when the
+    target has no audio (seconds of another recording mean nothing).
+
+    Returns ``restore``, to run after ``merge_work``: moving a position makes the
+    reading-state hook stamp it as read just now, and this puts the moved states back."""
+    src, dst = metadata_of(source), metadata_of(target)
+    filled = {k: v for k, v in src.items() if k not in _KEEP and _empty(dst[k]) and not _empty(v)}
+    if filled:
+        apply_metadata(target, {**dst, **filled})
+
+    on_target = {
+        s.user_id: s
+        for s in db.scalars(select(ReadingState).where(ReadingState.work_id == target.id))
+    }
+    moved: dict[int, tuple] = {}
+    for s in db.scalars(select(ReadingState).where(ReadingState.work_id == source.id)).all():
+        t = on_target.get(s.user_id)
+        if t is None:
+            moved[s.user_id] = (s.fraction, s.last_read_at, s.started_at, s.finished_at)
+            db.delete(s)
+        else:
+            for col in ("started_at", "finished_at"):
+                dates = [d for d in (getattr(t, col), getattr(s, col)) if d is not None]
+                setattr(t, col, min(dates) if dates else None)
+    db.flush()
+    for user_id, (fraction, last, started, finished) in moved.items():
+        db.add(
+            ReadingState(
+                user_id=user_id, work_id=target.id, fraction=fraction, last_read_at=last,
+                started_at=started, finished_at=finished,
+            )
+        )  # fmt: skip
+    db.flush()
+
+    has_position = set(
+        db.scalars(select(WorkProgress.user_id).where(WorkProgress.work_id == target.id))
+    )
+    for p in db.scalars(select(WorkProgress).where(WorkProgress.work_id == source.id)).all():
+        if p.user_id not in has_position and p.source != ProgressSource.AUDIO:
+            p.work_id = target.id
+    db.flush()
+
+    def restore() -> None:
+        db.flush()
+        for user_id, (fraction, last, started, finished) in moved.items():
+            s = db.get(ReadingState, (user_id, target.id))
+            if s is not None:
+                s.fraction, s.last_read_at = fraction, last
+                s.started_at, s.finished_at = started, finished
+        db.flush()
+
+    return restore
