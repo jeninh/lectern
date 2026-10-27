@@ -725,10 +725,15 @@ def _shelf_pred(ctx: Context, values: tuple[Value, ...], key: str) -> ColumnElem
 
 
 def _user_pred(ctx: Context, values: tuple[Value, ...], key: str) -> ColumnElement[bool]:
-    if ctx.strict and ctx.user.role == Role.READER:
-        raise FilterError(
-            "field_not_allowed", "Uploaded by: only owners and members can filter by uploader.", key
-        )
+    if ctx.user.role == Role.READER:
+        if ctx.strict:
+            raise FilterError(
+                "field_not_allowed",
+                "Uploaded by: only owners and members can filter by uploader.",
+                key,
+            )
+        # A smart shelf shared with a reader: who uploaded what is not theirs to learn.
+        return false()
     users = {fold(u.username): u.id for u in ctx.db.scalars(select(User))}
     parts = []
     for v in values:

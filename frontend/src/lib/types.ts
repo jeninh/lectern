@@ -879,12 +879,3 @@ export interface ReadingState {
   started_at: string | null;
   finished_at: string | null;
 }
-
-/** lectern.reading_state for one person and work. */
-export interface ReadingState {
-  fraction: number;
-  status: "unread" | "reading" | "finished";
-  last_read_at: string | null;
-  started_at: string | null;
-  finished_at: string | null;
-}

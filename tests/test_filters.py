@@ -498,9 +498,14 @@ def test_hidden_shelves_answer_like_missing_ones(ids, lib):
     assert r.status_code == 422
 
 
-def test_uploader_is_for_owners_and_members(ids, lib):
+def test_uploader_is_for_owners_and_members(client, ids, lib):
     r = lib["rex"].get("/api/library", params={"f": "by:owner"})
     assert r.status_code == 422 and r.json()["detail"] == "field_not_allowed"
+    # Nor through a smart shelf someone else shares: rex can see War, but not who added it.
+    s = smart(client, lib["csrf"], "Mine", "by:owner", lib["shared"])
+    assert found(client, shelf=s["id"]) == {"war"}
+    assert shelf_json(lib["rex"], s["id"])["work_count"] == 0
+    assert lib["rex"].get(f"/api/shelves/{s['id']}").json()["works"] == []
 
 
 # --- smart shelves ------------------------------------------------------------------------------
