@@ -283,3 +283,113 @@ def test_a_server_without_ffmpeg_still_converts(client, owner, settings, monkeyp
     _file_id, work_id = _pdf_work(settings, "labels.pdf")
     assert api_post(client, f"/api/works/{work_id}/pdf-epub", owner["csrf"]).status_code == 202
     assert run_pending(session_factory(), settings) == 1
+
+
+# --- many works at once (issue #61) --------------------------------------------------------------
+
+
+def test_bulk_convert_queues_eligible_works_and_reports_the_rest(
+    client, owner, settings, monkeypatch
+):
+    from tests.conftest import make_epub, make_mp3
+
+    _f, text_a = _pdf_work(settings, "labels.pdf")
+    _f, text_b = _pdf_work(settings, "plain.pdf")
+    (settings.inbox_path / "scanned.pdf").write_bytes((FIX / "scanned.pdf").read_bytes())
+    make_epub(settings.inbox_path / "novel.epub", title="Already An Epub")
+    make_mp3(settings.inbox_path / "talk.mp3", title="Only Audio", album="Only Audio")
+    drain_inbox(settings)
+    from lectern.pdftext.store import sweep
+
+    sweep(session_factory(), settings.library_dir)
+    with session_factory()() as db:
+        scanned = db.scalar(
+            select(BookFile.work_id).where(
+                BookFile.media_type == "application/pdf",
+                BookFile.work_id.not_in([text_a, text_b]),
+            )
+        )
+        epub = db.scalar(
+            select(BookFile.work_id).where(BookFile.media_type == "application/epub+zip")
+        )
+        audio = db.scalar(select(Work.id).where(Work.id.not_in([text_a, text_b, scanned, epub])))
+    assert None not in (scanned, epub, audio)
+
+    # one work's enqueue blows up: reported, and the rest still go through
+    from lectern.pdf2epub import jobs as pj
+
+    real = pj.enqueue
+
+    def flaky(db, settings_, work, user_id=None):
+        if work.id == text_b:
+            raise RuntimeError("boom")
+        return real(db, settings_, work, user_id)
+
+    monkeypatch.setattr(pj, "enqueue", flaky)
+    ids = [text_a, epub, 999999, text_b, scanned, audio]
+    r = api_post(client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": ids})
+    assert r.status_code == 200
+    got = {x["work_id"]: (x["ok"], x["status"], x.get("error")) for x in r.json()["results"]}
+    assert [x["work_id"] for x in r.json()["results"]] == ids  # request order
+    assert got == {
+        text_a: (True, "queued", None),
+        epub: (False, "skipped", "already_epub"),
+        999999: (False, "failed", "not_found"),
+        text_b: (False, "failed", "internal_error"),
+        scanned: (False, "skipped", "no_text_pdf"),
+        audio: (False, "skipped", "unsupported"),
+    }
+    job_a = r.json()["results"][0]["job_id"]
+    monkeypatch.setattr(pj, "enqueue", real)
+
+    # asking again: the live job is reported, not duplicated; the failed work queues now
+    again = api_post(
+        client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": [text_a, text_b]}
+    )
+    a, b = again.json()["results"]
+    assert (a["status"], a["job_id"]) == ("already_queued", job_a)
+    assert b["status"] == "queued"
+
+    st = client.get(f"/api/pdf-epub/jobs?ids={job_a},{b['job_id']},424242").json()["jobs"]
+    assert [(j["id"], j["work_id"], j["status"]) for j in st] == [
+        (job_a, text_a, "queued"),
+        (b["job_id"], text_b, "queued"),
+    ]
+    assert run_pending(session_factory(), settings) == 2  # one at a time, through the queue
+    st = client.get(f"/api/pdf-epub/jobs?ids={job_a},{b['job_id']}").json()["jobs"]
+    assert {j["status"] for j in st} == {"succeeded"}
+
+    # converted now: an EPUB edition exists, so a third request skips both
+    third = api_post(
+        client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": [text_a, text_b]}
+    )
+    assert [x["error"] for x in third.json()["results"]] == ["already_epub", "already_epub"]
+
+
+def test_bulk_convert_is_capped_rate_limited_and_hides_others_jobs(client, owner, settings):
+    from tests.conftest import login, make_user
+
+    too_many = list(range(1, 202))
+    r = api_post(client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": too_many})
+    assert r.status_code == 422
+    for _ in range(10):  # 10 per minute per user (the refused body above never got that far)
+        assert (
+            api_post(
+                client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": [1]}
+            ).status_code
+            == 200
+        )
+    assert (
+        api_post(client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": [1]}).status_code
+        == 429
+    )
+
+    _f, work_id = _pdf_work(settings, "plain.pdf")
+    job_id = api_post(client, f"/api/works/{work_id}/pdf-epub", owner["csrf"]).json()["job_id"]
+    assert client.get(f"/api/pdf-epub/jobs?ids={job_id}").json()["jobs"][0]["id"] == job_id
+    assert client.get("/api/pdf-epub/jobs?ids=1,x").status_code == 422
+    # readers manage no jobs and see none
+    reader = make_user(client, owner["csrf"], "reader", "reader")
+    client.cookies.clear()
+    login(client, "reader", reader["password"])
+    assert client.get(f"/api/pdf-epub/jobs?ids={job_id}").status_code == 403

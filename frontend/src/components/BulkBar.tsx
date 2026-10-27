@@ -2,9 +2,11 @@ import { useRef, useState, type ReactNode } from "react";
 import { post } from "../lib/api";
 import { bulkSummary } from "../lib/editor";
 import { MOD } from "../lib/hooks";
+import { convertMany, convertSummary, type BulkConvertResult } from "../lib/pdf2epub";
 import { pathLabel } from "../lib/shelves";
 import { useStore } from "../lib/store";
 import type { BulkResult, Shelf } from "../lib/types";
+import { BulkConvertSheet } from "./BulkConvert";
 import { Close, Send, Trash } from "./Icons";
 import { ChipInput } from "./MetadataForm";
 import { Sheet } from "./Sheet";
@@ -17,7 +19,7 @@ const uuid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.ra
 export type BulkTarget = { work_ids: number[] } | { selection: { filter: { q: string; status: string; shelf: number | null; unshelved?: boolean }; exclude_ids: number[]; view_token: string; expected_count: number } };
 
 /** How many books one request may target, per action (the server's caps, listed or selected). */
-export const LIMITS = { edit: 500, send: 200, align: 50 } as const;
+export const LIMITS = { edit: 500, send: 200, align: 50, convert: 200 } as const;
 
 /** The sticky bar shared by every multi-select view: the count, select all, and clear. */
 export function SelectionBar({ open = true, count, all, total, onSelectAll, onClear, children, label = "Selection" }: { open?: boolean; count: number; all: boolean; total: number; onSelectAll: () => void; onClear: () => void; children?: ReactNode; label?: string }) {
@@ -47,6 +49,7 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
   const { toast } = useStore();
   const [dialog, setDialog] = useState<Action | null>(null);
   const [busy, setBusy] = useState(false);
+  const [converted, setConverted] = useState<BulkConvertResult[] | null>(null);
   const n = books ?? count;
   const mixed = n !== count;
   /** Disabled: no books selected (or shelves too), a request running, the view still being
@@ -115,6 +118,23 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
     }
   };
 
+  const convert = async () => {
+    const t = target();
+    if (!t) return;
+    if (!window.confirm(`Convert ${plural(n, "book")} to EPUB? Each book's text PDF gets an EPUB edition next to it (the PDF stays); books that are already EPUB or have no text PDF are skipped. Conversions run one at a time on the server.`)) return;
+    setBusy(true);
+    try {
+      const r = await convertMany(t);
+      const s = convertSummary(r.results);
+      toast(s.text, s.queued ? "info" : "error", s.queued ? { label: "Progress", run: () => setConverted(r.results) } : undefined);
+      if (s.queued) setConverted(r.results);
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <SelectionBar open={open} count={count} all={all} total={total} onSelectAll={onSelectAll} onClear={onClear} label={`${count} selected`}>
@@ -129,6 +149,7 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
           </>
         )}
         {canAlign && <button className="btn sm" disabled={off("align")} title={over("align")} onClick={align}>Align</button>}
+        {canEdit && <button className="btn sm" disabled={off("convert")} title={over("convert") ?? "Convert each selected PDF to an EPUB edition"} onClick={convert}>Convert to EPUB</button>}
         {canEdit && (
           <button
             className="btn sm danger"
@@ -143,6 +164,7 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
       <Sheet open={dialog !== null} onClose={() => setDialog(null)} title={dialog ? `${dialog === "author" ? "Set author" : dialog === "series" ? "Set series" : dialog === "tags" ? "Tags" : "Shelves"} for ${plural(n, "book")}` : ""} variant="dialog" labelledBy="bulk-title">
         {dialog && <BulkForm action={dialog} shelves={shelves} busy={busy} titles={titles} count={n} onSubmit={run} />}
       </Sheet>
+      <BulkConvertSheet results={converted} onClose={() => setConverted(null)} />
     </>
   );
 }
