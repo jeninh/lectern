@@ -89,22 +89,30 @@ install nftables` if it is missing) and runs as a service:
 Description=Lectern offline mode firewall rules
 After=docker.service
 Requires=docker.service
+PartOf=docker.service
+# Never give up: a dockerd restart ends the script, and it must come back.
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/home/pi/lectern/deploy/offline-firewall.sh lectern-tailscale-tailscale-1 1000
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 Adjust the path to your checkout, then `sudo systemctl daemon-reload && sudo systemctl enable
---now lectern-offline-firewall`. The arguments depend on the setup:
+--now lectern-offline-firewall`. `journalctl -u lectern-offline-firewall` shows each time the
+rules were applied; *waiting for container …* means the name is wrong or the container is not
+running yet. The arguments depend on the setup:
 
 - **Tailscale setup** (`deploy/tailscale/compose.yaml`): `lectern-tailscale-tailscale-1 1000`.
   Lectern shares the Tailscale container's network, and Tailscale itself needs the internet
   to stay connected, so the rules match only Lectern's user; use your `LECTERN_UID` if you set
-  another one in `.env`. Lectern starts only once the sidecar is healthy, after the rules are in.
+  another one in `.env`. The rules usually go in before Lectern starts, because Lectern waits
+  for the sidecar's health check, but that order is not guaranteed; until they are in, only
+  offline mode itself holds.
 - **Plain `compose.yaml`** (a reverse proxy on the host reaches Lectern through the published
   port): `lectern`, with no user, so every new outbound connection from Lectern's own
   namespace is rejected. There is a moment at each start before the rules are in, during
