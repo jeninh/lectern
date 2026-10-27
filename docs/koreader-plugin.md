@@ -140,13 +140,16 @@ plugin, with the same credentials and the same Wi‑Fi-off outbox as positions:
 - **Once, with edits and deletions:** a highlight's id is its book, creation time, and start
   position, so a re-sync or a second device with the same sidecar stores it once. A newer edit
   time (a changed note) updates it; an older copy from another device does not undo it. A
-  highlight deleted on every device that had it is deleted in Lectern after their next sync.
+  highlight is deleted in Lectern when a device that syncs the book no longer has it and no
+  other device of yours (still connected, not revoked) does. A revoked or replaced device no
+  longer counts, and a plugin paired again sends every book's highlights again.
 - **On the right passage:** each highlight is placed on the text the web reader opens (the
   book's primary EPUB) by finding its text there, ignoring line breaks, spacing, and case, nearest
-  to where the device says it was. So a highlight made in the EPUB, the PDF, or a converted
-  edition lands on the same passage, and on the work's sentence when it has a sentence list. It is
-  placed again when the primary EPUB changes. A highlight whose text is not found still shows,
-  with its page.
+  to where the device says it was. So a highlight made in the EPUB or the PDF of a book lands on
+  the same passage (an EPUB Lectern made from a PDF is not matched yet: like positions, its
+  highlights need the file's KOReader document id, which converted files do not record), and
+  on the work's sentence when it has a sentence list. It is placed again when the primary EPUB
+  changes. A highlight whose text is not found still shows, with its page.
 
 In Lectern: **Highlights** on the book's page (with *Open in reader*), the **Highlights** button
 in the reader (*Go to passage*), and the **Highlights** page listing your books with highlights.

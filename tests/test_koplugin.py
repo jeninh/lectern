@@ -1039,6 +1039,14 @@ def test_plugin_sends_highlights_and_notes(live, settings, tmp_path):
     out = run({"action": "modified", "annotations": []})
     assert out["requests"] == 1 and shown() == []
 
+    # Re-paired (possibly another sync key): books already sent are sent again on the next push.
+    out = run({"action": "push", "annotations": [first]})
+    assert out["requests"] == 1
+    assert run({"action": "push", "annotations": [first]})["requests"] == 0
+    code = http.post(f"/api/devices/{dev['device']['id']}/pairing-code").json()["code"]
+    assert lua(plugin, sdir, "pair", base, "owner", code)["paired"]
+    assert run({"action": "push", "annotations": [first]})["requests"] == 1
+
     logged = "\n".join(LOGGED)
     for private in (PHRASE, OTHER, note, "changed my mind"):
         assert private not in logged

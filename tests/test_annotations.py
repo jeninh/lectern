@@ -14,7 +14,14 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from tests.conftest import ko_headers, login, make_sync_key, make_user
+from tests.conftest import (
+    api_post,
+    ko_headers,
+    login,
+    make_sync_key,
+    make_sync_key_full,
+    make_user,
+)
 from tests.test_jobs import EPUB, ingest_fixture
 
 from lectern.db import session_factory
@@ -152,6 +159,29 @@ def test_resyncs_and_a_second_device_store_one_copy_and_edits_and_deletes_follow
     put(client, kindle, doc, [])
     put(client, kobo, doc, [], device="Kobo")
     assert shown(client, book["work_id"]) == []
+
+
+def test_a_replaced_device_does_not_keep_deleted_highlights_alive(client, owner, book):
+    """Revoke a device, pair its replacement, delete there: gone, not held by the dead key."""
+    doc = book["doc"]
+    old = make_sync_key_full(client, owner["csrf"], "old kindle")
+    old_ko = ko_headers("owner", old["secret"])
+    a1, a2 = ann(PHRASE, "2026-10-01 09:30:00"), ann(OTHER, "2026-10-01 09:41:12")
+    put(client, old_ko, doc, [a1, a2])
+    r = api_post(client, f"/api/devices/sync-keys/{old['sync_key']['id']}/revoke", owner["csrf"])
+    assert r.status_code == 200, r.text
+    new_ko = ko_headers("owner", make_sync_key(client, owner["csrf"], "new kindle"))
+    assert put(client, new_ko, doc, [a1, a2]).json()["added"] == 0
+    assert put(client, new_ko, doc, [a2]).json()["deleted"] == 1
+    assert [a["text"] for a in shown(client, book["work_id"])] == [OTHER]
+    # A replacement that never synced the highlight at all: its snapshot still decides.
+    assert put(client, new_ko, doc, []).json()["deleted"] == 1
+    assert shown(client, book["work_id"]) == []
+    # A live second device keeps its highlight when another one deletes it.
+    put(client, book["kindle"], doc, [a1])
+    put(client, book["kobo"], doc, [a1], device="Kobo")
+    assert put(client, book["kindle"], doc, []).json()["deleted"] == 0
+    assert len(shown(client, book["work_id"])) == 1
 
 
 def test_a_highlight_from_another_edition_lands_on_the_same_passage(client, book, settings):

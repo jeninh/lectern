@@ -364,6 +364,9 @@ function Core:applyCredentials(payload, server_url)
     s:saveSetting("app_password", password)
     s:saveSetting("device_id", str(payload.device_id))
     s:saveSetting("label", str(payload.label))
+    -- Possibly another sync key (a replaced device) from here on: Lectern does not count it as
+    -- having any book's highlights yet, so every book is sent again on its next change or Sync now.
+    s:delSetting("annotations_sent")
     s:saveSetting("paired_at", self.now())
     s:saveSetting("last_ok_at", self.now())
     s:delSetting("last_error")
@@ -601,12 +604,12 @@ end
 
 -- --- highlights and notes (docs/koreader-plugin.md#highlights-and-notes) ---------------------
 
-local function clip(s)
-    s = str(s)
+local function clip(s, max)
+    s, max = str(s), max or Core.TEXT_MAX
     if not s then return nil end
-    if #s > Core.TEXT_MAX then
+    if #s > max then
         -- Never cut a UTF-8 character in half: drop a trailing partial sequence.
-        s = s:sub(1, Core.TEXT_MAX):gsub("[\192-\255][\128-\191]*$", "")
+        s = s:sub(1, max):gsub("[\192-\255][\128-\191]*$", "")
     end
     return s
 end
@@ -635,7 +638,7 @@ function Core.annotationsFrom(list)
                     datetime_updated = str(a.datetime_updated),
                     text = clip(a.text) or "",
                     note = clip(a.note),
-                    chapter = str(a.chapter) and str(a.chapter):sub(1, 500),
+                    chapter = clip(a.chapter, 500),
                     color = str(a.color),
                     drawer = str(a.drawer),
                     pos0 = pos0,

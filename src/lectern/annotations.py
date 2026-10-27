@@ -8,15 +8,14 @@ Pull
     devices that share a book's sidecar, is one row. A newer ``datetime_updated`` (a note edited
     on the device) updates the row. ``sources`` remembers which devices' latest snapshot has
     the highlight: one missing from a device's snapshot loses that device, and the row goes
-    when no device has it any more (deleted on the device).
+    when no live (unrevoked) device has it any more (deleted on the device).
 
 Place
     A highlight is placed on the work's text as the web reader opens it, the primary EPUB
     (:func:`locate`): by matching its text against the book's normalised text, ignoring
     whitespace, case, and compatibility forms, nearest to where the device says it was (the
     exact xpointer for the same EPUB, the spine item for another EPUB, the page share for a
-    PDF). So a highlight from the EPUB, the PDF, or a converted edition lands on the same
-    passage. When the work has a sentence list, the sentence is stored too. A placement is
+    PDF). So a highlight from the EPUB or the PDF of a book lands on the same passage. When the work has a sentence list, the sentence is stored too. A placement is
     redone when the primary EPUB changes.
 
 Privacy
@@ -40,7 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lectern.access import visible_works
-from lectern.models import Annotation, BookFile, FileKind, User, Work, utcnow
+from lectern.models import Annotation, BookFile, FileKind, SyncKey, User, Work, utcnow
 from lectern.positions import TextPos, xpointer_spine_index, xpointer_to_text
 
 MAX_PER_DOCUMENT = 5000
@@ -247,7 +246,16 @@ def sync_document(
     device: str,
     items: list[Incoming],
 ) -> dict:
-    """Apply one device's snapshot of ``document``'s highlights. Caller commits."""
+    """Apply one device's snapshot of ``document``'s highlights. Caller commits.
+
+    ``sources`` only ever counts the user's live sync keys: a revoked or deleted key (a device
+    replaced by a new one) stops holding highlights up, so a highlight missing from this
+    snapshot is deleted unless another live device still has it."""
+    live = set(
+        db.scalars(
+            select(SyncKey.id).where(SyncKey.user_id == user.id, SyncKey.revoked_at.is_(None))
+        )
+    )
     existing = {
         a.key: a
         for a in db.scalars(
@@ -293,14 +301,12 @@ def sync_document(
             changed.append(row)
     deleted = 0
     for key, row in existing.items():
-        if key in seen or sync_key_id not in (row.sources or []):
-            continue
-        left = [s for s in row.sources if s != sync_key_id]
-        if left:
-            row.sources = left
-        else:
+        left = [s for s in (row.sources or []) if s in live and (key in seen or s != sync_key_id)]
+        if key not in seen and not left:
             db.delete(row)
             deleted += 1
+        elif left != (row.sources or []):
+            row.sources = left
     db.flush()
     locate(db, library, changed)
     return {"document": document, "added": added, "updated": updated, "deleted": deleted,
@@ -395,9 +401,17 @@ def where(a: Annotation) -> str:
     return f"Page {page} · {when}" if page else when
 
 
+_BLOCK_START = re.compile(r"^(\s*\d*)([#>*+\-.)])")
+
+
+def _line(text: str) -> str:
+    """A line of highlight or note text that Markdown keeps as text (no heading, list, quote)."""
+    return _BLOCK_START.sub(lambda m: m.group(1) + "\\" + m.group(2), text)
+
+
 def _quote(text: str) -> str:
     return "\n".join(
-        "> " + line.rstrip() if line.strip() else ">" for line in text.strip().splitlines()
+        "> " + _line(line.rstrip()) if line.strip() else ">" for line in text.strip().splitlines()
     )
 
 
@@ -414,7 +428,7 @@ def _work_md(work: Work, pairs, level: int) -> list[str]:
         lines += [_quote(a.text), ""]
         if a.note:
             note = a.note.strip().splitlines()
-            lines += [f"**Note:** {note[0]}", *note[1:], ""]
+            lines += [f"**Note:** {note[0]}", *map(_line, note[1:]), ""]
         lines += [f"*{where(a)}*", ""]
     return lines
 
