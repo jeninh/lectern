@@ -6,13 +6,16 @@ import { MakeAudiobookRow } from "../components/MakeAudiobook";
 import { ConvertPdfRow } from "../components/ConvertPdfRow";
 import { OcrStatus } from "../components/OcrStatus";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
-import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
+import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, SmartFolder, Upload } from "../components/Icons";
+import { FilterBar, RuleChips } from "../components/FilterBar";
+import { SmartShelfDialog } from "../components/SmartShelfDialog";
 import { SendToDevice } from "../components/SendToDevice";
 import { DownloadButton } from "../components/Offline";
 import { OverflowMenu, type MenuAction } from "../components/Menu";
 import { BulkBar, type BulkTarget } from "../components/BulkBar";
 import { Breadcrumbs, canNestIn, DeleteShelfDialog, dragProps, FolderCell, folderSummary, FolderPicker, ShelfNameDialog } from "../components/Folders";
 import { del, get, post, put } from "../lib/api";
+import { clausesOf, extractChips, formatQuery, SORTS, type Clause } from "../lib/filters";
 import type { Items } from "../lib/folders";
 import { childrenOf, pathLabel, shelfKey, splitKeys, workKey, worksIn, type FolderId } from "../lib/shelves";
 import { clock, usePlayer } from "../lib/player";
@@ -28,11 +31,16 @@ import { useStore } from "../lib/store";
 import { bookFiles, formatName, formatOf, hasEpub, isPaged, PDF, readerPath } from "../lib/formats";
 import type { Work } from "../lib/types";
 
-type Sort = "title" | "author" | "added";
+type Sort = string;
 type Status = "all" | "reading" | "unread" | "finished";
 const FINISHED = 0.985;
+/** Sorts the web app can do on what it has loaded; any other goes to the server. */
+const LOCAL_SORTS = ["title", "author", "added"];
 
+/** The reading status (lectern.reading_state: KOReader, the web reader, and the audio player);
+ * a copy downloaded before the server reported it falls back to KOReader's percentage. */
 function statusOf(w: Work): Exclude<Status, "all"> {
+  if (w.reading) return w.reading.status;
   const p = w.progress?.percentage ?? 0;
   if (!w.progress || p <= 0) return "unread";
   return p >= FINISHED ? "finished" : "reading";
@@ -68,16 +76,21 @@ export function ProgressRing({ value, size = 34 }: { value: number; size?: numbe
 }
 
 const STATUS_LABEL: Record<Status, string> = { all: "All", reading: "Reading", unread: "Not started", finished: "Finished" };
-const SORT_LABEL: Record<Sort, string> = { title: "Title", author: "Author", added: "Newest" };
+const SORT_LABEL: Record<string, string> = { title: "Title", author: "Author", added: "Newest" };
 
 export function LibraryPage() {
-  const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen, shelves, canCreateShelf } = useStore();
+  const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen, shelves, canCreateShelf, offlineBooks } = useStore();
   const [sendingMany, setSendingMany] = useState(false);
   const readyImports = imports.filter((i) => i.status === "ready").length;
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
-  const sort = (params.get("sort") as Sort) || "title";
+  const sort: Sort = SORTS.some((x) => x.key === params.get("sort")) ? params.get("sort")! : "title";
+  const order = (["asc", "desc"].includes(params.get("order") ?? "") ? params.get("order") : null) as "asc" | "desc" | null;
   const status = (params.get("status") as Status) || "all";
+  // Filter chips (docs/filters.md): canonical syntax in `f`; the server evaluates them.
+  const f = params.get("f") ?? "";
+  const clauses = useMemo(() => clausesOf(f), [f]);
+  const [typedError, setTypedError] = useState<string | null>(null);
   const [view, setView] = useLocalStorage<"grid" | "list">("lectern.libraryView", "grid");
   const { id } = useParams();
   const nav = useNavigate();
@@ -109,7 +122,46 @@ export function LibraryPage() {
     loadSuggestions().catch(() => {});
   }, [loadSuggestions, works.length]);
 
-  const here = useMemo(() => (everything ? works : worksIn(works, folder)), [works, everything, folder]);
+  // Chips, a smart shelf, or a sort the app cannot do itself: the server lists the books.
+  // With chips, a folder means everything in it and below it; at the root, the whole library.
+  const chipsOn = clauses.length > 0;
+  const smartHere = !!current?.smart;
+  const serverMode = chipsOn || smartHere || !LOCAL_SORTS.includes(sort) || !!order;
+  const offlineIds = useMemo(
+    () => (clauses.some((c) => c.key === "is" && c.values.some((v) => v.a === "offline")) ? offlineBooks.map((b) => b.id) : []),
+    [clauses, offlineBooks],
+  );
+  const serverQuery = useMemo(() => {
+    if (!serverMode) return null;
+    const p = new URLSearchParams({ sort });
+    if (f) p.set("f", f);
+    if (order) p.set("order", order);
+    if (!everything) {
+      if (folder !== null) {
+        p.set("shelf", String(folder));
+        if (chipsOn && !smartHere) p.set("subtree", "true");
+      } else if (!chipsOn) p.set("unshelved", "true");
+    }
+    if (offlineIds.length) p.set("offline", offlineIds.join(","));
+    return p.toString();
+  }, [serverMode, sort, f, order, everything, folder, chipsOn, smartHere, offlineIds]);
+  const [served, setServed] = useState<{ key: string; works: Work[]; error: string | null } | null>(null);
+  useEffect(() => {
+    if (!serverQuery) return;
+    let stale = false;
+    get<{ works: Work[] }>(`/api/library?${serverQuery}`)
+      .then((d) => !stale && setServed({ key: serverQuery, works: d.works, error: null }))
+      .catch((e) => !stale && setServed({ key: serverQuery, works: [], error: (e as Error).message }));
+    return () => {
+      stale = true;
+    };
+    // `works`: refetch whenever the library itself is refreshed (an edit, an upload).
+  }, [serverQuery, works]);
+  const serverLoading = serverMode && served?.key !== serverQuery;
+  const here = useMemo(
+    () => (serverMode ? served?.works ?? [] : everything ? works : worksIn(works, folder)),
+    [serverMode, served, works, everything, folder],
+  );
   const counts = useMemo(() => {
     const c: Record<Status, number> = { all: here.length, reading: 0, unread: 0, finished: 0 };
     for (const w of here) c[statusOf(w)] += 1;
@@ -130,19 +182,20 @@ export function LibraryPage() {
     const needle = fold(q.trim());
     let list = needle ? here.filter((w) => fold(`${w.title} ${w.author} ${w.isbn ?? ""}`).includes(needle)) : here.slice();
     if (status !== "all") list = list.filter((w) => statusOf(w) === status);
-    const by: Record<Sort, (a: Work, b: Work) => number> = {
+    if (serverMode) return list; // already in the server's order
+    const by: Record<string, (a: Work, b: Work) => number> = {
       title: (a, b) => a.sort_title.localeCompare(b.sort_title),
       author: (a, b) => a.sort_author.localeCompare(b.sort_author) || a.sort_title.localeCompare(b.sort_title),
       added: (a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""),
     };
     return list.sort(by[sort]);
-  }, [here, q, sort, status]);
+  }, [here, q, sort, status, serverMode]);
   // Sub-shelves of this folder come first, as in a file manager; the filter matches names.
   const folders = useMemo(() => {
-    if (everything || status !== "all") return [];
+    if (everything || status !== "all" || chipsOn || smartHere) return [];
     const needle = fold(q.trim());
     return childrenOf(shelves, folder).filter((s) => !needle || fold(s.name).includes(needle));
-  }, [everything, status, q, shelves, folder]);
+  }, [everything, status, q, shelves, folder, chipsOn, smartHere]);
 
   const selected = id ? works.find((w) => w.id === Number(id)) ?? null : null;
   const setParam = (k: string, v: string, dflt: string) => {
@@ -154,9 +207,32 @@ export function LibraryPage() {
   /** Open a folder: a new history entry (Back returns), keeping the sort and layout. */
   const openFolder = (to: FolderId) => {
     const next = new URLSearchParams(sort === "title" ? {} : { sort });
+    if (order) next.set("order", order);
     if (to !== null) next.set("shelf", String(to));
     nav(`/app/library${next.size ? `?${next}` : ""}`);
   };
+  /** Replace the chips (and keep what is left of the typed text in the search box). */
+  const setFilter = (next: Clause[], rest?: string) => {
+    const p = new URLSearchParams(params);
+    const text = formatQuery({ clauses: next, words: [] });
+    if (text) p.set("f", text);
+    else p.delete("f");
+    if (rest !== undefined) {
+      if (rest) p.set("q", rest);
+      else p.delete("q");
+    }
+    setParams(p, { replace: true });
+  };
+  /** Typed syntax becomes chips: a finished token as soon as a space follows it, all on Enter. */
+  const takeTyped = (text: string, all: boolean): boolean => {
+    const { clauses: more, rest, error } = extractChips(text, all);
+    setTypedError(error ? error.message : null);
+    if (!more.length) return false;
+    setFilter([...clauses, ...more], rest);
+    return true;
+  };
+  const [savingSmart, setSavingSmart] = useState(false);
+  const [editingSmart, setEditingSmart] = useState(false);
   const setMode = (all: boolean) => {
     const next = new URLSearchParams(params);
     next.delete("shelf");
@@ -165,7 +241,7 @@ export function LibraryPage() {
     nav(`/app/library${next.size ? `?${next}` : ""}`);
   };
   const open = (w: Work) => nav(`/app/library/${w.id}${loc.search}`);
-  const filtering = !!q || status !== "all";
+  const filtering = !!q || status !== "all" || chipsOn;
 
   // Multi-select over folders and books together (lib/useSelection), keys "s12" and "w34"
   // (lib/shelves). The collection is windowed: only rows near the viewport are rendered, and
@@ -177,8 +253,16 @@ export function LibraryPage() {
   const rowGap = grid ? 26 : 2;
   const win = useWindowRows(scope, { count: keys.length, columns, gap: rowGap, estimate: grid ? 280 : 58, width });
   const viewFilter = useMemo(
-    () => ({ q: q.trim(), status, shelf: everything ? null : folder, ...(everything || folder !== null ? {} : { unshelved: true }) }),
-    [q, status, everything, folder],
+    () => ({
+      q: q.trim(),
+      status,
+      shelf: everything ? null : folder,
+      ...(everything || folder !== null || chipsOn ? {} : { unshelved: true }),
+      ...(f ? { f } : {}),
+      ...(chipsOn && !everything && folder !== null && !smartHere ? { subtree: true } : {}),
+      ...(offlineIds.length ? { offline_ids: offlineIds } : {}),
+    }),
+    [q, status, everything, folder, f, chipsOn, smartHere, offlineIds],
   );
   // The view's books as the server counted them when everything was selected: how many and
   // which. Kept as the user saw them ("All N selected"); the server refuses the action if the
@@ -202,6 +286,9 @@ export function LibraryPage() {
     const p = new URLSearchParams({ q: viewFilter.q, status: viewFilter.status });
     if (viewFilter.shelf !== null) p.set("shelf", String(viewFilter.shelf));
     if ("unshelved" in viewFilter) p.set("unshelved", "true");
+    if (viewFilter.f) p.set("f", viewFilter.f);
+    if (viewFilter.subtree) p.set("subtree", "true");
+    if (viewFilter.offline_ids) p.set("offline", viewFilter.offline_ids.join(","));
     let stale = false;
     get<{ total: number; view_token: string }>(`/api/library/count?${p}`).then((d) => !stale && setViewInfo(d)).catch((e) => toast((e as Error).message, "error"));
     return () => {
@@ -313,18 +400,28 @@ export function LibraryPage() {
             className="input"
             placeholder={everything || folder === null ? "Filter by title or author" : `Filter ${current?.name ?? "this shelf"}`}
             value={q}
-            onChange={(e) => setParam("q", e.target.value, "")}
+            onChange={(e) => {
+              if (!takeTyped(e.target.value, false)) setParam("q", e.target.value, "");
+            }}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
                 e.stopPropagation();
+                setTypedError(null);
                 if (q) setParam("q", "", "");
                 else input.current?.blur();
+              } else if (e.key === "Enter" && takeTyped(q, true)) {
+                e.preventDefault();
+              } else if (e.key === "Backspace" && !q && clauses.length && input.current?.selectionStart === 0) {
+                // Backspace in an empty box takes the last chip back into it, for editing.
+                e.preventDefault();
+                setFilter(clauses.slice(0, -1), formatQuery({ clauses: clauses.slice(-1), words: [] }));
               } else if (e.key === "Enter" && filtered[0]) {
                 // Without this the Enter keypress lands on the sheet's freshly focused Close button.
                 e.preventDefault();
                 open(filtered[0]);
               }
             }}
+            aria-describedby={typedError ? "lib-q-error" : undefined}
             autoComplete="off"
             spellCheck={false}
           />
@@ -342,20 +439,60 @@ export function LibraryPage() {
           ))}
         </div>
         <div className="chips" role="group" aria-label="Sort by">
-          {(Object.keys(SORT_LABEL) as Sort[]).map((so) => (
+          {Object.keys(SORT_LABEL).map((so) => (
             <button key={so} className="chip subtle" aria-pressed={sort === so} onClick={() => setParam("sort", so, "title")}>
               {SORT_LABEL[so]}
             </button>
           ))}
+          {!LOCAL_SORTS.includes(sort) && (
+            <button className="chip subtle" aria-pressed="true" onClick={() => setParam("sort", "title", "title")}>
+              {SORTS.find((x) => x.key === sort)?.label}
+            </button>
+          )}
+          <OverflowMenu
+            label="More ways to sort"
+            className="chip subtle more-sorts"
+            trigger={<>More <Down /></>}
+            actions={[
+              ...SORTS.filter((x) => !LOCAL_SORTS.includes(x.key)).map((x) => ({ label: x.label, checked: sort === x.key, onSelect: () => setParam("sort", x.key, "title") })),
+              {
+                label: (order ?? (SORTS.find((x) => x.key === sort)?.desc ? "desc" : "asc")) === "desc" ? "Reverse: smallest or oldest first" : "Reverse: largest or newest first",
+                onSelect: () => {
+                  const dflt = SORTS.find((x) => x.key === sort)?.desc ? "desc" : "asc";
+                  const now = order ?? dflt;
+                  setParam("order", now === "desc" ? "asc" : "desc", dflt);
+                },
+              },
+            ]}
+          />
         </div>
         <div className="seg" role="group" aria-label="Layout">
           <button aria-pressed={view === "grid"} onClick={() => setView("grid")} aria-label="Grid" title="Grid"><GridIcon /></button>
           <button aria-pressed={view === "list"} onClick={() => setView("list")} aria-label="List" title="List"><ListIcon /></button>
         </div>
-        <span className="sr-only" aria-live="polite">{filtering ? `${filtered.length} of ${here.length} books shown` : ""}</span>
+        <span className="sr-only" aria-live="polite">{filtering ? `${filtered.length} ${filtered.length === 1 ? "book" : "books"} shown` : ""}</span>
       </div>
+      {typedError && <p id="lib-q-error" className="field-error typed-error" role="status">{typedError}</p>}
+      {smartHere && current && (
+        <div className="smart-rule">
+          <SmartFolder aria-hidden="true" />
+          <span className="hint">Smart shelf: books where</span>
+          {current.filter !== undefined ? <RuleChips clauses={clausesOf(current.filter)} /> : <span className="hint">its owner’s filter matches, among the books you can see.</span>}
+          {current.permission === "owner" && <button className="btn sm ghost" onClick={() => setEditingSmart(true)}><Pencil /> Edit filter</button>}
+        </div>
+      )}
+      <FilterBar
+        clauses={clauses}
+        onChange={(next) => setFilter(next)}
+        error={served?.key === serverQuery ? served?.error : null}
+        actions={
+          chipsOn && !reader && canCreateShelf ? (
+            <button className="btn sm ghost" onClick={() => setSavingSmart(true)}><SmartFolder /> Save as smart shelf…</button>
+          ) : undefined
+        }
+      />
 
-      {!worksLoaded ? (
+      {!worksLoaded || (serverLoading && !served) ? (
         <div className="book-grid" aria-busy="true" aria-label="Loading">{Array.from({ length: 6 }, (_, i) => <div key={i} className="book skeleton"><div className="cover" /></div>)}</div>
       ) : unknownFolder ? (
         <EmptyState icon={<ShelfIcon />} title="This shelf isn’t available" action={<button className="btn" onClick={() => openFolder(null)}>Back to the Library</button>}>
@@ -379,13 +516,17 @@ export function LibraryPage() {
         filtering ? (
           <EmptyState
             icon={<SearchIcon />}
-            title={q ? `Nothing matches “${q}”` : `No ${STATUS_LABEL[status].toLowerCase()} books here`}
-            action={<button className="btn" onClick={() => setParams(new URLSearchParams([...params].filter(([k]) => k === "shelf" || k === "view" || k === "sort")), { replace: true })}>Clear filters</button>}
+            title={q ? `Nothing matches “${q}”` : chipsOn ? "No books match these filters" : `No ${STATUS_LABEL[status].toLowerCase()} books here`}
+            action={<button className="btn" onClick={() => setParams(new URLSearchParams([...params].filter(([k]) => k === "shelf" || k === "view" || k === "sort" || k === "order")), { replace: true })}>Clear filters</button>}
           >
-            {q ? "Try a shorter word, an author’s surname, or another status." : "Books move here as KOReader reports progress."}
+            {q ? "Try a shorter word, an author’s surname, or another status." : chipsOn ? "Remove a filter, or switch one to “is not”." : "Books move here as you read on KOReader, the web reader, or the player."}
           </EmptyState>
         ) : (
-          <EmptyState icon={<Folder />} title={current ? `“${current.name}” is empty` : "Every book is on a shelf"} action={canCreateHere ? <button className="btn" onClick={() => setNaming({ parent: folder, shelf: null })}><Folder /> New shelf</button> : undefined}>
+          smartHere && current ? (
+            <EmptyState icon={<SmartFolder />} title={`Nothing matches “${current.name}” yet`}>
+              A smart shelf fills itself: books show up here as soon as they match its filter.
+            </EmptyState>
+          ) : <EmptyState icon={<Folder />} title={current ? `“${current.name}” is empty` : "Every book is on a shelf"} action={canCreateHere ? <button className="btn" onClick={() => setNaming({ parent: folder, shelf: null })}><Folder /> New shelf</button> : undefined}>
             {current ? "Drag books or shelves here, or use Move to… on a selection." : "Books on no shelf show up here. Open a shelf, or switch to Everything."}
           </EmptyState>
         )
@@ -394,7 +535,7 @@ export function LibraryPage() {
           ref={setScope}
           className={grid ? "book-grid" : "book-list"}
           role="grid"
-          aria-label={everything ? (q ? `Books matching ${q}` : "Every book") : current ? `Shelves and books in ${current.name}` : "Shelves and books not on a shelf"}
+          aria-label={chipsOn ? "Books matching the filters" : everything ? (q ? `Books matching ${q}` : "Every book") : current ? `${current.smart ? "Books in the smart shelf" : "Shelves and books in"} ${current.name}` : "Shelves and books not on a shelf"}
           aria-multiselectable="true"
           aria-rowcount={win.rows}
           aria-colcount={columns}
@@ -445,6 +586,32 @@ export function LibraryPage() {
         title={`Send ${plural(pickedBooks, "book")} to a device`}
         onClose={() => setSendingMany(false)}
         onSent={s.exit}
+      />
+      <SmartShelfDialog
+        open={savingSmart}
+        filter={formatQuery({
+          // Everything this view filters by: the chips, the status chip, and the typed words.
+          clauses: [...clauses, ...(status !== "all" ? clausesOf(`status:${status}`) : [])],
+          words: q.trim() ? [{ text: q.trim(), negate: false }] : [],
+        })}
+        sort={sort}
+        order={order}
+        parent={!everything && folder !== null && current && current.permission !== "view" && !current.smart ? folder : null}
+        onClose={() => setSavingSmart(false)}
+        onSaved={(sh) => {
+          setSavingSmart(false);
+          toast(`Saved “${sh.name}”. It keeps itself up to date.`);
+          refreshLibrary().then(() => openFolder(sh.id)).catch(() => {});
+        }}
+      />
+      <SmartShelfDialog
+        open={editingSmart}
+        shelf={current}
+        onClose={() => setEditingSmart(false)}
+        onSaved={() => {
+          setEditingSmart(false);
+          refreshLibrary().catch(() => {});
+        }}
       />
       <FolderPicker items={moving?.items ?? null} title={moving?.title ?? ""} onClose={() => { setMoving(null); }} />
       <ShelfNameDialog open={!!naming} parent={naming?.parent} shelf={naming?.shelf} onClose={() => setNaming(null)} />

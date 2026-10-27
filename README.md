@@ -122,6 +122,19 @@ path above the grid (**Library › Kids › Picture books**), and bookmarks all 
 
 ![The Library as folders](docs/screenshots/library-folders.png)
 
+### Filters and smart shelves
+
+**Filter** next to the search box adds chips such as *Format: EPUB or PDF* or *Has audiobook:
+no*; click one to edit or negate it. Typing works too: `format:epub -has:audio
+author:"Tolstoy" year:1850..1900 progress:<50%` in the search box or Cmd/Ctrl+K turns into
+chips. The filter is in the URL, works in any folder (with its sub-shelves) and with
+multi-select, and any filterable field can be the sort. **Save as smart shelf…** keeps a
+filter as a live shelf, on OPDS too, and MCP's `search_library` takes the same syntax. Reading
+status now counts the web reader and the audio player as well as KOReader. Every field:
+[docs/filters.md](docs/filters.md).
+
+![Filter chips](docs/screenshots/filters-chips.png)
+
 ## Search inside books
 
 Cmd/Ctrl+K also searches the text of your books: **In books**, below the other results, lists

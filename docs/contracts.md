@@ -65,8 +65,9 @@ upper-case values. Timestamps are `UTCDateTime` (aware UTC in, aware UTC out).
 | `alignments` | Current alignment of a work (one row per work) | unique `work_id`; `coverage` null or in `[0, 1]`; `epub_sha256` and `audio_fingerprint` record the inputs; `job_id` → `jobs` (SET NULL) |
 | `work_progress` | Canonical position per user and work | unique `(user_id, work_id)`; `sentence_n, sentence_offset >= 0`; `source ∈ {KOREADER, WEB, AUDIO}`; `raw` keeps what the device sent |
 | `reading_progress` | **unchanged**: KOReader's own record keyed by document hash | as before |
+| `reading_states` | Each person's reading state per work from every source (migration `0018`, kept by `lectern.reading_state`) | PK `(user_id, work_id)`; `fraction`, `last_read_at`, `started_at`, `finished_at` |
 | `invites` | Single-use sign-up links | unique `token_hash`; `role ∈ {MEMBER, READER}` (never OWNER); `used_at`/`used_by` both null or both set |
-| `shelves` | Named collections owned by a user; nested folders | `parent_id` → `shelves` (CASCADE; `NULL` = top level; never a cycle, at most 8 deep, checked by the API); unique `(owner_id, coalesce(parent_id, 0), name)`: names are unique among one owner's siblings; `rule` JSON reserved for smart shelves (`NULL` = manual) |
+| `shelves` | Named collections owned by a user; nested folders | `parent_id` → `shelves` (CASCADE; `NULL` = top level; never a cycle, at most 8 deep, checked by the API); unique `(owner_id, coalesce(parent_id, 0), name)`: names are unique among one owner's siblings; `rule` JSON: a smart shelf's `{v, filter, sort, desc}` (`NULL` = manual; [filters.md](filters.md)) |
 | `shelf_items` | Shelf membership | PK `(shelf_id, work_id)`; `position` for manual order |
 | `shelf_grants` | Reader access to a shelf | PK `(shelf_id, user_id)`; `permission ∈ {VIEW, EDIT}` |
 | `worker_credentials` | Hashed bearer keys for external workers | unique `key_hash`; `revoked_at` |
@@ -513,7 +514,7 @@ routes in this document. A role change takes effect on the next request.
 | `GET /api/shelves/{id}/grants` | manager | `{grants: [{user, permission, granted_by, created_at}], inherited: [… + shelf]}`; `inherited` lists grants on shelves above that also reach this one, from the ancestors the caller manages |
 | `PUT /api/shelves/{id}/grants/{user_id} {permission}` / `DELETE` | manager | Upsert / revoke. Only the owner role may grant to a reader (`403 only_owner_grants_readers`). Granting to an owner or member is allowed but has no effect on visibility (it still lists the shelf for them) |
 
-`GET /api/library?shelf=&unshelved=` gives each work `shelf_ids` (the visible shelves it is
+`GET /api/library?shelf=&unshelved=&f=&sort=&order=&subtree=` (filters: [filters.md](filters.md)) gives each work `shelf_ids` (the visible shelves it is
 directly on); `shelf` narrows to one shelf's own works (a hidden shelf is `404`), `unshelved`
 to the root (works on none of the caller's visible shelves).
 
@@ -522,9 +523,12 @@ Moving books between folders is a bulk action, `move_to_shelf` (below): off `fro
 root, that is off every shelf the caller can change). Their other shelves are kept; adding
 without leaving is `add_to_shelves`.
 
-Smart shelves: `rule` is reserved (JSON, `NULL` today). When implemented, a non-null rule is
-evaluated instead of `shelf_items`, and grants on a smart shelf expose whatever the rule
-matches at request time.
+Smart shelves ([filters.md](filters.md)): a non-null `rule` is evaluated instead of
+`shelf_items`, for each viewer at request time and ANDed with what they see, so a grant on a
+smart shelf exposes only matching works the grantee already sees. `POST /api/shelves {name,
+filter, sort?, order?}` creates one; `PATCH` with `filter`/`sort`/`order` changes its rule
+(`409 not_smart` on a manual shelf); adding items is `409 smart_shelf`. `filter`, `sort`, and
+`order` are in the shelf JSON only for its managers.
 
 ### Invites — `/api/invites`, `/invite/{token}`
 
@@ -687,8 +691,9 @@ exactly one of `work_ids` or
 which the server resolves (`lectern.routes.api.selection`) to the works the caller sees in that
 view, in title order, minus `exclude_ids`. The filter is the Library's: `q` matches title,
 author, or ISBN after folding case and diacritics (NFKD, combining marks U+0300–U+036F
-dropped, lower case); `status` is `all|reading|unread|finished` from the caller's latest
-KOReader percentage (finished ≥ 98.5 %); `shelf` is direct membership of that shelf (the
+dropped, lower case); `status` is `all|reading|unread|finished` from the caller's reading
+state (`reading_states`: their latest position from any reader or player; finished ≥ 98.5 %);
+`f` is a filter, `subtree` widens `shelf` to its sub-shelves, `offline_ids` answers `is:offline`; `shelf` is direct membership of that shelf (the
 Folders view of it), and a shelf the caller may not see is `404` (as `GET /api/shelves/{id}`);
 `unshelved: true` is the root folder (works on none of the caller's visible shelves).
 `GET /api/library/count?q=&status=&shelf=&unshelved=`

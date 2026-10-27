@@ -182,6 +182,8 @@ export interface Work {
   files: BookFile[];
   audio: AudioSummary | null;
   position: PositionSummary | null;
+  /** How far the caller is with it, whatever they read on (GET /api/library). */
+  reading?: ReadingState;
   progress?: Progress | null;
   progress_file_id?: number;
   /** /api/continue: which record is newer, KOReader's or the canonical one. */
@@ -481,7 +483,12 @@ export interface Shelf {
   /** Sub-shelves directly in it. */
   shelf_count: number;
   grant_count: number;
+  /** A smart shelf: its books are a saved filter's matches (docs/filters.md). */
   smart: boolean;
+  /** A smart shelf's rule, for whoever manages it. */
+  filter?: string;
+  sort?: string;
+  order?: "asc" | "desc" | null;
 }
 
 export interface ShelfGrant {
@@ -862,4 +869,13 @@ export interface PdfSentencesResponse {
   count: number;
   map: "self" | "epub";
   sentences: PdfSentenceBoxes[];
+}
+
+/** lectern.reading_state for one person and work. */
+export interface ReadingState {
+  fraction: number;
+  status: "unread" | "reading" | "finished";
+  last_read_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 }

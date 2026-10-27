@@ -12,10 +12,12 @@ import { Cover } from "./Cover";
 import { folderSummary } from "./Folders";
 import { usePlayer } from "../lib/player";
 import { bookFiles, hitPath, readerPath } from "../lib/formats";
-import { Book, Devices, Download, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
+import { clauseLabel, extractChips, formatQuery } from "../lib/filters";
+import { pathLabel } from "../lib/shelves";
+import { Book, Devices, Download, Filter, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
-type Group = "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books";
-const ORDER: Group[] = ["Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings", "Docs"];
+type Group = "Filter" | "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books";
+const ORDER: Group[] = ["Filter", "Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings", "Docs"];
 type DocsModule = typeof import("../lib/docsData");
 
 interface Item {
@@ -81,6 +83,10 @@ export function CommandPalette() {
       if (document.activeElement === document.body || !document.activeElement) restore.current?.focus?.();
     };
   }, [paletteOpen]);
+
+  // Typed filter syntax (docs/filters.md): "format:epub -has:audio" opens the Library filtered.
+  const typed = useMemo(() => extractChips(q, true), [q]);
+  const filterMode = typed.clauses.length > 0;
 
   const groups = useMemo(() => {
     const isOwner = me?.user.role === "owner";
@@ -158,7 +164,7 @@ export function CommandPalette() {
       })),
     ];
 
-    const needle = q.trim();
+    const needle = filterMode ? typed.rest.trim() : q.trim();
     if (docs && needle) {
       const visible = docs.DOCS.filter((d) => docs.canSee(d.audience, me?.user.role));
       for (const d of visible) {
@@ -174,7 +180,24 @@ export function CommandPalette() {
       }
     }
     let picked: { item: Item; score: number }[];
-    if (!needle) {
+    if (filterMode) {
+      const byShelf = new Map(shelves.map((s) => [`#${s.id}`, pathLabel(s)]));
+      const labels = typed.clauses.map((c) => {
+        const l = clauseLabel(c, (k, ref) => (k === "shelf" ? byShelf.get(ref) : undefined));
+        return `${l.field}: ${l.values}`;
+      });
+      const p = new URLSearchParams({ view: "everything", f: formatQuery({ clauses: typed.clauses, words: [] }) });
+      if (needle) p.set("q", needle);
+      const filterItem: Item = {
+        id: "f-library",
+        group: "Filter",
+        label: `Filter the library: ${labels.join(" · ")}`,
+        detail: needle ? `and “${needle}”` : undefined,
+        icon: <Filter />,
+        run: () => go(`/app/library?${p}`),
+      };
+      picked = [{ item: filterItem, score: Infinity }];
+    } else if (!needle) {
       // Without a query: actions, a few recent books, and pages.
       const recent = [...works].sort((a, b) => (b.progress?.updated_at ?? b.created_at ?? "").localeCompare(a.progress?.updated_at ?? a.created_at ?? "")).slice(0, 4);
       const ids = new Set(recent.map((w) => `w${w.id}`));
@@ -200,12 +223,12 @@ export function CommandPalette() {
       .sort((a, b) => (needle ? b[1].best - a[1].best : 0) || ORDER.indexOf(a[0]) - ORDER.indexOf(b[0]))
       .map(([group, g]) => ({ group, items: g.items }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, works, shelves, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing, docs]);
+  }, [q, works, shelves, me, resolvedTheme, devices, canUpload, canEdit, imports, player.work, player.playing, docs, typed, filterMode]);
 
   // "In books": passages, asked of the server as you type (debounced). The previous answer
   // stays on screen until the next one arrives, so the list does not jump while typing.
   useEffect(() => {
-    if (!paletteOpen || q.trim().length < TEXT_MIN) {
+    if (!paletteOpen || q.trim().length < TEXT_MIN || filterMode) {
       setText(null);
       setSearching(false);
       return;
@@ -223,7 +246,7 @@ export function CommandPalette() {
       live = false;
       window.clearTimeout(t);
     };
-  }, [q, paletteOpen]);
+  }, [q, paletteOpen, filterMode]);
 
   const shown = useMemo(() => {
     const hits = (text?.results ?? []).map<Item>((h, n) => ({
@@ -238,7 +261,7 @@ export function CommandPalette() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groups, text, works]);
   const flat = shown.flatMap((g) => g.items);
-  const textNote = q.trim().length < TEXT_MIN || text?.results.length ? null : searching ? "Searching inside books…" : text?.too_broad ? "Too many passages match. Add another word." : null;
+  const textNote = filterMode || q.trim().length < TEXT_MIN || text?.results.length ? null : searching ? "Searching inside books…" : text?.too_broad ? "Too many passages match. Add another word." : null;
 
   useEffect(() => setSel(0), [q]);
   useEffect(() => {
@@ -288,7 +311,13 @@ export function CommandPalette() {
           <kbd aria-hidden="true">esc</kbd>
         </div>
         <div id="palette-list" role="listbox" ref={listRef} aria-label="Results">
-          {flat.length === 0 && !textNote && !searching && (
+          {typed.error && (
+            <div className="palette-note" role="status">
+              <span className="group">Filter</span>
+              {typed.error.message}
+            </div>
+          )}
+          {flat.length === 0 && !textNote && !searching && !typed.error && (
             <div className="palette-empty" role="presentation">
               <strong>No matches for “{q}”</strong>
               <span>Try an author’s surname, a device name, or “passkey”.</span>

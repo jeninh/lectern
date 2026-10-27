@@ -183,3 +183,10 @@ export const Down = (p: P) => (
 export const Select = (p: P) => (
   <svg {...base} {...p}><rect x="3.5" y="3.5" width="17" height="17" rx="4" /><path d="m8 12 3 3 5-6" /></svg>
 );
+export const Filter = (p: P) => (
+  <svg {...base} {...p}><path d="M4 5h16l-6.2 7.4V19l-3.6-1.8v-4.8z" /></svg>
+);
+/** A smart shelf: a folder that fills itself from a saved filter. */
+export const SmartFolder = (p: P) => (
+  <svg {...base} {...p}><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" /><path d="M8.5 10.5h7l-2.8 3.1v2.6l-1.4-.7v-1.9z" /></svg>
+);

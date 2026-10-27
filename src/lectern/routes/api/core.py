@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
-from lectern import egress, instance
+from lectern import egress, filters, instance
 from lectern.access import can_edit_library, shelf_permission, visible_shelf_ids, visible_works
 from lectern.models import (
     UPLOAD_CHUNK_MAX_BYTES,
     AudioTrack,
     AuditLog,
     BookFile,
+    Import,
+    ImportStatus,
     Notification,
     ProgressSource,
     ReadingProgress,
+    ReadingState,
     Role,
     Sentence,
     Shelf,
@@ -30,6 +34,7 @@ from lectern.models import (
     utcnow,
 )
 from lectern.reading_lists import continue_items
+from lectern.reading_state import status_of
 from lectern.routes.api.serializers import iso, progress_json, user_json, work_json
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 
@@ -197,42 +202,101 @@ def _isfloat(v: str) -> bool:
         return False
 
 
+def offline_ids_param(offline: str) -> frozenset[int]:
+    """``offline``: the works this device holds offline (``is:offline``), comma-separated."""
+    out = set()
+    for part in offline.split(",")[:5000]:
+        if part.strip().isdigit():
+            out.add(int(part))
+    return frozenset(out)
+
+
+def reading_json(state: ReadingState | None) -> dict:
+    """The caller's reading state for a work (``lectern.reading_state``)."""
+    f = state.fraction if state else 0.0
+    return {
+        "fraction": f,
+        "status": status_of(f),
+        "last_read_at": iso(state.last_read_at) if state else None,
+        "started_at": iso(state.started_at) if state else None,
+        "finished_at": iso(state.finished_at) if state else None,
+    }
+
+
+def library_query(
+    db, user: User, *, f: str = "", shelf: int | None = None, subtree: bool = False,
+    unshelved: bool = False, offline: frozenset[int] = frozenset(),
+):  # fmt: skip
+    """The ``Work`` select behind ``GET /api/library``: what ``user`` sees, narrowed to one
+    shelf (directly on it; with ``subtree``, anywhere below it too; a smart shelf: what its
+    rule matches), to the root (``unshelved``), and by the filter ``f`` (lectern.filters).
+    A hidden shelf is 404; a filter that cannot run is 422 with the reason."""
+    ctx = filters.Context(db, user, offline_ids=offline)
+    try:
+        q = filters.parse(f)
+        stmt = select(Work).where(filters.predicate(ctx, q))
+    except filters.FilterError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.json()) from None
+    if shelf is not None:
+        found = db.get(Shelf, shelf)
+        if found is None or shelf_permission(db, user, found) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+        if found.rule is not None:
+            stmt = stmt.where(filters.smart_predicate(ctx.lenient(), found))
+        elif subtree:
+            clause = filters.Clause("shelf", (filters.Value("=", f"#{shelf}"),))
+            stmt = stmt.where(filters.clause_pred(ctx, clause))
+        else:
+            stmt = stmt.where(
+                Work.id.in_(select(ShelfItem.work_id).where(ShelfItem.shelf_id == shelf))
+            )
+    if unshelved:
+        stmt = stmt.where(
+            Work.id.not_in(
+                select(ShelfItem.work_id).where(ShelfItem.shelf_id.in_(visible_shelf_ids(user)))
+            )
+        )
+    return stmt
+
+
 @router.get("/library")
 def library(
     auth: Auth,
     db: DbDep,
     q: str = Query(default="", max_length=200),
-    sort: str = Query(default="title", pattern="^(title|author|added)$"),
+    f: str = Query(default="", max_length=filters.MAX_CHARS),
+    sort: str = Query(default="title", pattern=filters.SORT_PATTERN),
+    order: Literal["asc", "desc"] | None = None,
     shelf: int | None = None,
+    subtree: bool = False,
     unshelved: bool = False,
+    offline: str = Query(default="", max_length=60000),
 ) -> dict:
     """Works this person sees, each with ``shelf_ids``: the visible shelves it is directly
-    on (``[]``: at the Library's root). ``shelf`` narrows to one shelf's direct works (a
-    hidden shelf is 404), ``unshelved`` to the root."""
+    on (``[]``: at the Library's root), and ``reading``: how far they are with it. ``shelf``
+    narrows to one shelf's direct works (``subtree``: and its sub-shelves'; a smart shelf:
+    its matches; a hidden shelf is 404), ``unshelved`` to the root, ``f`` by a filter
+    (docs/filters.md), and ``sort``/``order`` order them."""
     user = auth.user
-    stmt = select(Work).options(selectinload(Work.files)).where(visible_works(user))
-    if shelf is not None:
-        found = db.get(Shelf, shelf)
-        if found is None or shelf_permission(db, user, found) is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-        stmt = stmt.where(Work.id.in_(select(ShelfItem.work_id).where(ShelfItem.shelf_id == shelf)))
+    stmt = library_query(
+        db, user, f=f, shelf=shelf, subtree=subtree, unshelved=unshelved,
+        offline=offline_ids_param(offline),
+    ).options(selectinload(Work.files))  # fmt: skip
     on_visible = select(ShelfItem.work_id, ShelfItem.shelf_id).where(
         ShelfItem.shelf_id.in_(visible_shelf_ids(user))
     )
-    if unshelved:
-        stmt = stmt.where(Work.id.not_in(on_visible.with_only_columns(ShelfItem.work_id)))
     if q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Work.title.ilike(like), Work.author.ilike(like)))
-    order = {
-        "title": (Work.sort_title,),
-        "author": (Work.sort_author, Work.sort_title),
-        "added": (Work.created_at.desc(), Work.id.desc()),
-    }[sort]
-    works = db.scalars(stmt.order_by(*order).limit(2000)).all()
+    desc = None if order is None else order == "desc"
+    works = db.scalars(stmt.order_by(*filters.order_by(sort, user, desc)).limit(2000)).all()
     progress = _progress_by_doc(db, auth.user.id)
     audio = _audio_summary(db, [w.id for w in works])
     positions = _positions(db, auth.user.id, audio)
+    states = {
+        s.work_id: s
+        for s in db.scalars(select(ReadingState).where(ReadingState.user_id == user.id))
+    }
     shelf_ids: dict[int, list[int]] = {}
     for wid, sid in db.execute(on_visible.order_by(ShelfItem.shelf_id)).all():
         shelf_ids.setdefault(wid, []).append(sid)
@@ -241,10 +305,61 @@ def library(
             _attach_progress(
                 work_json(w, audio=audio.get(w.id), position=positions.get(w.id)), progress
             )
-            | {"shelf_ids": shelf_ids.get(w.id, [])}
+            | {"shelf_ids": shelf_ids.get(w.id, []), "reading": reading_json(states.get(w.id))}
             for w in works
         ],
         "total": len(works),
+    }
+
+
+FACETS = ("author", "series", "tag", "narrator", "lang", "publisher", "by")
+
+
+@router.get("/library/facets")
+def library_facets(
+    auth: Auth, db: DbDep, field: str = Query(pattern="^(" + "|".join(FACETS) + ")$")
+) -> dict:
+    """The values a text field takes among the works this person sees, most common first,
+    for the filter editor's suggestions. ``by`` (uploaders) is for owners and members."""
+    user = auth.user
+    counts: dict[str, int] = {}
+    if field == "by":
+        if user.role == Role.READER:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Insufficient role")
+        rows = db.execute(
+            select(User.username, func.count(func.distinct(Import.work_id)))
+            .join(Import, Import.user_id == User.id)
+            .join(Work, Work.id == Import.work_id)
+            .where(Import.status == ImportStatus.FILED, visible_works(user))
+            .group_by(User.username)
+        ).all()
+        counts = dict(rows)
+    else:
+        col = {
+            "author": Work.authors, "series": Work.series, "tag": Work.tags,
+            "narrator": Work.narrators, "lang": Work.language, "publisher": Work.publisher,
+        }[field]  # fmt: skip
+        extra = (Work.author,) if field == "author" else ()
+        for value, *rest in db.execute(select(col, *extra).where(visible_works(user))):
+            if field == "author":
+                names = [a.get("name") for a in value or [] if isinstance(a, dict)] or rest
+            elif isinstance(value, list):
+                names = value
+            else:
+                names = [value]
+            for n in {str(x).strip() for x in names if x and str(x).strip()}:
+                counts[n] = counts.get(n, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].casefold()))[:500]
+    return {"field": field, "values": [{"value": v, "count": n} for v, n in top]}
+
+
+@router.get("/library/fields")
+def library_fields(auth: Auth) -> dict:
+    """The filter fields and sorts (docs/filters.md), for the filter menu."""
+    can_by = auth.user.role != Role.READER
+    return {
+        "fields": [x for x in filters.describe() if can_by or not x["members_only"]],
+        "sorts": [{"key": k, "label": lab, "desc": d} for k, (lab, d) in filters.SORTS.items()],
     }
 
 
