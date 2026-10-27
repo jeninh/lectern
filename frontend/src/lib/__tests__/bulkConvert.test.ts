@@ -44,9 +44,14 @@ describe("convertProgress", () => {
     expect(p).toMatchObject({ active: true, done: 1, failed: 1 });
   });
   it("treats a job not reported yet as waiting, and stops once every job has finished", () => {
-    expect(convertProgress(results, []).rows[0].state).toBe("waiting");
+    expect(convertProgress(results, null).rows[0].state).toBe("waiting");
     const p = convertProgress(results, [job(10, 1, "succeeded"), job(11, 2, "cancelled"), job(12, 7, "succeeded")]);
     expect(p).toMatchObject({ active: false, done: 2, failed: 0 });
     expect(p.rows[1].state).toBe("cancelled");
+  });
+  it("treats a job missing from an answer as gone instead of waiting forever", () => {
+    const p = convertProgress(results, [job(10, 1, "succeeded"), job(11, 2, "succeeded")]);
+    expect([p.rows[6].state, p.rows[6].detail]).toEqual(["failed", "no longer exists"]);
+    expect(p).toMatchObject({ active: false, done: 2, failed: 1 });
   });
 });

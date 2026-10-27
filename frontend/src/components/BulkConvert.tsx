@@ -18,14 +18,14 @@ const LABEL: Record<ConvertRowState, string> = {
  * while the sheet is open. */
 export function BulkConvertSheet({ results, onClose }: { results: BulkConvertResult[] | null; onClose: () => void }) {
   const { refreshLibrary } = useStore();
-  const [jobs, setJobs] = useState<BulkConvertJob[]>([]);
+  const [jobs, setJobs] = useState<BulkConvertJob[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const ids = (results ?? []).flatMap((r) => (r.ok && r.job_id != null ? [r.job_id] : []));
   const key = ids.join(",");
   const { rows, active, done, failed } = convertProgress(results ?? [], jobs);
 
   useEffect(() => {
-    setJobs([]);
+    setJobs(null);
     if (!key) return;
     let stop = false;
     let timer = 0;

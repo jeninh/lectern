@@ -94,14 +94,16 @@ export interface ConvertRow {
 }
 
 /** Per-book progress: each selected book with where its conversion is, from the bulk answer
- * and the latest job states (`jobs`; a job not in it yet stays "waiting"). `active`: some
+ * and the latest job states (`jobs`; null before the first answer, when every job is still
+ * "waiting"; after it, a job left out is gone, e.g. its book was trashed). `active`: some
  * conversion is still queued or running, so keep polling. */
-export function convertProgress(results: BulkConvertResult[], jobs: BulkConvertJob[]): { rows: ConvertRow[]; active: boolean; done: number; failed: number } {
-  const byId = new Map(jobs.map((j) => [j.id, j]));
+export function convertProgress(results: BulkConvertResult[], jobs: BulkConvertJob[] | null): { rows: ConvertRow[]; active: boolean; done: number; failed: number } {
+  const byId = new Map((jobs ?? []).map((j) => [j.id, j]));
   const rows = results.map((r): ConvertRow => {
     const title = r.title ?? `Book ${r.work_id}`;
     if (!r.ok) return { work_id: r.work_id, title, state: r.status === "skipped" ? "skipped" : "failed", detail: reason(r.error) };
     const job = r.job_id != null ? byId.get(r.job_id) : undefined;
+    if (!job && jobs) return { work_id: r.work_id, title, state: "failed", detail: reason("not_found") };
     const st = job?.status ?? "queued";
     const state: ConvertRowState = st === "queued" ? "waiting" : st === "leased" ? "converting" : st === "succeeded" ? "done" : st;
     return { work_id: r.work_id, title, state, detail: state === "failed" ? reason(job?.error) : null };
