@@ -128,7 +128,8 @@ KOReader and page-viewer progress counted, so a book read in the browser or list
 
 The new `reading_states` table holds one row per person and work. It records the latest
 `fraction` (the position written last wins, as the Library always showed the most recently
-synced file), `last_read_at`, `started_at` (first above 0 %), and `finished_at` (first at
+synced file; a KOReader sync counts with KOReader's own percentage, not the web position it is
+projected onto), `last_read_at`, `started_at` (first above 0 %), and `finished_at` (first at
 98.5 % or more). A `before_flush` hook (`lectern.reading_state`) keeps it current on every
 progress write, in the same transaction. Migration `0018_library_filters` backfills it from the
 progress that already exists. With no history to go on, it uses the earliest position as the

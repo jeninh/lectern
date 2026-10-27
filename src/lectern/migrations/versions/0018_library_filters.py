@@ -69,7 +69,8 @@ def _backfill(conn) -> None:
             "SELECT wp.user_id, wp.work_id, wp.sentence_n, wp.source, wp.raw, wp.received_at, "
             "(SELECT count(*) FROM sentences s WHERE s.work_id = wp.work_id), "
             "(SELECT sum(t.duration_s) FROM audio_tracks t WHERE t.work_id = wp.work_id) "
-            "FROM work_progress wp"
+            # A KOReader-sourced position projects a reading_progress row counted above.
+            "FROM work_progress wp WHERE wp.source != 'KOREADER'"
         )
     )
     for user_id, work_id, n, source, raw, at, sentences, duration in rows:

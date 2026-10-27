@@ -92,9 +92,12 @@ def _written(db: Session, cls):
 def _track(db: Session, _ctx, _instances) -> None:
     pending: dict = {}
     with db.no_autoflush:
-        # Canonical positions first, so a KOReader sync that also projects onto the work
-        # keeps KOReader's own percentage.
+        # A KOReader-sourced canonical position is kosync's projection of a sync whose own
+        # percentage was just recorded from reading_progress (in this flush or the one
+        # before it); KOReader's figure stands, not the projected sentence's.
         for wp in list(_written(db, WorkProgress)):
+            if wp.source == ProgressSource.KOREADER:
+                continue
             if wp.user_id is not None and wp.work_id is not None:
                 record(db, wp.user_id, wp.work_id, work_progress_fraction(db, wp), pending)
         for rp in list(_written(db, ReadingProgress)):

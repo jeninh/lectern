@@ -682,12 +682,14 @@ def test_reading_state_follows_every_position_written(client, ids, lib):
         row.raw = "8100"
         db.commit()
     assert state(ids["night"]).fraction == pytest.approx(0.75)
-    # One flush writing both tables for the same work keeps one state (KOReader's figure).
+    # A KOReader sync flushes its own record, then projects onto the work in a second flush
+    # (routes/kosync.py put_progress): KOReader's percentage stands, not the sentence's.
     with session_factory()() as db:
-        db.add(WorkProgress(user_id=uid, work_id=ids["war"], sentence_n=0, raw="1",
-                            source=ProgressSource.KOREADER))  # fmt: skip
         db.get(ReadingProgress, db.scalar(sa.select(ReadingProgress.id).where(
             ReadingProgress.document == doc))).percentage = 0.6  # fmt: skip
+        db.flush()
+        db.add(WorkProgress(user_id=uid, work_id=ids["war"], sentence_n=0, raw="1",
+                            source=ProgressSource.KOREADER))  # fmt: skip
         db.commit()
     assert state(ids["war"]).fraction == pytest.approx(0.6)
 
@@ -736,7 +738,12 @@ def test_migration_0018_backfills_states_and_pages(tmp_path):
         " '2026-03-01 10:00:00.000000')",
         "INSERT INTO reading_progress (user_id, document, progress, percentage, device,"
         " device_id, timestamp, updated_at) VALUES (1, 'doc1', 'x', 0.99, '', '', 1,"
-        " '2026-02-05 10:00:00.000000')",
+        " '2026-02-05 10:00:00.000000'),"
+        # Paged: KOReader at 100%, then kosync's projection of it (no sentences: 0).
+        " (1, 'doc3', '42', 1.0, '', '', 1, '2026-04-01 10:00:00.000000')",
+        "INSERT INTO work_progress (user_id, work_id, sentence_n, sentence_offset, source, raw,"
+        " device, received_at, updated_at) VALUES (1, 3, 0, 0, 'KOREADER', '42', '',"
+        " '2026-04-01 10:00:00.000001', '2026-04-01 10:00:00.000001')",
     ]
     with engine.begin() as conn:
         for s in sql:
@@ -757,7 +764,8 @@ def test_migration_0018_backfills_states_and_pages(tmp_path):
             "2026-02-05 10:00:00.000000",
         )  # fmt: skip
         assert rows[2] == (0.25, "2026-03-01 10:00:00.000000", "2026-03-01 10:00:00.000000", None)
-        assert 3 not in rows
+        t = "2026-04-01 10:00:00.000000"
+        assert rows[3] == (1.0, t, t, t)
         pages = dict(conn.execute(sa.text("SELECT id, pages FROM book_files")).all())
         assert pages == {1: None, 3: 42}
         assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
