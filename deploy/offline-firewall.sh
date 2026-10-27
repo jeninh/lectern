@@ -31,9 +31,18 @@ table inet lectern_offline {
 EOF
 }
 
+WAITING=0
+
 apply() {
-	pid=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER" 2>/dev/null) || return 0
-	[ "${pid:-0}" -gt 0 ] || return 0
+	if ! pid=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER" 2>/dev/null) || [ "${pid:-0}" -le 0 ]; then
+		# A typo in the name would otherwise look exactly like a container that is not up yet.
+		if [ "$WAITING" = 0 ]; then
+			echo "waiting for container $CONTAINER: it does not exist or is not running (check the name with docker ps)" >&2
+			WAITING=1
+		fi
+		return 0
+	fi
+	WAITING=0
 	if nsenter -t "$pid" -n nft list table inet lectern_offline >/dev/null 2>&1; then
 		return 0
 	fi
@@ -44,6 +53,9 @@ apply() {
 	fi
 }
 
+# Events from before the first apply too, so a start in between is not missed (apply() skips a
+# namespace that already has the rules).
+SINCE=$(date +%s)
 apply
-docker events --filter type=container --filter event=start --filter "container=$CONTAINER" |
+docker events --since "$SINCE" --filter type=container --filter event=start --filter "container=$CONTAINER" |
 	while read -r _; do apply; done
