@@ -24,6 +24,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import threading
 import time
 import zlib
 from dataclasses import dataclass
@@ -148,7 +149,38 @@ class _TLS(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         sock = socket.create_connection((self._address, self.port), self.timeout)
-        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        # Handshake after self.sock is set, so the watchdog can cut a dripped handshake too.
+        self.sock = self._context.wrap_socket(
+            sock, server_hostname=self.host, do_handshake_on_connect=False
+        )
+        self.sock.do_handshake()
+
+
+class _Watchdog:
+    """Shuts the connection's socket down at the deadline. A socket timeout bounds one
+    ``recv``, not a read: a server sending a byte every few seconds would otherwise hold the
+    request (status line, headers, TLS handshake, or body) far past the deadline, and with it
+    the job runner. The shutdown makes the blocked call fail at once; :attr:`fired` tells
+    that failure apart from a real network error."""
+
+    def __init__(self, conn: http.client.HTTPConnection, deadline: float) -> None:
+        self.fired = False
+        self._conn = conn
+        self._timer = threading.Timer(max(0.0, deadline - time.monotonic()), self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _fire(self) -> None:
+        self.fired = True
+        sock = self._conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def cancel(self) -> None:
+        self._timer.cancel()
 
 
 def _remaining(deadline: float) -> float:
@@ -171,7 +203,7 @@ def _read(resp: http.client.HTTPResponse, sock, max_bytes: int, deadline: float)
     while True:
         if sock is not None:
             sock.settimeout(min(CONNECT_TIMEOUT_S, _remaining(deadline)))
-        block = resp.read(64 * 1024)
+        block = resp.read1(64 * 1024)  # what one recv brings, not a full 64 KiB
         if not block:
             break
         received += len(block)
@@ -205,7 +237,11 @@ def get(url: str, *, max_bytes: int, accept: str, deadline: float) -> Response:
         address = public_addresses(host, port)[0]
         conn = (_TLS if tls else _Plain)(host, port, address, timeout)
         target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        watchdog = _Watchdog(conn, deadline)
         try:
+            conn.connect()
+            # The socket now exists: a deadline passed during the connect cut nothing.
+            _remaining(deadline)
             conn.request(
                 "GET",
                 target,
@@ -228,6 +264,8 @@ def get(url: str, *, max_bytes: int, accept: str, deadline: float) -> Response:
             if declared.isdigit() and int(declared) > max_bytes:
                 raise FetchError("too_large")
             data = _read(resp, conn.sock, max_bytes, deadline)
+            if watchdog.fired:  # the shutdown reads as end-of-body, not as an error
+                raise FetchError("timeout")
             media, _, params = (resp.getheader("Content-Type") or "").partition(";")
             charset = None
             for p in params.split(";"):
@@ -240,9 +278,12 @@ def get(url: str, *, max_bytes: int, accept: str, deadline: float) -> Response:
         except TimeoutError:
             raise FetchError("timeout") from None
         except ssl.SSLError:
-            raise FetchError("tls_error") from None
+            raise FetchError("timeout" if watchdog.fired else "tls_error") from None
         except (OSError, http.client.HTTPException):
+            if watchdog.fired:
+                raise FetchError("timeout") from None
             raise FetchError("offline" if egress.offline() else "unreachable") from None
         finally:
+            watchdog.cancel()
             conn.close()
     raise FetchError("too_many_redirects")

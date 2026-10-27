@@ -209,7 +209,7 @@ class Settings(BaseSettings):
     # Threads Tesseract may use for one page (OMP_THREAD_LIMIT).
     ocr_threads: int = Field(default=1, ge=1, le=64)
 
-    # Email-in (docs/ingest-paths.md): poll one dedicated mailbox (Gmail or Fastmail) over
+    # Email-in (docs/email-in.md): poll one dedicated mailbox (Gmail or Fastmail) over
     # IMAP with TLS and an app password, for books people mail to their own address. Outbound
     # only: no mail server here. Off unless LECTERN_EMAIL_IN=1 and host, user, and password are
     # set. Strings on purpose: lectern.email_in.load() checks them, so a missing or mistyped

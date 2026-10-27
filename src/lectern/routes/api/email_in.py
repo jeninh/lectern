@@ -1,4 +1,4 @@
-"""Email-in settings (issue #67, docs/ingest-paths.md).
+"""Email-in settings (issue #67, docs/email-in.md).
 
 Everyone who may upload (owners and members):
 

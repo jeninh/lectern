@@ -50,7 +50,14 @@ Mail is also rejected, into **Rejected**, when:
 - it is not addressed to exactly one person's Lectern address;
 - it has more than one sender, or your mail provider's own check says the sender was forged
   (DMARC fail);
-- it is too large, or has no allowed attachment.
+- it is too large, or has no allowed attachment;
+- it could not be read at all (`malformed`): it is set aside so the mail after it still
+  arrives.
+
+The forgery check only works for domains that publish a DMARC policy. Mail claiming to be
+from a domain without one cannot be told apart from a forgery, so prefer exact addresses at
+big providers (Gmail, Fastmail, iCloud), which all publish DMARC, and avoid allowing a
+small domain you don't control.
 
 The server log names the reason (for example `sender_not_allowed`) but never an address,
 subject, file name, or password.
@@ -114,7 +121,9 @@ docker compose --env-file .env -f deploy/tailscale/compose.yaml up -d --build
 **Admin → Email-in** shows whether it is running. A missing or invalid key keeps email-in off
 and is named there and in the log (`email-in is off: missing or invalid in .env: …`); Lectern
 itself starts normally. The password is never shown, logged, or sent anywhere but to the
-mail server.
+mail server. Like every other `LECTERN_*` setting, it is included in
+[backups](backups.md) (`config/lectern.env`, readable only by Lectern, inside the encrypted
+backup repository), so after a restore it is in `restored-lectern.env` for rebuilding `.env`.
 
 ## Offline mode
 

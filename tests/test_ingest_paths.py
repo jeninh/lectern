@@ -617,6 +617,61 @@ def test_oversized_mail_and_mail_without_books(client, owner, settings, inbox):
     assert imap.flags == {1: {"(\\Seen)"}, 2: {"(\\Seen)"}}
 
 
+def test_mail_the_parser_chokes_on_is_rejected_and_does_not_block_the_rest(client, owner, settings, inbox, epub, caplog):  # fmt: skip
+    # Anyone can send this (no tag needed): reading its To header raises IndexError inside
+    # the stdlib email parser. It must not stop the allowed mail queued behind it.
+    hostile = mail(inbox, "alice@example.org", [("x.epub", epub)]).replace(
+        f"To: {inbox}".encode(), rb"To: <b, :b<,\@<\[c@ab(;=<b(]"
+    )
+    imap = FakeIMAP({1: hostile, 2: mail(inbox, "alice@example.org", [("Mailed Book.epub", epub)])})  # fmt: skip
+    with caplog.at_level("INFO", logger="lectern"):
+        assert _poll(settings, imap) == {"malformed": 1, "accepted": 1}
+    assert imap.folders == {"Processed": [2], "Rejected": [1]} and imap.messages == {}
+    assert "IndexError" in caplog.text and "c@ab" not in caplog.text
+    assert _poll(settings, imap) == {}  # passed for good, not retried
+
+
+def test_slow_drip_responses_are_cut_at_the_deadline(monkeypatch):
+    """A server that sends a byte every 0.2 s never trips a per-recv timeout; the deadline
+    must still end the request, whether it drips the headers or the body."""
+    import socket as socketlib
+    import time
+
+    def serve(conn, head_fast: bool):
+        try:
+            conn.recv(4096)
+            head = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100000\r\n\r\n"
+            if head_fast:
+                conn.sendall(head)
+                head = b"x" * 100000
+            for byte in head:
+                conn.sendall(bytes([byte]))
+                time.sleep(0.2)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    for head_fast in (True, False):
+        listener = socketlib.create_server(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+
+        def accept(listener=listener, head_fast=head_fast):
+            conn, _ = listener.accept()
+            serve(conn, head_fast)
+
+        threading.Thread(target=accept, daemon=True).start()
+        monkeypatch.setattr(fetch, "public_addresses", lambda host, port: ["127.0.0.1"])
+        started = time.monotonic()
+        with pytest.raises(fetch.FetchError) as exc:
+            fetch.get(f"http://drip.test:{port}/", max_bytes=1_000_000, accept="text/html",
+                      deadline=started + 1.0)  # fmt: skip
+        elapsed = time.monotonic() - started
+        listener.close()
+        assert exc.value.code == "timeout", head_fast
+        assert elapsed < 1.6, (head_fast, elapsed)
+
+
 def _shelf(client, owner, name, parent=None) -> int:
     r = api_post(client, "/api/shelves", owner["csrf"], {"name": name, "parent_id": parent})
     assert r.status_code in (200, 201), r.text

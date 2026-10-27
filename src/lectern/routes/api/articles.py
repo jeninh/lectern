@@ -1,4 +1,4 @@
-"""Save a web article as an EPUB (issue #67, docs/ingest-paths.md).
+"""Save a web article as an EPUB (issue #67, docs/save-articles.md).
 
 - ``GET  /api/articles``  whether saving works right now (``reason``: ``offline``) and the
   person's recent saves

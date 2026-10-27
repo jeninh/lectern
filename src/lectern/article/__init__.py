@@ -1,4 +1,4 @@
-"""Save a web article as an EPUB (issue #67): fetch, extract, build, file (docs/ingest-paths.md).
+"""Save a web article as an EPUB (issue #67): fetch, extract, build, file (docs/save-articles.md).
 
 - :mod:`lectern.article.fetch`: a bounded HTTP GET that reaches only public internet addresses;
 - :mod:`lectern.article.build`: the readable article from a page, and the EPUB built from it;

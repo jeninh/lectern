@@ -1,4 +1,4 @@
-"""Email-in (issue #67, docs/ingest-paths.md): books mailed to a person's own address wait for
+"""Email-in (issue #67, docs/email-in.md): books mailed to a person's own address wait for
 their review, like an upload.
 
 Lectern runs no mail server and listens on nothing new. When the owner configures one
@@ -616,7 +616,16 @@ def poll_once(session_factory: sessionmaker, settings: Settings, connect=connect
         uids = sorted(int(u) for u in (data[0].split() if data and data[0] else []))
         # "n:*" always includes the highest UID, even one below n
         for uid in [u for u in uids if u > last][:MAX_MESSAGES_PER_POLL]:
-            outcome = _handle(conn, session_factory, settings, cfg, uid)
+            try:
+                outcome = _handle(conn, session_factory, settings, cfg, uid)
+            except (imaplib.IMAP4.error, OSError):
+                raise  # the connection, not this message
+            except Exception as exc:  # noqa: BLE001 - one bad message must not wedge the rest
+                # Anyone can mail the mailbox, and the parser can be made to raise; such a
+                # message is rejected and passed like any other. The type only: messages
+                # may quote the mail.
+                log.warning("email-in: could not handle a message: %s", type(exc).__name__)
+                outcome = "malformed"
             if outcome == "busy":
                 counts["busy"] += 1
                 break  # the same message again next time
