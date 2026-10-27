@@ -113,6 +113,11 @@ def state(auth: Viewer, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
     }
 
 
+def _analysing(job) -> bool:
+    """Whether a pdf2epub job is an analysis (the review step), not a conversion."""
+    return (job.payload or {}).get("mode") == "analyse"
+
+
 def _report(settings, work) -> dict | None:
     import json
 
@@ -295,6 +300,7 @@ def preview_image(
     auth: Viewer, db: DbDep, settings: SettingsDep, work_id: int, page: int
 ) -> Response:
     work = visible_work(db, auth.user, work_id)
+    _need_analysis(db, settings, work)  # renders of an older text (or PDF) are not served
     path = settings.library_dir / work.dir_path / "derived" / pj.PREVIEW_DIR / f"page-{page}.jpg"
     if not 1 <= page <= 10_000 or not path.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, {"detail": "no_preview"})
@@ -320,7 +326,9 @@ def convert(
     if reason is not None and reason != "converted":
         raise HTTPException(status.HTTP_409_CONFLICT, {"detail": reason})
     active = pj.active_job(db, work.id)
-    if active is not None and (active.payload or {}).get("mode") == "analyse":
+    # A running analysis must finish first; a running conversion is returned as it is, unless
+    # new rules came with this request (they would be silently ignored).
+    if active is not None and (_analysing(active) or body.rules is not None):
         raise HTTPException(status.HTTP_409_CONFLICT, {"detail": "already_running"})
     job = pj.enqueue(db, settings, work, auth.user.id, rules=body.rules)
     audit.record(db, "pdf2epub.request", actor_user_id=auth.user.id, target=f"work:{work.id}",
@@ -403,8 +411,8 @@ def convert_many(
     """Queue a PDF → EPUB conversion for every selected work that can have one. One result per
     work, in order, each its own transaction (a failure never stops the rest): ``ok`` with
     ``status`` ``queued`` or ``already_queued`` (and the ``job_id``), or not ``ok`` with
-    ``status`` ``skipped`` or ``failed`` and an ``error`` (:func:`_skip_reason`, ``not_found``,
-    ``internal_error``); each with the work's ``title`` when it was found. At most
+    ``status`` ``skipped`` or ``failed`` and an ``error`` (:func:`_skip_reason`, ``analysing``
+    while the work's PDF is being analysed for review, ``not_found``, ``internal_error``); each with the work's ``title`` when it was found. At most
     ``CONVERT_MANY_MAX`` works per request."""
     if not request.app.state.limiters["bulk_jobs"].allow(f"user:{auth.user.id}"):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
@@ -415,7 +423,11 @@ def convert_many(
         try:
             work = visible_work(db, auth.user, wid)
             item["title"] = work.title
-            if (job := pj.active_job(db, work.id)) is not None:
+            if (job := pj.active_job(db, work.id)) is not None and _analysing(job):
+                # an analysis (the review step) is no conversion: it would finish "succeeded"
+                # with no edition
+                item.update(ok=False, status="skipped", error="analysing")
+            elif job is not None:
                 item.update(ok=True, status="already_queued", job_id=job.id)
             elif (reason := _skip_reason(db, settings, work)) is not None:
                 item.update(ok=False, status="skipped", error=reason)
@@ -459,7 +471,7 @@ def jobs_state(
         .join(Work, Work.id == Job.work_id)
         .where(Job.id.in_(wanted), Job.kind == build.PDF2EPUB, visible_works(auth.user))
     ).all()
-    by_id = {j.id: j for j in rows}
+    by_id = {j.id: j for j in rows if not _analysing(j)}  # conversions only
     return {
         "jobs": [{**_job_json(by_id[i]), "work_id": by_id[i].work_id} for i in wanted if i in by_id]
     }

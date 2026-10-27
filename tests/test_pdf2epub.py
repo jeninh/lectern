@@ -614,3 +614,28 @@ def test_bulk_convert_is_capped_rate_limited_and_hides_others_jobs(client, owner
     client.cookies.clear()
     login(client, "reader", reader["password"])
     assert client.get(f"/api/pdf-epub/jobs?ids={job_id}").status_code == 403
+
+
+def test_bulk_convert_never_reports_an_analysis_as_a_queued_conversion(client, owner, settings):
+    """An analysis (the review step) is a pdf2epub job too, but no conversion: bulk convert
+    must not hand its id back as "already_queued" (it would finish succeeded, no edition)."""
+    _f, work_id = _pdf_work(settings, "structured.pdf")
+    base = f"/api/works/{work_id}/pdf-epub"
+    analyse = api_post(client, f"{base}/analyse", owner["csrf"]).json()["job_id"]
+    r = api_post(client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": [work_id]})
+    (item,) = r.json()["results"]
+    assert (item["ok"], item["status"], item["error"]) == (False, "skipped", "analysing")
+    assert "job_id" not in item
+    assert client.get(f"/api/pdf-epub/jobs?ids={analyse}").json()["jobs"] == []
+    # nor does a single convert with rules quietly drop them while a job runs
+    assert api_post(client, base, owner["csrf"], json={"rules": {}}).status_code == 409
+
+    assert run_pending(session_factory(), settings) == 1  # the analysis
+    r = api_post(client, "/api/works/pdf-epub", owner["csrf"], json={"work_ids": [work_id]})
+    (item,) = r.json()["results"]
+    assert (item["ok"], item["status"]) == (True, "queued")
+    assert api_post(client, base, owner["csrf"], json={"rules": {}}).status_code == 409
+    assert run_pending(session_factory(), settings) == 1
+    jobs = client.get(f"/api/pdf-epub/jobs?ids={analyse},{item['job_id']}").json()["jobs"]
+    assert [(j["id"], j["status"]) for j in jobs] == [(item["job_id"], "succeeded")]
+    assert client.get(base).json()["edition"] is not None

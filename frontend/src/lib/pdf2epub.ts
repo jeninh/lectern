@@ -253,6 +253,7 @@ export const CONVERT_REASONS: Record<string, string> = {
   converted: "already an EPUB",
   unsupported: "no PDF to convert",
   no_text_pdf: "no text in the PDF yet (a scan needs OCR first)",
+  analysing: "being analysed for review; convert it from its details",
   not_found: "no longer exists",
   internal_error: "an unexpected server error",
   pdf_changed: "the PDF changed while it was queued",

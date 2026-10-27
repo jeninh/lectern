@@ -104,7 +104,8 @@ members, at most 200 books per request, after a confirmation). Every selected bo
 PDF gets the same conversion job as above; the rest are skipped and say why: already an EPUB
 (an uploaded one, a Kindle book — MOBI and AZW3 become EPUB when they are added — or an
 earlier conversion), no PDF at all (comics, audiobooks), or a PDF without text yet (a scan
-needs OCR first). A book already converting is reported, not queued twice, and one book
+needs OCR first), or a PDF being analysed for review right now. A book already converting is
+reported, not queued twice, and one book
 failing never stops the rest.
 
 The jobs go through the same queue and run one at a time on the server, so a big selection

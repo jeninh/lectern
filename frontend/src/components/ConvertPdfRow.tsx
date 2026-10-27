@@ -110,7 +110,8 @@ export function ConvertPdfRow({ work }: { work: Work }) {
     hint = job!.status === "queued" ? (analysing ? "Queued: analysing the PDF" : "Queued: converting") : analysing ? "Analysing the PDF…" : "Converting…";
     action = <button className="btn sm ghost" onClick={() => act(() => cancelPdfJob(job!.id), "Could not cancel")}>Cancel</button>;
   } else if (job && (job.status === "failed" || job.status === "cancelled")) {
-    hint = job.status === "cancelled" ? "Conversion cancelled" : `Conversion failed: ${job.error ?? "unknown error"}`;
+    const what = job.mode === "analyse" ? "Analysis" : "Conversion";
+    hint = job.status === "cancelled" ? `${what} cancelled` : `${what} failed: ${job.error ?? "unknown error"}`;
     action = (
       <button className="btn sm ghost" onClick={() => act(() => retryPdf(work.id), "Could not retry")}>
         Retry
