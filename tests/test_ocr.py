@@ -29,6 +29,7 @@ from tests.conftest import api_delete, api_post, drain_inbox
 from lectern.align.worker import RemoteWorker
 from lectern.db import session_factory
 from lectern.ingest.hashing import sha256_file
+from lectern.ingest.sentences import epub_sentences
 from lectern.jobs import run_pending
 from lectern.models import (
     Alignment,
@@ -86,10 +87,10 @@ def make_scan(path: Path, title: str = "The Lighthouse Keeper") -> Path:
     return path
 
 
-def make_text_pdf(path: Path, title: str = "Born Digital") -> Path:
+def make_text_pdf(path: Path, title: str = "Born Digital", pages: list[list[str]] = PAGES) -> Path:
     """A born-digital PDF: real text in Helvetica on every page."""
     w = PdfWriter()
-    for lines in PAGES:
+    for lines in pages:
         page = w.add_blank_page(612, 792)
         font = w._add_object(DictionaryObject({
             NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
@@ -645,9 +646,11 @@ def test_a_worker_without_the_language_fails_retryably_and_never_bounces(
 # words file's shape. The end-to-end test above checks the real recognition does the same.
 
 
-def fake_ocr(settings, book: BookFile, work: Work, language: str = "eng") -> str:
+def fake_ocr(
+    settings, book: BookFile, work: Work, language: str = "eng", pages: list[list[str]] = PAGES
+) -> str:
     """Publish an OCR words file for ``book`` (and its checksum sidecar); returns its digest."""
-    typeset = make_text_pdf(settings.data_dir / f"typeset-{language}.pdf")
+    typeset = make_text_pdf(settings.data_dir / f"typeset-{language}.pdf", pages=pages)
     pages = [vars(p) for p in extract.extract_words(typeset).pages]
     src = SimpleNamespace(book=book, scan={"toc": []})
     doc = ocr.build_document(src, pages, engine_label="tesseract 5.3.0", language=language,
@@ -860,7 +863,12 @@ def test_an_ocrd_scan_converts_to_an_epub_labelled_as_ocr_that_takes_part_in_rea
 
     # Recognised again: the edition is out of date, and converting again replaces it.
     old = sha256_file(path)
-    fake_ocr(settings, book, work, "fra")
+    with session_factory()() as db:
+        before = db.query(Sentence).filter_by(work_id=work.id).count()
+    # recognised again, and better: different words (more sentences), so the new edition's
+    # sentence spans differ from the old one's
+    better = [[*lines, "It was quiet. The sea was grey. Nobody came."] for lines in PAGES]
+    fake_ocr(settings, book, work, "fra", pages=better)
     pdf_sweep(session_factory(), settings.library_dir)
     st = client.get(f"/api/works/{work.id}/pdf-epub").json()
     assert (st["eligible"], st["outdated"]) == (True, True)
@@ -871,6 +879,19 @@ def test_an_ocrd_scan_converts_to_an_epub_labelled_as_ocr_that_takes_part_in_rea
     assert st["report"]["ocr"]["language"] == "fra" and sha256_file(path) != old
     with session_factory()() as db:
         assert db.query(BookFile).filter_by(work_id=work.id, rel_path=CONVERTED_NAME).count() == 1
+        # the work's sentences are the new edition's, not the old one's
+        spans = db.execute(select(Sentence.spine_index, Sentence.char_start, Sentence.char_end)
+                           .where(Sentence.work_id == work.id).order_by(Sentence.n)).all()  # fmt: skip
+        new = [(e["spine_index"], e["char_start"], e["char_end"]) for e in epub_sentences(path)]
+        assert [tuple(r) for r in spans] == new and len(new) > before
+    pdf_sweep(session_factory(), settings.library_dir)  # the PDF's pages follow the new list
+    pdf_sweep(session_factory(), settings.library_dir)
+    with session_factory()() as db:
+        assert db.query(Sentence).filter_by(work_id=work.id).count() == len(new)
+        mapped = [r.epub_n for r in db.query(PdfSentence).filter_by(file_id=book.id)]
+        assert any(n is not None for n in mapped) and max(n for n in mapped if n is not None) < len(
+            new
+        )
 
     # ...and it can be deleted like any converted edition (the scan and its OCR stay).
     assert api_delete(client, f"/api/works/{work.id}/pdf-epub", owner["csrf"]).status_code == 200

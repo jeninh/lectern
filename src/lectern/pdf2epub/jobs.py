@@ -26,8 +26,10 @@ A scan converts like a text PDF once OCR has given it a ``ready`` text document 
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from lectern import queue
@@ -230,8 +232,12 @@ def _publish(
             work_dir = settings.library_dir / work.dir_path
             work_dir.mkdir(parents=True, exist_ok=True)
             dest = work_dir / CONVERTED_NAME
-            dest.unlink(missing_ok=True)
-            move_file(scratch, dest)
+            # Next to the live edition first, then one atomic replace: a failed move never
+            # leaves the edition's row pointing at a missing file.
+            staged = work_dir / f".{job.id}-{CONVERTED_NAME}.part"
+            staged.unlink(missing_ok=True)
+            move_file(scratch, staged)
+            os.replace(staged, dest)
             report_dest = work_dir / "derived" / REPORT_NAME
             report_dest.parent.mkdir(parents=True, exist_ok=True)
             report_dest.unlink(missing_ok=True)
@@ -240,7 +246,8 @@ def _publish(
 
             digest = sha256_file(dest)
             existing = converted_file(db, work.id)
-            if existing is not None:
+            replaced = existing is not None
+            if replaced:
                 db.delete(existing)
                 db.flush()
             db.add(
@@ -256,11 +263,43 @@ def _publish(
             # The work's text is this EPUB the moment the row exists: move the sentence list
             # and every stored position onto it now (the PDF↔EPUB projection carries them).
             pdf_store.ensure_pdf_sentences(db, settings.library_dir, work)
+            if replaced:
+                _replace_sentences(db, settings, work, dest)
             db.commit()
             return digest
     finally:
         scratch.unlink(missing_ok=True)
         report_scratch.unlink(missing_ok=True)
+
+
+def _replace_sentences(db: Session, settings: Settings, work: Work, epub: Path) -> None:
+    """A new edition replaced an older one (converted again after the PDF's text changed):
+    the work's sentence list is still the old edition's, which ``ensure_pdf_sentences`` leaves
+    alone (it is an EPUB's). Rebuild it from the new edition when that is the work's text and
+    no alignment owns it, moving positions proportionally (as an edited EPUB does,
+    ``lectern.editing``), and let the staleness rules handle an alignment of the old one."""
+    from lectern.align import jobs as align_jobs
+    from lectern.ingest.sentences import epub_sentences, replace_sentences
+    from lectern.models import Alignment, AlignmentStatus, Sentence
+
+    db.flush()
+    found = pdf_store.work_text(db, settings.library_dir, work)
+    # an alignment that has installed its sentence map owns the list; a queued one has not
+    aligned = db.scalar(select(Alignment.id).where(
+        Alignment.work_id == work.id,
+        Alignment.status.in_([AlignmentStatus.SUCCEEDED, AlignmentStatus.STALE]),
+    )) is not None  # fmt: skip
+    if found is not None and found[0].kind == "epub" and found[0].file.rel_path == CONVERTED_NAME:
+        if not aligned:
+            try:
+                entries = epub_sentences(epub)
+            except Exception:  # noqa: BLE001 - an unreadable edition keeps the list it has
+                log.warning("could not segment the converted EPUB of work %d", work.id)
+            else:
+                old = db.scalar(select(func.count(Sentence.id)).where(Sentence.work_id == work.id))
+                move = (lambda n: round(n * len(entries) / old)) if old else None
+                replace_sentences(db, work.id, entries, move=move)
+    align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
 
 
 def remove(db: Session, settings: Settings, work: Work) -> bool:
