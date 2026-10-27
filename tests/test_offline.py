@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import select
 from tests.conftest import (
@@ -396,13 +397,25 @@ def test_doc_text_sends_only_the_docs_a_role_may_see(client, owner, tmp_path, mo
     if made:
         built.write_text(json.dumps(text))
     try:
-        for path in ("/static/app/doc-text.json", "/static/app/../app/doc-text.json",
-                     "/static//app/doc-text.json", "/static/./app/doc-text.json"):  # fmt: skip
-            assert client.get(path).status_code == 404, path
-        client.cookies.clear()
-        assert client.get("/static/app/doc-text.json").status_code == 404
+        # httpx keeps %2e%2e as sent (a literal ".." it would collapse itself), so these reach
+        # the server as traversal, as curl or a proxy would send them.
+        sneaky = (
+            "/static/app/doc-text.json",
+            "/static//app/doc-text.json",
+            "/static/%2e%2e/static/app/doc-text.json",
+            "/static/voice-samples/%2e%2e/%2e%2e/static/app/doc-text.json",
+            "/static/x/%2e%2e/%2e%2e/static/app/doc-text.json",
+        )
+        assert httpx.URL("http://t" + sneaky[2]).raw_path == sneaky[2].encode()
+        for signed_in in (True, False):
+            if not signed_in:
+                client.cookies.clear()
+            for path in sneaky:
+                assert client.get(path).status_code == 404, (path, signed_in)
         assert client.get("/app/doc-text").status_code == 401
-        assert client.get("/static/lectern.css").status_code == 200  # the rest stays public
+        # The rest stays public.
+        assert client.get("/static/lectern.css").status_code == 200
+        assert client.get("/static/webauthn.js").status_code == 200
     finally:
         if made:
             built.unlink()

@@ -80,6 +80,7 @@ test("a reader's browser never receives the docs hidden from readers", async ({ 
   const anon = await page.context().browser()!.newContext({ baseURL: base });
   expect((await anon.request.get("/static/app/doc-text.json")).status()).toBe(404);
   expect((await anon.request.get("/static/app/doc-media/backups-admin.png")).status()).toBe(404);
+  expect((await anon.request.get("/static/%2e%2e/static/app/doc-text.json")).status()).toBe(404);
   await anon.close();
 
   const received = (await Promise.all(bodies)).join("\n");

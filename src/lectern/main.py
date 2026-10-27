@@ -51,12 +51,21 @@ STATIC_DIR = TEMPLATES_DIR.parent / "static"
 class PublicStatic(StaticFiles):
     """/static, public: the sign-in pages' stylesheet and script, and the voice samples. Never
     app/, the built web app: /app serves it, and parts of it are for signed-in people only
-    (doc-text.json by role, doc-media), so they must not be reachable around that check."""
+    (doc-text.json by role, doc-media), so they must not be reachable around that check.
+    Decided on the resolved file, so "../static/app/…" (a request for /static/%2e%2e/…) is
+    refused like "app/…"."""
+
+    PUBLIC = frozenset({"lectern.css", "webauthn.js", "voice-samples"})
 
     def lookup_path(self, path: str):
-        if Path(path).parts[:1] == ("app",):
+        full_path, stat = super().lookup_path(path)
+        if stat is None:
+            return full_path, stat
+        try:
+            rel = Path(full_path).resolve().relative_to(STATIC_DIR.resolve())
+        except ValueError:
             return "", None
-        return super().lookup_path(path)
+        return (full_path, stat) if rel.parts[:1] and rel.parts[0] in self.PUBLIC else ("", None)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
