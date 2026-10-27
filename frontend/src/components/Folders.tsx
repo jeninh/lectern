@@ -11,7 +11,7 @@ import { useStore } from "../lib/store";
 import type { Shelf, Work } from "../lib/types";
 import type { CellProps } from "../lib/useSelection";
 import { Cover } from "./Cover";
-import { Chevron, Folder, Library as LibraryIcon } from "./Icons";
+import { Chevron, Folder, Library as LibraryIcon, SmartFolder } from "./Icons";
 import { OverflowMenu, type MenuAction } from "./Menu";
 import { Sheet } from "./Sheet";
 
@@ -29,7 +29,7 @@ export function folderSummary(s: Pick<Shelf, "work_count" | "shelf_count">): str
  * selected, Enter, or Open in its menu), selected like a book, dragged and dropped onto. */
 export function FolderCell({ shelf, grid, cell, col, covers, menu, drag }: { shelf: Shelf; grid: boolean; cell: CellProps; col: number; covers: Work[]; menu: MenuAction[]; drag: { draggable: boolean; onDragStart: (e: React.DragEvent) => void; onDragEnd: () => void } }) {
   const drop = useDropTarget()(shelf.id);
-  const label = `Shelf ${shelf.name}, ${folderSummary(shelf)}`;
+  const label = `${shelf.smart ? "Smart shelf" : "Shelf"} ${shelf.name}, ${folderSummary(shelf)}`;
   const pick = (
     <span className="pick" data-sel-toggle aria-hidden="true" title="Select">
       {cell["aria-selected"] ? "✓" : ""}
@@ -50,7 +50,7 @@ export function FolderCell({ shelf, grid, cell, col, covers, menu, drag }: { she
               <Cover key={w.id} work={w} />
             ))}
           </span>
-          <Folder className="folder-icon" aria-hidden="true" />
+          {shelf.smart ? <SmartFolder className="folder-icon" aria-hidden="true" /> : <Folder className="folder-icon" aria-hidden="true" />}
         </span>
         {more}
       </span>
@@ -60,7 +60,7 @@ export function FolderCell({ shelf, grid, cell, col, covers, menu, drag }: { she
   ) : (
     <div className="book folder" aria-label={label} aria-colindex={col} {...cell} {...drag} {...drop}>
       {pick}
-      <span className="folder-row-icon" aria-hidden="true"><Folder /></span>
+      <span className="folder-row-icon" aria-hidden="true">{shelf.smart ? <SmartFolder /> : <Folder />}</span>
       <span className="titles">
         <strong>{shelf.name}</strong>
         <span>{folderSummary(shelf)}</span>
@@ -142,7 +142,7 @@ export function ShelfTree() {
               <span className="twisty" aria-hidden="true" />
             )}
             <Link to={folderUrl(s.id)} className="tree-link" aria-current={active === s.id ? "page" : undefined} title={pathLabel(s)}>
-              <Folder aria-hidden="true" />
+              {s.smart ? <SmartFolder aria-hidden="true" /> : <Folder aria-hidden="true" />}
               <span>{s.name}</span>
             </Link>
           </div>

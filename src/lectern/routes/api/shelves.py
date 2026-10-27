@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from lectern import filters
 from lectern.access import (
     MAX_DEPTH,
     can_create_shelf,
@@ -38,6 +39,7 @@ from lectern.access import (
 from lectern.access import (
     shelf_permission as _shelf_permission,
 )
+from lectern.filters import smart_predicate
 from lectern.models import Role, Shelf, ShelfGrant, ShelfItem, ShelfPermission, User, Work
 from lectern.routes.api.serializers import iso, work_json
 from lectern.security import audit
@@ -83,6 +85,8 @@ class Tree:
         return visible_path(shelf, self.shelves, self.perms)
 
     def counts(self) -> dict[int, int]:
+        """Works on each visible shelf that this person sees; for a smart shelf, how many
+        its rule matches for them."""
         if self._counts is None:
             self._counts = dict(
                 self.db.execute(
@@ -92,6 +96,19 @@ class Tree:
                     .group_by(ShelfItem.shelf_id)
                 ).all()
             )
+            ctx = filters.Context(self.db, self.user).lenient()
+            for sid in self.perms:
+                if self.shelves[sid].rule is not None:
+                    self._counts[sid] = (
+                        self.db.scalar(
+                            select(func.count())
+                            .select_from(Work)
+                            .where(
+                                visible_works(self.user), smart_predicate(ctx, self.shelves[sid])
+                            )
+                        )
+                        or 0
+                    )
         return self._counts
 
     def json(self, shelf: Shelf, owners: dict[int, str]) -> dict:
@@ -110,9 +127,21 @@ class Tree:
             "shelf_count": len(self.children.get(shelf.id, [])),
             "grant_count": grants or 0,
             "smart": shelf.rule is not None,
+            # The rule is for whoever manages the shelf: it may name shelves, devices, or
+            # people others cannot see. Everyone else sees only what it matches for them.
+            **(
+                _rule_json(shelf.rule)
+                if shelf.rule is not None and self.perms[shelf.id] == "owner"
+                else {}
+            ),
             "created_at": iso(shelf.created_at),
             "updated_at": iso(shelf.updated_at),
         }
+
+
+def _rule_json(rule: dict) -> dict:
+    return {"filter": rule.get("filter", ""), "sort": rule.get("sort") or "title",
+            "order": None if rule.get("desc") is None else ("desc" if rule["desc"] else "asc")}  # fmt: skip
 
 
 def _owners(db) -> dict[int, str]:
@@ -152,7 +181,18 @@ def _clean_name(v: str) -> str:
     return v
 
 
-class CreateIn(BaseModel):
+class RuleIn(BaseModel):
+    """A smart shelf's rule: a filter (docs/filters.md) and the order its books are listed
+    in (the web app, OPDS)."""
+
+    filter: str | None = Field(default=None, max_length=filters.MAX_CHARS)
+    sort: str | None = Field(default=None, pattern=filters.SORT_PATTERN)
+    order: Literal["asc", "desc"] | None = None
+
+
+class CreateIn(RuleIn):
+    """``filter`` set: a smart shelf."""
+
     name: str = Field(min_length=1, max_length=128)
     parent_id: int | None = None
 
@@ -162,8 +202,9 @@ class CreateIn(BaseModel):
         return _clean_name(v)
 
 
-class PatchIn(BaseModel):
-    """Rename (``name``), move (``parent_id``; ``null`` = top level), or both."""
+class PatchIn(RuleIn):
+    """Rename (``name``), move (``parent_id``; ``null`` = top level), or both; for a smart
+    shelf, also change its ``filter``, ``sort``, and ``order``."""
 
     name: str | None = Field(default=None, min_length=1, max_length=128)
     parent_id: int | None = None
@@ -246,6 +287,25 @@ def _too_deep() -> HTTPException:
     )  # fmt: skip
 
 
+def _rule(db, user: User, body: RuleIn, current: dict | None) -> dict:
+    """The smart-shelf rule ``body`` asks for (unchanged parts from ``current``), checked as
+    a filter typed now by ``user``: a value they cannot use is 422 with the reason."""
+    text = body.filter if body.filter is not None else (current or {}).get("filter", "")
+    sort = body.sort or (current or {}).get("sort")
+    fields = body.model_fields_set
+    desc = (
+        (None if body.order is None else body.order == "desc")
+        if "order" in fields
+        else (current or {}).get("desc")
+    )
+    try:
+        rule = filters.make_rule(text, sort, desc)
+        filters.check(filters.Context(db, user), filters.parse(rule["filter"]))
+    except filters.FilterError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.json()) from None
+    return rule
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_shelf(request: Request, auth: AuthCsrf, db: DbDep, body: CreateIn) -> dict:
     """A new shelf in ``parent_id`` (``null``: top level), owned by its creator."""
@@ -255,10 +315,13 @@ def create_shelf(request: Request, auth: AuthCsrf, db: DbDep, body: CreateIn) ->
             raise _too_deep()
         if _clash(db, auth.user.id, body.parent_id, body.name) is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
-        shelf = Shelf(owner_id=auth.user.id, name=body.name, parent=parent)
+        rule = _rule(db, auth.user, body, None) if body.filter is not None else None
+        shelf = Shelf(owner_id=auth.user.id, name=body.name, parent=parent, rule=rule)
         db.add(shelf)
         db.flush()
         where = f"in shelf:{parent.id}" if parent else None
+        if rule is not None:
+            where = " ".join(filter(None, [where, f"smart: {rule['filter']}"]))
         _audit(db, request, auth, "shelf.create", body.name, where)
         db.commit()
         return _shelf_json(db, shelf, auth.user)
@@ -271,19 +334,33 @@ def get_shelf(auth: Auth, db: DbDep, shelf_id: int) -> dict:
     tree = Tree(db, auth.user)
     shelf = tree.visible(shelf_id)
     owners = _owners(db)
-    rows = db.execute(
-        select(ShelfItem, Work)
-        .join(Work, Work.id == ShelfItem.work_id)
-        .options(selectinload(Work.files))
-        .where(ShelfItem.shelf_id == shelf.id, visible_works(auth.user))
-        .order_by(ShelfItem.position, ShelfItem.added_at)
-    ).all()
     return {
         **tree.json(shelf, owners),
         "ancestors": [{"id": s.id, "name": s.name} for s in tree.path(shelf)[:-1]],
         "shelves": [tree.json(s, owners) for s in tree.children.get(shelf.id, [])],
-        "works": [work_json(w) for _, w in rows],
+        "works": [work_json(w) for w in shelf_works(db, auth.user, shelf)],
     }
+
+
+def shelf_works(db, user: User, shelf: Shelf, limit: int | None = None) -> list[Work]:
+    """The works on a shelf that ``user`` sees, in shelf order; for a smart shelf, what its
+    rule matches for them, in the rule's order."""
+    if shelf.rule is not None:
+        ctx = filters.Context(db, user).lenient()
+        stmt = (
+            select(Work)
+            .where(visible_works(user), smart_predicate(ctx, shelf))
+            .order_by(*filters.smart_order(shelf, user))
+        )
+    else:
+        stmt = (
+            select(Work)
+            .join(ShelfItem, ShelfItem.work_id == Work.id)
+            .where(ShelfItem.shelf_id == shelf.id, visible_works(user))
+            .order_by(ShelfItem.position, ShelfItem.added_at)
+        )
+    stmt = stmt.options(selectinload(Work.files))
+    return list(db.scalars(stmt.limit(limit) if limit else stmt))
 
 
 @router.patch("/{shelf_id}", response_model=None)
@@ -312,6 +389,14 @@ def update_shelf(
                     raise _too_deep()
         if _clash(db, shelf.owner_id, parent_id, name, shelf.id) is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
+        if body.model_fields_set & {"filter", "sort", "order"}:
+            if shelf.rule is None:
+                # A manual shelf's books would be lost; make a smart shelf beside it instead.
+                raise HTTPException(status.HTTP_409_CONFLICT, "not_smart")
+            rule = _rule(db, auth.user, body, shelf.rule)
+            if rule != shelf.rule:
+                _audit(db, request, auth, "shelf.rule", shelf.name, rule["filter"])
+                shelf.rule = rule
         if name != shelf.name:
             _audit(db, request, auth, "shelf.rename", name, shelf.name)
             shelf.name = name
@@ -451,6 +536,9 @@ def _editable(db, auth, shelf_id: int) -> Shelf:
     shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
     if perm not in ("owner", "edit"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "View-only shelf")
+    if shelf.rule is not None:
+        # A smart shelf's books are its rule's matches; nothing is put on it by hand.
+        raise HTTPException(status.HTTP_409_CONFLICT, "smart_shelf")
     return shelf
 
 

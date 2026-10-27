@@ -48,9 +48,56 @@ def rescan_works(session_factory: sessionmaker, library: Path) -> int:
     return queued
 
 
+def fill_page_counts(session_factory: sessionmaker, library: Path, *, limit: int = 200) -> int:
+    """Page counts for the ``pages:`` filter (``book_files.pages``): a PDF's from its text
+    layer once read, a comic's from its page list. Returns comics counted this pass."""
+    from sqlalchemy import update
+
+    from lectern.ingest import formats
+    from lectern.ingest.comic import ComicCache
+    from lectern.models import BookFile, PdfText
+
+    with session_factory() as db:
+        read = (
+            select(PdfText.pages)
+            .where(
+                PdfText.file_id == BookFile.id,
+                PdfText.pdf_sha256 == BookFile.sha256,
+                PdfText.pages > 0,
+            )
+            .scalar_subquery()
+        )
+        db.execute(
+            update(BookFile)
+            .where(BookFile.media_type == formats.PDF, BookFile.pages.is_distinct_from(read))
+            .values(pages=read)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        todo = db.execute(
+            select(BookFile.id, BookFile.rel_path, BookFile.sha256, Work.dir_path)
+            .join(Work, Work.id == BookFile.work_id)
+            .where(BookFile.media_type == formats.CBZ, BookFile.pages.is_(None))
+            .order_by(BookFile.id)
+            .limit(limit)
+        ).all()
+    counted = 0
+    for file_id, rel, sha, d in todo:
+        try:
+            pages = len(ComicCache.get(library / d / rel, sha).pages)
+        except Exception as exc:  # noqa: BLE001 - a missing or damaged comic is counted later
+            log.debug("could not count the pages of file %d: %s", file_id, exc)
+            continue
+        with session_factory() as db:
+            db.execute(update(BookFile).where(BookFile.id == file_id).values(pages=pages))
+            db.commit()
+        counted += 1
+    return counted
+
+
 class Housekeeping:
     """One thread: reclaim expired leases every ``job_sweep_seconds`` and rescan the library
-    for audio and PDF text layers (:func:`lectern.pdftext.store.sweep`) every
+    for audio, PDF text layers (:func:`lectern.pdftext.store.sweep`), and page counts every
     ``track_rescan_seconds`` (and once at start)."""
 
     def __init__(self, session_factory: sessionmaker, settings: Settings) -> None:
@@ -77,6 +124,10 @@ class Housekeeping:
                     pdftext.sweep(self.session_factory, self.settings.library_dir)
                 except Exception:  # noqa: BLE001
                     log.exception("PDF text sweep failed")
+                try:
+                    fill_page_counts(self.session_factory, self.settings.library_dir)
+                except Exception:  # noqa: BLE001
+                    log.exception("page count sweep failed")
                 try:
                     n = rescan_works(self.session_factory, self.settings.library_dir)
                     if n:

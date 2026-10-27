@@ -1,0 +1,555 @@
+{
+ "_comment": "The filter fields (lectern.filters.describe()) and sorts. tests/test_filters.py checks the server against this file and frontend/src/lib/__tests__/filters.test.ts checks frontend/src/lib/filters.ts.",
+ "fields": [
+  {
+   "key": "format",
+   "kind": "enum",
+   "label": "Format",
+   "group": "Files",
+   "aliases": [],
+   "options": [
+    {
+     "value": "epub",
+     "label": "EPUB"
+    },
+    {
+     "value": "pdf",
+     "label": "PDF"
+    },
+    {
+     "value": "cbz",
+     "label": "CBZ comic"
+    },
+    {
+     "value": "audiobook",
+     "label": "Audiobook"
+    }
+   ],
+   "members_only": false
+  },
+  {
+   "key": "kind",
+   "kind": "enum",
+   "label": "Ebook or audio",
+   "group": "Files",
+   "aliases": [],
+   "options": [
+    {
+     "value": "ebook",
+     "label": "Ebook only"
+    },
+    {
+     "value": "audio",
+     "label": "Audio only"
+    },
+    {
+     "value": "both",
+     "label": "Ebook and audio"
+    }
+   ],
+   "members_only": false
+  },
+  {
+   "key": "size",
+   "kind": "size",
+   "label": "File size",
+   "group": "Files",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "has",
+   "kind": "enum",
+   "label": "Has",
+   "group": "Book details",
+   "aliases": [],
+   "options": [
+    {
+     "value": "audio",
+     "label": "Audiobook"
+    },
+    {
+     "value": "cover",
+     "label": "Cover art"
+    },
+    {
+     "value": "author",
+     "label": "Author"
+    },
+    {
+     "value": "series",
+     "label": "Series"
+    },
+    {
+     "value": "isbn",
+     "label": "ISBN"
+    },
+    {
+     "value": "tags",
+     "label": "Tags"
+    },
+    {
+     "value": "description",
+     "label": "Description"
+    }
+   ],
+   "members_only": false
+  },
+  {
+   "key": "audio",
+   "kind": "enum",
+   "label": "Narration",
+   "group": "Audio & read-along",
+   "aliases": [
+    "narration"
+   ],
+   "options": [
+    {
+     "value": "narrated",
+     "label": "Real narrator"
+    },
+    {
+     "value": "generated",
+     "label": "Generated"
+    }
+   ],
+   "members_only": false
+  },
+  {
+   "key": "align",
+   "kind": "enum",
+   "label": "Read-along",
+   "group": "Audio & read-along",
+   "aliases": [
+    "alignment"
+   ],
+   "options": [
+    {
+     "value": "aligned",
+     "label": "Aligned"
+    },
+    {
+     "value": "running",
+     "label": "In progress"
+    },
+    {
+     "value": "failed",
+     "label": "Failed"
+    },
+    {
+     "value": "none",
+     "label": "Not aligned"
+    }
+   ],
+   "members_only": false
+  },
+  {
+   "key": "length",
+   "kind": "duration",
+   "label": "Audio length",
+   "group": "Audio & read-along",
+   "aliases": [
+    "duration"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "narrator",
+   "kind": "text",
+   "label": "Narrator",
+   "group": "Audio & read-along",
+   "aliases": [
+    "narrators",
+    "reader"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "status",
+   "kind": "enum",
+   "label": "Reading status",
+   "group": "Reading",
+   "aliases": [],
+   "options": [
+    {
+     "value": "unread",
+     "label": "Not started"
+    },
+    {
+     "value": "reading",
+     "label": "Reading"
+    },
+    {
+     "value": "finished",
+     "label": "Finished"
+    }
+   ],
+   "members_only": false
+  },
+  {
+   "key": "progress",
+   "kind": "percent",
+   "label": "Progress",
+   "group": "Reading",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "read",
+   "kind": "date",
+   "label": "Last read",
+   "group": "Reading",
+   "aliases": [
+    "last-read",
+    "lastread"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "started",
+   "kind": "date",
+   "label": "Started",
+   "group": "Reading",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "finished",
+   "kind": "date",
+   "label": "Finished",
+   "group": "Reading",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "title",
+   "kind": "text",
+   "label": "Title",
+   "group": "Book details",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "author",
+   "kind": "text",
+   "label": "Author",
+   "group": "Book details",
+   "aliases": [
+    "by-author",
+    "authors"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "series",
+   "kind": "text",
+   "label": "Series",
+   "group": "Book details",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "lang",
+   "kind": "text",
+   "label": "Language",
+   "group": "Book details",
+   "aliases": [
+    "language"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "tag",
+   "kind": "text",
+   "label": "Tag",
+   "group": "Book details",
+   "aliases": [
+    "tags"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "publisher",
+   "kind": "text",
+   "label": "Publisher",
+   "group": "Book details",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "year",
+   "kind": "number",
+   "label": "Year",
+   "group": "Book details",
+   "aliases": [
+    "published"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "pages",
+   "kind": "number",
+   "label": "Page count",
+   "group": "Book details",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "added",
+   "kind": "date",
+   "label": "Added",
+   "group": "Library",
+   "aliases": [],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "shelf",
+   "kind": "shelf",
+   "label": "Shelf",
+   "group": "Library",
+   "aliases": [
+    "shelves",
+    "in"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "by",
+   "kind": "user",
+   "label": "Uploaded by",
+   "group": "Library",
+   "aliases": [
+    "uploaded-by",
+    "uploader"
+   ],
+   "options": [],
+   "members_only": true
+  },
+  {
+   "key": "queue",
+   "kind": "device",
+   "label": "Send-to-device queue",
+   "group": "Devices",
+   "aliases": [
+    "queued"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
+   "key": "is",
+   "kind": "enum",
+   "label": "Is",
+   "group": "Cleanup",
+   "aliases": [],
+   "options": [
+    {
+     "value": "offline",
+     "label": "Downloaded on this device"
+    },
+    {
+     "value": "duplicate",
+     "label": "Possible duplicate"
+    }
+   ],
+   "members_only": false
+  },
+  {
+   "key": "needs",
+   "kind": "enum",
+   "label": "Needs",
+   "group": "Cleanup",
+   "aliases": [],
+   "options": [
+    {
+     "value": "ocr",
+     "label": "Text recognition (OCR)"
+    }
+   ],
+   "members_only": false
+  }
+ ],
+ "sorts": [
+  {
+   "key": "title",
+   "label": "Title",
+   "desc": false
+  },
+  {
+   "key": "author",
+   "label": "Author",
+   "desc": false
+  },
+  {
+   "key": "added",
+   "label": "Newest",
+   "desc": true
+  },
+  {
+   "key": "series",
+   "label": "Series",
+   "desc": false
+  },
+  {
+   "key": "year",
+   "label": "Year",
+   "desc": false
+  },
+  {
+   "key": "size",
+   "label": "File size",
+   "desc": true
+  },
+  {
+   "key": "length",
+   "label": "Audio length",
+   "desc": true
+  },
+  {
+   "key": "pages",
+   "label": "Page count",
+   "desc": true
+  },
+  {
+   "key": "progress",
+   "label": "Progress",
+   "desc": true
+  },
+  {
+   "key": "read",
+   "label": "Last read",
+   "desc": true
+  },
+  {
+   "key": "started",
+   "label": "Started",
+   "desc": true
+  },
+  {
+   "key": "finished",
+   "label": "Finished",
+   "desc": true
+  },
+  {
+   "key": "lang",
+   "label": "Language",
+   "desc": false
+  },
+  {
+   "key": "publisher",
+   "label": "Publisher",
+   "desc": false
+  }
+ ],
+ "aliases": {
+  "format": {
+   "epub": [],
+   "pdf": [],
+   "cbz": [
+    "comic",
+    "comics"
+   ],
+   "audiobook": [
+    "audio",
+    "m4b",
+    "mp3"
+   ]
+  },
+  "kind": {
+   "ebook": [
+    "ebook-only",
+    "text"
+   ],
+   "audio": [
+    "audio-only"
+   ],
+   "both": []
+  },
+  "has": {
+   "audio": [
+    "audiobook"
+   ],
+   "cover": [
+    "art"
+   ],
+   "author": [
+    "authors"
+   ],
+   "series": [],
+   "isbn": [],
+   "tags": [
+    "tag"
+   ],
+   "description": [
+    "summary"
+   ]
+  },
+  "audio": {
+   "narrated": [
+    "human",
+    "real"
+   ],
+   "generated": [
+    "tts",
+    "synthesized"
+   ]
+  },
+  "align": {
+   "aligned": [
+    "done"
+   ],
+   "running": [
+    "in-progress",
+    "pending",
+    "queued"
+   ],
+   "failed": [],
+   "none": [
+    "not-aligned",
+    "no"
+   ]
+  },
+  "status": {
+   "unread": [
+    "not-started",
+    "new"
+   ],
+   "reading": [
+    "started"
+   ],
+   "finished": [
+    "done",
+    "read"
+   ]
+  },
+  "is": {
+   "offline": [
+    "downloaded"
+   ],
+   "duplicate": [
+    "duplicates",
+    "dup"
+   ]
+  },
+  "needs": {
+   "ocr": []
+  }
+ }
+}

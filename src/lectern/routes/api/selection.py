@@ -3,13 +3,15 @@
 The web app selects "everything in this view" (Cmd/Ctrl+A) without enumerating ids: some of
 those works may not be loaded or rendered. Bulk endpoints then take a :class:`Selection`
 (the view's filter, minus the works the user deselected) instead of ``work_ids`` and resolve
-it here, with exactly the filter the Library applies on the client (``frontend/src/pages/
-Library.tsx``: ``fold`` on title, author, and ISBN; reading status from KOReader progress;
+it here, with exactly the filter the Library applies (``frontend/src/pages/Library.tsx``:
+``fold`` on title, author, and ISBN; the reading status from ``lectern.reading_state``;
 direct membership of one shelf, or ``unshelved``: on none of the shelves the person sees,
-the Library's root folder).
+the Library's root folder; and a filter, ``f``, which the server always evaluates:
+``GET /api/library?f=``, lectern.filters).
 
-- ``GET /api/library/count?q=&status=&shelf=&unshelved=``: how many works the view holds, for
-  "All N selected", and ``view_token``, a fingerprint of exactly which works they are.
+- ``GET /api/library/count?q=&status=&shelf=&unshelved=&f=&subtree=``: how many works the
+  view holds, for "All N selected", and ``view_token``, a fingerprint of exactly which works
+  they are.
 
 A selection names the view by ``view_token``; if the view resolves to a different set of
 works by the time the action runs (one left and another arrived, say), it is ``409
@@ -21,22 +23,23 @@ selection may resolve to, as it caps ``work_ids``.
 from __future__ import annotations
 
 import hashlib
-import unicodedata
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import and_, select
+from sqlalchemy.orm import Session
 
-from lectern.access import shelf_permission, visible_shelf_ids, visible_works
-from lectern.models import ReadingProgress, Shelf, ShelfItem, User, Work
+from lectern import filters
+from lectern.access import visible_shelf_ids
+from lectern.filters import fold
+from lectern.models import ShelfItem, User, Work
+from lectern.reading_state import FINISHED
 from lectern.security.deps import Auth, DbDep
 
 router = APIRouter()
 
 Status = Literal["all", "reading", "unread", "finished"]
-FINISHED = 0.985  # Library.tsx FINISHED
 MAX_EXCLUDE = 5000
 
 
@@ -48,6 +51,11 @@ class ViewFilter(BaseModel):
     shelf: int | None = None
     # The Library's root folder: works on none of the shelves this person sees.
     unshelved: bool = False
+    # A filter (docs/filters.md), and with ``shelf``, the shelf's sub-shelves too.
+    f: str = Field(default="", max_length=filters.MAX_CHARS)
+    subtree: bool = False
+    # ``is:offline``: the works this device holds offline.
+    offline_ids: list[int] = Field(default_factory=list, max_length=MAX_EXCLUDE)
 
 
 class Selection(BaseModel):
@@ -61,32 +69,6 @@ class Selection(BaseModel):
     exclude_ids: list[int] = Field(default_factory=list, max_length=MAX_EXCLUDE)
     view_token: str = Field(min_length=1, max_length=64)
     expected_count: int | None = Field(default=None, ge=0)
-
-
-def fold(s: str) -> str:
-    """``frontend/src/lib/fuzzy.ts`` ``fold``: compatibility-decompose, drop combining
-    diacritical marks (U+0300–U+036F), lower-case."""
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", s) if not "\u0300" <= c <= "\u036f"
-    ).lower()
-
-
-def status_of(percentage: float | None) -> Status:
-    p = percentage or 0.0
-    if p <= 0:
-        return "unread"
-    return "finished" if p >= FINISHED else "reading"
-
-
-def _latest_percentage(work: Work, progress: dict[str, ReadingProgress]) -> float | None:
-    """The percentage of the work's most recently synced file, as ``_attach_progress``
-    picks ``work.progress`` for the client."""
-    best: ReadingProgress | None = None
-    for f in work.files:
-        p = progress.get(f.partial_md5 or "")
-        if p is not None and (best is None or p.updated_at > best.updated_at):
-            best = p
-    return best.percentage if best is not None else None
 
 
 def shelved_work_ids(user: User):
@@ -104,28 +86,27 @@ def view_work_ids(db: Session, user: User, f: ViewFilter) -> list[int]:
     """Ids of the works ``user`` sees in the Library under ``f``, in title order. A shelf the
     user may not see is 404, exactly as ``GET /api/shelves/{id}``: its membership is not
     theirs to learn or to act on."""
-    stmt = select(Work).where(visible_works(user))
-    if f.shelf is not None:
-        shelf = db.get(Shelf, f.shelf)
-        if shelf is None or shelf_permission(db, user, shelf) is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-        stmt = stmt.where(
-            Work.id.in_(select(ShelfItem.work_id).where(ShelfItem.shelf_id == f.shelf))
-        )
-    if f.unshelved:
-        stmt = stmt.where(Work.id.not_in(shelved_work_ids(user)))
+    from lectern.routes.api.core import library_query
+
+    stmt = library_query(
+        db, user, f=f.f, shelf=f.shelf, subtree=f.subtree, unshelved=f.unshelved,
+        offline=frozenset(f.offline_ids),
+    )  # fmt: skip
     if f.status != "all":
-        stmt = stmt.options(selectinload(Work.files))
-    works = db.scalars(stmt.order_by(Work.sort_title, Work.id)).all()
+        x = filters.fraction_of(user)
+        stmt = stmt.where(
+            {"unread": x <= 0, "reading": and_(x > 0, x < FINISHED), "finished": x >= FINISHED}[
+                f.status
+            ]
+        )
+    works = db.execute(
+        stmt.with_only_columns(Work.id, Work.title, Work.author, Work.isbn).order_by(
+            Work.sort_title, Work.id
+        )
+    ).all()
     needle = fold(f.q.strip())
     if needle:
         works = [w for w in works if needle in fold(f"{w.title} {w.author} {w.isbn or ''}")]
-    if f.status != "all":
-        progress = {
-            p.document: p
-            for p in db.scalars(select(ReadingProgress).where(ReadingProgress.user_id == user.id))
-        }
-        works = [w for w in works if status_of(_latest_percentage(w, progress)) == f.status]
     return [w.id for w in works]
 
 
@@ -173,7 +154,15 @@ def library_count(
     status_: Status = Query(default="all", alias="status"),
     shelf: int | None = None,
     unshelved: bool = False,
+    f: str = Query(default="", max_length=filters.MAX_CHARS),
+    subtree: bool = False,
+    offline: str = Query(default="", max_length=60000),
 ) -> dict:
-    f = ViewFilter(q=q, status=status_, shelf=shelf, unshelved=unshelved)
+    from lectern.routes.api.core import offline_ids_param
+
+    f = ViewFilter(
+        q=q, status=status_, shelf=shelf, unshelved=unshelved, f=f, subtree=subtree,
+        offline_ids=sorted(offline_ids_param(offline)),
+    )  # fmt: skip
     ids = view_work_ids(db, auth.user, f)
     return {"total": len(ids), "view_token": view_token(ids)}

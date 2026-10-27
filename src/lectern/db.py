@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+import lectern.reading_state  # noqa: F401  (registers the reading-state flush hook)
 from lectern.config import Settings
 
 _engine: Engine | None = None
@@ -22,6 +23,10 @@ def _apply_pragmas(dbapi_conn, _record) -> None:
     cur.execute("PRAGMA busy_timeout=5000")
     cur.execute("PRAGMA temp_store=MEMORY")
     cur.close()
+    # Accent- and case-insensitive text matching for library filters (lectern.filters).
+    from lectern.filters import fold
+
+    dbapi_conn.create_function("lectern_fold", 1, fold, deterministic=True)
 
 
 def make_engine(url: str) -> Engine:

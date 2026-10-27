@@ -138,12 +138,19 @@ under Devices → AI tools → Edit.`
   with metadata corrections. Joining only fills the book's empty fields, and adding audio to a
   book that already has an audiobook needs `add_audio_tracks`. Same as the review sheet.
 - `cancel_import`: discard it and its files.
-- `search_library`, `list_recent` (`added`, or what you `read` most recently), `get_book`
+- `search_library` takes the Library's filter syntax ([filters.md](filters.md)), such as
+  `format:epub -has:audio author:"Tolstoy" year:1850..1900 progress:<50%`, and a `sort`; it
+  returns the filter it ran in canonical form as `filter`. A value it cannot take is an
+  `invalid_filter` error with the reason.
+- `list_recent` (`added`, or what you `read` most recently), `get_book`
   (metadata, formats, audiobook length, alignment status and job, shelves, your progress).
   Formats are labelled `EPUB`, `PDF`, `CBZ`, or `audiobook`.
 - `list_shelves`: every shelf you see, with its path, parent, books directly on it,
   sub-shelves, and your permission (`owner`, `edit`, `view`). A shelf shared with you appears
-  at your top level; shelves above it that are not shared with you are never named.
+  at your top level; shelves above it that are not shared with you are never named. A smart
+  shelf has `smart: true` (and its `filter`, for people who manage it); its books are its
+  filter's matches, so `search_library` with `shelf:"<path>"` lists them and nothing is
+  added to it by hand.
 - `add_to_shelf`, `remove_from_shelf`: shelves you may edit, with the shelf rules of the web
   app (for example, a reader with an edit grant cannot widen another reader's library). A book
   can be on several shelves; adding never takes it off another.
