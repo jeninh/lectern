@@ -544,6 +544,8 @@ export interface UploadSessionInfo {
 
 export interface MatchSuggestion {
   id: number;
+  /** "ingest": a new upload looked like a book you have; "library": the duplicate scan. */
+  origin?: "ingest" | "library";
   score: number;
   reason: string;
   created_at: string | null;
@@ -739,6 +741,32 @@ export interface LookupResult {
   errors: { provider: string; error: string }[];
   cached: boolean;
 }
+
+/** Fields the automatic metadata pass fills (lectern/autometa.py FIELDS). */
+export type AutoField = "description" | "series" | "series_index" | "isbn" | "tags";
+
+/** One work's result from the Fix metadata pass (GET /api/metadata/suggestions). */
+export interface MetaSuggestionItem {
+  work_id: number;
+  version: number;
+  title: string;
+  author: string;
+  status: "queued" | "ready" | "no_match" | "error";
+  error: string | null;
+  fields: Partial<Record<AutoField, { value: unknown; provider: string; provider_name: string; source_url: string }>>;
+  current: Record<AutoField, unknown>;
+  updated_at: string | null;
+}
+
+export interface MetaSuggestions {
+  counts: Partial<Record<MetaSuggestionItem["status"], number>>;
+  items: MetaSuggestionItem[];
+  lookup_enabled: boolean;
+  lookup_offline: boolean;
+}
+
+/** POST /api/metadata/fix: what happened to each selected book. */
+export type FixStatus = "queued" | "already_queued" | "nothing_missing" | "not_found" | "waiting_review" | "dismissed";
 
 export interface TrashList {
   retention_days: number;

@@ -193,6 +193,23 @@ def _strs(v: object, n: int = 20, limit: int = 128) -> list[str]:
     return [s.strip()[:limit] for s in v if isinstance(s, str) and s.strip()][:n]
 
 
+_SERIES_NUMBER = re.compile(
+    r"^(?P<name>.+?)[\s,;:]*(?:\(|#|\b(?:book|vol\.?|volume|no\.?)\s*#?)\s*"
+    r"(?P<n>\d{1,4}(?:\.\d{1,2})?)\)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def split_series(text: str | None) -> tuple[str | None, float | None]:
+    """'Discworld (3)', 'Discworld #3', 'Discworld, book 3' -> ('Discworld', 3.0)."""
+    if not text:
+        return None, None
+    m = _SERIES_NUMBER.match(text.strip())
+    if not m or not m.group("name").strip(" ,;:"):
+        return text.strip() or None, None
+    return m.group("name").strip(" ,;:"), float(m.group("n"))
+
+
 def openlibrary(q: Query, fetch: Callable[[str], bytes]) -> list[dict]:
     origin = PROVIDERS["openlibrary"]["origin"]
     params = {
@@ -225,7 +242,7 @@ def openlibrary(q: Query, fetch: Callable[[str], bytes]) -> list[dict]:
         isbns = [normalize_isbn(x) for x in _strs(d.get("isbn"), 50, 20)]
         isbn = q.isbn if q.isbn else next((x for x in isbns if x), None)
         langs = _strs(d.get("language"), 3, 8)
-        series = _strs(d.get("series"), 1, 256)
+        series, series_index = split_series((_strs(d.get("series"), 1, 256) or [None])[0])
         year = d.get("first_publish_year")
         out.append(
             {
@@ -235,7 +252,8 @@ def openlibrary(q: Query, fetch: Callable[[str], bytes]) -> list[dict]:
                 "fields": {
                     "title": _plain(d.get("title"), 512),
                     "authors": [{"name": a} for a in _strs(d.get("author_name"), 10, 256)],
-                    "series": series[0] if series else None,
+                    "series": series,
+                    "series_index": series_index,
                     "description": description,
                     "language": _LANG3.get(langs[0]) if langs else None,
                     "isbn": isbn,

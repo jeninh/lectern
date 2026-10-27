@@ -130,8 +130,8 @@ def features(db: Session, settings: Settings, models_: dict | None = None) -> li
             "name": "Metadata suggestions",
             "contacts": ["openlibrary.org", "www.googleapis.com"],
             "on": instance.get(db, "metadata_lookup_enabled"),
-            "when": "When someone asks for suggestions in the book editor: the ISBN, or the "
-            "title and first author, is sent.",
+            "when": "When someone asks for suggestions in the book editor, or runs Fix metadata "
+            "on books in the Library: the ISBN, or the title and first author, is sent.",
         },
         {
             "id": "elevenlabs",

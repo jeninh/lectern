@@ -471,6 +471,7 @@ def _suggestion_json(db, s: MatchSuggestion) -> dict:
     new, cand = db.get(Work, s.work_id), db.get(Work, s.candidate_work_id)
     return {
         "id": s.id,
+        "origin": s.origin,
         "score": s.score,
         "reason": s.reason,
         "created_at": iso(s.created_at),
@@ -495,6 +496,17 @@ def suggestions(auth: Manager, db: DbDep) -> dict:
     return {"suggestions": [_suggestion_json(db, s) for s in rows]}
 
 
+@router.post("/suggestions/scan")
+def scan_duplicates(auth: Manager, db: DbDep) -> dict:
+    """Look for likely duplicates among the works already in the library (local only; the
+    hourly sweep runs the same scan). New pairs join the review list above."""
+    from lectern import duplicates
+
+    found = duplicates.scan(db)
+    db.commit()
+    return {"found": found}
+
+
 def _open_suggestion(db, suggestion_id: int) -> MatchSuggestion:
     s = db.get(MatchSuggestion, suggestion_id)
     if (
@@ -506,12 +518,21 @@ def _open_suggestion(db, suggestion_id: int) -> MatchSuggestion:
     return s
 
 
-def _merge_commit(request, auth, db, settings, source: Work, target: Work, label: str) -> None:
+def _merge_commit(
+    request, auth, db, settings, source: Work, target: Work, label: str, *, keep_owner_data=False
+) -> None:
     """Merge under the caller's library lock: file moves are journalled and put back if the
-    commit fails; the emptied source folder and its history go only after it succeeds."""
+    commit fails; the emptied source folder and its history go only after it succeeds.
+    ``keep_owner_data`` (library duplicates): the source's metadata, positions, and reading
+    states fill what the target lacks first (``lectern.duplicates.carry_over``)."""
+    from lectern import duplicates
+
     journal = Journal()
     try:
+        restore = duplicates.carry_over(db, source, target) if keep_owner_data else None
         finish = merge_work(db, settings, source, target, journal)
+        if restore:
+            restore()
         target.version = (target.version or 1) + 1
         write_book_json(db, settings.library_dir, target)
         audit.record(
@@ -539,7 +560,9 @@ def _merge(request, auth, db, settings, suggestion_id: int) -> dict:
     s = _open_suggestion(db, suggestion_id)
     source, target = db.get(Work, s.work_id), db.get(Work, s.candidate_work_id)
     label = f"{source.title} -> {target.title}"
-    _merge_commit(request, auth, db, settings, source, target, label)
+    _merge_commit(
+        request, auth, db, settings, source, target, label, keep_owner_data=s.origin == "library"
+    )
     return {"work_id": target.id}
 
 

@@ -649,7 +649,7 @@ def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda 
     """The hourly sweep: abandoned uploads and imports, the 30-day trash, old undo history,
     replay records, and staged covers. Each part is independent; one failing does not stop
     the rest."""
-    from lectern import editing, idempotency, imports, trash
+    from lectern import duplicates, editing, idempotency, imports, trash
     from lectern.fsops import LIBRARY_LOCK
     from lectern.tts.jobs import sweep as tts_sweep
     from lectern.uploads import sweep
@@ -661,6 +661,7 @@ def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda 
         ("idempotency", idempotency.sweep),
         ("editing", lambda db: editing.sweep(db, settings, busy)),
         ("tts", lambda db: tts_sweep(db, settings.data_dir)),
+        ("duplicates", lambda db: (duplicates.scan(db), db.commit())),
     ]
     for name, step in steps:
         with LIBRARY_LOCK, session_factory() as db:
@@ -672,14 +673,21 @@ def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda 
 
 
 class JobRunner:
-    """Background thread: runs transcode jobs, the hourly housekeeping, and folder renames
-    that had to wait for a build."""
+    """Background thread: runs transcode jobs, the metadata pass (``lectern.autometa``), the
+    hourly housekeeping, and folder renames that had to wait for a build. ``fetch`` is the
+    metadata lookup's transport (``app.state.lookup_fetch``)."""
 
     def __init__(
-        self, session_factory: sessionmaker, settings: Settings, poll: float = 5.0, busy=None
+        self,
+        session_factory: sessionmaker,
+        settings: Settings,
+        poll: float = 5.0,
+        busy=None,
+        fetch=None,
     ):
         self.session_factory = session_factory
         self.settings = settings
+        self.fetch = fetch
         self.poll = poll
         self.busy = busy or (lambda _id: False)
         self.wake = threading.Event()
@@ -697,7 +705,7 @@ class JobRunner:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        from lectern import editing
+        from lectern import autometa, editing
         from lectern.fsops import LIBRARY_LOCK
 
         last_sweep = utcnow()
@@ -706,6 +714,7 @@ class JobRunner:
         while not self._stop.is_set():
             try:
                 run_pending(self.session_factory, self.settings)
+                autometa.run_pending(self.session_factory, self.fetch)
                 if utcnow() - last_sweep > timedelta(hours=1):
                     housekeeping(self.session_factory, self.settings, self.busy)
                     last_sweep = utcnow()

@@ -787,21 +787,36 @@ def _device_pred(ctx: Context, values: tuple[Value, ...], key: str) -> ColumnEle
 
 def duplicate_ids(db: Session, user: User) -> set[int]:
     """Works that look like another work this person can see: the same title and author
-    (accents, case, and spacing ignored), or a match ingest was unsure about and nobody has
-    decided yet. Only visible works are compared, so a hidden copy is never hinted at."""
+    (accents, case, and spacing ignored) unless someone said they are different books, or a
+    possible duplicate (from ingest or the library scan) nobody has decided on yet. Only visible works are compared, so a hidden copy is never hinted at."""
     seen: dict[tuple[str, str], list[int]] = {}
     for wid, title, author in db.execute(
         select(Work.id, Work.title, Work.author).where(visible_works(user))
     ):
         k = (" ".join((fold(title) or "").split()), " ".join((fold(author) or "").split()))
         seen.setdefault(k, []).append(wid)
-    out = {w for ids in seen.values() if len(ids) > 1 for w in ids}
-    visible = {w for ids in seen.values() for w in ids}
-    for a, b in db.execute(
-        select(MatchSuggestion.work_id, MatchSuggestion.candidate_work_id).where(
-            MatchSuggestion.resolved_at.is_(None)
+    open_pairs, dismissed = [], set()
+    for a, b, resolution in db.execute(
+        select(
+            MatchSuggestion.work_id, MatchSuggestion.candidate_work_id, MatchSuggestion.resolution
+        ).where(
+            or_(MatchSuggestion.resolved_at.is_(None), MatchSuggestion.resolution == "dismissed")
         )
     ):
+        if resolution == "dismissed":
+            dismissed.add(frozenset((a, b)))
+        else:
+            open_pairs.append((a, b))
+    # A pair someone marked as different books is not a duplicate any more.
+    out = {
+        w
+        for ids in seen.values()
+        if len(ids) > 1
+        for w in ids
+        if any(o != w and frozenset((o, w)) not in dismissed for o in ids)
+    }
+    visible = {w for ids in seen.values() for w in ids}
+    for a, b in open_pairs:
         if a in visible and b in visible:
             out |= {a, b}
     return out
