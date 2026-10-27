@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
+from lectern.models import Role
 from lectern.security.deps import Auth
 
 router = APIRouter()
@@ -82,6 +84,30 @@ def doc_media(auth: Auth, name: str):
     return FileResponse(
         path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"}
     )
+
+
+_AUDIENCES = {
+    Role.OWNER: {"everyone", "members", "owner"},
+    Role.MEMBER: {"everyone", "members"},
+    Role.READER: {"everyone"},
+}
+
+
+@router.get("/app/doc-text", include_in_schema=False)
+def doc_text(auth: Auth):
+    """The Docs tab's Markdown for the docs this person's role may see (docs/index.yml
+    ``audience``), from doc-text.json (written by vite.config.ts). Only docs for everyone are in
+    the public bundle, so ops and admin docs never reach a reader's browser."""
+    path = APP_DIR / "doc-text.json"
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    seen = _AUDIENCES.get(auth.user.role, {"everyone"})
+    sections = []
+    for section in json.loads(path.read_text(encoding="utf-8"))["sections"]:
+        docs = [d for d in section["docs"] if d.get("audience", "everyone") in seen]
+        if docs:
+            sections.append({**section, "docs": docs})
+    return JSONResponse({"sections": sections}, headers={"Cache-Control": "private, no-cache"})
 
 
 @router.get("/app", include_in_schema=False)

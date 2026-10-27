@@ -323,11 +323,14 @@ function EpubReader() {
   // there now (a hit chosen while it is still opening is picked up by the open above).
   useEffect(() => {
     if (atKey === lastAt.current) return;
-    lastAt.current = atKey;
     const hit = hitTarget(search);
     target.current = hit;
     const v = view.current;
-    if (!hit || !v || loading) return;
+    // Still opening: the open may already have gone to an earlier hit, so this runs again
+    // when it is done (loading) and goes to the latest one.
+    if (hit && (!v || loading)) return;
+    lastAt.current = atKey;
+    if (!hit || !v) return;
     setHandoff(null);
     v.renderer.goTo({ index: hit.spine_index, anchor: (doc) => highlight(doc, hit.char, hit.char + hit.length) ?? doc.body }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps

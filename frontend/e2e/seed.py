@@ -67,6 +67,17 @@ def main(base: Path) -> None:
                 webauthn_user_handle=secrets.token_bytes(32),
             )
         )
+        # The Docs tab's reader case (e2e/docs.spec.ts): docs for members and the owner never
+        # reach a reader's browser.
+        db.add(
+            User(
+                username="reader",
+                display_name="Reader",
+                role=Role.READER,
+                password_hash=hash_password(PASSWORD),
+                webauthn_user_handle=secrets.token_bytes(32),
+            )
+        )
         complete_setup(db)
         assert len(db.scalars(select(Work)).all()) == EPUBS
         for i in range(EPUBS + 1, TOTAL + 1):

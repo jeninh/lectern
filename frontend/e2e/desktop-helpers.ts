@@ -4,11 +4,11 @@ export const PASSWORD = "e2e correct horse battery"; // e2e/seed.py
 
 /** The flat Everything view of the Library is where the multi-select suites run (the default
  * Folders view shows only books on no shelf); e2e/folders.spec.ts covers Folders. */
-export async function signIn(page: Page, path = "/app/library?view=everything") {
+export async function signIn(page: Page, path = "/app/library?view=everything", username = "owner") {
   // The password form's POST, from the page's own cookie jar (the form itself sits behind
   // "Use password instead").
   const base = test.info().project.use.baseURL!;
-  const r = await page.request.post("/login", { form: { username: "owner", password: PASSWORD, totp: "", next: "/app" }, headers: { origin: base }, maxRedirects: 0 });
+  const r = await page.request.post("/login", { form: { username, password: PASSWORD, totp: "", next: "/app" }, headers: { origin: base }, maxRedirects: 0 });
   expect(r.status(), await r.text()).toBe(303);
   await page.goto(path);
 }
