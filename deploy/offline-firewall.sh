@@ -18,6 +18,9 @@ set -u
 CONTAINER=${1:?usage: offline-firewall.sh CONTAINER [UID]}
 UID_MATCH=${2:+meta skuid $2 }
 
+# Without nft every apply would fail while the service looked healthy.
+command -v nft >/dev/null 2>&1 || { echo "nft is not installed: sudo apt install nftables" >&2; exit 1; }
+
 rules() {
 	cat <<EOF
 table inet lectern_offline {
@@ -31,9 +34,18 @@ table inet lectern_offline {
 EOF
 }
 
+WAITING=0
+
 apply() {
-	pid=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER" 2>/dev/null) || return 0
-	[ "${pid:-0}" -gt 0 ] || return 0
+	if ! pid=$(docker inspect --type container -f '{{.State.Pid}}' "$CONTAINER" 2>/dev/null) || [ "${pid:-0}" -le 0 ]; then
+		# A typo in the name would otherwise look exactly like a container that is not up yet.
+		if [ "$WAITING" = 0 ]; then
+			echo "waiting for container $CONTAINER: it does not exist or is not running (check the name with docker ps)" >&2
+			WAITING=1
+		fi
+		return 0
+	fi
+	WAITING=0
 	if nsenter -t "$pid" -n nft list table inet lectern_offline >/dev/null 2>&1; then
 		return 0
 	fi
@@ -44,6 +56,11 @@ apply() {
 	fi
 }
 
+# Events from before the first apply too, so a start in between is not missed (apply() skips a
+# namespace that already has the rules).
+SINCE=$(date +%s)
 apply
-docker events --filter type=container --filter event=start --filter "container=$CONTAINER" |
+docker events --since "$SINCE" --filter type=container --filter event=start --filter "container=$CONTAINER" |
 	while read -r _; do apply; done
+# docker events ended (dockerd stopped or restarted): exit non-zero so the service restarts.
+exit 1

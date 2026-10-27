@@ -16,6 +16,9 @@ Allowed while offline:
 - a UDP *connect* to Tailscale's resolver (:data:`TAILSCALE_PROBE`) and nowhere else: it sends
   nothing; KOReader plugin zips use it to learn Lectern's own Tailscale address
   (:func:`lectern.koplugin.detect_tailscale_ip`).
+  ``send()`` on a connected socket raises no audit event, so a process could still send DNS
+  queries to that one address this way; the uid-scoped firewall rules of
+  ``deploy/offline-firewall.sh`` (docs/offline-mode.md) are what close that gap.
 
 Everything else is refused: name lookups other than ``localhost`` (DNS is outbound traffic
 too), reverse lookups, and connections to any other address, LAN included (a LAN proxy could
