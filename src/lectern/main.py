@@ -236,6 +236,8 @@ def create_app(
         "koplugin_hello": SlidingWindowLimiter(limit=30, window_seconds=60),
         # Optional metadata suggestions (outbound to Open Library / Google Books), per user.
         "lookup": SlidingWindowLimiter(limit=10, window_seconds=60),
+        # Bulk job requests from the selection bar (POST /api/works/pdf-epub), per user.
+        "bulk_jobs": SlidingWindowLimiter(limit=10, window_seconds=60),
         # AI apps on /mcp: failed AI keys per address, requests per valid key, and tool calls
         # per key within the burst window (over it alerts; see lectern.ai_keys).
         "mcp_fail": SlidingWindowLimiter(limit=settings.rate_limit_per_minute, window_seconds=60),
