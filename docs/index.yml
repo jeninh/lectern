@@ -28,6 +28,11 @@ sections:
         title: Kindle and Kobo (KOReader plugin)
         description: Connect an e-reader without typing passwords; progress sync and the catalogue.
         icon: devices
+      - file: home-network.md
+        title: Home Wi-Fi access
+        description: Let e-readers sync over your home Wi-Fi without Tailscale, safely.
+        icon: devices
+        audience: members
       - file: offline.md
         title: Phone app (PWA)
         description: Install Lectern on a phone, download books, and read and listen offline.
