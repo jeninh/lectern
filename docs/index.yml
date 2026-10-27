@@ -71,6 +71,10 @@ sections:
         title: Kindle books (MOBI and AZW3)
         description: DRM-free MOBI and AZW3 books are converted to EPUB on arrival.
         icon: book
+      - file: search.md
+        title: Search inside books
+        description: Find passages inside your books from Cmd/Ctrl+K and open the book at the match.
+        icon: book
 
   - title: AI and automation
     docs:
