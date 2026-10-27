@@ -1,7 +1,7 @@
 // Book formats as the UI names them. EPUB has text (reader, read-along, alignment); PDF and CBZ
 // comics have pages (page viewer, page progress that KOReader syncs as page numbers).
 
-import type { BookFile, Work } from "./types";
+import type { BookFile, TextHit, Work } from "./types";
 
 export const EPUB = "application/epub+zip";
 export const PDF = "application/pdf";
@@ -41,6 +41,19 @@ export function readerPath(work: Pick<Work, "id" | "files">, file?: BookFile): s
   if (file || hasEpub(work)) return `/app/reader/${work.id}`;
   const paged = bookFiles(work).find(isPaged);
   return paged ? `/app/reader/${work.id}?file=${paged.id}` : `/app/reader/${work.id}`;
+}
+
+/** Where a search hit opens: the EPUB reader at the match, or the PDF at its page. */
+export function hitPath(hit: TextHit): string {
+  if (hit.format === "pdf") return `/app/reader/${hit.work_id}?file=${hit.file_id}&page=${hit.page}&find=${encodeURIComponent(hit.match)}`;
+  return `/app/reader/${hit.work_id}?at=${hit.spine_index}:${hit.char}&len=${hit.length}`;
+}
+
+/** The `?at=<spine>:<char>&len=<n>` of a search hit, if the reader was opened at one. */
+export function hitTarget(search: URLSearchParams): { spine_index: number; char: number; length: number } | null {
+  const m = /^(\d+):(\d+)$/.exec(search.get("at") ?? "");
+  if (!m) return null;
+  return { spine_index: Number(m[1]), char: Number(m[2]), length: Math.max(1, Number(search.get("len")) || 1) };
 }
 
 /** KOReader positions: "/body/DocFragment[12]/…" for EPUBs, a page number for PDFs and comics. */

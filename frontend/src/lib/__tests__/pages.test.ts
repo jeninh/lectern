@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bookFiles, positionLabel, readerPath } from "../formats";
-import { fitScale, spreadOf, stepZoom, turn } from "../pages";
+import { findInItems, fitScale, multiply, spreadOf, stepZoom, turn } from "../pages";
 import { ACCEPT, mediaTypeOf } from "../uploads";
 import type { BookFile } from "../types";
 
@@ -62,5 +62,30 @@ describe("formats", () => {
   it("KOReader page numbers read as pages", () => {
     expect(positionLabel("12")).toBe("Page 12");
     expect(positionLabel("/body/DocFragment[4]/body/p[1]/text().0")).toBe("Section 4");
+  });
+});
+
+describe("finding a search match on a PDF page", () => {
+  // pdf.js splits and spaces text its own way; the server's match comes from PDFium.
+  const items = [{ str: "The Orinoco" }, { str: " " }, { str: "floods in Ma" }, { str: "y. Café 😀 ok" }];
+  it("maps the match onto the pieces of the items it spans", () => {
+    expect(findInItems(items, "orinoco floods")).toEqual([
+      { item: 0, from: 4, to: 11 },
+      { item: 2, from: 0, to: 6 },
+    ]);
+    expect(findInItems(items, "in May")).toEqual([
+      { item: 2, from: 7, to: 12 },
+      { item: 3, from: 0, to: 1 },
+    ]);
+  });
+  it("ignores case and accents, and counts a surrogate pair as one character", () => {
+    expect(findInItems(items, "CAFE")).toEqual([{ item: 3, from: 3, to: 7 }]);
+    expect(findInItems(items, "😀 ok")).toEqual([{ item: 3, from: 8, to: 13 }]);
+    expect(findInItems(items, "nowhere")).toEqual([]);
+    expect(findInItems(items, "  ")).toEqual([]);
+  });
+  it("multiplies transforms like pdf.js", () => {
+    // scale 2 with a y flip, after a translation by (10, 20)
+    expect(multiply([2, 0, 0, -2, 0, 100], [1, 0, 0, 1, 10, 20])).toEqual([2, 0, 0, -2, 20, 60]);
   });
 });

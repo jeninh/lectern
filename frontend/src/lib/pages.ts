@@ -53,3 +53,57 @@ export function stepZoom(zoom: number, dir: 1 | -1): number {
 export function pageLabel(shown: number[], total: number): string {
   return shown.length > 1 ? `Pages ${shown[0]}–${shown[1]} of ${total}` : `Page ${shown[0]} of ${total}`;
 }
+
+/** A piece of one pdf.js text item: UTF-16 offsets [from, to) of `items[item].str`. */
+export interface TextPiece {
+  item: number;
+  from: number;
+  to: number;
+}
+
+const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+
+/**
+ * Where the first occurrence of `needle` is among a page's pdf.js text items (a search match
+ * from the server, which read the same page with PDFium): ignoring case, accents, and
+ * whitespace, since the two libraries space and split text differently.
+ */
+export function findInItems(items: { str: string }[], needle: string): TextPiece[] {
+  const want = fold(needle).replace(/\s+/g, "");
+  if (!want) return [];
+  let hay = "";
+  const at: [number, number, number][] = []; // per folded character: item, offset, width
+  items.forEach((it, i) => {
+    for (let j = 0; j < it.str.length; ) {
+      const ch = String.fromCodePoint(it.str.codePointAt(j)!);
+      if (!/\s/.test(ch)) {
+        for (const f of fold(ch)) {
+          hay += f;
+          at.push([i, j, ch.length]);
+        }
+      }
+      j += ch.length;
+    }
+  });
+  const k = hay.indexOf(want);
+  if (k < 0) return [];
+  const pieces: TextPiece[] = [];
+  for (const [i, j, w] of at.slice(k, k + want.length)) {
+    const last = pieces[pieces.length - 1];
+    if (last && last.item === i) last.to = Math.max(last.to, j + w);
+    else pieces.push({ item: i, from: j, to: j + w });
+  }
+  return pieces;
+}
+
+/** The product of two PDF transform matrices `[a, b, c, d, e, f]` (pdf.js `Util.transform`). */
+export function multiply(m: number[], n: number[]): number[] {
+  return [
+    m[0] * n[0] + m[2] * n[1],
+    m[1] * n[0] + m[3] * n[1],
+    m[0] * n[2] + m[2] * n[3],
+    m[1] * n[2] + m[3] * n[3],
+    m[0] * n[4] + m[2] * n[5] + m[4],
+    m[1] * n[4] + m[3] * n[5] + m[5],
+  ];
+}

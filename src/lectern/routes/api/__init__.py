@@ -21,6 +21,7 @@ from lectern.routes.api import (
     pdftext,
     queues,
     readalong,
+    search,
     security,
     selection,
     shelves,
@@ -47,6 +48,7 @@ router.include_router(works.router)
 router.include_router(offline.router)
 router.include_router(notifications.router)
 router.include_router(readalong.router)
+router.include_router(search.router)
 router.include_router(pages.router)
 router.include_router(pdftext.router)
 router.include_router(align.router)

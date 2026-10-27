@@ -15,7 +15,7 @@
 // boxes on the device, so this works offline too.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Chevron, Follow, NextSentence, Pause, Play, PrevSentence } from "../components/Icons";
 import { ApiError, get } from "../lib/api";
 import { getPdfInfo, orOffline } from "../lib/offline/store";
@@ -36,7 +36,7 @@ import {
   workSentenceAt,
 } from "../lib/pdfreadalong";
 import { formatClock, locate, saveProgress, spokenDuration } from "../lib/readalong";
-import { clampPage, type Fit, fitScale, pageLabel, spreadOf, stepZoom, turn } from "../lib/pages";
+import { clampPage, findInItems, type Fit, fitScale, multiply, pageLabel, spreadOf, stepZoom, turn } from "../lib/pages";
 import { useStore } from "../lib/store";
 import type { PagesInfo, PdfBox } from "../lib/types";
 
@@ -70,8 +70,14 @@ function writeMark(fileId: number, m: Mark) {
 }
 
 /* Minimal pdf.js surface (the package ships types, but loading it lazily keeps them out). */
+interface PdfTextItem {
+  str: string;
+  transform: number[];
+  width: number;
+}
 interface PdfPage {
-  getViewport(o: { scale: number }): { width: number; height: number; transform: number[] };
+  getViewport(o: { scale: number }): { width: number; height: number; scale: number; transform: number[] };
+  getTextContent(): Promise<{ items: (PdfTextItem | { type: string })[] }>;
   render(o: {
     canvas: HTMLCanvasElement;
     canvasContext: CanvasRenderingContext2D;
@@ -112,6 +118,12 @@ const SOURCES = { web: "Lectern", audio: "the audiobook", koreader: "KOReader" }
 export function PageReader({ workId, fileId }: { workId: number; fileId: number }) {
   const nav = useNavigate();
   const { deviceName, now, resolvedTheme } = useStore();
+  // Opened from a search hit ("In books" in Cmd/Ctrl+K): that page, with the match marked.
+  const [search] = useSearchParams();
+  const findPage = Number(search.get("page")) || 0;
+  const findText = search.get("find") ?? "";
+  const jumpTo = useRef({ page: findPage, find: findText });
+  const lastJump = useRef(`${findPage}|${findText}`);
   const [info, setInfo] = useState<PagesInfo | null>(null);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -153,14 +165,14 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
         setTotal(n);
         const mark = readMark(fileId);
         const server = i.progress;
-        const start = clampPage(mark?.page ?? server?.page ?? 1, n);
+        const start = clampPage(jumpTo.current.page || (mark?.page ?? server?.page ?? 1), n);
         setPage(start);
-        if (mark && server?.page && server.page !== start && server.updated_at && (!mark.seenAt || server.updated_at > mark.seenAt)) setHandoff(server);
+        if (!jumpTo.current.page && mark && server?.page && server.page !== start && server.updated_at && (!mark.seenAt || server.updated_at > mark.seenAt)) setHandoff(server);
         if (!mark && server?.updated_at) writeMark(fileId, { page: start, seenAt: server.updated_at });
         // Newer than anything on the page record: listening, the EPUB, or KOReader moved on.
         const pos = i.position;
         const seen = mark?.seenAt ?? server?.updated_at ?? null;
-        if (pos && pos.page !== start && pos.updated_at && (!seen || pos.updated_at > seen)) {
+        if (!jumpTo.current.page && pos && pos.page !== start && pos.updated_at && (!seen || pos.updated_at > seen)) {
           setHandoff({ page: pos.page, percentage: 0, device: pos.device || SOURCES[pos.source], from_web: false, updated_at: pos.updated_at });
         }
         setLoading(false);
@@ -178,6 +190,18 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
       pdf.current = null;
     };
   }, [fileId, workId]);
+
+  // Another search hit in this same PDF while it is open: the viewer stays mounted, so turn
+  // to that page now (a hit chosen while it is still opening is picked up by the open above).
+  useEffect(() => {
+    const key = `${findPage}|${findText}`;
+    if (key === lastJump.current) return;
+    lastJump.current = key;
+    jumpTo.current = { page: findPage, find: findText };
+    if (!findPage || loading || !latest.current.total) return;
+    setHandoff(null);
+    setPage(clampPage(findPage, latest.current.total));
+  }, [findPage, findText, loading]);
 
   // Stage size, for fitting.
   useEffect(() => {
@@ -487,7 +511,7 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
             <div className="pages-spread" data-count={display.length} dir="ltr">
               {display.map((n) =>
                 info?.url ? (
-                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} onPick={readalong ? pick : undefined} onMarked={keepInView} />
+                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} find={n === findPage ? findText : ""} onPick={readalong ? pick : undefined} onMarked={keepInView} />
                 ) : (
                   <ComicPage key={n} fileId={fileId} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} />
                 ),
@@ -576,10 +600,13 @@ interface PdfCanvasProps extends PageProps {
   onPick?: (n: number, x: number, y: number) => boolean;
   /** Read-along: the highlight is drawn (the element holding its rectangles). */
   onMarked?: (marks: HTMLElement) => void;
+  /** A search match to mark on this page (opened from "In books" in Cmd/Ctrl+K). */
+  find: string;
 }
 
-function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked }: PdfCanvasProps) {
+function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked, find }: PdfCanvasProps) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const [found, setFound] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
   const markLayer = useRef<HTMLDivElement>(null);
   const [css, setCss] = useState<{ w: number; h: number; t: Affine } | null>(null);
   const marked = marks.map((m) => m.join()).join(";");
@@ -610,12 +637,33 @@ function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMar
       });
       task = r;
       await r.promise.catch(() => {});
+      setFound([]);
+      if (!find || cancelled) return;
+      // The match's boxes, from pdf.js's own reading of the page's text (no text layer is
+      // rendered): each item's baseline origin and width, in viewport pixels.
+      const items = (await page.getTextContent()).items.filter((it): it is PdfTextItem => "str" in it);
+      if (cancelled) return;
+      // Where a piece starts and ends inside its item: the item's width split in proportion to
+      // the text's width in a sans-serif (close for proportional fonts, exact for monospace).
+      const measure = document.createElement("canvas").getContext("2d")!;
+      measure.font = "100px sans-serif";
+      const part = (str: string, upto: number) => measure.measureText(str.slice(0, upto)).width / Math.max(1, measure.measureText(str).width);
+      setFound(
+        findInItems(items, find).map(({ item, from, to }) => {
+          const it = items[item];
+          const t = multiply(vp.transform, it.transform);
+          const h = Math.hypot(t[2], t[3]);
+          const w = it.width * vp.scale;
+          const a = part(it.str, from);
+          return { x: t[4] + w * a, y: t[5] - h, w: w * (part(it.str, to) - a), h: h * 1.2 };
+        }),
+      );
     })().catch(() => {});
     return () => {
       cancelled = true;
       task?.cancel();
     };
-  }, [doc, n, count, fit, zoom, stage.w, stage.h, dark]);
+  }, [doc, n, count, fit, zoom, stage.w, stage.h, dark, find]);
   const click = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!onPick || !css || window.getSelection()?.toString()) return;
     const r = e.currentTarget.getBoundingClientRect();
@@ -633,6 +681,14 @@ function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMar
           })}
         </div>
       )}
+      {found.length > 0 && (
+        <div className="pages-found" aria-hidden="true">
+          {found.map((m, i) => (
+            <mark key={i} style={{ left: m.x, top: m.y, width: m.w, height: m.h }} />
+          ))}
+        </div>
+      )}
+      {found.length > 0 && <span className="sr-only" role="status">Search match marked on page {n}</span>}
     </div>
   );
 }

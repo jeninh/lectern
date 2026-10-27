@@ -96,3 +96,14 @@ export function rangeAt(doc: Document, char: number): Range | null {
   r.collapse(true);
   return r;
 }
+
+/** The DOM range covering normalised offsets [start, end), e.g. a search match. */
+export function rangeBetween(doc: Document, start: number, end: number): Range | null {
+  const a = pointAt(doc, start);
+  const b = pointAt(doc, Math.max(start, end - 1)); // the last character, then past it
+  if (!a || !b || b.offset >= b.node.data.length) return null;
+  const r = doc.createRange();
+  r.setStart(a.node, a.offset);
+  r.setEnd(b.node, b.offset + (b.node.data.codePointAt(b.offset)! > 0xffff ? 2 : 1));
+  return r;
+}

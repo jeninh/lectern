@@ -27,9 +27,18 @@ def make_epub(
     cover: bool = False,
     padding: int = 0,
     language: str = "en",
+    chapters: list[str] | None = None,
 ) -> Path:
-    """Build a minimal but valid EPUB 3 with the given OPF metadata."""
+    """Build a minimal but valid EPUB 3 with the given OPF metadata. ``chapters``: the XHTML
+    body of each spine item (default: one short paragraph)."""
     authors = authors if authors is not None else ["Test Author"]
+    body = "<p>Hello.</p>" + ("<p>" + "x" * padding + "</p>" if padding else "")
+    chapters = chapters or [body]
+    items = "".join(
+        f'<item id="ch{i}" href="ch{i}.xhtml" media-type="application/xhtml+xml"/>'
+        for i in range(1, len(chapters) + 1)
+    )
+    itemrefs = "".join(f'<itemref idref="ch{i}"/>' for i in range(1, len(chapters) + 1))
     creators = "".join(f'<dc:creator id="c{i}">{a}</dc:creator>' for i, a in enumerate(authors))
     ident = f'<dc:identifier id="isbn">urn:isbn:{isbn}</dc:identifier>' if isbn else ""
     manifest_cover = (
@@ -51,16 +60,15 @@ def make_epub(
   </metadata>
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
-    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    {items}
     {manifest_cover}
   </manifest>
-  <spine><itemref idref="ch1"/></spine>
+  <spine>{itemrefs}</spine>
 </package>"""
     container = """<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
 </container>"""
-    body = "<p>Hello.</p>" + ("<p>" + "x" * padding + "</p>" if padding else "")
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr(
             zipfile.ZipInfo("mimetype"), "application/epub+zip", compress_type=zipfile.ZIP_STORED
@@ -71,10 +79,11 @@ def make_epub(
             "OEBPS/nav.xhtml",
             "<html xmlns='http://www.w3.org/1999/xhtml'><body><nav epub:type='toc' xmlns:epub='http://www.idpf.org/2007/ops'><ol><li><a href='ch1.xhtml'>1</a></li></ol></nav></body></html>",
         )
-        zf.writestr(
-            "OEBPS/ch1.xhtml",
-            f"<html xmlns='http://www.w3.org/1999/xhtml'><body>{body}</body></html>",
-        )
+        for i, chapter in enumerate(chapters, 1):
+            zf.writestr(
+                f"OEBPS/ch{i}.xhtml",
+                f"<html xmlns='http://www.w3.org/1999/xhtml'><body>{chapter}</body></html>",
+            )
         if cover:
             from io import BytesIO
 
