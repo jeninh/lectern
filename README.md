@@ -199,6 +199,11 @@ PDF's own page numbers are kept as a `page-list` (so "page 143" still matches on
 in KOReader), progress and read-along carry over, and the original PDF stays. Details:
 [`docs/pdf-epub.md`](docs/pdf-epub.md).
 
+**Scanned PDFs** (pictures of pages) get their text recognised with Tesseract as a background
+job, on the server or a worker, one page at a time within Raspberry Pi memory: a searchable copy
+with an invisible text layer sits next to the untouched original. Status, progress, Retry, a
+language override, and the download are on the work. Details: [`docs/ocr.md`](docs/ocr.md).
+
 ## Kindle books
 
 DRM-free MOBI and AZW3 books are converted to EPUB when they arrive (in a resource-limited

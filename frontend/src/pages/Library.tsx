@@ -4,6 +4,7 @@ import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { MakeAudiobookRow } from "../components/MakeAudiobook";
 import { ConvertPdfRow } from "../components/ConvertPdfRow";
+import { OcrStatus } from "../components/OcrStatus";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, Upload } from "../components/Icons";
 import { SendToDevice } from "../components/SendToDevice";
@@ -621,6 +622,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
                   <div className="hint">{bytes(f.size)} · added {relativeTime(f.added_at)}</div>
                   {showTech && f.partial_md5 && <div className="hint mono">Document id {f.partial_md5}</div>}
                   {f.progress && <div className="hint">{percent(f.progress.percentage)} synced {absoluteTime(f.progress.updated_at)}</div>}
+                  {formatOf(f) === "PDF" && <OcrStatus file={f} title={work.title} />}
                 </td>
                 <td style={{ textAlign: "right" }}>
                   <span className="row" style={{ gap: 4, justifyContent: "flex-end" }}>

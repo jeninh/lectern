@@ -33,7 +33,10 @@ FROM python:3.12-slim-bookworm
 # fonts-noto-cjk: Chinese, Japanese, and Korean titles on generated covers (lectern.covergen;
 # every other script's font ships in src/lectern/fonts). Only the serif regular face is used,
 # so the sans and bold collections (~63 MB) are removed.
+# tesseract-ocr: text recognition for scanned PDFs (lectern.ocr, docs/ocr.md), English data
+# only; other languages are one apt package each (tesseract-ocr-fra, -deu, …).
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk restic \
+    tesseract-ocr tesseract-ocr-eng \
  && find /usr/share/fonts/opentype/noto -name '*.ttc' ! -name 'NotoSerifCJK-Regular.ttc' -delete \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 1000 lectern && useradd -u 1000 -g lectern -m -s /usr/sbin/nologin lectern \

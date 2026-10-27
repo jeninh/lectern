@@ -1015,10 +1015,10 @@ def test_failed_enrollment_codes_do_not_lock_out_working_workers(app, wc):
 def test_the_pi_does_not_wait_for_a_worker_on_a_kind_no_worker_can_claim(
     client, owner, work_id, wc
 ):
-    wc.post("/api/worker/status", json={"state": "ready", "capabilities": ["ocr"]})
-    job_id = add_job(work_id, "ocr", {})  # no handler: external workers can never lease it
+    wc.post("/api/worker/status", json={"state": "ready", "capabilities": ["local-only"]})
+    job_id = add_job(work_id, "local-only", {})  # no handler: external workers never lease it
     with session_factory()() as db:
-        got = jobs.claim(db, kinds=["ocr"], worker="pi", lease_s=60, credential_id=None,
+        got = jobs.claim(db, kinds=["local-only"], worker="pi", lease_s=60, credential_id=None,
                          defer_s=600)  # fmt: skip
         assert got is not None and got[0].id == job_id
 
@@ -1502,6 +1502,7 @@ def test_the_agent_offers_only_what_passes_its_self_test(tmp_path, monkeypatch):
     monkeypatch.setattr(mlx, "worker_transcriber", lambda *a, **k: None)
     monkeypatch.setattr(runners, "kokoro_available", lambda: True)
     monkeypatch.setattr(runners, "ffmpeg_available", lambda *a: True)
+    monkeypatch.setattr(runners, "tesseract_available", lambda *a: False)
     tested = []
 
     def check_isolated(caps, **kw):

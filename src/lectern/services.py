@@ -22,6 +22,7 @@ from lectern.align.worker import LocalWorker
 from lectern.config import Settings
 from lectern.fsops import LIBRARY_LOCK
 from lectern.models import Work
+from lectern.ocr import jobs as ocr_jobs
 from lectern.pdftext import store as pdftext
 
 log = logging.getLogger("lectern.services")
@@ -82,6 +83,10 @@ class Housekeeping:
                         log.info("queued %d alignment job(s)", n)
                 except Exception:  # noqa: BLE001
                     log.exception("library rescan failed")
+                try:
+                    ocr_jobs.sweep(self.session_factory, self.settings)
+                except Exception:  # noqa: BLE001
+                    log.exception("OCR sweep failed")
             if now >= next_sweep:
                 next_sweep = now + self.settings.job_sweep_seconds
                 try:
@@ -133,6 +138,8 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
         # the OOM killer): its lease would otherwise hold the job for up to the lease length.
         if n := jobs.reclaim_expired(db, orphaned_local=True, stall_s=settings.align_stall_seconds):
             log.warning("requeued %d alignment job(s) interrupted by a restart", n)
+        # the previous process's OCR runner is gone too (even if Tesseract is now missing)
+        ocr_jobs.recover_local(db)
         # nothing is being published yet: every staged result copy is a leftover
         queue.sweep_staging(db, settings.library_dir, everything=True)
     started: list = [
@@ -179,6 +186,12 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
         from lectern.tts.runner import TTSRunner
 
         started.append(TTSRunner(session_factory, settings, poll_s=settings.worker_poll_seconds))
+    if ocr_jobs.local_engine(settings) is not None:
+        started.append(
+            ocr_jobs.OcrRunner(session_factory, settings, poll_s=settings.worker_poll_seconds)
+        )
+    else:
+        log.info("no local text recognition (Tesseract): OCR jobs wait for a worker with it")
     for s in started:
         s.start()
     return started

@@ -21,13 +21,13 @@ jobs:
         working-directory: frontend
       - run: npm test
         working-directory: frontend
-      - name: Install ffmpeg (audio ingest, transcode, and range tests), Noto CJK (generated covers), LuaJIT with LuaSocket/cjson (KOReader plugin), and restic (backups)
+      - name: Install ffmpeg (audio ingest, transcode, and range tests), Noto CJK (generated covers), LuaJIT with LuaSocket/cjson (KOReader plugin), restic (backups), and Tesseract (OCR)
         timeout-minutes: 15
         run: |
           # A slow or stuck Ubuntu mirror would otherwise hang here: bounded attempts, retried.
           apt() { sudo timeout 240 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=60 "$@"; }
           for i in 1 2 3; do
-            apt update -q && apt install -y -q --no-install-recommends ffmpeg fonts-noto-cjk luajit lua-socket lua-cjson restic && exit 0
+            apt update -q && apt install -y -q --no-install-recommends ffmpeg fonts-noto-cjk luajit lua-socket lua-cjson restic tesseract-ocr tesseract-ocr-eng && exit 0
             echo "apt attempt $i failed; retrying"; sleep 10
             sudo dpkg --configure -a || true  # a killed install leaves dpkg interrupted
           done
@@ -59,6 +59,8 @@ jobs:
           LUAJIT_REQUIRED: "1"
           # tests/test_backups.py round-trips a restic repository; never skip it here.
           RESTIC_REQUIRED: "1"
+          # tests/test_ocr.py recognises a scanned PDF with Tesseract; never skip it here.
+          TESSERACT_REQUIRED: "1"
   # Playwright against seeded servers: the desktop suite (frontend/e2e/serve.sh: multi-select in
   # the Library, Trash, Review before filing) and the installed app on phones (docs/offline.md#tests:
   # iPhone 15 on WebKit, Pixel 7 on Chromium, offline mode included; frontend/e2e/serve.py).
@@ -121,6 +123,7 @@ jobs:
           docker run --rm lectern:ci lectern worker --help
           docker run --rm lectern:ci lectern restore --help > /dev/null
           docker run --rm lectern:ci restic version
+          docker run --rm lectern:ci python -c "from lectern.ocr import engine as e; v, l = e.probe(); print('tesseract:', v, l); assert v and 'eng' in l"
           docker run --rm lectern:ci python -c "from lectern.align.transcribe import transcription_available as t; print('faster-whisper:', t()); assert t() == ('align' in '${{ matrix.extras }}'.split())"
       - name: Piper (generated audiobooks) is in the tts images only
         run: docker run --rm lectern:ci python -c "from lectern.tts.engines import piper_installed as p; print('piper:', p()); assert p() == ('tts' in '${{ matrix.extras }}'.split())"
