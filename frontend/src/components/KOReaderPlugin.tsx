@@ -83,6 +83,13 @@ export function KOReaderPlugin({ device, onChanged }: { device: Device; onChange
               ? "From LECTERN_DEVICE_URL."
               : "Use Lectern's Tailscale IP from the Tailscale admin console, on port 8080: MagicDNS is off on e-readers."}
         </p>
+        {defaults?.lan_url && (
+          <p className="hint">
+            The zip also carries Lectern’s home Wi-Fi address, <code>{defaults.lan_url}</code>. At home the plugin uses it for progress sync and
+            Books sent to this device, after checking it really is your Lectern, so the e-reader syncs without Tailscale. The OPDS catalogue and everything away from home
+            use the address above, which must be the Tailscale one.
+          </p>
+        )}
         {insecureServerUrl(server) && (
           <div className="alert warn" role="note">
             This is plain http outside your tailnet: the e-reader would send its sync key and catalogue password unencrypted. Use Lectern's Tailscale address (100.x.y.z) instead.
@@ -105,7 +112,7 @@ export function KOReaderPlugin({ device, onChanged }: { device: Device; onChange
         <ol className="hint install-steps">
           <li>Unzip it and connect the e-reader over USB.</li>
           <li>Copy the <code>lectern.koplugin</code> folder into <code>koreader/plugins/</code> (Kindle: <code>/mnt/us/koreader/plugins/</code>, Kobo: <code>.adds/koreader/plugins/</code>).</li>
-          <li>Eject, restart KOReader, and turn on Wi-Fi and Tailscale. Lectern appears in the Tools menu.</li>
+          <li>Eject, restart KOReader, and turn on Wi-Fi and Tailscale{defaults?.lan_url ? " (at home, Wi-Fi is enough)" : ""}. Lectern appears in the Tools menu.</li>
         </ol>
       </section>
       <section className="config" aria-labelledby="kp-pair-h">

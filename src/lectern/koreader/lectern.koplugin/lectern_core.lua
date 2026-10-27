@@ -8,7 +8,14 @@ Core.new{
     configure = function(config) end,  -- writes KOReader's kosync + OPDS settings
     logger = { info, warn },           -- optional
     now = os.time,                     -- optional
+    sha2 = KOReader's ffi/sha2,        -- optional (sha256, hmac): the home address check
 }
+
+Two addresses: server_url (Tailscale) and, with home Wi-Fi access on, lan_url
+(docs/home-network.md). Core:route() prefers the home address, but only after the server there
+proved it is this device's Lectern (POST /koplugin/hello: an HMAC of a fresh nonce keyed by the
+SHA-256 of a secret this device holds), so no credential goes to another network's machine
+that happens to have the same private IP.
 
 Secrets (the setup secret, userkey, app password, pairing code) are never passed to the
 logger: every log line goes through Core:log, which also masks any known secret.
@@ -22,6 +29,39 @@ Core.BOOTSTRAP_FILE = "lectern_bootstrap.txt"
 Core.DEFAULT_PAGES = 10
 Core.RETRY_DELAYS = { 30, 60, 120, 300, 900 } -- seconds, while the network is up
 Core.OUTBOX_MAX = 50
+Core.ROUTE_TTL = 600 -- seconds a home/Tailscale choice is trusted before it is checked again
+
+--- Looks like a home-network address (private IPv4, IPv6 link-local or unique-local, or an
+-- mDNS .local name). With home Wi-Fi access on, such an address is never the Tailscale
+-- fallback: the fallback is used without a check, and another network may have a different
+-- machine at the same private address.
+function Core.homeLike(url)
+    if type(url) ~= "string" then return false end
+    local auth = url:lower():match("^%a+://([^/?#]*)")
+    if not auth or auth:find("@", 1, true) then return true end -- unparseable: not trusted
+    -- Any IPv6 literal (mapped IPv4, link-local, unique-local; Tailscale's own are ULA too).
+    if auth:sub(1, 1) == "[" then return true end
+    -- Only a plain host name or dotted IPv4 with an optional numeric port is classified;
+    -- anything else (a named port such as :http-alt, unbracketed IPv6, odd characters) is
+    -- something the socket library may still resolve, so it is never trusted.
+    local host = auth:gsub(":%d+$", ""):gsub("%.+$", "") -- port, DNS-root dots
+    if not host:match("^[%w%-%.]+$") then return true end
+    if host == "local" or host:match("%.local$") then return true end
+    local numeric = host:match("^[%d.]+$") or host:match("%.%d+$") or host:match("^0x")
+        or host:match("%.0x")
+    if not numeric then return false end
+    -- Numeric hosts must be canonical dotted quads; anything else (10.1, 0x0a.1, 010.0.0.1)
+    -- resolves to some IPv4 address in the socket library, so it is never trusted.
+    local q = { host:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
+    if #q ~= 4 then return true end
+    for k = 1, 4 do
+        if (#q[k] > 1 and q[k]:sub(1, 1) == "0") or tonumber(q[k]) > 255 then return true end
+        q[k] = tonumber(q[k])
+    end
+    local a, b = q[1], q[2]
+    return a == 10 or (a == 172 and b >= 16 and b <= 31) or (a == 192 and b == 168)
+        or (a == 169 and b == 254)
+end
 
 Core.DEFAULT_OPTIONS = {
     auto_sync = true,                 -- pull on open, push on close and suspend
@@ -59,6 +99,11 @@ function Core.new(deps)
     self.configure = deps.configure or function() end
     self.logger = deps.logger
     self.now = deps.now or os.time
+    self.sha2 = deps.sha2
+    if not self.sha2 then
+        local ok, sha2 = pcall(require, "ffi/sha2")
+        if ok then self.sha2 = sha2 end
+    end
     return self
 end
 
@@ -155,6 +200,122 @@ function Core:serverUrl()
     return d and d.server_url
 end
 
+--- The home Wi-Fi address, if Lectern offers one: what the server last said, else the zip's.
+function Core:lanUrl()
+    local s = self.store:readSetting("lan_url")
+    if s then return s ~= "" and s or nil end
+    local d = self:deviceFile()
+    return d and d.lan_url
+end
+
+--- Once a home address was ever known, a home-like Tailscale fallback stays untrusted for good,
+-- even after the server stops announcing one (it could have been the home address itself).
+function Core:homeSeen()
+    return self.store:readSetting("lan_seen") == true or self:lanUrl() ~= nil
+end
+
+function Core:saveLanUrl(value)
+    if self:lanUrl() or str(value) then self.store:saveSetting("lan_seen", true) end
+    -- "" remembers "the server has none" (so the zip's address is not used again).
+    self.store:saveSetting("lan_url", str(value) or "")
+    self.store:delSetting("active_url")
+    self._route, self._route_at = nil, nil
+end
+
+--- Stop trusting the home address until it proves itself again: on start, wake, and network
+-- changes (another Wi-Fi may have a different machine at the same private IP). KOReader's own
+-- sync and catalogue settings go back to the Tailscale address at once, synchronously.
+function Core:forgetHome()
+    self._route, self._route_at = nil, nil
+    local active = self.store:readSetting("active_url")
+    local stale = active and active ~= ""
+    if stale then
+        self.store:delSetting("active_url")
+        self.store:flush()
+    end
+    if self:isPaired() and (stale or (self:lanUrl() and not self:fallbackUrl())) then
+        self.configure(self:config())
+    end
+end
+
+local function nonce()
+    local f = io.open("/dev/urandom", "rb")
+    local bytes = f and f:read(16)
+    if f then f:close() end
+    if not bytes or #bytes < 16 then
+        local t = {}
+        for i = 1, 16 do t[i] = string.char(math.random(0, 255)) end
+        bytes = table.concat(t)
+    end
+    return (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+
+--- The secret this device holds and the server keeps a SHA-256 of: the app password once
+-- paired, before that the setup secret from the zip.
+function Core:proofSecret()
+    if self:isPaired() then
+        return self.store:readSetting("app_password"), self.store:readSetting("device_id"), false
+    end
+    local d = self:deviceFile()
+    return self:bootstrapSecret(), d and d.device_id, true
+end
+
+--- Is the Lectern at ``url`` this device's? Sends nothing secret: a nonce, checked against
+-- the server's HMAC of it.
+function Core:verifyHome(url)
+    local secret, device_id, setup = self:proofSecret()
+    if not secret or not device_id or not self.sha2 then return false end
+    local n = nonce()
+    local code, data = self:request("POST", "/koplugin/hello", {
+        server_url = url, json = { device_id = device_id, nonce = n, setup = setup },
+        timeout = { 2, 4 },
+    })
+    if code ~= 200 or type(data) ~= "table" then return false end
+    local sha2 = self.sha2
+    return str(data.proof) == sha2.hmac(sha2.sha256, sha2.sha256(secret), "lectern-lan:" .. n)
+end
+
+--- Where to send requests now: the home address when it answers as this Lectern, else the
+-- Tailscale one. Checked again after ROUTE_TTL, or at once with ``force`` (network change,
+-- Sync now, a failed request). A change rewrites KOReader's kosync and OPDS settings.
+-- The home address is never used unverified, and never as the fallback: a fallback that is a
+-- home address (only possible before setup, from a zip) gives no route until the check passes.
+function Core:route(force)
+    local remote, lan = self:fallbackUrl(), self:lanUrl()
+    if not lan then return remote end
+    local now = self.now()
+    if not force and self._route_at and now - self._route_at < Core.ROUTE_TTL then
+        return self._route
+    end
+    local home = self:verifyHome(lan)
+    local pick = home and lan or remote
+    self._route, self._route_at = pick, pick and now or nil
+    local want = home and lan or ""
+    if self:isPaired() and (want ~= (self.store:readSetting("active_url") or "") or not pick) then
+        self.store:saveSetting("active_url", want)
+        self.store:flush()
+        self:log("info", home and "at home: using the home Wi-Fi address"
+            or (pick and "not at home: using Tailscale" or "no trusted address: sync paused"))
+        self.configure(self:config()) -- without a trusted address, this removes the credentials
+    end
+    return pick
+end
+
+--- The Tailscale address, unless it is home-like while home Wi-Fi access is on (then there is
+-- no fallback that may be used without a check).
+function Core:fallbackUrl()
+    local remote, lan = self:serverUrl(), self:lanUrl()
+    if remote and (remote == lan or (self:homeSeen() and Core.homeLike(remote))) then return nil end
+    return remote
+end
+
+--- The address in use: the home one while verified, else the fallback (nil: none trusted).
+function Core:activeUrl()
+    local lan = self:lanUrl()
+    if lan and self.store:readSetting("active_url") == lan then return lan end
+    return self:fallbackUrl()
+end
+
 function Core:username()
     local u = self.store:readSetting("username")
     if u then return u end
@@ -165,7 +326,10 @@ end
 --- Everything main.lua needs to write KOReader's kosync and OPDS settings.
 function Core:config()
     return {
-        server_url = self.store:readSetting("server_url"),
+        server_url = self:activeUrl(),
+        -- KOReader's OPDS browser keeps copies of its links and credentials while it is open,
+        -- out of the plugin's reach, so the catalogue entry always uses the Tailscale address.
+        opds_url = self:fallbackUrl(),
         username = self.store:readSetting("username"),
         userkey = self.store:readSetting("userkey"),
         app_password = self.store:readSetting("app_password"),
@@ -181,8 +345,16 @@ function Core:applyCredentials(payload, server_url)
     if not userkey or not password or not username then
         return false
     end
+    local lan = str(payload.lan_url) or self:lanUrl()
+    if server_url == lan or ((lan or self:homeSeen()) and Core.homeLike(server_url)) then
+        self:log("warn", "refused a home-network address as the Tailscale address")
+        return false
+    end
     local s = self.store
     s:saveSetting("server_url", server_url)
+    if payload.lan_url ~= nil then self:saveLanUrl(payload.lan_url) end
+    s:delSetting("active_url")
+    self._route, self._route_at = nil, nil
     s:saveSetting("username", username)
     s:saveSetting("userkey", userkey)
     s:saveSetting("app_password", password)
@@ -193,7 +365,8 @@ function Core:applyCredentials(payload, server_url)
     s:delSetting("last_error")
     s:delSetting("setup_error")
     s:flush()
-    self.configure(self:config())
+    self.configure(self:config()) -- Tailscale first; the home address only once verified
+    if self:lanUrl() then self:route(true) end
     return true
 end
 
@@ -201,8 +374,18 @@ end
 
 function Core:request(method, path, opts)
     opts = opts or {}
-    local base = opts.server_url or self:serverUrl()
+    local base = opts.server_url or self:route()
     if not base then return nil, nil, "no server" end
+    local code, data, err = self:send(base, method, path, opts)
+    if not code and not opts.server_url and self._route then
+        -- Left home (or came back) since the last check: try the other address once.
+        local again = self:route(true)
+        if again and again ~= base then code, data, err = self:send(again, method, path, opts) end
+    end
+    return code, data, err
+end
+
+function Core:send(base, method, path, opts)
     local headers = { accept = opts.accept or "application/json" }
     local body
     if opts.json then
@@ -268,7 +451,7 @@ function Core:bootstrap()
         return postpone("no server address")
     end
     local code, data, err = self:request("POST", "/koplugin/bootstrap", {
-        server_url = server, json = { secret = secret }, timeout = { 3, 10 },
+        server_url = self:route(true), json = { secret = secret }, timeout = { 3, 10 },
     })
     if code == 200 and type(data) == "table" then
         if self:applyCredentials(data, str(data.server_url) or server) then
@@ -286,13 +469,38 @@ function Core:bootstrap()
     return postpone(code and ("HTTP " .. code) or (err or "offline"))
 end
 
+--- ``scheme://host[:port]`` with a plain host name, dotted IPv4, or bracketed IPv6 and an
+-- optional numeric port; nothing else is accepted as a server address.
+function Core.validServerUrl(url)
+    if type(url) ~= "string" then return false end
+    local host = url:match("^https?://([%w%-%.]+)$") or url:match("^https?://([%w%-%.]+):%d+$")
+    if host then return true end
+    return url:match("^https?://%[[%x:%.]+%]:%d+$") ~= nil or url:match("^https?://%[[%x:%.]+%]$") ~= nil
+end
+
 --- Lectern → Pair: a 6-digit code from the web app. Returns "ok", "invalid", or "retry".
 function Core:pair(server_url, username, code)
+    if not Core.validServerUrl(server_url) then return "invalid_server" end
     local code_status, data, err = self:request("POST", "/koplugin/pair", {
         server_url = server_url, json = { username = username, code = code }, timeout = { 5, 15 },
     })
     if code_status == 200 and type(data) == "table" then
-        if self:applyCredentials(data, server_url) then
+        -- The Tailscale fallback: the server's own Tailscale address, else the address entered,
+        -- else the one known before; never a home-network address (it is used without a check).
+        local lan = str(data.lan_url) or self:lanUrl()
+        local seen = lan or self:homeSeen()
+        local remote
+        for _, candidate in ipairs({ str(data.server_url) or false, server_url, self:serverUrl() or false }) do
+            if candidate and candidate ~= lan and not (seen and Core.homeLike(candidate)) then
+                remote = candidate
+                break
+            end
+        end
+        if not remote then
+            self:log("warn", "paired over the home address, but no Tailscale address is known")
+            return "no_fallback"
+        end
+        if self:applyCredentials(data, remote) then
             self:deleteBootstrap() -- a stale zip secret is superseded
             self:log("info", "paired as device", str(data.label) or "?")
             return "ok"
@@ -312,6 +520,11 @@ function Core:status()
     local code, data, err = self:request("GET", "/koplugin/status", { basic = true, timeout = { 4, 10 } })
     self:noteResult(code, err)
     if code == 200 and type(data) == "table" then
+        if data.lan_url ~= nil and str(data.lan_url) ~= self:lanUrl() then
+            self:saveLanUrl(data.lan_url) -- turned on, off, or moved on the server
+            self.store:flush()
+            self.configure(self:config()) -- Tailscale until the next request checks again
+        end
         self.store:saveSetting("queue_pending", tonumber(data.queue and data.queue.pending) or 0)
         self.store:flush()
         return data

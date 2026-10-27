@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from lectern import koplugin
+from lectern import koplugin, lan
 from lectern.models import (
     AppPassword,
     BookFile,
@@ -325,7 +325,13 @@ def set_device_download_cap(
 def koplugin_defaults(auth: Auth, settings: SettingsDep) -> dict:
     """The address a new zip would carry: LECTERN_DEVICE_URL, else the detected Tailscale IP."""
     url, source = koplugin.default_server_url(settings)
-    return {"server_url": url, "source": source, "port": settings.port}
+    return {
+        "server_url": url,
+        "source": source,
+        "port": settings.port,
+        # Also put into the zip: the plugin prefers it at home (docs/home-network.md).
+        "lan_url": koplugin.home_url(settings),
+    }
 
 
 def _own_plugin_device(db, user: User, device_id: str) -> tuple[SyncKey, AppPassword]:
@@ -372,6 +378,10 @@ def download_koplugin(
         server_url = koplugin.normalize_server_url(raw)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_server_url") from exc
+    if koplugin.home_url(settings) and lan.is_home_address(server_url):
+        # The zip's address is the plugin's unverified fallback; the home address is added
+        # separately and used only after the plugin verified it (docs/home-network.md).
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "server_url_is_home")
     boot, secret = koplugin.mint_bootstrap(db, key, server_url)
     data = koplugin.build_zip(
         device_lua=koplugin.device_config_lua(
@@ -380,6 +390,7 @@ def download_koplugin(
             device_id=f"k{key.id}",
             label=key.label,
             expires_at=iso(boot.expires_at) or "",
+            lan_url=koplugin.home_url(settings),
         ),
         secret=secret,
     )

@@ -44,7 +44,8 @@ services:
       retries: 3
       start_period: 2m
       start_interval: 5s
-    # No `ports:` on purpose, here or below. The only way in is the tailnet.
+    # No `ports:` on purpose, here or below. The only way in is the tailnet. (Opt-in exception:
+    # lan.yaml publishes one LAN address for e-readers at home, docs/home-network.md.)
 
   lectern:
     build:

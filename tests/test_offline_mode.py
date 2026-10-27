@@ -87,8 +87,14 @@ def test_every_outbound_path_is_refused_before_it_starts(loopback_server):
 def test_the_server_runs_on_an_event_loop_the_guard_sees(monkeypatch):
     """uvloop connects and resolves in libuv, where no audit event fires."""
     seen: dict = {}
-    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: seen.update(kw))
+    # serve() binds its listeners itself (the main one and the optional home Wi-Fi one) and
+    # runs uvicorn.Server on them; record the loop it asks for instead of serving.
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", lambda self: None)
+    monkeypatch.setattr(
+        uvicorn.Server, "run", lambda self, sockets=None: seen.update(loop=self.config.loop)
+    )
     cli.serve()
+    assert seen, "cli.serve() did not reach uvicorn.Server.run"
     loop = uvicorn.Config(
         "lectern.main:app_factory", loop=seen.get("loop", "auto")
     ).get_loop_factory()()
