@@ -94,9 +94,15 @@ def pdf_path(library: Path, work: Work, sha256: str) -> Path:
     return library / work.dir_path / DERIVED / f"ocr-{prefix(sha256)}.pdf"
 
 
+def words_rel(sha256: str) -> str:
+    """The recognised words, relative to the work's folder: ``derived/ocr-<prefix>.json``
+    (what :mod:`lectern.pdftext.store` builds a scan's text document from)."""
+    return f"{DERIVED}/ocr-{prefix(sha256)}.json"
+
+
 def words_path(library: Path, work: Work, sha256: str) -> Path:
     """The recognised words: ``<work>/derived/ocr-<sha256 prefix>.json``."""
-    return library / work.dir_path / DERIVED / f"ocr-{prefix(sha256)}.json"
+    return library / work.dir_path / words_rel(sha256)
 
 
 def has_output(library: Path, work: Work, sha256: str) -> bool:

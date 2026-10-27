@@ -8,8 +8,11 @@ The housekeeping thread (:mod:`lectern.services`) calls :func:`sweep` with the l
 2. writes the canonical text document next to the work
    (``derived/pdf-text-<sha256 prefix>.json``, replaced atomically, never in place) and its
    sentences with page and box maps (``pdf_sentences``);
-3. marks a PDF whose pages mostly have no text ``needs_ocr`` (issue #17: OCR will produce the
-   same document, so everything below works on scans unchanged once it exists);
+3. marks a PDF whose pages mostly have no text ``needs_ocr``, until OCR has recognised it:
+   then the document is built from the recognised words (``derived/ocr-<prefix>.json``,
+   :mod:`lectern.ocr`) through the same layout step instead (:func:`read_ocr`), it is
+   ``ready``, and everything below works on the scan unchanged. A new recognition (another
+   language, a retry) or a deleted copy reads the PDF again (``pdf_texts.ocr_sha256``);
 4. for a work whose text is an EPUB, projects the PDF's sentences onto the work's sentences
    (:mod:`lectern.pdftext.project`) whenever that list changes (an alignment, a narration);
 5. for a work whose only text is a PDF, gives it the text-only sentence list a work with an
@@ -39,6 +42,7 @@ from lectern.ingest import formats
 from lectern.ingest.formats import FormatError, ProbeBusy
 from lectern.models import BookFile, FileKind, PdfSentence, PdfText, Sentence, Work
 from lectern.pdftext.document import DOCUMENT_VERSION, build_document, dumps, sha256_of
+from lectern.pdftext.extract import RawDoc
 
 log = logging.getLogger("lectern.pdftext")
 
@@ -122,12 +126,65 @@ def load_document(library: Path, work: Work, book: BookFile, row: PdfText) -> di
 # --- reading a PDF -----------------------------------------------------------------------------
 
 
-def stale(row: PdfText | None, pdf_sha256: str) -> bool:
-    """Should this PDF be read (again)? New, changed, or read by an older extractor; a failure
-    is retried on later sweeps until ``MAX_ATTEMPTS`` (a new extractor version starts over)."""
+def stale(row: PdfText | None, pdf_sha256: str, ocr_sha256: str | None = None) -> bool:
+    """Should this PDF be read (again)? New, changed, read by an older extractor, or its OCR
+    words are not the ones it was read from (recognised, recognised again, or deleted:
+    ``ocr_sha256`` is :func:`ocr_digest`'s); a failure is retried on later sweeps until
+    ``MAX_ATTEMPTS`` (a new extractor version or recognition starts over)."""
     if row is None or row.pdf_sha256 != pdf_sha256 or row.version != DOCUMENT_VERSION:
         return True
+    if row.ocr_sha256 != ocr_sha256:
+        return True
     return row.status == PENDING or (row.status == FAILED and row.attempts < MAX_ATTEMPTS)
+
+
+# --- recognised text (OCR) ---------------------------------------------------------------------
+
+
+def ocr_digest(work_dir: Path, pdf_sha256: str) -> str | None:
+    """The SHA-256 of the PDF's finished OCR words (``derived/ocr-<prefix>.json``), or None
+    when it has none (never recognised, or the copy was deleted). Read from the checksum
+    sidecar the OCR publish writes next to it; hashed when the sidecar is missing."""
+    from lectern.ocr.jobs import words_rel
+
+    path = work_dir / words_rel(pdf_sha256)
+    if not path.is_file():
+        return None
+    try:
+        digest = path.with_name(path.name + ".sha256").read_text("ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        digest = ""
+    if len(digest) == 64:
+        return digest
+    try:
+        return sha256_of(path.read_bytes())
+    except OSError:
+        return None
+
+
+def read_ocr(path: Path, pdf_sha256: str) -> tuple[RawDoc, dict]:
+    """The OCR words file of a PDF as the text-layer reader's pages (``RawDoc``), and how
+    they were recognised (``{"engine", "language"}``), for :func:`build_document`. Raises
+    ``ValueError`` when the file is not that PDF's words."""
+    from lectern.pdftext.extract import TOC_MAX, _page
+
+    data = json.loads(path.read_bytes())
+    if not isinstance(data, dict) or data.get("kind") != "ocr":
+        raise ValueError("not an OCR words file")
+    if data.get("pdf_sha256") != pdf_sha256:
+        raise ValueError("the OCR words are another PDF's")
+    pages = data.get("pages")
+    if not isinstance(pages, list) or not all(isinstance(p, dict) for p in pages):
+        raise ValueError("the OCR words have no pages")
+    try:
+        raw_pages = [_page(p) for p in pages]
+        toc = [(int(lv), str(t), int(pi)) for lv, t, pi in (data.get("toc") or [])[:TOC_MAX]]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed OCR words: {type(exc).__name__}") from exc
+    if any(p.index != i for i, p in enumerate(raw_pages)):
+        raise ValueError("the OCR words skip pages")
+    info = {"engine": str(data.get("engine") or "ocr"), "language": str(data.get("language") or "")}
+    return RawDoc(raw_pages, toc, bool(data.get("truncated"))), info
 
 
 def document_sentences(doc: dict) -> list[dict]:
@@ -183,15 +240,28 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
             return None
         sha, work_id = book.sha256, work.id
         root = library.resolve()
+        work_dir = (root / work.dir_path).resolve()
         path = (root / work.dir_path / book.rel_path).resolve()
-        if root not in path.parents or not path.is_file():
+        if root not in path.parents or not path.is_file() or root not in work_dir.parents:
             return None
     error = None
     doc = None
+    # Recognised words, when OCR has run: they are the scan's text (its own text layer is
+    # what made it a scan), laid out by the same step as a text PDF's.
+    ocr = ocr_digest(work_dir, sha)
     try:
+        from lectern.ocr.jobs import words_rel
         from lectern.pdftext.extract import extract_words
 
-        doc = build_document(extract_words(path), sha)
+        if ocr is not None:
+            words = work_dir / words_rel(sha)
+            try:
+                raw, info = read_ocr(words, sha)
+            except (OSError, ValueError) as exc:
+                raise FormatError("ocr_unreadable", str(exc)[:200]) from exc
+            doc = build_document(raw, sha, ocr=info)
+        else:
+            doc = build_document(extract_words(path), sha)
     except ProbeBusy:
         return None
     except FormatError as exc:
@@ -208,6 +278,8 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
         work = db.get(Work, work_id)
         if book is None or work is None or book.sha256 != sha or book.work_id != work_id:
             return None  # replaced or moved meanwhile: the next sweep reads the new one
+        if ocr_digest(library.resolve() / work.dir_path, sha) != ocr:
+            return None  # recognised again (or deleted) meanwhile: the next sweep reads it
         if data is not None:
             # Written before any database write, so the SQLite write lock is not held over
             # the fsync of a large document.
@@ -221,9 +293,10 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
         if row is None:
             row = PdfText(file_id=file_id, work_id=work_id, pdf_sha256=sha, attempts=0)
             db.add(row)
-        if row.pdf_sha256 != sha or row.version != DOCUMENT_VERSION:
+        if row.pdf_sha256 != sha or row.version != DOCUMENT_VERSION or row.ocr_sha256 != ocr:
             row.attempts = 0
         row.work_id, row.pdf_sha256, row.version = work_id, sha, DOCUMENT_VERSION
+        row.ocr_sha256 = ocr
         row.attempts = (row.attempts or 0) + 1
         # Read again with the same result (a regenerated document): the work's list is still
         # this PDF's when it was before. An EPUB projection is redone (epub_n is rewritten).
@@ -239,7 +312,8 @@ def refresh_file(session_factory: sessionmaker, library: Path, file_id: int) -> 
             return FAILED
         stats = doc["stats"]
         row.pages, row.pages_with_text = stats["pages"], stats["pages_with_text"]
-        row.chars, row.stats, row.error = stats["chars"], stats, None
+        row.chars, row.error = stats["chars"], None
+        row.stats = {**stats, "ocr": doc["ocr"]} if "ocr" in doc else stats
         if doc["status"] != READY:
             row.status, row.text_sha256, row.sentence_count = NEEDS_OCR, None, 0
             row.sections = []
@@ -499,7 +573,7 @@ def sweep(session_factory: sessionmaker, library: Path, *, limit: int = 20) -> i
         # out derived/) is read again: the same PDF gives the same document and sentences.
         todo = [
             fid for fid, sha, row, d in books
-            if stale(row, sha)
+            if stale(row, sha, ocr_digest(root / d, sha))
             or (row.status == READY and not (root / d / document_rel(sha)).is_file())
         ]  # fmt: skip
         ready = [fid for fid, _sha, row, _d in books if row is not None and row.status == READY]
@@ -536,10 +610,11 @@ def status_json(row: PdfText | None, book: BookFile) -> dict:
     """What the app shows about a PDF's text (``GET /api/files/{id}/text`` and the work)."""
     if row is None or row.pdf_sha256 != book.sha256 or row.version != DOCUMENT_VERSION:
         return {"status": PENDING, "pages": None, "pages_with_text": None, "sections": [],
-                "sentences": 0, "error": None}  # fmt: skip
+                "sentences": 0, "error": None, "source": None, "ocr": None}  # fmt: skip
     status = row.status
     if status == FAILED and row.attempts < MAX_ATTEMPTS:
         status = PENDING  # retried on the next sweep
+    ocr = (row.stats or {}).get("ocr") if row.ocr_sha256 else None
     return {
         "status": status,
         "pages": row.pages,
@@ -547,4 +622,7 @@ def status_json(row: PdfText | None, book: BookFile) -> dict:
         "sections": row.sections or [],
         "sentences": row.sentence_count,
         "error": row.error if status == FAILED else None,
+        # where the text came from: the PDF's text layer, or OCR ({"engine", "language"})
+        "source": "ocr" if row.ocr_sha256 else "text_layer",
+        "ocr": ocr,
     }

@@ -14,6 +14,12 @@ headers/footers are already stripped from the text flow by :mod:`lectern.pdftext
 pagination as ``epub:type="pagebreak"`` markers — one inline empty ``span`` at every page's
 first word — plus a ``page-list`` nav, ``dc:source``, and ``pageBreakSource``.
 
+A scanned PDF converts once OCR has given it a text document (issue #62: the document then
+carries ``"ocr": {"engine", "language"}``). Its edition says so everywhere a person or a
+reader looks: the package description and a ``lectern:source`` meta, a note in the
+navigation document, and the report (``source: "ocr"`` and a warning to expect recognition
+errors). Nothing else differs: the same chapters, pagination, and read-along.
+
 Deliberately out of scope here (the routes' docs and the PR carry the deferral list):
 images and figures, tables, footnotes as noteref asides, and inline styling. The converted
 edition carries the reflowable text and the pagination.
@@ -168,9 +174,10 @@ def build_epub(
     cover_jpeg: bytes | None = None,
 ) -> tuple[bytes, dict]:
     """The converted EPUB's bytes and its conversion report. Raises :class:`ConversionError`
-    when the document has nothing to convert."""
+    when the document has nothing to convert (a scan with no recognised text yet)."""
     if doc.get("status") != "ready":
         raise ConversionError("needs_ocr")
+    ocr = ocr_of(doc)
     sections = doc.get("sections") or []
     if not sections or not doc.get("pages"):
         raise ConversionError("no_text")
@@ -194,7 +201,7 @@ def build_epub(
         manifest.append((f"s{index + 1}", name, "application/xhtml+xml", ""))
         spine.append(f"s{index + 1}")
 
-    files.append((NAV_NAME, _nav_doc(title, language or "en", sections, page_list)))
+    files.append((NAV_NAME, _nav_doc(title, language or "en", sections, page_list, ocr)))
     manifest.append(("nav", NAV_NAME, "application/xhtml+xml", "nav"))
     # The nav document is not in the spine: it is a navigation aid, not content, and it must
     # not join the text timeline (sentences, narration, the reader's spine).
@@ -206,13 +213,34 @@ def build_epub(
     files.insert(0, ("content.opf", _opf(
         title=title, author=author, language=language or "en", source_name=source_name,
         pdf_sha256=pdf_sha256, isbn=isbn, manifest=manifest, spine=spine,
-        has_cover=bool(cover_jpeg),
+        has_cover=bool(cover_jpeg), ocr=ocr,
     )))  # fmt: skip
     return _zip(files), _report(doc, labels, page_list)
 
 
+def ocr_of(doc: dict) -> dict | None:
+    """``{"engine", "language"}`` when the document's text was recognised by OCR, else None."""
+    ocr = doc.get("ocr")
+    if not isinstance(ocr, dict):
+        return None
+    return {"engine": str(ocr.get("engine") or "OCR"), "language": str(ocr.get("language") or "")}
+
+
+def ocr_note(ocr: dict) -> str:
+    """The one line an OCR-generated edition carries wherever it describes itself."""
+    lang = f", language {ocr['language']}" if ocr["language"] else ""
+    return (
+        f"Generated from text recognition (OCR: {ocr['engine']}{lang}) of a scanned PDF; "
+        "expect recognition errors."
+    )
+
+
 def _nav_doc(
-    title: str, lang: str, sections: list[dict], page_list: list[tuple[str, str, str]]
+    title: str,
+    lang: str,
+    sections: list[dict],
+    page_list: list[tuple[str, str, str]],
+    ocr: dict | None = None,
 ) -> bytes:
     head = XHTML_HEAD.format(lang=escape(lang), title=_xml_text(f"{title} — Contents"))
     lines = [f'<nav epub:type="toc" id="toc"><h1>{_xml_text(title)}</h1><ol>']
@@ -229,6 +257,8 @@ def _nav_doc(
             for href, pid, label in page_list
         ]
         lines.append("</ol></nav>")
+    if ocr is not None:
+        lines.append(f'<p class="lectern-ocr">{_xml_text(ocr_note(ocr))}</p>')
     return (head + "\n".join(lines) + "\n</body>\n</html>\n").encode()
 
 
@@ -243,14 +273,24 @@ def _opf(
     manifest: list[tuple[str, str, str, str]],
     spine: list[str],
     has_cover: bool,
+    ocr: dict | None = None,
 ) -> bytes:
+    if ocr is None:
+        description = (
+            f"EPUB edition converted from the PDF file {_xml_text(source_name)} "
+            "by Lectern; the original PDF is kept."
+        )
+    else:
+        description = (
+            f"EPUB edition converted by Lectern from the scanned PDF file {_xml_text(source_name)}. "
+            f"{_xml_text(ocr_note(ocr))} The original PDF is kept."
+        )
     metadata = [
         f'<dc:identifier id="uid">urn:sha256:{pdf_sha256}</dc:identifier>',
         f"<dc:title>{_xml_text(title)}</dc:title>",
         f"<dc:creator>{_xml_text(author)}</dc:creator>",
         f"<dc:language>{escape(language)}</dc:language>",
-        f"<dc:description>EPUB edition converted from the PDF file {_xml_text(source_name)} "
-        "by Lectern; the original PDF is kept.</dc:description>",
+        f"<dc:description>{description}</dc:description>",
         f"<dc:source>{_xml_text(source_name)}</dc:source>",
         # Where the page numbers come from: this PDF's pagination.
         f'<meta property="pageBreakSource">urn:sha256:{pdf_sha256}</meta>',
@@ -260,6 +300,8 @@ def _opf(
         metadata.insert(1, f'<dc:identifier id="isbn">urn:isbn:{_xml_text(isbn)}</dc:identifier>')
     if has_cover:
         metadata.append('<meta name="cover" content="cover-image"/>')
+    if ocr is not None:
+        metadata.append('<meta name="lectern:source" content="ocr"/>')
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
         '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">',
@@ -311,6 +353,9 @@ def _report(doc: dict, labels: list[str], page_list: list[tuple[str, str, str]])
     empty = [i + 1 for i, p in enumerate(doc.get("pages") or []) if not p.get("text")]
     unlinked = sorted(set(range(1, len(labels) + 1)) - {p + 1 for p in pages_with_words})
     warnings: list[str] = []
+    ocr = ocr_of(doc)
+    if ocr is not None:
+        warnings.append(ocr_note(ocr))
     if doc.get("stats", {}).get("truncated"):
         warnings.append("the PDF was truncated at the extractor's page cap")
     if not any(s.get("from_outline") for s in sections):
@@ -322,6 +367,8 @@ def _report(doc: dict, labels: list[str], page_list: list[tuple[str, str, str]])
     return {
         "pdf_sha256": doc.get("pdf_sha256"),
         "status": doc.get("status"),
+        "source": "ocr" if ocr is not None else "text_layer",
+        "ocr": ocr,
         "pages": stats.get("pages", len(labels)),
         "sections": len(sections),
         "page_list_entries": len(page_list),

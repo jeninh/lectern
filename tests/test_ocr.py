@@ -11,7 +11,11 @@ import hashlib
 import io
 import json
 import os
+import re
+import shutil
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pypdfium2 as pdfium
 import pytest
@@ -25,12 +29,26 @@ from tests.conftest import api_delete, api_post, drain_inbox
 from lectern.align.worker import RemoteWorker
 from lectern.db import session_factory
 from lectern.ingest.hashing import sha256_file
-from lectern.models import BookFile, Job, JobStatus, Work
+from lectern.jobs import run_pending
+from lectern.models import (
+    Alignment,
+    AlignmentStatus,
+    BookFile,
+    Job,
+    JobStatus,
+    PdfSentence,
+    PdfText,
+    Sentence,
+    Work,
+)
 from lectern.ocr import child, engine
 from lectern.ocr import jobs as ocr
 from lectern.ocr.words import FLAG_BREAK, FLAG_HYPHEN, from_tsv
+from lectern.pdf2epub.build import CONVERTED_NAME
 from lectern.pdftext import extract
 from lectern.pdftext.document import build_document
+from lectern.pdftext.store import document_rel, work_text
+from lectern.pdftext.store import sweep as pdf_sweep
 from lectern.worker.runners import OcrRunner
 
 HAVE_TESSERACT = engine.probe()[0] is not None and "eng" in engine.probe()[1]
@@ -39,6 +57,7 @@ if os.environ.get("TESSERACT_REQUIRED") == "1":
 needs_tesseract = pytest.mark.skipif(not HAVE_TESSERACT, reason="tesseract not installed")
 
 FONT = Path(__file__).parents[1] / "src/lectern/fonts/LecternCover-Text.ttf"
+EXCERPT = Path(__file__).parent / "fixtures" / "magi" / "excerpt.mp3"
 PAGES = [
     ["Chapter One", "The lighthouse keeper climbed the stairs every night.",
      "He counted the steps and listened to the sea below."],
@@ -249,6 +268,12 @@ def test_a_scan_is_recognised_into_a_searchable_copy_and_the_original_is_untouch
     assert "lighthouse keeper climbed the stairs" in section["text"]
     assert "until morning" in section["text"]
     assert section["words"][0][:3] == [0, 7, 0]  # "Chapter", boxed on the first page
+    # ...and the library sweep makes it the scan's text (issue #62)
+    pdf_sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/files/{book.id}/text").json()
+    assert (st["status"], st["source"], st["map"]) == ("ready", "ocr", "self"), st
+    assert st["ocr"]["language"] == "eng" and st["ocr"]["engine"].startswith("tesseract")
+    assert st["sentences"] > 3
 
     r = client.get(f"/api/files/{book.id}/ocr/pdf")
     assert r.status_code == 200 and r.content == searchable.read_bytes()
@@ -611,3 +636,242 @@ def test_a_worker_without_the_language_fails_retryably_and_never_bounces(
         assert job.status == JobStatus.QUEUED and job.attempts == 1
         assert "no data for eng" in job.error
     assert "ocr" in worker.capabilities  # the worker keeps offering OCR for other jobs
+
+
+# --- the recognised text is the scan's text (issue #62) -----------------------------------------
+#
+# These write what a finished OCR job leaves (docs/ocr.md, "What is kept") without Tesseract:
+# the words of the same pages typeset as a text PDF, read by the text-layer reader, in the
+# words file's shape. The end-to-end test above checks the real recognition does the same.
+
+
+def fake_ocr(settings, book: BookFile, work: Work, language: str = "eng") -> str:
+    """Publish an OCR words file for ``book`` (and its checksum sidecar); returns its digest."""
+    typeset = make_text_pdf(settings.data_dir / f"typeset-{language}.pdf")
+    pages = [vars(p) for p in extract.extract_words(typeset).pages]
+    src = SimpleNamespace(book=book, scan={"toc": []})
+    doc = ocr.build_document(src, pages, engine_label="tesseract 5.3.0", language=language,
+                             dpi=300)  # fmt: skip
+    data = ocr.dumps(doc)
+    dest = ocr.words_path(settings.library_dir, work, book.sha256)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    dest.with_name(dest.name + ".sha256").write_text(digest)
+    return digest
+
+
+def _text(client, book) -> dict:
+    return client.get(f"/api/files/{book.id}/text").json()
+
+
+def test_recognised_words_become_the_scans_ready_text_and_read_along_runs_on_it(
+    client, owner, settings, scanned
+):
+    book, work = scanned
+    assert pdf_sweep(session_factory(), settings.library_dir) == 1
+    assert _text(client, book)["status"] == "needs_ocr"
+    assert pdf_sweep(session_factory(), settings.library_dir) == 0  # nothing new: not read again
+
+    digest = fake_ocr(settings, book, work)
+    assert pdf_sweep(session_factory(), settings.library_dir) == 1  # recognised: read again
+    assert pdf_sweep(session_factory(), settings.library_dir) == 0
+    st = _text(client, book)
+    assert (st["status"], st["source"], st["ocr"]) == (
+        "ready", "ocr", {"engine": "tesseract 5.3.0", "language": "eng"})  # fmt: skip
+    assert (st["text_source"], st["map"], st["pages"], st["pages_with_text"]) == (
+        "pdf",
+        "self",
+        2,
+        2,
+    )
+    assert st["sections"] and st["sentences"] > 3
+
+    doc_path = settings.library_dir / work.dir_path / document_rel(book.sha256)
+    doc = json.loads(doc_path.read_bytes())
+    assert doc["ocr"] == {"engine": "tesseract 5.3.0", "language": "eng"}
+    text = " ".join(s["text"] for s in doc["sections"])
+    assert "lighthouse keeper climbed the stairs every night" in text
+    assert "the old tower on the rocks" in text
+    # every word has a box on its page: the overlay highlights recognised text
+    assert {w[2] for s in doc["sections"] for w in s["words"]} == {0, 1}
+    with session_factory()() as db:
+        row = db.scalar(select(PdfText).where(PdfText.file_id == book.id))
+        assert row.ocr_sha256 == digest and row.text_sha256 == hashlib.sha256(
+            doc_path.read_bytes()).hexdigest()  # fmt: skip
+        n_work = db.query(Sentence).filter_by(work_id=work.id).count()
+        assert n_work == db.query(PdfSentence).filter_by(file_id=book.id).count() == st["sentences"]
+    r = client.get(f"/api/files/{book.id}/sentences?from=0&to=3").json()
+    assert r["map"] == "self" and [s["work_n"] for s in r["sentences"]] == [0, 1, 2]
+    assert all(s["boxes"] for s in r["sentences"])
+
+    # Alignment reads the recognised text, and narration has a text to narrate.
+    shutil.copy(EXCERPT, settings.library_dir / work.dir_path / "01 reading.mp3")
+    r = api_post(client, f"/api/works/{work.id}/align", owner["csrf"], {})
+    assert r.status_code == 202, r.text
+    assert r.json()["capability"] == "align-pdf"
+    with session_factory()() as db:
+        job = db.scalar(select(Job).where(Job.kind == "align"))
+        assert job.payload["epub_sha256"] == row.text_sha256
+    assert client.get(f"/api/works/{work.id}/audiobook").json()["reason"] != "pdf_needs_ocr"
+
+
+def test_a_sparse_scan_is_ready_from_what_ocr_recognised():
+    """A picture book: text on one page in three is not a text PDF by the text-layer rule,
+    but it is a recognised text."""
+    words = [["Once", 72.0, 700.0, 110.0, 712.0, 12.0, 0], ["upon", 114.0, 700.0, 150.0, 712.0,
+             12.0, 0], ["a", 154.0, 700.0, 160.0, 712.0, 12.0, 0], ["time.", 164.0, 700.0, 200.0,
+             712.0, 12.0, 2]]  # fmt: skip
+    pages = [extract.RawPage(i, 612.0, 792.0, 0.0, 0.0, 0, None, 0, 0, words if i == 1 else [])
+             for i in range(3)]  # fmt: skip
+    raw = extract.RawDoc(pages, [])
+    assert build_document(raw, "0" * 64)["status"] == "needs_ocr"
+    doc = build_document(raw, "0" * 64, ocr={"engine": "tesseract 5", "language": "eng"})
+    assert doc["status"] == "ready" and doc["sections"][0]["text"] == "Once upon a time."
+    assert doc["sections"][0]["words"][0][2] == 1  # boxed on the second page
+    # nothing recognised at all is still no text
+    empty = extract.RawDoc([extract.RawPage(0, 612.0, 792.0, 0.0, 0.0, 0, None, 0, 0, [])], [])
+    assert build_document(empty, "0" * 64, ocr={"engine": "t", "language": "eng"})["status"] == (
+        "needs_ocr"
+    )
+
+
+def test_recognising_again_in_another_language_makes_older_alignments_stale(
+    client, owner, settings, scanned
+):
+    from lectern.align.jobs import DEFAULT_MODEL, align_payload, refresh_work
+
+    book, work = scanned
+    shutil.copy(EXCERPT, settings.library_dir / work.dir_path / "01 reading.mp3")
+    fake_ocr(settings, book, work, "eng")
+    pdf_sweep(session_factory(), settings.library_dir)
+    with session_factory()() as db:
+        w = db.get(Work, work.id)
+        refresh_work(db, settings.library_dir, w, auto_enqueue=False)
+        payload = align_payload(db, settings.library_dir, w, DEFAULT_MODEL)
+        first = db.scalar(select(PdfText).where(PdfText.file_id == book.id)).text_sha256
+        assert payload["epub_sha256"] == first and payload["text_source"] == "pdf"
+        db.add(Alignment(work_id=w.id, model="m", status=AlignmentStatus.SUCCEEDED,
+                         epub_sha256=first, audio_fingerprint=payload["audio_fingerprint"]))  # fmt: skip
+        db.commit()
+        assert refresh_work(db, settings.library_dir, w) is None  # current: nothing to do
+        db.commit()
+
+    fake_ocr(settings, book, work, "fra")  # the same words, recognised as French
+    assert pdf_sweep(session_factory(), settings.library_dir) == 1
+    st = _text(client, book)
+    assert st["status"] == "ready" and st["ocr"]["language"] == "fra"
+    with session_factory()() as db:
+        w = db.get(Work, work.id)
+        second = db.scalar(select(PdfText).where(PdfText.file_id == book.id)).text_sha256
+        assert second != first  # a new recognition is a new text
+        job = refresh_work(db, settings.library_dir, w)
+        db.commit()
+        a = db.scalar(select(Alignment).where(Alignment.work_id == w.id))
+        assert a.status == AlignmentStatus.STALE
+        assert job is not None and job.payload["epub_sha256"] == second
+
+
+def test_deleting_the_copy_takes_the_recognised_text_back_out(client, owner, settings, scanned):
+    book, work = scanned
+    fake_ocr(settings, book, work)
+    ocr.pdf_path(settings.library_dir, work, book.sha256).write_bytes(b"%PDF-")  # the copy
+    pdf_sweep(session_factory(), settings.library_dir)
+    assert _text(client, book)["status"] == "ready"
+    assert api_delete(client, f"/api/files/{book.id}/ocr", owner["csrf"]).status_code == 200
+    assert pdf_sweep(session_factory(), settings.library_dir) == 1
+    st = _text(client, book)
+    assert (st["status"], st["source"], st["sentences"]) == ("needs_ocr", "text_layer", 0)
+    with session_factory()() as db:
+        assert db.query(PdfSentence).filter_by(file_id=book.id).count() == 0
+
+
+def test_unusable_words_fail_that_pdf_and_stop_retrying(client, owner, settings, scanned):
+    book, work = scanned
+    dest = ocr.words_path(settings.library_dir, work, book.sha256)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps({"kind": "ocr", "pdf_sha256": "f" * 64, "pages": []}).encode()
+    dest.write_bytes(data)  # no sidecar: hashed instead
+    for _ in range(3):
+        assert pdf_sweep(session_factory(), settings.library_dir) == 1
+    assert pdf_sweep(session_factory(), settings.library_dir) == 0  # MAX_ATTEMPTS, then left
+    st = _text(client, book)
+    assert st["status"] == "failed" and st["error"].startswith("ocr_unreadable")
+    # a new recognition starts over
+    fake_ocr(settings, book, work)
+    assert pdf_sweep(session_factory(), settings.library_dir) == 1
+    assert _text(client, book)["status"] == "ready"
+
+
+# --- the reflowed EPUB of a scan (issue #62, phase 2 of #17) ------------------------------------
+
+
+def _opf(path: Path) -> str:
+    with zipfile.ZipFile(path) as z:
+        return z.read("OEBPS/content.opf").decode()
+
+
+def test_an_ocrd_scan_converts_to_an_epub_labelled_as_ocr_that_takes_part_in_read_along(
+    client, owner, settings, scanned
+):
+    book, work = scanned
+    pdf_sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/works/{work.id}/pdf-epub").json()
+    assert (st["eligible"], st["reason"]) == (False, "no_text_pdf")  # a scan: not yet
+
+    fake_ocr(settings, book, work)
+    pdf_sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/works/{work.id}/pdf-epub").json()
+    assert (st["eligible"], st["source"], st["outdated"]) == (True, "ocr", False)
+    assert api_post(client, f"/api/works/{work.id}/pdf-epub", owner["csrf"]).status_code == 202
+    assert run_pending(session_factory(), settings) == 1
+
+    st = client.get(f"/api/works/{work.id}/pdf-epub").json()
+    assert st["job"]["status"] == "succeeded", st["job"]
+    assert (st["reason"], st["outdated"], st["report"]["source"]) == ("converted", False, "ocr")
+    assert st["report"]["ocr"] == {"engine": "tesseract 5.3.0", "language": "eng"}
+    assert any("OCR" in w and "recognition errors" in w for w in st["report"]["warnings"])
+    path = settings.library_dir / work.dir_path / CONVERTED_NAME
+    opf = _opf(path)
+    assert '<meta name="lectern:source" content="ocr"/>' in opf
+    assert "text recognition (OCR: tesseract 5.3.0, language eng)" in opf
+    with zipfile.ZipFile(path) as z:
+        assert "recognition errors" in z.read("OEBPS/nav.xhtml").decode()
+        body = " ".join(z.read(n).decode() for n in z.namelist() if re.match(r"OEBPS/s\d+", n))
+    assert "lighthouse keeper climbed the stairs every night" in body
+
+    # The edition is the work's text now (sentences, alignment, read-along), and the scan's
+    # pages follow it through the PDF↔EPUB projection.
+    with session_factory()() as db:
+        w = db.get(Work, work.id)
+        found = work_text(db, settings.library_dir, w)
+        assert (
+            found is not None
+            and found[0].kind == "epub"
+            and found[0].file.rel_path == (CONVERTED_NAME)
+        )
+        assert db.query(Sentence).filter_by(work_id=work.id).count() > 3
+    pdf_sweep(session_factory(), settings.library_dir)
+    st = _text(client, book)
+    assert (st["text_source"], st["map"]) == ("epub", "epub")
+    shutil.copy(EXCERPT, settings.library_dir / work.dir_path / "01 reading.mp3")
+    r = api_post(client, f"/api/works/{work.id}/align", owner["csrf"], {})
+    assert r.status_code == 202 and r.json()["capability"] == "align", r.text
+
+    # Recognised again: the edition is out of date, and converting again replaces it.
+    old = sha256_file(path)
+    fake_ocr(settings, book, work, "fra")
+    pdf_sweep(session_factory(), settings.library_dir)
+    st = client.get(f"/api/works/{work.id}/pdf-epub").json()
+    assert (st["eligible"], st["outdated"]) == (True, True)
+    assert api_post(client, f"/api/works/{work.id}/pdf-epub", owner["csrf"]).status_code == 202
+    assert run_pending(session_factory(), settings) >= 1
+    st = client.get(f"/api/works/{work.id}/pdf-epub").json()
+    assert (st["reason"], st["outdated"]) == ("converted", False)
+    assert st["report"]["ocr"]["language"] == "fra" and sha256_file(path) != old
+    with session_factory()() as db:
+        assert db.query(BookFile).filter_by(work_id=work.id, rel_path=CONVERTED_NAME).count() == 1
+
+    # ...and it can be deleted like any converted edition (the scan and its OCR stay).
+    assert api_delete(client, f"/api/works/{work.id}/pdf-epub", owner["csrf"]).status_code == 200
+    assert not path.exists() and ocr.words_path(settings.library_dir, work, book.sha256).is_file()
