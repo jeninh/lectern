@@ -12,8 +12,8 @@ pull, so the queue is just a personal shelf for one catalogue password.
 - **One book:** open it in the Library and choose **Send to device**. The dialog lists the
   devices you can send to, which ones already have the book waiting, and remembers your last
   choice.
-- **Several books:** select them in the Library (click, `⌘/Ctrl` or `Shift` + click, `⌘/Ctrl A`
-  for the whole view; on a phone, press and hold), then **Send** in the selection bar (the same bar as bulk edit; readers see only **Send to device**). The
+- **Several books:** select them in the Library (click a book's circle, then the others;
+  `⌘/Ctrl` or `Shift` + click, `⌘/Ctrl A` for the whole view; on a phone, press and hold), then **Send** in the selection bar (the same bar as bulk edit; readers see only **Send to device**). The
   toast says what happened to each book: sent, already waiting, not shared with that person,
   or without an EPUB.
 - **The queue:** on **Devices**, each device with a catalogue password shows how many books

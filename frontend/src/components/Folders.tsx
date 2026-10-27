@@ -25,8 +25,8 @@ export function folderSummary(s: Pick<Shelf, "work_count" | "shelf_count">): str
   return parts.join(" · ") || "Empty";
 }
 
-/** A shelf in the Library grid or list: opened like a folder (double-click, Enter, or a tap),
- * selected like a book, dragged and dropped onto. */
+/** A shelf in the Library grid or list: opened like a folder (a click or tap when nothing is
+ * selected, Enter, or Open in its menu), selected like a book, dragged and dropped onto. */
 export function FolderCell({ shelf, grid, cell, col, covers, menu, drag }: { shelf: Shelf; grid: boolean; cell: CellProps; col: number; covers: Work[]; menu: MenuAction[]; drag: { draggable: boolean; onDragStart: (e: React.DragEvent) => void; onDragEnd: () => void } }) {
   const drop = useDropTarget()(shelf.id);
   const label = `Shelf ${shelf.name}, ${folderSummary(shelf)}`;

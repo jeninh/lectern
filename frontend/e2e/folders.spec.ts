@@ -3,7 +3,7 @@
 // (Alt adds), Move to… on a mixed selection, deleting a non-empty shelf, and Ctrl+K paths.
 // Uses Books 201–215 of e2e/seed.py and shelves named "F …", and puts everything back.
 import { expect, test, type Page } from "@playwright/test";
-import { api, book, countText, idOf, signIn } from "./desktop-helpers";
+import { api, book, circle, countText, idOf, signIn } from "./desktop-helpers";
 
 
 const tile = (page: Page, name: string) => page.getByRole("gridcell", { name: new RegExp(`^Shelf ${name},`) });
@@ -64,15 +64,19 @@ test("Folders: shelves first, books on no shelf, open, breadcrumbs, Back, and th
   await expect(tile(page, "F Kids")).toHaveCount(0);
   await filter(page).fill("");
 
-  await tile(page, "F Kids").dblclick();
+  // Not selecting: a plain click opens a shelf.
+  await tile(page, "F Kids").click();
   await expect(page).toHaveURL(new RegExp(`/app/library\\?shelf=${ids.kids}$`));
   await expect(crumbs(page)).toHaveText(/Library›F Kids/);
   await expect(tile(page, "F Picture")).toBeVisible();
   await expect(book(page, "Book 201")).toBeVisible();
   await expect(page.getByRole("grid")).toHaveAttribute("aria-label", "Shelves and books in F Kids");
 
-  // Keyboard: Enter on a focused shelf opens it.
+  // Selecting: a click toggles a shelf instead; Enter on the focused shelf still opens it.
+  await circle(book(page, "Book 201"));
   await tile(page, "F Picture").click();
+  await expect(countText(page)).toHaveText("2 selected");
+  await expect(page).toHaveURL(new RegExp(`shelf=${ids.kids}$`));
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(new RegExp(`shelf=${ids.picture}`));
   await expect(crumbs(page)).toHaveText(/Library›F Kids›F Picture/);
@@ -140,7 +144,7 @@ test("drag and drop: a plain drop moves, Alt adds, a breadcrumb takes drops too"
 
 test("Move to…: a shelf and a book together, never into itself; Ctrl+A counts both", async ({ page }) => {
   await page.goto(`/app/library?shelf=${ids.kids}`);
-  await tile(page, "F Comics").click();
+  await circle(tile(page, "F Comics"));
   await book(page, "Book 201").click({ modifiers: ["Control"] });
   await expect(countText(page)).toHaveText("2 selected");
   // Book-only actions are off while a shelf is selected.
@@ -159,7 +163,7 @@ test("Move to…: a shelf and a book together, never into itself; Ctrl+A counts 
 
   // Kids can't go into Picture, which is inside it.
   await page.goto("/app/library");
-  await tile(page, "F Kids").click();
+  await circle(tile(page, "F Kids"));
   await page.getByRole("button", { name: "Move to…" }).click();
   await expect(page.getByRole("dialog").getByRole("option", { name: /^F Picture/ })).toHaveAttribute("aria-disabled", "true");
   await page.keyboard.press("Escape");
@@ -169,7 +173,7 @@ test("Move to…: a shelf and a book together, never into itself; Ctrl+A counts 
   const cells = page.getByRole("grid").getByRole("gridcell");
   await expect(tile(page, "F Picture")).toBeVisible();
   const n = await cells.count();
-  await cells.first().click();
+  await cells.first().focus();
   await page.keyboard.press("Control+a");
   await expect(countText(page)).toHaveText(`All ${n} selected`);
 });
