@@ -8,7 +8,7 @@ sync and read-along then work on the PDF the same way they work on an EPUB.
 | The book is | What Lectern does |
 |---|---|
 | **Text PDF** | Reads the text layer. Read-along highlights the narration *on the PDF's pages*; **Make an audiobook** narrates it by outline chapter or page range; alignment runs on its text. |
-| **Scanned PDF** (pictures of pages, no text layer) | Marks it **needs OCR**: viewing and page sync work, but nothing is aligned or narrated. Text recognition is [issue #17](https://github.com/jeninh/lectern/issues/17); it will produce the same canonical text, so everything below then works on scans unchanged. |
+| **Scanned PDF** (pictures of pages, no text layer) | Marks it **needs OCR** until text recognition ([ocr.md](ocr.md)) has run: viewing and page sync work, but nothing is aligned or narrated. Once it has, the recognised words become the same canonical text, so everything below works on the scan unchanged. |
 | **Comic (CBZ)** | Pictures, not text: read-along and narration need an EPUB or a text PDF of the book. |
 | **EPUB** | As before. When a work has an EPUB *and* a text PDF, the EPUB is the text, and the PDF's sentences are projected onto it, so read-along also works on the PDF's pages. |
 
@@ -57,7 +57,9 @@ or was read by an older extractor.
 - **Sections** are what a spine item is for an EPUB: from outline entries whose titles appear
   on their pages (leading "Chapter 3", "IV." enumerators are tolerated), else ranges of 10
   pages ("Pages 1–10").
-- **Needs OCR**: fewer than half the pages have 40 or more characters of body text.
+- **Needs OCR**: fewer than half the pages have 40 or more characters of body text, and no
+  text has been recognised yet. A recognised scan is read from its OCR words instead of its
+  text layer (same layout step) and is ready whenever anything was recognised.
 
 The result is one deterministic JSON document per PDF, written atomically to
 `<work>/derived/pdf-text-<sha256 prefix>.json` (format in `lectern/pdftext/document.py`,
@@ -148,8 +150,9 @@ with the network off.
 
 - `GET /api/files/{id}/text`: `{status: "pending" | "ready" | "needs_ocr" | "failed", pages,
   pages_with_text, sections: [{title, page_start, page_end, from_outline, sentences,
-  characters}], sentences, error, text_source: "epub" | "pdf" | null, map: "self" | "epub" |
-  null, readalong}`.
+  characters}], sentences, error, source: "text_layer" | "ocr" | null, ocr: {engine,
+  language} | null, text_source: "epub" | "pdf" | null, map: "self" | "epub" | null,
+  readalong}`.
 - `GET /api/files/{id}/sentences?from=&to=` (pages of 2000): `{count, map, sentences: [{n,
   work_n, page, boxes: [[page, x0, y0, x1, y1]]}]}`. Only page numbers and rectangles, no text.
   `409 no_map` until the text is ready and current.
@@ -161,8 +164,11 @@ with the network off.
 - `GET /api/works/{id}/audiobook` chapters add `pages: [first, last]` (1-based) for PDF
   sections.
 
-## OCR (issue #17)
+## OCR (issues #17, #62)
 
-OCR must write this same document: sections with text and words with boxes, `status:
-"ready"`. Sentences, positions, alignment, narration, the overlay and offline then work on
-scans with no other change.
+A recognised scan gets this same document, built from the OCR words file
+(`derived/ocr-<prefix>.json`) by the same layout step: sections with text and words with
+boxes, `status: "ready"`, plus `"ocr": {engine, language}`. Sentences, positions,
+alignment, narration, the overlay and offline then work on scans with no other change.
+Because the engine and language are part of the document, recognising again (another
+language) is a new text: an alignment of the old one goes stale and is redone.

@@ -4,7 +4,9 @@ A scanned PDF is pictures of pages: nothing in it can be searched, selected, rea
 aligned. Lectern finds scans, recognises their text with
 [Tesseract](https://github.com/tesseract-ocr/tesseract) as a background job, and keeps a
 **searchable copy**: the same pages with an invisible text layer, so any PDF viewer can search,
-select, and copy the text. The original file is never changed. Issue #17, phase 1.
+select, and copy the text. The original file is never changed. The recognised text then
+becomes the scan's text for read-along, alignment and narration, and can be reflowed into an
+EPUB edition. Issues #17 and #62.
 
 | Scan, not recognised yet | Queued | Recognising | Failed (Retry) | Done |
 |---|---|---|---|---|
@@ -93,28 +95,47 @@ Next to the work, under `derived/` (regenerable, not backed up, deleted with **D
   Download it from the card (*Searchable PDF*); it counts as a download.
 - `ocr-<sha256 prefix>.json`: the recognised words, for the read-along pipeline below.
 
-Both are removed when their PDF leaves the work.
+Both are removed when their PDF leaves the work. Deleting the copy also takes the recognised
+text back out: at the next library sweep the scan is *needs OCR* again.
 
 ## Read-along on scans (with the PDF text work)
 
-The words file has exactly the shape of the PDF text reader's pages (`lectern.pdftext.extract`,
+Within a minute of a recognition finishing (the next library sweep), the scan's canonical
+text document ([pdf-read-along.md](pdf-read-along.md)) is built from the words file instead
+of the empty text layer. The words file has exactly the shape of the PDF text reader's pages (`lectern.pdftext.extract`,
 [pdf-read-along.md](pdf-read-along.md)): per page `{index, w, h, x0, y0,
 rotation, label, chars, map_errors, words: [[text, x0, y0, x1, y1, size, flags]]}`, boxes in PDF
 user space (points, origin bottom left, before `/Rotate`), flags 1 = line-end hyphen and 2 =
 line break, plus the outline as `toc`. Each word's box spans its line, as PDFium's loose boxes
 do. So the same layout step (running heads and page numbers, columns, dehyphenation, Unicode)
-can build the same canonical text document from it, with `status: "ready"`, and sentences,
-positions, alignment, narration, and the read-along overlay then work on scans unchanged.
+builds the same canonical text document from it, and sentences, positions, KOReader page
+sync, alignment (`align-pdf`), **Make an audiobook**, and the read-along overlay work on the
+scan unchanged.
 
-Still to do (a small hookup, not part of this change): store a scan's
-text from this file; mark the document as `ready` from the recognised text rather than by the
-text-layer rule (a sparse scan, such as a picture book, would otherwise stay `needs_ocr`); and
-record the OCR engine and language in the document, so a new recognition is a new text and an
-older alignment goes stale.
+- The document is `ready` whenever anything was recognised, not by the text-layer rule, so a
+  sparse scan (a picture book) is a text too. A recognition that found nothing stays *needs
+  OCR*.
+- It records the engine and language (`"ocr": {"engine", "language"}`; `GET
+  /api/files/{id}/text` says `source: "ocr"`). Recognising again, say in another language, is
+  a new text: an older alignment goes stale and is redone, and a converted EPUB says it is out
+  of date.
+- The words file the text was built from is remembered (`pdf_texts.ocr_sha256`), so a new
+  recognition or a deleted copy is noticed at the next sweep. A words file that cannot be
+  used fails that PDF's text (`ocr_unreadable`, 3 attempts), never the sweep.
+
+## A reflowed EPUB of a scan
+
+Once a scan has recognised text, **Convert to EPUB…** ([pdf-epub.md](pdf-epub.md)) works on it
+like on a text PDF: a separate, reflowable EPUB 3 edition with the scan's page numbers, which
+takes part in sentence mapping, alignment and read-along like any EPUB. It is labelled as
+generated from OCR in the package description (with the engine and language) and a
+`lectern:source` meta, in a note in its contents, in the conversion report (`source: "ocr"`
+and a warning to expect recognition errors), and on the card (*EPUB generated from OCR text of
+the scan*). **Remove** deletes it; after recognising again, the card offers **Convert again**,
+which replaces it.
 
 ## Not yet
 
-- **A reflowed EPUB from the recognised text** (issue #17, phase 2) is a follow-up.
 - Handwriting, tables and maths, comics, and editing recognised text are out of scope.
 
 ## API

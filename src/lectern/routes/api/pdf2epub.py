@@ -1,7 +1,8 @@
 """PDF → EPUB conversion of a work (issue #28), as a job (docs/pdf-epub.md).
 
 - ``GET    /api/works/{id}/pdf-epub``  eligibility, the latest job, the converted edition, the report
-- ``POST   /api/works/{id}/pdf-epub``  queue a conversion of the work's text PDF
+- ``POST   /api/works/{id}/pdf-epub``  queue a conversion of the work's text PDF (a scan once
+  OCR has given it text; again, replacing the edition, when it is ``outdated``)
 - ``POST   /api/works/{id}/pdf-epub/retry``  queue the last failed one again
 - ``DELETE /api/works/{id}/pdf-epub``  remove the converted edition (the PDF stays)
 - ``POST   /api/works/pdf-epub``  queue conversions for many works (the selection bar, #61)
@@ -68,15 +69,25 @@ def _job_json(job) -> dict | None:
 
 @router.get("/works/{work_id}/pdf-epub")
 def state(auth: Viewer, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
+    from lectern.pdftext.store import text_pdf
+
     work = visible_work(db, auth.user, work_id)
     reason = pj.eligibility(db, settings, work)
     job = pj.latest_job(db, work_id)
     edition = pj.converted_file(db, work.id)
     report = (job.result or {}).get("report") if job else None
+    if edition is not None:  # the edition's own report, not a later failed attempt's
+        made = pj.edition_job(db, edition)
+        report = (made.result or {}).get("report") if made else report
+    pair = text_pdf(db, work.id)
+    row = pair[1] if pair else None
     return {
         "work_id": work.id,
         "eligible": reason is None,
         "reason": reason,
+        # where the text to convert comes from: the PDF's text layer, or OCR of a scan
+        "source": ("ocr" if row.ocr_sha256 else "text_layer") if row else None,
+        "outdated": edition is not None and pj.outdated(db, work.id, edition),
         "job": _job_json(job),
         "edition": (
             {

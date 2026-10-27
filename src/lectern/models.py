@@ -1277,8 +1277,9 @@ class PdfText(Base):
 
     ``status``: ``pending`` (not read yet), ``ready`` (a canonical text document exists:
     ``text_sha256`` names it, ``sections`` summarises it, ``pdf_sentences`` holds its sentences
-    with their pages and boxes), ``needs_ocr`` (most pages have no usable text: a scan; issue
-    #17's OCR will fill in the same document), or ``failed`` (the sandboxed reader refused or
+    with their pages and boxes), ``needs_ocr`` (most pages have no usable text: a scan with no
+    recognised text yet; once OCR has run, the document is built from its words and
+    ``ocr_sha256`` names them), or ``failed`` (the sandboxed reader refused or
     crashed; ``error`` says why). ``version`` is the extractor's
     (:data:`lectern.pdftext.document.DOCUMENT_VERSION`): a newer one reads the file again.
     """
@@ -1306,6 +1307,9 @@ class PdfText(Base):
     # The work sentence list ``pdf_sentences.epub_n`` was projected onto (a digest of it), when
     # the work's text comes from an EPUB; NULL = no projection (the PDF is the text, or none yet).
     projected_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    # The OCR words file (``derived/ocr-<prefix>.json``, its SHA-256) the text was built from,
+    # NULL when it came from the PDF's own text layer (migration 0019_pdf_text_ocr).
+    ocr_sha256: Mapped[str | None] = mapped_column(String(64), default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 

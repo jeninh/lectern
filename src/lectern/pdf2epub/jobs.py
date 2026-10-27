@@ -15,14 +15,21 @@ What a successful job publishes, under the library lock:
 - the work's sentence list moves to the EPUB's (the existing PDF↔EPUB projection carries
   positions over, so progress and read-along survive the new text timeline).
 
-Deleting the edition (:func:`remove`) takes the file, the row, and the report back out.
+Deleting the edition (:func:`remove`) takes the file, the row, and the report back out. An
+edition whose PDF text has changed since (a scan recognised again, in another language) is
+:func:`outdated`, and converting again replaces it.
+
+A scan converts like a text PDF once OCR has given it a ``ready`` text document (issue
+#62); the edition is then labelled as generated from OCR (:mod:`lectern.pdf2epub.build`).
 """
 
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from lectern import queue
@@ -77,8 +84,33 @@ def latest_job(db: Session, work_id: int) -> Job | None:
     )
 
 
+def edition_job(db: Session, edition: BookFile) -> Job | None:
+    """The conversion that produced ``edition`` (its result names the edition's bytes)."""
+    for job in db.scalars(
+        select(Job)
+        .where(Job.work_id == edition.work_id, Job.kind == PDF2EPUB,
+               Job.status == JobStatus.SUCCEEDED)
+        .order_by(Job.id.desc())
+    ):  # fmt: skip
+        if (job.result or {}).get("sha256") == edition.sha256:
+            return job
+    return None
+
+
+def outdated(db: Session, work_id: int, edition: BookFile | None = None) -> bool:
+    """Whether the converted edition was built from another text than the work's text PDF
+    has now (the PDF was recognised again, or replaced). Unknown provenance is not outdated."""
+    edition = edition or converted_file(db, work_id)
+    pair = pdf_store.text_pdf(db, work_id)
+    job = edition_job(db, edition) if edition is not None else None
+    if job is None or pair is None:
+        return False
+    return (job.payload or {}).get("text_sha256") != pair[1].text_sha256
+
+
 def eligibility(db: Session, settings: Settings, work: Work) -> str | None:
-    """Why the work cannot be converted, or None when it can."""
+    """Why the work cannot be converted, or None when it can (an outdated edition can be
+    converted again: the new one replaces it)."""
     pair = pdf_store.text_pdf(db, work.id)
     if pair is None:
         return "no_text_pdf"
@@ -86,7 +118,8 @@ def eligibility(db: Session, settings: Settings, work: Work) -> str | None:
     path = settings.library_dir / work.dir_path / book.rel_path
     if not path.is_file():
         return "no_text_pdf"
-    if converted_file(db, work.id) is not None:
+    edition = converted_file(db, work.id)
+    if edition is not None and not outdated(db, work.id, edition):
         return "converted"
     return None
 
@@ -199,8 +232,12 @@ def _publish(
             work_dir = settings.library_dir / work.dir_path
             work_dir.mkdir(parents=True, exist_ok=True)
             dest = work_dir / CONVERTED_NAME
-            dest.unlink(missing_ok=True)
-            move_file(scratch, dest)
+            # Next to the live edition first, then one atomic replace: a failed move never
+            # leaves the edition's row pointing at a missing file.
+            staged = work_dir / f".{job.id}-{CONVERTED_NAME}.part"
+            staged.unlink(missing_ok=True)
+            move_file(scratch, staged)
+            os.replace(staged, dest)
             report_dest = work_dir / "derived" / REPORT_NAME
             report_dest.parent.mkdir(parents=True, exist_ok=True)
             report_dest.unlink(missing_ok=True)
@@ -209,7 +246,8 @@ def _publish(
 
             digest = sha256_file(dest)
             existing = converted_file(db, work.id)
-            if existing is not None:
+            replaced = existing is not None
+            if replaced:
                 db.delete(existing)
                 db.flush()
             db.add(
@@ -225,11 +263,43 @@ def _publish(
             # The work's text is this EPUB the moment the row exists: move the sentence list
             # and every stored position onto it now (the PDF↔EPUB projection carries them).
             pdf_store.ensure_pdf_sentences(db, settings.library_dir, work)
+            if replaced:
+                _replace_sentences(db, settings, work, dest)
             db.commit()
             return digest
     finally:
         scratch.unlink(missing_ok=True)
         report_scratch.unlink(missing_ok=True)
+
+
+def _replace_sentences(db: Session, settings: Settings, work: Work, epub: Path) -> None:
+    """A new edition replaced an older one (converted again after the PDF's text changed):
+    the work's sentence list is still the old edition's, which ``ensure_pdf_sentences`` leaves
+    alone (it is an EPUB's). Rebuild it from the new edition when that is the work's text and
+    no alignment owns it, moving positions proportionally (as an edited EPUB does,
+    ``lectern.editing``), and let the staleness rules handle an alignment of the old one."""
+    from lectern.align import jobs as align_jobs
+    from lectern.ingest.sentences import epub_sentences, replace_sentences
+    from lectern.models import Alignment, AlignmentStatus, Sentence
+
+    db.flush()
+    found = pdf_store.work_text(db, settings.library_dir, work)
+    # an alignment that has installed its sentence map owns the list; a queued one has not
+    aligned = db.scalar(select(Alignment.id).where(
+        Alignment.work_id == work.id,
+        Alignment.status.in_([AlignmentStatus.SUCCEEDED, AlignmentStatus.STALE]),
+    )) is not None  # fmt: skip
+    if found is not None and found[0].kind == "epub" and found[0].file.rel_path == CONVERTED_NAME:
+        if not aligned:
+            try:
+                entries = epub_sentences(epub)
+            except Exception:  # noqa: BLE001 - an unreadable edition keeps the list it has
+                log.warning("could not segment the converted EPUB of work %d", work.id)
+            else:
+                old = db.scalar(select(func.count(Sentence.id)).where(Sentence.work_id == work.id))
+                move = (lambda n: round(n * len(entries) / old)) if old else None
+                replace_sentences(db, work.id, entries, move=move)
+    align_jobs.refresh_work(db, settings.library_dir, work, auto_enqueue=False)
 
 
 def remove(db: Session, settings: Settings, work: Work) -> bool:
