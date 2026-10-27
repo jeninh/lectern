@@ -30,8 +30,10 @@ What is indexed: each book's EPUB (the one the reader opens, chosen in the edito
 text of each of its PDFs: the same reading-order text PDF read-along uses
 ([pdf-read-along.md](pdf-read-along.md)), once Lectern has read it, so a new PDF becomes
 searchable a little after its text is ready. Search never opens a PDF itself. Comics,
-audiobooks, and scanned PDFs without a text layer have no text to search; a scan becomes
-searchable once OCR has given it text (#17).
+audiobooks, and scanned PDFs without a text layer have no text to search. OCR
+([ocr.md](ocr.md)) already makes a searchable copy of a scan, but its words do not feed the PDF
+text document yet ("Still to do" there); once they do, the scan's text is indexed like any
+other PDF's, with no change here.
 Up to `LECTERN_SEARCH_MAX_CHARS_PER_WORK` characters (5 million, more than *War and Peace*)
 per book.
 
