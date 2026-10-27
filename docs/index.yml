@@ -59,6 +59,10 @@ sections:
         title: Read-along for PDFs
         description: Text PDFs get alignment, generated audiobooks, positions, and read-along on the pages.
         icon: headphones
+      - file: ocr.md
+        title: Text recognition for scanned PDFs
+        description: Scanned PDFs get a searchable copy and recognised words, on the server or a worker.
+        icon: book
       - file: pdf-epub.md
         title: PDF to EPUB conversion
         description: Give a text PDF a reflowable EPUB edition, keeping the PDF's page numbers.
