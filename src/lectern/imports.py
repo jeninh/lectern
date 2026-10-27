@@ -252,26 +252,50 @@ def stage_upload(
 ) -> ImportFile:
     """Move a verified upload into the import's staging folder and read it. A file whose
     checksum is already in this import is the same file again: the existing entry answers."""
+    return stage_file(
+        db,
+        settings,
+        imp,
+        part,
+        filename=upload.filename,
+        media_type=upload.media_type,
+        size=upload.size,
+        sha256=upload.sha256,
+    )
+
+
+def stage_file(
+    db: Session,
+    settings: Settings,
+    imp: Import,
+    part: Path,
+    *,
+    filename: str,
+    media_type: str,
+    size: int,
+    sha256: str,
+) -> ImportFile:
+    """:func:`stage_upload` for a file that did not come through an upload session (an
+    e-mailed attachment, a saved web article): ``part`` is moved in, its checksum known."""
     if imp.status not in OPEN:
         raise ImportError_(409, "import_closed", status=imp.status.value)
     existing = db.scalar(
-        select(ImportFile).where(ImportFile.import_id == imp.id, ImportFile.sha256 == upload.sha256)
+        select(ImportFile).where(ImportFile.import_id == imp.id, ImportFile.sha256 == sha256)
     )
     if existing is not None:
         part.unlink(missing_ok=True)
         return existing
     if len(imp.files) >= MAX_FILES:
         raise ImportError_(413, "too_many_files")
-    book = formats.is_book(upload.media_type)
+    book = formats.is_book(media_type)
     kind = FileKind.EBOOK if book else FileKind.AUDIO
     folder = staging_dir(settings, imp)
     folder.mkdir(parents=True, exist_ok=True)
-    stem = safe_component(Path(upload.filename).stem, "file")[:80]
-    suffix = media_suffix(upload.filename, upload.media_type)
+    stem = safe_component(Path(filename).stem, "file")[:80]
+    suffix = media_suffix(filename, media_type)
     rel = unique_name(folder, f"{len(imp.files) + 1:04d} {stem}{suffix}")
     dest = checked(folder, rel)
     move_file(part, dest)
-    media_type, size, sha256 = upload.media_type, upload.size, upload.sha256
     cover = None
     try:
         if formats.is_kindle(media_type):
@@ -316,7 +340,7 @@ def stage_upload(
     row = ImportFile(
         import_id=imp.id,
         kind=kind,
-        filename=upload.filename[:600],
+        filename=filename[:600],
         rel_path=rel,
         media_type=media_type,
         size=size,
@@ -756,10 +780,31 @@ def file(
     imp.target = {"action": "new" if created else "join", "work_id": work.id}
     _touch(imp)
     db.flush()
+    if imp.shelf_id is not None:
+        report["shelf"] = _put_on_shelf(db, user, work, imp.shelf_id)
     journal.add(_restore_file(work_dir / BOOK_JSON))
     write_book_json(db, library, work)
     report["skipped_duplicates"] = [f.filename for f in imp.files if f.status == "duplicate"]
     return work, report
+
+
+def _put_on_shelf(db: Session, user: User, work: Work, shelf_id: int) -> int | None:
+    """Put the filed work on the import's shelf (email-in's destination shelf). A shelf that
+    is gone, became smart, or is no longer the person's to add to is skipped with a notice:
+    the book is filed anyway. Returns the shelf's id, or None when skipped."""
+    from lectern.access import can_edit_shelf
+    from lectern.email_in import shelf_gone_notice
+    from lectern.models import Shelf, ShelfItem
+
+    shelf = db.get(Shelf, shelf_id)
+    if shelf is None or shelf.rule is not None or not can_edit_shelf(db, user, shelf):
+        shelf_gone_notice(db, user)
+        return None
+    if db.get(ShelfItem, (shelf.id, work.id)) is None:
+        last = db.scalar(select(func.max(ShelfItem.position)).where(ShelfItem.shelf_id == shelf.id))
+        db.add(ShelfItem(shelf_id=shelf.id, work_id=work.id, position=(last or 0) + 1))
+        db.flush()
+    return shelf.id
 
 
 def _restore_file(path: Path):
@@ -929,6 +974,7 @@ def import_json(db: Session, settings: Settings, imp: Import, *, refresh: bool =
         "proposal": imp.proposal,
         "target": imp.target,
         "use_cover": imp.use_cover,
+        "shelf_id": imp.shelf_id,
         "cover_url": f"/api/imports/{imp.public_id}/cover.jpg?v={imp.version}"
         if has_cover
         else None,

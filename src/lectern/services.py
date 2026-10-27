@@ -200,6 +200,10 @@ def start_services(session_factory: sessionmaker, settings: Settings) -> list:
         Maintenance(session_factory, settings),
         SearchIndexer(session_factory, settings),
     ]
+    from lectern import email_in
+
+    if poller := email_in.start(session_factory, settings):  # off by default (.env)
+        started.append(poller)
     missing = jobs.local_engine_missing(settings)
     if missing is None:
         started.append(

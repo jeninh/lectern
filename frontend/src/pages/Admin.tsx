@@ -12,6 +12,7 @@ import { useStore } from "../lib/store";
 import type { Invite, User } from "../lib/types";
 import { CapForm } from "./Devices";
 import { ElevenLabsCard } from "../components/ElevenLabsCard";
+import { EmailInAdminCard } from "../components/EmailIn";
 
 /** Instance-wide switches. Metadata lookup is off by default because it sends data outside. */
 function LibrarySettingsCard() {
@@ -230,6 +231,7 @@ export function AdminPage() {
       <BackupsCard />
       {me?.user.role === "owner" && <OfflineModeCard />}
       {me?.user.role === "owner" && <HomeNetworkCard />}
+      {me?.user.role === "owner" && <EmailInAdminCard />}
       {me?.user.role === "owner" && <ElevenLabsCard />}
       <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for @${capFor.username}` : ""} variant="dialog" labelledBy="ucap-title">
         {capFor && (

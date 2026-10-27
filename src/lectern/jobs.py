@@ -41,6 +41,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from lectern import queue
+from lectern.article import ARTICLE
 from lectern.config import Settings
 from lectern.models import JOB_ACTIVE_STATUSES, AudioTrack, Job, JobStatus, Work, utcnow
 from lectern.pdf2epub.build import PDF2EPUB
@@ -411,14 +412,15 @@ def _publish_variant(db, settings, job, work, sha256: str, codec: str, scratch: 
 
 def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
     """Run every queued in-process job now. Returns how many ran. Conversions (``pdf2epub``)
-    never wait for a transcode worker: they are claimed first, without the deferral.
+    and saved web articles (``article``) never wait for a transcode worker: they are claimed
+    first, without the deferral.
     Transcodes run here only with ffmpeg; otherwise they wait for an external worker (and
     say so, :func:`transcoder_unavailable`)."""
     transcodes = local_transcoder(settings)
     n = 0
     while True:
         with session_factory() as db:
-            claimed = claim(db, kinds=(PDF2EPUB,))
+            claimed = claim(db, kinds=(PDF2EPUB, ARTICLE))
             if claimed is None and transcodes:
                 claimed = claim(db, defer_s=settings.local_defer_seconds)
             if claimed is None:
@@ -427,6 +429,10 @@ def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
                 from lectern.pdf2epub import jobs as pdf2epub
 
                 pdf2epub.run(db, settings, claimed[0])
+            elif claimed[0].kind == ARTICLE:
+                from lectern.article import jobs as article
+
+                article.run(db, settings, claimed[0])
             else:
                 run_transcode(db, settings, claimed[0])
             n += 1
@@ -635,7 +641,7 @@ def recover_local_leases(db: Session) -> int:
     res = db.execute(
         update(Job)
         .where(
-            Job.kind.in_((TRANSCODE, PDF2EPUB)),
+            Job.kind.in_((TRANSCODE, PDF2EPUB, ARTICLE)),
             Job.status == JobStatus.LEASED,
             Job.leased_by_id.is_(None),
         )

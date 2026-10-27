@@ -42,6 +42,19 @@ sections:
         description: Queue a book at the top of one e-reader's catalogue.
         icon: send
 
+  - title: Adding books
+    docs:
+      - file: save-articles.md
+        title: Save web articles
+        description: Turn a web article into a clean EPUB book for your e-reader.
+        icon: download
+        audience: members
+      - file: email-in.md
+        title: Email books in
+        description: Mail books to your own address; they wait for review. Set up by the owner.
+        icon: send
+        audience: members
+
   - title: Reading and audio
     docs:
       - file: read-aloud.md

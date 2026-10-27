@@ -6415,3 +6415,42 @@ table.compare td:first-child {
   gap: 4px;
   white-space: nowrap;
 }
+/* Save a web article (components/SaveArticle.tsx) and email-in (components/EmailIn.tsx) */
+.article-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.article-list li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.article-what {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  min-width: 0;
+}
+.article-what > :first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.send-option.plain {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.email-address {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.email-address code {
+  overflow-wrap: anywhere;
+  font-size: 0.95em;
+}

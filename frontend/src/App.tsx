@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useSearchParams } from "react-router-dom";
 import { Shell } from "./components/Shell";
 import { StoreProvider, useStore } from "./lib/store";
 import { ActivityPage } from "./pages/Activity";
@@ -15,6 +15,7 @@ import { TrashPage } from "./pages/Trash";
 import { DownloadsPage } from "./pages/Downloads";
 import { ReaderPage } from "./pages/Reader";
 import { PlayerProvider } from "./lib/player";
+import { sharedUrl } from "./lib/ingest";
 
 // The docs and their Markdown parser load on first visit (they are precached for offline use).
 const DocsPage = lazy(() => import("./pages/Docs"));
@@ -30,6 +31,14 @@ function EditorsOnly({ children }: { children: JSX.Element }) {
   const { me, canEdit } = useStore();
   if (!me) return null;
   return canEdit ? children : <Navigate to="/app" replace />;
+}
+
+/** The installed app's share target (manifest.webmanifest): a shared link opens the
+ * "Save a web article" dialog in the Library with it filled in. */
+function ShareTarget() {
+  const [params] = useSearchParams();
+  const url = sharedUrl(params);
+  return <Navigate to={`/app/library?article=${encodeURIComponent(url ?? "1")}`} replace />;
 }
 
 export default function App() {
@@ -51,6 +60,7 @@ export default function App() {
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
           <Route path="/app/trash" element={<EditorsOnly><TrashPage /></EditorsOnly>} />
+          <Route path="/app/save-article" element={<EditorsOnly><ShareTarget /></EditorsOnly>} />
           <Route path="/app/docs" element={docs} />
           <Route path="/app/docs/:slug" element={docs} />
           <Route path="/app/admin" element={<OwnerOnly><AdminPage /></OwnerOnly>} />
