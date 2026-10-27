@@ -2,7 +2,7 @@
 
 Every job has a ``capability``: what a worker must advertise to claim it. It is derived from
 the job's kind and payload when the job is inserted (``capability_for``): ``align`` →
-``align`` (``align-pdf`` when its text is a PDF's), ``transcode`` → ``transcode``, ``tts`` → ``tts-<payload.engine>``. Workers send
+``align`` (``align-pdf`` when its text is a PDF's), ``transcode`` → ``transcode``, ``ocr`` → ``ocr``, ``tts`` → ``tts-<payload.engine>``. Workers send
 the capabilities they have on every claim; the server leases a job only to a worker that
 advertises its capability, that the credential's owner-set allowlist permits, and that may
 leave the server at all (``SERVER_ONLY`` never does).
@@ -46,7 +46,7 @@ ALIGN = "align"
 # credential allowed to ``align`` may also ``align-pdf`` (the same engine).
 ALIGN_PDF = "align-pdf"
 TRANSCODE = "transcode"
-OCR = "ocr"  # reserved: no job kind uses it yet
+OCR = "ocr"  # text recognition of scanned PDFs (lectern.ocr.jobs)
 TTS_KOKORO = "tts-kokoro"
 TTS_PIPER = "tts-piper"
 TTS_ELEVENLABS = "tts-elevenlabs"
@@ -120,6 +120,7 @@ def _load_builtin() -> None:
     if ALIGN not in _HANDLERS:
         import lectern.align.jobs  # noqa: F401 - registers "align"
         import lectern.jobs  # noqa: F401 - registers "transcode"
+        import lectern.ocr.jobs  # noqa: F401 - registers "ocr" (scanned PDFs)
         import lectern.pdf2epub.jobs  # noqa: F401 - registers "pdf2epub" (server-only)
 
         try:

@@ -738,7 +738,7 @@ written by a lookup.
 `work.purge`, `file.restore`, `file.purge`, `metadata.lookup`, `settings.change`,
 `readaloud.regenerate`, `tts.request`, `tts.retry`, `integration.elevenlabs.set`,
 `integration.elevenlabs.test`, `integration.elevenlabs.revoke`, `integration.elevenlabs.preview`,
-`integration.elevenlabs.use`.
+`integration.elevenlabs.use`, `ocr.start`, `ocr.delete`.
 
 ## Worker protocol
 
@@ -923,7 +923,7 @@ behaves as before.
 ### Capabilities
 
 A capability is a token `^[a-z][a-z0-9-]{0,47}$`. Known ones: `align`, `transcode`,
-`tts-kokoro`, `tts-piper`, `tts-elevenlabs`, `ocr` (reserved). The vocabulary is open: a
+`tts-kokoro`, `tts-piper`, `tts-elevenlabs`, `ocr`. The vocabulary is open: a
 well-formed unknown token is accepted and simply matches no job.
 
 Every job has `jobs.capability` (NOT NULL, indexed), set when it is inserted from its kind and
@@ -1057,6 +1057,28 @@ the Kokoro client (`lectern.worker.runners.KokoroRunner`).
   synthesis (exact). The server validates artifact hashes, every script `n` exactly once,
   monotone times within the duration.
 - heartbeat `progress` = sentences done / total.
+
+### `ocr` on external workers
+
+Text recognition of scanned PDFs ([`ocr.md`](ocr.md); server side `lectern.ocr.jobs`, worker
+`lectern.worker.runners.OcrRunner`). No schema change: the job row is the state.
+
+- kind `ocr`, capability `ocr`.
+- payload: `{"file_id", "pdf_sha256", "pages", "language": "eng" | "eng+fra", "dpi": 300,
+  "batch_pages": 10}`.
+- input `pdf` (the original, `application/pdf`, checked against `pdf_sha256`).
+- artifacts, uploaded as each batch finishes: `pages-<first page, 5 digits>.json` =
+  `{"first", "pages": [{"index", "words": [[text, x0, y0, x1, y1, size, flags]], "conf",
+  "dpi", "failed"?}]}`, words in PDF user space (points, origin bottom left, before
+  `/Rotate`), flags 1 = line-end hyphen, 2 = line break.
+- result: `{"engine": "tesseract 5.3.0", "language", "batches": [{"first", "artifact",
+  "artifact_sha256"}]}`, every batch exactly once (`422 missing_batches`), the language of the
+  payload (`422 input_mismatch`). The server pins each artifact, validates every page against
+  its *own* page geometry (`422 invalid_pages`: an unknown or repeated page, malformed words,
+  more than 30,000 characters on a page; boxes are clipped to the crop box), builds the
+  searchable PDF in its sandboxed child, and publishes both files under the held lease, as for
+  `transcode`.
+- heartbeat `progress` = pages done / pages.
 
 Migrations: `0012_worker_capabilities` (down `0011`), then `0012_tts` (down
 `0012_worker_capabilities`), which adds the generated-audiobook tables.

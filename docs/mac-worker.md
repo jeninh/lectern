@@ -69,7 +69,7 @@ then revoke the worker in Admin.
 📗  Lectern Worker
     Making audiobook work 12: 43 %
     chapter 3: 210/480 sentences
-    Runs: align, tts-kokoro, transcode
+    Runs: align, tts-kokoro, transcode, ocr
     ─────────
   ✓ Worker on
   ✓ Start at login
@@ -111,7 +111,7 @@ only to a worker that has its capability ([contracts](contracts.md#capabilities-
 | `tts-kokoro` | **Kokoro-82M** (`kokoro` package, PyTorch on MPS), one sentence at a time so every sentence's timing is exact; chapters encoded with ffmpeg | Piper on the Pi (the generated-audiobooks feature decides when to fall back) |
 | `transcode` | ffmpeg (data-saver renditions), installed by the one-command installer | ffmpeg on the server, one track at a time at `nice` 19 on one thread under `LECTERN_TRANSCODE_MEMORY_LIMIT_MB`; with neither, the player and editor say a copy cannot be made |
 | `tts-elevenlabs` | never: server only, the ElevenLabs key never leaves the server | the server |
-| `ocr` | reserved | — |
+| `ocr` | Tesseract, when `tesseract` is on the PATH (`brew install tesseract tesseract-lang`); the server builds the searchable PDF ([ocr.md](ocr.md)) | Tesseract on the server (in the image) |
 
 **Pi fallback.** While a worker that can run a capability is online and not paused, the
 server's own runners leave that capability's jobs to it for `LECTERN_LOCAL_DEFER_SECONDS`

@@ -125,9 +125,11 @@ def worker(args: argparse.Namespace) -> None:
     from lectern.worker.conditions import apply_network_env, http_options
     from lectern.worker.runners import (
         KokoroRunner,
+        OcrRunner,
         TranscodeRunner,
         ffmpeg_available,
         kokoro_available,
+        tesseract_available,
     )
 
     server = args.server.rstrip("/")
@@ -165,7 +167,11 @@ def worker(args: argparse.Namespace) -> None:
         if not ffmpeg_available():
             sys.exit("transcode needs ffmpeg on the PATH")
         runners.append(TranscodeRunner())
-    if unknown := caps - {"align", "tts-kokoro", "transcode"}:
+    if "ocr" in caps:
+        if not tesseract_available():
+            sys.exit("ocr needs Tesseract on the PATH (e.g. apt install tesseract-ocr)")
+        runners.append(OcrRunner())
+    if unknown := caps - {"align", "tts-kokoro", "transcode", "ocr"}:
         sys.exit(f"--capabilities: this worker cannot run {', '.join(sorted(unknown))}")
     withheld: dict[str, str] = {}
     if not args.no_self_test:
@@ -479,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument(
         "--capabilities",
         default=os.environ.get("LECTERN_WORKER_CAPABILITIES", "align"),
-        help="comma-separated: align, tts-kokoro, transcode (default align)",
+        help="comma-separated: align, tts-kokoro, transcode, ocr (default align)",
     )
     w.add_argument(
         "--engine",

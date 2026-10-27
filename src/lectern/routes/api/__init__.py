@@ -14,6 +14,7 @@ from lectern.routes.api import (
     editor,
     imports,
     notifications,
+    ocr,
     offline,
     pages,
     pdf2epub,
@@ -52,3 +53,4 @@ router.include_router(align.router)
 router.include_router(worker.router)
 router.include_router(tts.router)
 router.include_router(pdf2epub.router)
+router.include_router(ocr.router)

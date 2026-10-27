@@ -116,6 +116,9 @@ queued. The **narrated EPUB** (EPUB 3 Media Overlay) export is made from an EPUB
 work with both an EPUB and a PDF aligns its EPUB as before, and read-along also works on the
 PDF's pages.
 
+A **scanned** PDF has no text at all; Lectern recognises it and keeps a searchable copy next to
+it ([ocr.md](ocr.md)).
+
 ![Read-along unavailable on a comic](screenshots/formats-comic-library-detail.png)
 
 ## AI tools (MCP)

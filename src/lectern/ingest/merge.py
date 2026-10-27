@@ -80,6 +80,11 @@ def merge_work(
         filed.append(f)
         if (src_dir / f.rel_path).exists():
             move(src_dir / f.rel_path, dst_dir / rel, f.sha256)
+        # a scanned PDF's searchable copy and words (lectern.ocr) go with it
+        for v in sorted((src_dir / "derived").glob(f"ocr-{f.sha256[:16]}.*")):
+            out = dst_dir / "derived" / v.name
+            if v.is_file() and not out.exists():
+                move(v, out)
         f.work_id, f.rel_path = target.id, rel
 
     moved_audio = False

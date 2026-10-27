@@ -5514,3 +5514,38 @@ table.compare td:first-child {
     display: none;
   }
 }
+
+/* Text recognition of a scanned PDF, under its row in a work's Files (OcrStatus). */
+.ocr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 6px;
+}
+.ocr .progress-bar {
+  flex: 1 0 100%;
+  height: 4px;
+}
+.ocr .ocr-actions {
+  gap: 4px;
+}
+.ocr .spinner.sm {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+.ocr .error-text {
+  color: var(--danger);
+}
+.ocr-lang {
+  font: inherit;
+  font-size: 13px;
+  padding: 3px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface, transparent);
+  color: inherit;
+}
