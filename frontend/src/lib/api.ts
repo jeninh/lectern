@@ -134,6 +134,16 @@ const MESSAGES: Record<string, string> = {
   readers_cannot_upload: "Readers cannot let an AI app add or file books.",
   revoked: "This key was revoked.",
   busy: "The server is busy filing a book. Try again in a moment.",
+  bad_url: "That is not a web link Lectern can save (http or https only).",
+  blocked_address: "That link points at a private or local address; Lectern only saves pages from the public internet.",
+  too_many_articles: "Ten articles are already being saved. Wait for them to finish.",
+  offline: "Offline mode is on, so Lectern makes no internet connections.",
+  not_configured: "Email-in is not set up on this server.",
+  no_address: "Get your email-in address first.",
+  set_in_env: "The sender filter is set in the server's .env file; change it there.",
+  confirm_blocklist: "Confirm that anyone not on the blocklist may send books.",
+  bad_sender: "Enter addresses (name@example.org) or whole domains (@example.org).",
+  bad_shelf: "Choose a shelf you can add books to.",
 };
 
 /** Plain-language text for an API error code (the code itself when there is none). */

@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
 import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
+import { EmailInCard } from "../components/EmailIn";
 import { Check, Key, Logout, Shield } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -164,6 +165,8 @@ export function SecurityPage() {
             </div>
           </section>
         )}
+
+        {(me?.user.role === "owner" || me?.user.role === "member") && <EmailInCard highlighted={hash === "email-in"} />}
 
         <section className="card" id="downloads" aria-labelledby="dl-h" data-highlight={hash === "downloads" || undefined}>
           <h2 id="dl-h">Downloads and alerts</h2>

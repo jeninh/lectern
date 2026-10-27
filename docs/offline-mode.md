@@ -18,6 +18,8 @@ Admin → Offline mode lists these with whether each is on right now.
 | ElevenLabs narration (only with your key) | `api.elevenlabs.io` | Testing the key, voices, previews, estimates, and narrations you confirmed |
 | Alignment model download (`align` image) | `huggingface.co` | Once, at the server's first alignment, unless the model is already downloaded |
 | Kokoro download (`LECTERN_TTS_KOKORO_LOCAL=1`) | `huggingface.co` | Once, at the server's first Kokoro narration, unless already downloaded |
+| [Saving web articles](save-articles.md) | The page someone saves, and its pictures | When someone saves a web article (public internet addresses only) |
+| [Email-in](email-in.md) (off by default) | The mailbox set in `.env` | Every few minutes while it is set up: reading new mail over IMAP with TLS |
 
 Nothing else in the server opens a connection outward. Not on that list, because they are not
 the server: a Mac worker downloads its own models, and `/worker/install.sh` makes the Mac
@@ -40,6 +42,9 @@ While it is on:
   health check) keeps working;
 - metadata suggestions and ElevenLabs show as unavailable, with that reason, and send
   nothing: a queued ElevenLabs narration fails at its next request instead of retrying;
+- saving web articles and email-in are off, and say so where they are used: nothing is
+  queued or fetched, a save queued before fails as *offline* without touching the network,
+  and mail waits in the mailbox;
 - alignment loads its model from the data directory only (`HF_HUB_OFFLINE=1`, local files
   only). A missing model fails the job with a message that says to download it first.
 

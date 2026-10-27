@@ -78,6 +78,19 @@ services:
       LECTERN_ALIGN_THREADS: ${LECTERN_ALIGN_THREADS:-0}
       # 1 = offline mode: no outbound internet connections from Lectern (docs/offline-mode.md).
       LECTERN_OFFLINE: ${LECTERN_OFFLINE:-0}
+      # Email-in (docs/email-in.md): off unless LECTERN_EMAIL_IN=1. Lectern reads one mailbox
+      # over IMAP with TLS (outbound only; nothing here listens for mail). Empty = default.
+      LECTERN_EMAIL_IN: ${LECTERN_EMAIL_IN:-}
+      LECTERN_EMAIL_IN_HOST: ${LECTERN_EMAIL_IN_HOST:-}
+      LECTERN_EMAIL_IN_PORT: ${LECTERN_EMAIL_IN_PORT:-}
+      LECTERN_EMAIL_IN_USER: ${LECTERN_EMAIL_IN_USER:-}
+      LECTERN_EMAIL_IN_PASSWORD: ${LECTERN_EMAIL_IN_PASSWORD:-}
+      LECTERN_EMAIL_IN_ADDRESS: ${LECTERN_EMAIL_IN_ADDRESS:-}
+      LECTERN_EMAIL_IN_MAILBOX: ${LECTERN_EMAIL_IN_MAILBOX:-}
+      LECTERN_EMAIL_IN_POLL_MINUTES: ${LECTERN_EMAIL_IN_POLL_MINUTES:-}
+      LECTERN_EMAIL_IN_MAX_MB: ${LECTERN_EMAIL_IN_MAX_MB:-}
+      LECTERN_EMAIL_IN_SENDER_MODE: ${LECTERN_EMAIL_IN_SENDER_MODE:-}
+      LECTERN_EMAIL_IN_SENDERS: ${LECTERN_EMAIL_IN_SENDERS:-}
     # Create data and library yourself, owned by LECTERN_UID:LECTERN_GID. Docker would
     # otherwise create them owned by root, and Lectern could not write to them.
     volumes:

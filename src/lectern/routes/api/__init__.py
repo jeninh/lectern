@@ -8,10 +8,12 @@ from lectern.routes.api import (
     admin,
     ai_keys,
     align,
+    articles,
     books,
     core,
     devices,
     editor,
+    email_in,
     imports,
     notifications,
     ocr,
@@ -42,6 +44,8 @@ router.include_router(admin.router)
 router.include_router(books.router)
 router.include_router(uploads.router)
 router.include_router(imports.router)
+router.include_router(articles.router)
+router.include_router(email_in.router)
 router.include_router(editor.router)
 router.include_router(shelves.router)
 router.include_router(works.router)

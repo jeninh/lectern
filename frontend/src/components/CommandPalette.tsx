@@ -96,6 +96,7 @@ export function CommandPalette() {
         ? [
             { id: "a-upload", group: "Actions" as Group, label: "Add books or audiobooks", keywords: "upload epub pdf cbz comic m4b mp3 audio import add file", hint: "B", icon: <Upload />, run: () => { close(); pickBooks(); } },
             { id: "a-folder", group: "Actions" as Group, label: "Add an audiobook folder", keywords: "upload directory mp3 tracks multi-track import", icon: <Folder />, run: () => { close(); pickFolder(); } },
+            { id: "a-article", group: "Actions" as Group, label: "Save a web article", keywords: "read later url link web page epub article save share", icon: <Upload />, run: () => go("/app/library?article=1") },
             ...(imports.some((i) => i.status === "ready")
               ? [{ id: "a-review", group: "Actions" as Group, label: `Review ${imports.filter((i) => i.status === "ready").length} uploaded before filing`, keywords: "imports pending match", icon: <Upload />, run: () => { close(); setReviewOpen(true); } }]
               : []),

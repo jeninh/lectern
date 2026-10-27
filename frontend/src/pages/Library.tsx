@@ -10,6 +10,7 @@ import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, 
 import { FilterBar, RuleChips } from "../components/FilterBar";
 import { SmartShelfDialog } from "../components/SmartShelfDialog";
 import { SendToDevice } from "../components/SendToDevice";
+import { SaveArticle } from "../components/SaveArticle";
 import { DownloadButton } from "../components/Offline";
 import { OverflowMenu, type MenuAction } from "../components/Menu";
 import { BulkBar, type BulkTarget } from "../components/BulkBar";
@@ -385,6 +386,7 @@ export function LibraryPage() {
                   actions={[
                     { label: "Choose files (EPUB, PDF, CBZ, MOBI, M4B, MP3)…", onSelect: pickBooks },
                     { label: "Choose a folder (one audiobook)…", onSelect: pickFolder },
+                    { label: "Save a web article…", onSelect: () => setParam("article", "1", "") },
                     ...(readyImports ? [{ label: `Review ${readyImports} waiting`, onSelect: () => setReviewOpen(true) }] : []),
                   ]}
                 />
@@ -625,6 +627,13 @@ export function LibraryPage() {
           onSend={() => setSendingMany(true)}
           onMove={reader ? undefined : () => setMoving({ items: selectionItems(), title: `Move or add ${describe(pickedShelves.length, pickedBooks)}` })}
         />
+      {canUpload && (
+        <SaveArticle
+          open={!!params.get("article")}
+          initialUrl={params.get("article") === "1" ? "" : params.get("article") ?? ""}
+          onClose={() => setParam("article", "", "")}
+        />
+      )}
       <SendToDevice
         open={sendingMany}
         target={() => target() ?? { work_ids: [] }}

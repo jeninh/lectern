@@ -119,6 +119,7 @@ def _load_builtin() -> None:
     # Imported lazily: the built-in handlers import lectern.align, which imports models.
     if ALIGN not in _HANDLERS:
         import lectern.align.jobs  # noqa: F401 - registers "align"
+        import lectern.article.jobs  # noqa: F401 - registers "article" (server-only)
         import lectern.jobs  # noqa: F401 - registers "transcode"
         import lectern.ocr.jobs  # noqa: F401 - registers "ocr" (scanned PDFs)
         import lectern.pdf2epub.jobs  # noqa: F401 - registers "pdf2epub" (server-only)
