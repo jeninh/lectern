@@ -5,6 +5,8 @@
 ``GET  /koplugin/status``     HTTP Basic with the device's app password: who it is, its queue
 ``POST /koplugin/hello``      device id + nonce -> proof that this is the device's Lectern, so the
                               plugin can trust the home Wi-Fi address (lectern.lan)
+``PUT  /koplugin/annotations`` kosync headers (the device's sync key): one book's highlights and
+                              notes on the device (lectern.annotations)
 
 Failures say as little as possible (one error code each), and the audit log records why.
 Secrets, codes, and issued credentials never reach the log stream or the audit log.
@@ -17,10 +19,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import device_queue, koplugin, lan
+from lectern import annotations, device_queue, koplugin, lan
 from lectern.models import BookFile, FileKind, SyncKey, User, Work, utcnow
 from lectern.routes.api.serializers import iso
-from lectern.security.deps import DbDep, OpdsUser, SettingsDep
+from lectern.security.deps import DbDep, KoSync, OpdsUser, SettingsDep
 from lectern.security.sessions import client_ip
 
 router = APIRouter(prefix="/koplugin")
@@ -192,3 +194,56 @@ def plugin_status(request: Request, user: OpdsUser, db: DbDep, settings: Setting
         "last_sync_at": iso(key.last_used_at) if key else None,
         "queue": {"pending": total, "items": items},
     }
+
+
+class AnnotationIn(BaseModel):
+    """One KOReader highlight, as the plugin reads it from the book's sidecar."""
+
+    datetime: str = Field(min_length=1, max_length=32)
+    datetime_updated: str | None = Field(default=None, max_length=32)
+    text: str = Field(max_length=annotations.MAX_TEXT)
+    note: str | None = Field(default=None, max_length=annotations.MAX_TEXT)
+    chapter: str | None = Field(default=None, max_length=512)
+    color: str | None = Field(default=None, max_length=32)
+    drawer: str | None = Field(default=None, max_length=32)
+    pos0: str = Field(min_length=1, max_length=4096)
+    pos1: str | None = Field(default=None, max_length=4096)
+    page: int | None = Field(default=None, ge=1, le=1_000_000)
+    pageno: int | None = Field(default=None, ge=0, le=1_000_000)
+
+
+class AnnotationsIn(BaseModel):
+    document: str = Field(pattern=r"^[A-Za-z0-9._-]{1,128}$")
+    device: str = Field(default="", max_length=128)
+    # Missing means none left (a Lua JSON encoder writes an empty list as an object).
+    annotations: list[AnnotationIn] = Field(
+        default_factory=list, max_length=annotations.MAX_PER_DOCUMENT
+    )
+
+
+@router.put("/annotations", include_in_schema=False)
+def put_annotations(auth: KoSync, db: DbDep, settings: SettingsDep, body: AnnotationsIn) -> dict:
+    """One device's highlights and notes of one book, all of them (lectern.annotations). Same
+    credentials as progress sync. The answer only counts: it never says whether the book is in
+    the library. Nothing about the highlights is logged."""
+    items = [
+        annotations.Incoming(
+            created=a.datetime,
+            updated=max(a.datetime_updated or a.datetime, a.datetime),
+            text=a.text,
+            note=a.note or None,
+            chapter=a.chapter or None,
+            color=a.color or None,
+            drawer=a.drawer or None,
+            pos0=a.pos0,
+            pos1=a.pos1 or None,
+            page=a.page,
+            pageno=a.pageno,
+        )
+        for a in body.annotations
+    ]
+    result = annotations.sync_document(
+        db, settings.library_dir, auth.user, auth.key.id, body.document, body.device, items
+    )
+    db.commit()
+    return result

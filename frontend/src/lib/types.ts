@@ -907,3 +907,37 @@ export interface ReadingState {
   started_at: string | null;
   finished_at: string | null;
 }
+
+/** A KOReader highlight (and its note), GET /api/works/{id}/annotations (docs/koreader-plugin.md). */
+export interface Annotation {
+  id: number;
+  key: string;
+  text: string;
+  note: string | null;
+  chapter: string | null;
+  color: string | null;
+  /** 1-based page of a PDF highlight. */
+  page: number | null;
+  /** The page number KOReader showed. */
+  pageno: number | null;
+  /** KOReader's own times, "YYYY-MM-DD HH:MM:SS" in the device's local time. */
+  created: string;
+  updated: string;
+  device: string;
+  file: { id: number; media_type: string };
+  /** Where it is in the text the web reader opens; null when it could not be placed. */
+  location: { spine_index: number; char: number; length: number } | null;
+  sentence_n: number | null;
+}
+
+export interface WorkAnnotations {
+  work_id: number;
+  annotations: Annotation[];
+  export_url: string;
+}
+
+export interface AnnotationsSummary {
+  works: { work_id: number; title: string; author: string; count: number }[];
+  total: number;
+  export_url: string;
+}

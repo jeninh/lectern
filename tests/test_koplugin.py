@@ -949,3 +949,104 @@ def test_plugin_prefers_the_home_address_only_when_it_proves_itself(live, settin
     assert out["message"].startswith("Not paired"), out["message"]
     assert not out["paired"] and "server_url" not in out["settings"]
     impostor.shutdown()
+
+
+@needs_lua
+def test_plugin_sends_highlights_and_notes(live, settings, tmp_path):
+    """Issue #65: the open book's highlights go with its position pushes and shortly after an
+    edit, wait in the outbox while Lectern is unreachable, are sent only when they changed, and
+    Sync now also picks up recently read books' sidecars. Their text is never logged."""
+    from tests.test_annotations import OTHER, PHRASE, xp
+    from tests.test_jobs import ingest_fixture
+
+    from lectern.ingest.sentences import ensure_text_sentences
+    from lectern.models import Annotation, BookFile
+
+    http, base = live["http"], live["base"]
+    LOGGED.clear()
+    work_id = ingest_fixture(settings, tmp_path, audio=False)
+    with session_factory()() as db:
+        ensure_text_sentences(db, settings.library_dir, work_id)
+        db.commit()
+        digest = db.scalar(select(BookFile.partial_md5).where(BookFile.work_id == work_id))
+    dev = http.post("/api/devices", json={"label": "Kindle PW5"}).json()
+    z = http.post(f"/api/devices/{dev['device']['id']}/koplugin", json={"server_url": base})
+    root = tmp_path / "koreader"
+    (root / "plugins").mkdir(parents=True)
+    (root / "settings").mkdir()
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        zf.extractall(root / "plugins")
+    plugin, sdir = root / "plugins" / "lectern.koplugin", root / "settings"
+    assert lua(plugin, sdir, "setup")["paired"]
+
+    def run(spec: dict, settings_dir: Path = sdir) -> dict:
+        path = tmp_path / "spec.json"
+        path.write_text(json.dumps({"digest": digest, **spec}))
+        return lua(plugin, settings_dir, "highlights", str(path))
+
+    def shown() -> list[dict]:
+        return http.get(f"/api/works/{work_id}/annotations").json()["annotations"]
+
+    note = "Della's savings, again"
+    first = {"datetime": "2026-10-01 09:30:00", "drawer": "lighten", "color": "yellow",
+             "text": PHRASE, "chapter": "The Gift of the Magi", "pageno": 3,
+             "pos0": xp(PHRASE), "pos1": xp(PHRASE)}  # fmt: skip
+    second = {**first, "datetime": "2026-10-01 09:41:12", "text": OTHER, "note": note,
+              "pos0": xp(OTHER), "pos1": xp(OTHER)}  # fmt: skip
+    bookmark = {"datetime": "2026-10-01 09:50:00", "page": "/body/DocFragment[3]", "text": "x"}
+
+    # A page-turn push sends the position and the book's highlights (not its bookmarks).
+    out = run({"action": "push", "annotations": [first, second, bookmark]})
+    assert out["requests"] == 1 and out["pending_books"] == 0
+    got = shown()
+    assert [a["text"] for a in got] == [PHRASE, OTHER] and got[1]["note"] == note
+    assert got[0]["location"]["char"] > 0 and got[0]["device"] == "Kindle"
+
+    # Nothing changed: the next push does not send them again.
+    out = run({"action": "push", "annotations": [first, second, bookmark]})
+    assert out["requests"] == 0
+
+    # Edited and deleted on the device: sent 15 s later, and Lectern follows.
+    edited = {**second, "note": "changed my mind", "datetime_updated": "2026-10-02 08:00:00"}
+    out = run({"action": "modified", "annotations": [edited]})
+    assert out["scheduled_in"] == 15 and out["before_task"] == 0 and out["requests"] == 1
+    assert [(a["text"], a["note"]) for a in shown()] == [(OTHER, "changed my mind")]
+
+    # Lectern not reachable: the highlights wait, quietly, and go out when Wi-Fi is back.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    out = run({"action": "push", "annotations": [first, edited], "server_url": dead,
+               "reconnect": True})  # fmt: skip
+    assert out["pending_books"] == 1 and out["retry_in"] == 30
+    assert out["status_line"] == "Retrying · 1 position and highlights of 1 book waiting to send"
+    assert out["after_reconnect"] == 1 and out["pending_after_reconnect"] == 0
+    assert [a["text"] for a in shown()] == [PHRASE, OTHER]
+
+    # Sync now: the open book always, plus recently read books whose sidecars changed.
+    other_doc = "a" * 32
+    history = [{"file": "/mnt/us/books/Other.epub", "digest": other_doc,
+                "annotations": [{**first, "datetime": "2026-09-01 07:00:00"}]},
+               {"file": "/mnt/us/books/Plain.epub", "digest": "b" * 32, "annotations": []}]  # fmt: skip
+    out = run({"action": "sync-now", "annotations": [first, edited], "history": history})
+    assert out["requests"] == 2, out  # the open book (forced) and Other.epub; not Plain.epub
+    assert "Highlights and notes of 2 book(s) sent." in out["message"]
+    with session_factory()() as db:
+        assert db.scalar(select(Annotation.text).where(Annotation.document == other_doc)) == PHRASE
+    assert len(shown()) == 2  # a book that is not in the library shows nowhere
+
+    # Deleted all of them in the open book: an empty list clears Lectern's copy.
+    out = run({"action": "modified", "annotations": []})
+    assert out["requests"] == 1 and shown() == []
+
+    # Re-paired (possibly another sync key): books already sent are sent again on the next push.
+    out = run({"action": "push", "annotations": [first]})
+    assert out["requests"] == 1
+    assert run({"action": "push", "annotations": [first]})["requests"] == 0
+    code = http.post(f"/api/devices/{dev['device']['id']}/pairing-code").json()["code"]
+    assert lua(plugin, sdir, "pair", base, "owner", code)["paired"]
+    assert run({"action": "push", "annotations": [first]})["requests"] == 1
+
+    logged = "\n".join(LOGGED)
+    for private in (PHRASE, OTHER, note, "changed my mind"):
+        assert private not in logged
