@@ -271,7 +271,8 @@ def recent(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
 # /opds/shelves lists this person's top-level shelves (those whose parent they cannot see
 # included, without the hidden parent). A shelf with sub-shelves opens as a navigation feed:
 # its own books first (one entry), then each sub-shelf. A shelf without sub-shelves opens
-# straight onto its books, so a leaf is one tap on e-ink. Hidden shelves are 404.
+# straight onto its books, so a leaf is one tap on e-ink. Hidden shelves are 404. A smart
+# shelf is a leaf whose books are its filter's matches for the device's person, live.
 
 
 def _nav_feed(feed_id: str, title: str, self_href: str, up: str, entries: str) -> Response:
@@ -370,21 +371,14 @@ def shelf_nav(user: OpdsUser, db: DbDep, shelf_id: int) -> Response:
 
 @router.get("/shelves/{shelf_id}/books", include_in_schema=False)
 def shelf_books(user: OpdsUser, db: DbDep, shelf_id: int, page: int = 1) -> Response:
-    """The works directly on one shelf, in shelf order."""
-    from lectern.models import ShelfItem
-    from lectern.routes.api.shelves import Tree
+    """The works directly on one shelf, in shelf order; a smart shelf's are what its rule
+    matches for this person right now, in its order (lectern.filters)."""
+    from lectern.routes.api.shelves import Tree, shelf_works
 
     page = max(1, page)
     tree = Tree(db, user)
     shelf = tree.visible(shelf_id)
-    ids = list(
-        db.scalars(
-            select(ShelfItem.work_id)
-            .join(Work, Work.id == ShelfItem.work_id)
-            .where(ShelfItem.shelf_id == shelf.id, visible_works(user))
-            .order_by(ShelfItem.position, ShelfItem.added_at)
-        )
-    )
+    ids = [w.id for w in shelf_works(db, user, shelf)]
     # A leaf's books page is where its parent's entry leads, so "up" is the parent.
     up = f"/opds/shelves/{shelf.id}" if tree.children.get(shelf.id) else _shelf_up(tree, shelf)
     return _acquisition(

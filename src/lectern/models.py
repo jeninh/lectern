@@ -236,15 +236,17 @@ class Work(Base):
     sort_title: Mapped[str] = mapped_column(String(512), index=True)
     author: Mapped[str] = mapped_column(String(512), index=True)  # primary author display
     sort_author: Mapped[str] = mapped_column(String(512), index=True)
-    language: Mapped[str | None] = mapped_column(String(16), default=None)
+    # Migration 0018 indexes language, publisher, published, and created_at: library filters
+    # and sorts (lectern.filters).
+    language: Mapped[str | None] = mapped_column(String(16), default=None, index=True)
     isbn: Mapped[str | None] = mapped_column(String(13), default=None, index=True)
     description: Mapped[str | None] = mapped_column(Text, default=None)
-    publisher: Mapped[str | None] = mapped_column(String(256), default=None)
-    published: Mapped[str | None] = mapped_column(String(32), default=None)
+    publisher: Mapped[str | None] = mapped_column(String(256), default=None, index=True)
+    published: Mapped[str | None] = mapped_column(String(32), default=None, index=True)
     dir_path: Mapped[str] = mapped_column(String(1024), unique=True)  # relative to library
     has_cover: Mapped[bool] = mapped_column(Boolean, default=False)
     cover_tint: Mapped[str | None] = mapped_column(String(7), default=None)  # "#rrggbb"
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
     # Migration 0007 (add & edit books). ``author``/``sort_author`` stay the display and sort
     # forms of ``authors`` (every author: [{"name", "sort"}], in order) for OPDS and sorting.
@@ -295,6 +297,10 @@ class BookFile(Base):
     sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     partial_md5: Mapped[str | None] = mapped_column(String(32), index=True, default=None)
     added_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Migration 0018: pages of a PDF (from its text layer) or a comic, filled in by the
+    # housekeeping sweep (lectern.services.fill_page_counts); NULL for EPUBs and not yet
+    # counted. The ``pages:`` library filter.
+    pages: Mapped[int | None] = mapped_column(Integer, default=None)
 
     work: Mapped[Work] = relationship(back_populates="files")
 
@@ -458,6 +464,30 @@ class WorkProgress(Base):
     device: Mapped[str] = mapped_column(String(128), default="")
     received_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class ReadingState(Base):
+    """How far one person is with one work, whatever they read or listened on (migration
+    0018, ``lectern.reading_state``): the fraction from the latest position written to
+    ``reading_progress`` (KOReader, the page viewer) or ``work_progress`` (web reader, audio
+    player), when that was, and when the work was first started and first finished.
+    Derived: kept up to date on every flush that writes a position. What the Library's reading
+    status and the ``status:``, ``progress:``, ``read:``, ``started:``, and ``finished:``
+    filters use."""
+
+    __tablename__ = "reading_states"
+    __table_args__ = (Index("ix_reading_states_last_read", "user_id", "last_read_at"),)
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    fraction: Mapped[float] = mapped_column(Float, default=0.0)
+    last_read_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
 
 
 # --- Invites ---------------------------------------------------------------------------
@@ -899,6 +929,8 @@ class Import(Base):
     __table_args__ = (
         Index("ix_imports_user_status", "user_id", "status"),
         Index("ix_imports_idempotency", "user_id", "idempotency_key"),
+        # Migration 0018: who uploaded a work (the ``by:`` library filter).
+        Index("ix_imports_work_status", "work_id", "status"),
         CheckConstraint("status <> 'FILED' OR work_id IS NOT NULL", name="ck_import_filed"),
     )
 

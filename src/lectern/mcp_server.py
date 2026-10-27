@@ -45,13 +45,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import Receive, Scope, Send
 
-from lectern import __version__, ai_keys, device_queue, imports
+from lectern import __version__, ai_keys, device_queue, filters, imports
 from lectern.access import can_edit_library, can_see_work, visible_works
 from lectern.config import Settings
 from lectern.db import session_factory
@@ -90,7 +90,8 @@ You act as one person, with only their permissions and only the scopes their AI 
   existing book, or file as new; needs the file scope, and only for imports you uploaded) or cancel_import. Ask the person when
   the match is not certain.
 - Find books with search_library / list_recent and inspect one with get_book. Book ids are
-  numbers; use them for every other tool.
+  numbers; use them for every other tool. search_library takes the Library's filters, e.g.
+  format:epub -has:audio author:"Tolstoy" year:1850..1900 progress:<50% status:reading.
 - Shelves are nested folders; name one by id or by path from the top level, e.g.
   "Kids/Picture books" (list_shelves). A book can be on several shelves.
 - Organize: add_to_shelf / remove_from_shelf, create_shelf / move_shelf,
@@ -686,23 +687,37 @@ def search_library(
     query: Annotated[
         str,
         Field(
-            max_length=200,
-            description="Words from the title, author, or series; empty lists everything.",
+            max_length=1000,
+            description="Words from the title, author, series, or ISBN, and filters in the "
+            "Library's syntax, e.g. 'format:epub,pdf -has:audio author:\"Tolstoy\" "
+            'year:1850..1900 progress:<50% shelf:"Kids/Picture books"\'. Fields: '
+            + ", ".join(filters.FIELDS)
+            + ". Empty lists everything.",
         ),
     ] = "",
+    sort: Annotated[
+        str,
+        Field(pattern=filters.SORT_PATTERN, description="One of: " + ", ".join(filters.SORTS)),
+    ] = "title",
     limit: Annotated[int, Field(ge=1, le=100)] = 20,
 ) -> dict:
-    """Find books this person can see. Scope: read."""
+    """Find books this person can see, with the Library's filters (docs/filters.md): a
+    leading - negates a filter, a,b matches either value, and numbers, sizes, lengths, and
+    dates take <, >, or a..b. Scope: read."""
     with _call(ctx, "search_library", "read") as c:
-        stmt = select(Work).options(selectinload(Work.files)).where(visible_works(c.user))
-        for word in query.split()[:8]:
-            like = f"%{word}%"
-            stmt = stmt.where(
-                or_(Work.title.ilike(like), Work.author.ilike(like), Work.series.ilike(like))
-            )
+        try:
+            q = filters.parse(query)
+            where = filters.predicate(filters.Context(c.db, c.user), q)
+        except filters.FilterError as exc:
+            raise ToolError(f"invalid_filter: {exc.message}") from None
+        stmt = select(Work).options(selectinload(Work.files)).where(where)
         total = c.db.scalar(select(func.count()).select_from(stmt.subquery()))
-        works = c.db.scalars(stmt.order_by(Work.sort_title, Work.id).limit(limit)).all()
-        return {"total": total or 0, "books": [_summary(w) for w in works]}
+        works = c.db.scalars(stmt.order_by(*filters.order_by(sort, c.user)).limit(limit)).all()
+        return {
+            "total": total or 0,
+            "filter": filters.format_query(q),
+            "books": [_summary(w) for w in works],
+        }
 
 
 def get_book(ctx: Context, book_id: int) -> dict:
@@ -838,6 +853,10 @@ def list_shelves(ctx: Context) -> dict:
                     "books": s["work_count"],
                     "sub_shelves": s["shelf_count"],
                     "permission": s["permission"],
+                    # A smart shelf's books are a saved filter's matches (search_library
+                    # with shelf:"<path>" lists them); nothing is added to it by hand.
+                    "smart": s["smart"],
+                    **({"filter": s["filter"]} if "filter" in s else {}),
                 }
                 for s in _shelves(c)
             ]
