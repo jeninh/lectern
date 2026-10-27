@@ -18,7 +18,8 @@ SHA-256 of a secret this device holds), so no credential goes to another network
 that happens to have the same private IP.
 
 Secrets (the setup secret, userkey, app password, pairing code) are never passed to the
-logger: every log line goes through Core:log, which also masks any known secret.
+logger: every log line goes through Core:log, which also masks any known secret. Highlights and
+notes are private too: only counts are ever logged, never their text.
 ]]
 
 local Core = {}
@@ -29,6 +30,9 @@ Core.BOOTSTRAP_FILE = "lectern_bootstrap.txt"
 Core.DEFAULT_PAGES = 10
 Core.RETRY_DELAYS = { 30, 60, 120, 300, 900 } -- seconds, while the network is up
 Core.OUTBOX_MAX = 50
+Core.ANNOTATION_BOOKS_MAX = 50 -- books whose highlights wait to be sent
+Core.HISTORY_SCAN = 100 -- recent books whose sidecars Sync now checks for highlights
+Core.TEXT_MAX = 15000 -- bytes of a highlight's text or note sent (the server takes 20000 chars)
 Core.ROUTE_TTL = 600 -- seconds a home/Tailscale choice is trusted before it is checked again
 
 --- Looks like a home-network address (private IPv4, IPv6 link-local or unique-local, or an
@@ -553,11 +557,12 @@ function Core:queuePush(item)
     self.store:flush()
 end
 
---- Send what is waiting, oldest first. Stops at the first failure and keeps the rest.
--- Returns sent count, remaining count, and nil or the reason it stopped.
+--- Send what is waiting, oldest first: positions, then highlights. Stops at the first failure
+-- and keeps the rest. Returns positions sent, what is left (positions and books of
+-- highlights), nil or the reason it stopped, and books of highlights sent.
 function Core:drain()
     local box = self:outbox()
-    if #box == 0 or not self:isPaired() then return 0, #box end
+    if not self:isPaired() then return 0, self:pending() end
     local sent = 0
     while #box > 0 do
         local item = box[1]
@@ -580,7 +585,8 @@ function Core:drain()
         else
             self.store:saveSetting("outbox", box)
             self.store:flush()
-            return sent, #box, code == 401 and "unauthorized" or (code and ("server " .. code) or (err or "offline"))
+            return sent, #box + #self:annotationOutbox(),
+                code == 401 and "unauthorized" or (code and ("server " .. code) or (err or "offline")), 0
         end
     end
     self.store:saveSetting("outbox", box)
@@ -589,7 +595,143 @@ function Core:drain()
         self.store:saveSetting("last_push_at", self.now())
         self.store:flush()
     end
-    return sent, 0
+    local books, left, why = self:drainAnnotations()
+    return sent, left, why, books
+end
+
+-- --- highlights and notes (docs/koreader-plugin.md#highlights-and-notes) ---------------------
+
+local function clip(s)
+    s = str(s)
+    if not s then return nil end
+    if #s > Core.TEXT_MAX then
+        -- Never cut a UTF-8 character in half: drop a trailing partial sequence.
+        s = s:sub(1, Core.TEXT_MAX):gsub("[\192-\255][\128-\191]*$", "")
+    end
+    return s
+end
+
+local function position(p)
+    if type(p) == "table" then -- PDFs: { page = n, x = .., y = .. }
+        local page = tonumber(p.page)
+        if not page then return nil end
+        return string.format("%d:%.1f:%.1f", page, tonumber(p.x) or 0, tonumber(p.y) or 0), page
+    end
+    return str(p)
+end
+
+--- KOReader's annotations (ReaderAnnotation, the sidecar's "annotations") as Lectern takes
+-- them: highlights only (bookmarks have no drawer), with their text, note, chapter, and where.
+function Core.annotationsFrom(list)
+    local out = {}
+    if type(list) ~= "table" then return out end
+    for _, a in ipairs(list) do
+        if type(a) == "table" and a.drawer and a.pos0 ~= nil and str(a.datetime) then
+            local pos0, page = position(a.pos0)
+            if pos0 then
+                local pageno = tonumber(a.pageno)
+                out[#out + 1] = {
+                    datetime = str(a.datetime),
+                    datetime_updated = str(a.datetime_updated),
+                    text = clip(a.text) or "",
+                    note = clip(a.note),
+                    chapter = str(a.chapter) and str(a.chapter):sub(1, 500),
+                    color = str(a.color),
+                    drawer = str(a.drawer),
+                    pos0 = pos0,
+                    pos1 = (position(a.pos1)),
+                    page = page or (type(a.page) == "number" and a.page >= 1 and math.floor(a.page)) or nil,
+                    pageno = pageno and pageno >= 0 and math.floor(pageno) or nil,
+                }
+            end
+        end
+    end
+    return out
+end
+
+--- A short digest of a book's highlights, to send them only when something changed.
+function Core.fingerprint(items)
+    local bit = require("bit")
+    local rows = {}
+    for i, a in ipairs(items) do
+        rows[i] = table.concat({ a.datetime, a.datetime_updated or "", a.pos0, a.pos1 or "",
+            a.text, a.note or "", a.chapter or "", a.color or "" }, "\0")
+    end
+    table.sort(rows)
+    -- FNV-1a, 32-bit: h * 16777619 is h << 24 plus h * 403, exact in doubles.
+    local h = bit.tobit(2166136261)
+    local s = table.concat(rows, "\1")
+    for i = 1, #s do
+        h = bit.bxor(h, s:byte(i))
+        h = bit.tobit(bit.lshift(h, 24) + (h % 4294967296) * 403)
+    end
+    return string.format("%d:%08x", #items, h % 4294967296)
+end
+
+function Core:annotationOutbox()
+    return self.store:readSetting("annotation_outbox") or {}
+end
+
+--- Positions and books of highlights waiting to be sent.
+function Core:pending()
+    return #self:outbox() + #self:annotationOutbox()
+end
+
+--- Queue a book's highlights (all of them: Lectern drops the ones that are gone) when they
+-- changed since they were last sent, or always with ``force``. Returns true when queued.
+function Core:queueAnnotations(document, items, device, force)
+    if not document or type(items) ~= "table" then return false end
+    local fp = Core.fingerprint(items)
+    local sent = self.store:readSetting("annotations_sent") or {}
+    local box = self:annotationOutbox()
+    local queued
+    for i = #box, 1, -1 do
+        if box[i].document == document then queued = table.remove(box, i) end
+    end
+    if not force and not queued and (sent[document] == fp or (#items == 0 and not sent[document])) then
+        return false
+    end
+    box[#box + 1] = { document = document, device = device, annotations = items, fingerprint = fp }
+    while #box > Core.ANNOTATION_BOOKS_MAX do table.remove(box, 1) end
+    self.store:saveSetting("annotation_outbox", box)
+    self.store:flush()
+    return true
+end
+
+function Core:drainAnnotations()
+    local box = self:annotationOutbox()
+    local books = 0
+    while #box > 0 do
+        local item = box[1]
+        local code, _, err = self:request("PUT", "/koplugin/annotations", {
+            kosync = true, timeout = { 3, 15 },
+            json = {
+                document = item.document, device = item.device or "KOReader",
+                -- An empty list is left out: Lua encodes it as an object.
+                annotations = #item.annotations > 0 and item.annotations or nil,
+            },
+        })
+        self:noteResult(code, err)
+        if code == 200 or code == 400 or code == 422 then
+            table.remove(box, 1)
+            if code == 200 then
+                books = books + 1
+                local sent = self.store:readSetting("annotations_sent") or {}
+                sent[item.document] = item.fingerprint
+                self.store:saveSetting("annotations_sent", sent)
+            else
+                self:log("warn", "Lectern refused the highlights of one book (HTTP " .. code .. ")")
+            end
+        else
+            self.store:saveSetting("annotation_outbox", box)
+            self.store:flush()
+            return books, #box, code == 401 and "unauthorized" or (code and ("server " .. code) or (err or "offline"))
+        end
+    end
+    self.store:saveSetting("annotation_outbox", box)
+    self.store:flush()
+    if books > 0 then self:log("info", "sent the highlights of", books, "book(s)") end
+    return books, 0
 end
 
 function Core:retryDelay(attempt)
@@ -661,9 +803,14 @@ function Core:statusLine(online, ago)
     end
     local err = self.store:readSetting("last_error")
     if err == "unauthorized" then return "Device revoked or replaced: pair again" end
-    if box > 0 then
-        return string.format("%s · %d %s waiting to send", online and "Retrying" or "Offline", box,
-            box == 1 and "position" or "positions")
+    local books = #self:annotationOutbox()
+    if box > 0 or books > 0 then
+        local what = {}
+        if box > 0 then what[#what + 1] = string.format("%d %s", box, box == 1 and "position" or "positions") end
+        if books > 0 then
+            what[#what + 1] = string.format("highlights of %d %s", books, books == 1 and "book" or "books")
+        end
+        return string.format("%s · %s waiting to send", online and "Retrying" or "Offline", table.concat(what, " and "))
     end
     if err and err ~= "" then return "Not reachable (" .. err .. ")" end
     local last = self.store:readSetting("last_ok_at")

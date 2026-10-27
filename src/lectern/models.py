@@ -1402,3 +1402,53 @@ class EmailInbox(Base):
     shelf_id: Mapped[int | None] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class Annotation(Base):
+    """A highlight (and its note) made in KOReader, pulled in by the plugin (migration 0019,
+    :mod:`lectern.annotations`, docs/koreader-plugin.md#highlights-and-notes).
+
+    Private to ``user_id``: nobody else sees it, and its owner only while the work its document
+    belongs to is visible to them. ``document`` is KOReader's document digest (the partial MD5
+    in ``book_files.partial_md5``), so a highlight follows its file through merges and is shown
+    once the book is in the library. ``key`` is the stable id of one annotation: a digest of the
+    document, KOReader's creation time, and the start position, so the same highlight from two
+    syncs or two devices is one row. ``sources`` lists the sync keys whose latest snapshot of the
+    document still has it; it is deleted when none does.
+
+    ``loc_*`` place it on the work's text as the web reader opens it: ``loc_sha`` is the SHA-256
+    of the primary EPUB it was placed against (NULL: the work has none), ``loc_spine``,
+    ``loc_char``, ``loc_len`` the spine item, normalised-text offset, and length (NULL: its
+    text was not found there), and ``sentence_n`` the work sentence it starts in.
+    """
+
+    __tablename__ = "annotations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "key", name="uq_annotation_user_key"),
+        Index("ix_annotations_user_document", "user_id", "document"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    document: Mapped[str] = mapped_column(String(128))
+    key: Mapped[str] = mapped_column(String(64))
+    text: Mapped[str] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text, default=None)
+    chapter: Mapped[str | None] = mapped_column(String(512), default=None)
+    color: Mapped[str | None] = mapped_column(String(32), default=None)
+    drawer: Mapped[str | None] = mapped_column(String(32), default=None)
+    pos0: Mapped[str] = mapped_column(Text)
+    pos1: Mapped[str | None] = mapped_column(Text, default=None)
+    page: Mapped[int | None] = mapped_column(Integer, default=None)  # 1-based, PDFs
+    pageno: Mapped[int | None] = mapped_column(Integer, default=None)  # as KOReader showed it
+    # KOReader's own times ("YYYY-MM-DD HH:MM:SS", the device's local time), kept as sent.
+    created: Mapped[str] = mapped_column(String(32))
+    updated: Mapped[str] = mapped_column(String(32))
+    device: Mapped[str] = mapped_column(String(128), default="")
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    loc_sha: Mapped[str | None] = mapped_column(String(64), default=None)
+    loc_spine: Mapped[int | None] = mapped_column(Integer, default=None)
+    loc_char: Mapped[int | None] = mapped_column(Integer, default=None)
+    loc_len: Mapped[int | None] = mapped_column(Integer, default=None)
+    sentence_n: Mapped[int | None] = mapped_column(Integer, default=None)
+    synced_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)

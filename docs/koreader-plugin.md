@@ -97,8 +97,8 @@ KOReader's own progress sync does the work; the plugin turns it on and makes it 
 
 | Item | |
 | --- | --- |
-| *status line* | Connected, Offline/Retrying with how many positions wait, Not reachable, or *Device revoked or replaced: pair again*. Tap for details: server, account, device, last push, books waiting. |
-| **Sync now** | Sends the current position and the outbox, pulls, and always says what happened: synced, refused, or not reachable with the actual error. Before setup has finished it tries setup now and says *set up*, or the error and when it tries again. |
+| *status line* | Connected, Offline/Retrying with how many positions (and books of highlights) wait, Not reachable, or *Device revoked or replaced: pair again*. Tap for details: server, account, device, last push, books waiting. |
+| **Sync now** | Sends the current position, highlights that changed, and the outbox, pulls, and always says what happened: synced, refused, or not reachable with the actual error. Before setup has finished it tries setup now and says *set up*, or the error and when it tries again. |
 | **Books sent to this device** | The device's Send to device queue. Tap a book to download it into KOReader's download folder (as `Title - Author (2).epub` if that name is taken; nothing is replaced); a complete download marks it delivered in Lectern, as with the catalogue. |
 | **Sync automatically**, **Also push every N pages**, **When another device is further ahead**, **When Wi‑Fi is off** | The settings above. |
 | **Pair with a code…** | See below. |
@@ -123,6 +123,42 @@ filled in from the plugin (`lectern_device.lua` or the last pairing); enter the 
   at most once a minute per address and username.
 - Pairing replaces the device's credentials, like the first start, and makes any unused setup
   link of the device useless.
+
+## Highlights and notes
+
+Highlights you make in KOReader, and the notes you add to them, come to Lectern through the
+plugin, with the same credentials and the same Wi‑Fi-off outbox as positions:
+
+- **When:** the open book's highlights go with each automatic position push, and 15 seconds
+  after you make, edit, or delete one. **Sync now** always sends the open book's and also checks
+  the sidecars (`.sdr`) of the 100 most recently read books. Only books whose highlights changed
+  since they were last sent are sent again; while Lectern is not reachable they wait (up to 50
+  books) and go out with the positions when it is.
+- **What:** each highlight's text, note, chapter, position (xpointer, or page for PDFs), KOReader's
+  page number, color and style, and creation and edit times. Bookmarks without a highlight are
+  not sent. Text and notes over 15,000 bytes are cut.
+- **Once, with edits and deletions:** a highlight's id is its book, creation time, and start
+  position, so a re-sync or a second device with the same sidecar stores it once. A newer edit
+  time (a changed note) updates it; an older copy from another device does not undo it. A
+  highlight deleted on every device that had it is deleted in Lectern after their next sync.
+- **On the right passage:** each highlight is placed on the text the web reader opens (the
+  book's primary EPUB) by finding its text there, ignoring line breaks, spacing, and case, nearest
+  to where the device says it was. So a highlight made in the EPUB, the PDF, or a converted
+  edition lands on the same passage, and on the work's sentence when it has a sentence list. It is
+  placed again when the primary EPUB changes. A highlight whose text is not found still shows,
+  with its page.
+
+In Lectern: **Highlights** on the book's page (with *Open in reader*), the **Highlights** button
+in the reader (*Go to passage*), and the **Highlights** page listing your books with highlights.
+**Markdown** exports one book's highlights; **Export all as Markdown** all of them, in the same
+order with the same chapters, notes, pages, and times as shown. Searching them is issue #72.
+
+**Private.** Highlights belong to the person whose device sent them: nobody else sees them, not
+other household members nor the owner, and their owner sees them only while they can see the
+book (a book unshared from a reader takes its highlights out of their view until it is shared
+again; trashed books hide them). They are not in the catalogue (OPDS) or available to AI apps
+(MCP). Lectern and the plugin never log their text or notes, only counts. They are stored in
+`lectern.db` (`annotations`, migration `0019`), so [backups](backups.md) and restore include them.
 
 ## Security
 
@@ -213,6 +249,9 @@ do not enable *Force userspace mode*, for the same reason as above.
 | `POST /koplugin/bootstrap` `{secret}` | the secret | credentials and `lan_url`, or `410 setup_secret_invalid` |
 | `POST /koplugin/pair` `{username, code}` | the code | credentials, `server_url` (the Tailscale address, if known), and `lan_url`, or `401 invalid_code` |
 | `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first), `lan_url` |
+| `PUT /koplugin/annotations` `{document, device, annotations: [...]}` | kosync headers (the device's sync key) | the device's current highlights of one book: `{document, added, updated, deleted, total}` |
+| `GET /api/works/{id}/annotations`, `GET /api/works/{id}/annotations.md` | session, own highlights, visible work | one book's highlights; as Markdown |
+| `GET /api/annotations`, `GET /api/annotations.md` | session, own highlights | books with highlights and counts; all as Markdown |
 | `POST /koplugin/hello` `{device_id, nonce, setup?}` | none (answers with a proof) | `{proof}`: HMAC-SHA256 of `lectern-lan:<nonce>` keyed by the hex SHA-256 of the catalogue password (or with `setup` the setup secret), or `404` ([home-network.md](home-network.md)) |
 
 `GET /api/devices` adds `koplugin` (the device has both credentials) and `plugin` (state of the

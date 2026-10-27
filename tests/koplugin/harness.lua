@@ -94,6 +94,20 @@ package.preload["ui/network/manager"] = function()
     }
 end
 
+-- Read history and book sidecars, for Sync now's scan of recently read books' highlights.
+local HISTORY = { hist = {} }
+local SIDECARS = {}
+package.preload["readhistory"] = function() return HISTORY end
+package.preload["docsettings"] = function()
+    local DS = {}
+    function DS:hasSidecarFile(file) return SIDECARS[file] ~= nil end
+    function DS:open(file)
+        local data = SIDECARS[file] or {}
+        return { readSetting = function(_, k) return data[k] end }
+    end
+    return DS
+end
+
 local UI = { shown = {}, tasks = {} }
 package.preload["ui/uimanager"] = function()
     return {
@@ -196,6 +210,17 @@ local function fake_opds()
 end
 
 -- --- run -----------------------------------------------------------------------------------
+
+-- Count the plugin's requests by path (wrapping its transport).
+local REQUESTS = {}
+do
+    local real = require("lectern_http")
+    package.loaded["lectern_http"] = function(req)
+        local path = req.url:match("^%a+://[^/]+(/[^?]*)") or req.url
+        REQUESTS[path] = (REQUESTS[path] or 0) + 1
+        return real(req)
+    end
+end
 
 local Lectern = dofile(plugin_dir .. "/main.lua")
 local function make(reader)
@@ -327,6 +352,47 @@ elseif command == "sync-now" then
         out.outbox_after_push = #p.core:outbox()
         out.tasks_after_push = #UI.tasks
     end
+elseif command == "highlights" then
+    -- arg 4: a JSON spec { digest, annotations, action = "push" | "modified" | "sync-now",
+    -- online, server_url, history = { { file, digest, annotations } } }.
+    local f = assert(io.open(arg[4], "rb"))
+    local spec = cjson.decode(f:read("*a"))
+    f:close()
+    NET.online = spec.online ~= false
+    NET.connected = NET.online
+    for _, h in ipairs(spec.history or {}) do
+        HISTORY.hist[#HISTORY.hist + 1] = { file = h.file }
+        SIDECARS[h.file] = { partial_md5_checksum = h.digest, annotations = h.annotations }
+    end
+    local p, ui = make(true)
+    UI.shown, UI.tasks = {}, {}
+    if spec.server_url then p.store:saveSetting("server_url", spec.server_url) end
+    ui.kosync.getDocumentDigest = function() return spec.digest end
+    ui.annotation = { annotations = spec.annotations }
+    if spec.action == "push" then
+        ui.kosync:updateProgress(false, false) -- a page-turn or close push
+    elseif spec.action == "modified" then
+        p:onAnnotationsModified()
+        out.scheduled_in = UI.tasks[1] and UI.tasks[1].s
+        out.before_task = REQUESTS["/koplugin/annotations"] or 0
+        run_tasks()
+    elseif spec.action == "sync-now" then
+        p:syncNow()
+        out.message = UI.shown[#UI.shown] and UI.shown[#UI.shown].text
+    end
+    out.requests = REQUESTS["/koplugin/annotations"] or 0
+    out.pending_books = #p.core:annotationOutbox()
+    out.retry_in = UI.tasks[1] and UI.tasks[1].s
+    out.status_line = p.core:statusLine(NET.online)
+    if spec.reconnect then
+        p.store:delSetting("server_url")
+        local before = out.requests
+        p:onNetworkConnected()
+        run_tasks()
+        out.after_reconnect = (REQUESTS["/koplugin/annotations"] or 0) - before
+        out.pending_after_reconnect = #p.core:annotationOutbox()
+    end
+    p.store:flush()
 elseif command == "route" then
     -- Home Wi-Fi or Tailscale: what the next request uses, and what KOReader is set to.
     NET.online, NET.connected = true, true
