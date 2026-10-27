@@ -1,7 +1,7 @@
 # PDF → EPUB conversion
 
-A work with a text PDF (not a scan — those need OCR first) can gain a reflowable EPUB
-edition: **Convert to EPUB…** in its detail view queues a conversion job. The original PDF
+A work with a text PDF, or a scan once text recognition has run ([ocr.md](ocr.md)), can gain a
+reflowable EPUB edition: **Convert to EPUB…** in its detail view queues a conversion job. The original PDF
 stays; the EPUB is a separate edition of the same work (`book-converted-from-pdf.epub`), and
 removing it takes nothing else with it.
 
@@ -31,7 +31,16 @@ reader can switch editions without losing their place).
 
 The conversion is deliberately text-first. Not converted in this version: images and
 figures, tables, footnotes as `noteref` asides, drop caps, poetry mode, inline styles, and
-math (issue #28's later bullets). A scanned PDF is refused until OCR exists (issue #17).
+math (issue #28's later bullets). A scanned PDF is refused until OCR has given it text.
+
+## Scans (OCR)
+
+A scan's edition is built from its recognised text (issue #62) and says so: the package
+description names the OCR engine and language, a `<meta name="lectern:source"
+content="ocr"/>` marks it, the contents page carries a note, and the report has `source:
+"ocr"`, `ocr: {engine, language}` and a warning to expect recognition errors. When the PDF's
+text changes after a conversion (the scan was recognised again), `GET
+/api/works/{id}/pdf-epub` says `outdated: true` and converting again replaces the edition.
 
 ## Running it
 

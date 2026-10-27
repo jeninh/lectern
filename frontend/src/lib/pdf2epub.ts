@@ -1,12 +1,16 @@
 // PDF → EPUB conversion (issue #28): turn a work's text PDF into a reflowable EPUB edition,
 // with the PDF's own page numbers kept as metadata (a page-list nav the Kindle and KOReader
-// can show). The original PDF is kept; the EPUB is a separate edition.
+// can show). The original PDF is kept; the EPUB is a separate edition. A scanned PDF converts
+// once OCR has given it text (issue #62), and its edition is labelled as generated from OCR.
 
 import { del, get, post } from "./api";
 
 export interface PdfEpubReport {
   pdf_sha256: string | null;
   status: string;
+  /** Where the converted text came from (older reports have neither field). */
+  source?: "text_layer" | "ocr";
+  ocr?: { engine: string; language: string } | null;
   pages: number;
   sections: number;
   page_list_entries: number;
@@ -30,7 +34,31 @@ export interface PdfEpubState {
   job: PdfEpubJob | null;
   edition: { file: string; size: number; sha256: string; added_at: string } | null;
   report: PdfEpubReport | null;
+  /** The work's text PDF: its own text layer, or OCR of a scan. */
+  source: "text_layer" | "ocr" | null;
+  /** The edition was built from an older text (the scan was recognised again). */
+  outdated: boolean;
 }
+
+/** What the "EPUB from PDF" row says about the converted edition. */
+export function editionHint(st: Pick<PdfEpubState, "report" | "outdated">): string {
+  const r = st.report;
+  const sections = r?.sections ?? 0;
+  let hint = `${r?.source === "ocr" ? "EPUB generated from OCR text of the scan" : "EPUB converted from the PDF"} · ${sections} section${
+    sections === 1 ? "" : "s"
+  }`;
+  if (r?.page_list_entries) {
+    hint += `, page numbers ${r.labels_source === "page_labels" ? "from the PDF's page labels" : "1…" + r.pages}`;
+  }
+  if (st.outdated) hint += " · out of date: the PDF's text changed since";
+  return hint;
+}
+
+/** The hint before converting: a scan's text comes from OCR, so the edition will too. */
+export const convertHint = (source: PdfEpubState["source"]) =>
+  source === "ocr"
+    ? "Reflowable text from the OCR of the scan (expect recognition errors), the PDF's own page numbers kept; the PDF stays"
+    : "Reflowable text, the PDF's own page numbers kept; the PDF stays";
 
 export const pdfEpubState = (workId: number) => get<PdfEpubState>(`/api/works/${workId}/pdf-epub`);
 export const convertPdf = (workId: number) =>

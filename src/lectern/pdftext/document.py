@@ -22,7 +22,8 @@ Shape (version 1)::
                    "text", "blocks": [[start, kind]],
                    "words": [[start, end, page, x0, y0, x1, y1]]}],
      "stats": {"pages", "pages_with_text", "chars", "columns", "margin_lines_removed",
-               "truncated"}}
+               "truncated"},
+     "ocr": {"engine", "language"}}  (only when built from OCR'd words: docs/ocr.md)
 """
 
 from __future__ import annotations
@@ -73,7 +74,14 @@ class SectionText:
         return out
 
 
-def build_document(raw: RawDoc, pdf_sha256: str) -> dict:
+def build_document(raw: RawDoc, pdf_sha256: str, *, ocr: dict | None = None) -> dict:
+    """The canonical text document of ``raw``: the PDF's text layer, or (``ocr`` given) the
+    words OCR recognised on its page images, laid out by the same step.
+
+    ``ocr`` is ``{"engine", "language"}``: a document built from recognised text records
+    them, so another recognition is another text (another ``text_sha256``) and an alignment
+    of the old one goes stale. It is ``ready`` whenever anything was recognised, not by the
+    text-layer rule: a sparse scan (a picture book) is still a text."""
     lay = layout(raw)
     plans = plan_sections(lay.blocks, raw.toc, len(raw.pages))
     sections = []
@@ -105,8 +113,9 @@ def build_document(raw: RawDoc, pdf_sha256: str) -> dict:
         )
     with_text = sum(lay.pages_with_text)
     pages = len(raw.pages)
-    status = "ready" if pages and with_text / pages >= NEEDS_OCR_SHARE and sections else "needs_ocr"
-    return {
+    enough = ocr is not None or (pages and with_text / pages >= NEEDS_OCR_SHARE)
+    status = "ready" if pages and enough and sections else "needs_ocr"
+    out = {
         "version": DOCUMENT_VERSION,
         "pdf_sha256": pdf_sha256,
         "status": status,
@@ -132,6 +141,10 @@ def build_document(raw: RawDoc, pdf_sha256: str) -> dict:
             "truncated": raw.truncated,
         },
     }
+    if ocr is not None:
+        # Only on recognised text: a text PDF's document keeps its bytes (and alignments).
+        out["ocr"] = {"engine": str(ocr["engine"]), "language": str(ocr["language"])}
+    return out
 
 
 def dumps(doc: dict) -> bytes:

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
   cancelPdfJob,
+  convertHint,
   convertPdf,
+  editionHint,
   pdfEpubState,
   removePdfEpub,
   retryPdf,
@@ -15,8 +17,9 @@ import { Book } from "./Icons";
 const POLL_MS = 3000;
 
 /**
- * "Convert to EPUB" row for a work with a text PDF: queues the conversion, follows the job
- * (progress, Cancel, Retry), and once it exists, offers the converted edition for removal.
+ * "Convert to EPUB" row for a work with a text PDF (or a scan OCR has given text): queues the
+ * conversion, follows the job (progress, Cancel, Retry), and once it exists, offers the
+ * converted edition for removal, or to convert again when the PDF's text has changed since.
  */
 export function ConvertPdfRow({ work }: { work: Work }) {
   const { refreshLibrary, toast } = useStore();
@@ -67,7 +70,7 @@ export function ConvertPdfRow({ work }: { work: Work }) {
     }
   };
 
-  let hint = "Reflowable text, the PDF's own page numbers kept; the PDF stays";
+  let hint = convertHint(st.source);
   let action = (
     <button className="btn sm" onClick={() => act(() => convertPdf(work.id), "Could not start the conversion")}>
       Convert to EPUB…
@@ -84,10 +87,8 @@ export function ConvertPdfRow({ work }: { work: Work }) {
       </button>
     );
   } else if (st.edition) {
-    hint = `EPUB converted from the PDF · ${st.report?.sections ?? 0} section${
-      st.report?.sections === 1 ? "" : "s"
-    }${st.report?.page_list_entries ? `, page numbers ${st.report.labels_source === "page_labels" ? "from the PDF's page labels" : "1…" + st.report.pages}` : ""}`;
-    action = (
+    hint = editionHint(st);
+    const remove = (
       <button
         className="btn sm ghost"
         onClick={() =>
@@ -103,6 +104,16 @@ export function ConvertPdfRow({ work }: { work: Work }) {
       >
         Remove
       </button>
+    );
+    action = st.outdated ? (
+      <div className="row">
+        <button className="btn sm" onClick={() => act(() => convertPdf(work.id), "Could not start the conversion")}>
+          Convert again
+        </button>
+        {remove}
+      </div>
+    ) : (
+      remove
     );
   }
 
