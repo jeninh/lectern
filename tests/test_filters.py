@@ -782,6 +782,30 @@ def test_migration_0018_backfills_states_and_pages(tmp_path):
     assert "pages" not in {c["name"] for c in insp.get_columns("book_files")}
     upgrade_to_head(engine)
 
+    # SQLite before 3.35 has no ALTER TABLE … DROP COLUMN: the downgrade still works, keeps
+    # every file (no table rebuild cascading through foreign keys), and so does upgrading again.
+    def old_sqlite(_conn, _cursor, statement, *_args):
+        if "DROP COLUMN" in statement.upper():
+            raise sa.exc.OperationalError(statement, None, Exception('near "DROP": syntax error'))
+
+    engine.dialect.server_version_info = (3, 34, 1)
+    sa.event.listen(engine, "before_cursor_execute", old_sqlite)
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.downgrade(cfg, "0017_data_saver")
+    insp = sa.inspect(engine)
+    assert "reading_states" not in insp.get_table_names()
+    with engine.connect() as conn:
+        assert conn.execute(sa.text("SELECT count(*) FROM book_files")).scalar() == 2
+        assert conn.execute(sa.text("SELECT count(*) FROM pdf_texts")).scalar() == 1
+        conn.execute(sa.text("UPDATE book_files SET pages = 7"))  # left stale while downgraded
+        conn.commit()
+    upgrade_to_head(engine)
+    with engine.connect() as conn:
+        pages = dict(conn.execute(sa.text("SELECT id, pages FROM book_files")).all())
+        assert pages == {1: None, 3: 42}
+        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+
 
 def test_page_counts_are_filled_in(settings, client, owner):
     import zipfile

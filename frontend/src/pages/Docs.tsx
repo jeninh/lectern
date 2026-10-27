@@ -6,8 +6,8 @@ import { DocMarkdown } from "../components/DocMarkdown";
 import { EmptyState } from "../components/EmptyState";
 import { Book, Devices, Download, Gear, Headphones, Home, Key, Search, Send, Shield, Sparkle, Sync, Toc } from "../components/Icons";
 import { PageTitle } from "../components/Shell";
-import { canSee, docPath, searchDocs, slugify, type Doc, type DocIcon } from "../lib/docs";
-import { DOCS } from "../lib/docsData";
+import { docPath, searchDocs, slugify, type Doc, type DocIcon } from "../lib/docs";
+import { useDocs } from "../lib/docsData";
 import { fold } from "../lib/fuzzy";
 import { useStore } from "../lib/store";
 
@@ -90,11 +90,13 @@ export default function DocsPage() {
   const q = params.get("q") ?? "";
   const { me } = useStore();
   const role = me?.user.role;
-  const visible = useMemo(() => DOCS.filter((d) => canSee(d.audience, role)), [role]);
+  // Only the docs this person may read (lib/docsData.ts); null while they load.
+  const loaded = useDocs(role);
+  const visible = useMemo(() => loaded ?? [], [loaded]);
   // Links to docs this person cannot open render as plain text instead of a dead end.
   const visibleFiles = useMemo(() => new Set(visible.map((d) => d.file)), [visible]);
-  const doc = slug ? DOCS.find((d) => d.slug === slug) ?? null : null;
-  const allowed = !!doc && canSee(doc.audience, role);
+  const doc = slug ? visible.find((d) => d.slug === slug) ?? null : null;
+  const allowed = !!doc;
   const hits = useMemo(() => (q.trim() ? searchDocs(visible, q, 30) : []), [visible, q]);
   const tocIds = useMemo(() => (allowed && doc ? doc.toc.map((h) => h.id) : []), [allowed, doc]);
   const active = useActiveHeading(tocIds);
@@ -124,7 +126,9 @@ export default function DocsPage() {
   );
 
   let body: ReactNode;
-  if (q.trim()) {
+  if (!loaded) {
+    body = <div className="hint">Loading…</div>;
+  } else if (q.trim()) {
     body = (
       <section className="docs-results" aria-label="Search results">
         <p className="hint" role="status">{hits.length ? `${hits.length === 30 ? "30+" : hits.length} ${hits.length === 1 ? "result" : "results"} for “${q.trim()}”` : `Nothing in the docs matches “${q.trim()}”.`}</p>
@@ -170,14 +174,10 @@ export default function DocsPage() {
         </nav>
       </article>
     );
-  } else if (doc || slug) {
+  } else if (slug) {
     body = (
-      <EmptyState
-        icon={<Book />}
-        title={doc ? "This page is for the people who run Lectern" : "No such page"}
-        action={<Link className="btn" to="/app/docs">All docs</Link>}
-      >
-        {doc ? "Ask the household's owner if you need it." : "It may have moved. Search the docs or browse them all."}
+      <EmptyState icon={<Book />} title="No such page" action={<Link className="btn" to="/app/docs">All docs</Link>}>
+        It may have moved, or be only for the people who run Lectern. Search the docs or browse them all.
       </EmptyState>
     );
   } else {

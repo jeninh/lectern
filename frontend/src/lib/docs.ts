@@ -1,5 +1,5 @@
 // The in-app Docs tab: the repository's docs/*.md, listed and grouped by docs/index.yml, bundled
-// at build time (lib/docsData.ts). This module is pure (no React, no DOM, no bundler features) so
+// or fetched by role (lib/docsData.ts). This module is pure (no React, no DOM, no bundler features) so
 // the CI check in __tests__/docs.test.ts validates exactly what the app renders.
 //
 // Markdown is parsed with raw HTML off: `<script>` or `<img onerror>` in a doc arrives as plain
@@ -24,6 +24,12 @@ export type Audience = (typeof AUDIENCES)[number];
 /** docs/index.yml as written. */
 export interface Manifest {
   sections: { title: string; docs: { file: string; title: string; description: string; icon: string; audience?: string }[] }[];
+}
+
+/** Docs with their Markdown: what vite.config.ts bundles ("everyone" docs only) and what
+ * /app/doc-text serves (the docs the signed-in person's role may see). */
+export interface DocText {
+  sections: { title: string; docs: (Manifest["sections"][number]["docs"][number] & { source: string })[] }[];
 }
 
 export interface Heading {
@@ -145,6 +151,10 @@ export function buildDocs(manifest: Manifest, sources: Record<string, string>): 
     }
   }
   return docs;
+}
+
+export function docsFromText(text: DocText): Doc[] {
+  return buildDocs(text, Object.fromEntries(text.sections.flatMap((s) => s.docs.map((d) => [d.file, d.source]))));
 }
 
 /** Ops and admin docs are hidden from readers; owners see everything. */

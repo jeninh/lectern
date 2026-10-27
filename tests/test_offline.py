@@ -353,6 +353,44 @@ def test_pwa_files_are_public_and_the_app_is_not(client):
     assert client.get("/api/me").status_code == 401
 
 
+def test_doc_text_sends_only_the_docs_a_role_may_see(client, owner, tmp_path, monkeypatch):
+    """Ops and admin docs stay out of the public bundle; /app/doc-text sends each role only its
+    own (docs/index.yml audience), so a reader's browser never receives them."""
+    import json  # noqa: PLC0415
+
+    from lectern.routes import spa  # noqa: PLC0415
+
+    def doc(file: str, audience: str | None = None) -> dict:
+        d = {"file": file, "title": file, "description": "", "icon": "book", "source": f"# {file}"}
+        return d | ({"audience": audience} if audience else {})
+
+    text = {
+        "sections": [
+            {"title": "A", "docs": [doc("all.md"), doc("ops.md", "members")]},
+            {"title": "Admin", "docs": [doc("backups.md", "owner")]},
+        ]
+    }
+    (tmp_path / "doc-text.json").write_text(json.dumps(text))
+    monkeypatch.setattr(spa, "APP_DIR", tmp_path)
+
+    def files() -> list[str]:
+        r = client.get("/app/doc-text")
+        assert r.status_code == 200 and r.headers["cache-control"] == "private, no-cache"
+        return [d["file"] for s in r.json()["sections"] for d in s["docs"]]
+
+    assert files() == ["all.md", "ops.md", "backups.md"]
+    member = make_user(client, owner["csrf"], "mem", "member")
+    reader = make_user(client, owner["csrf"], "rdr", "reader")
+    login(client, "mem", member["password"])
+    assert files() == ["all.md", "ops.md"]
+    login(client, "rdr", reader["password"])
+    r = client.get("/app/doc-text")
+    assert r.json() == {"sections": [{"title": "A", "docs": [doc("all.md")]}]}
+    assert "backups" not in r.text and "ops.md" not in r.text
+    client.cookies.clear()
+    assert client.get("/app/doc-text").status_code == 401
+
+
 def test_sign_out_clears_site_data_and_book_frames_are_allowed(client, owner):
     csp = client.get("/api/me").headers["content-security-policy"]
     assert "frame-ancestors 'self'" in csp

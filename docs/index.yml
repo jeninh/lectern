@@ -7,7 +7,9 @@
 #   title        shown in the sidebar, breadcrumbs, and search
 #   description  one line for the Docs overview and search
 #   icon         one of the names in DOC_ICONS (frontend/src/lib/docs.ts)
-#   audience     everyone (default), members (owners and members; hidden from readers), or owner
+#   audience     everyone (default), members (owners and members; hidden from readers), or owner.
+#                Only "everyone" docs are bundled into the app; the others are sent by the server
+#                to the roles that may read them (routes/spa.py, /app/doc-text).
 sections:
   - title: Getting started
     docs:

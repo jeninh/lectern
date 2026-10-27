@@ -604,7 +604,7 @@ interface PdfCanvasProps extends PageProps {
   find: string;
 }
 
-function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked, find }: PdfCanvasProps) {
+export function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked, find }: PdfCanvasProps) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [found, setFound] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
   const markLayer = useRef<HTMLDivElement>(null);
@@ -616,6 +616,9 @@ function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMar
   useEffect(() => {
     let cancelled = false;
     let task: { cancel(): void } | null = null;
+    // Marks belong to one query at one size: none from before this change while the page
+    // redraws, and only this run's (a superseded run is cancelled before it can set any).
+    setFound([]);
     (async () => {
       const page = await doc.getPage(n);
       if (cancelled || !canvas.current) return;
@@ -637,7 +640,6 @@ function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMar
       });
       task = r;
       await r.promise.catch(() => {});
-      setFound([]);
       if (!find || cancelled) return;
       // The match's boxes, from pdf.js's own reading of the page's text (no text layer is
       // rendered): each item's baseline origin and width, in viewport pixels.

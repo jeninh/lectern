@@ -127,8 +127,13 @@ def upgrade() -> None:
     )
     op.create_index("ix_reading_states_work_id", "reading_states", ["work_id"])
     op.create_index("ix_reading_states_last_read", "reading_states", ["user_id", "last_read_at"])
-    # Plain ADD COLUMN (nullable, no default), never a batch rebuild of book_files.
-    op.add_column("book_files", sa.Column("pages", sa.Integer(), nullable=True))
+    # Plain ADD COLUMN (nullable, no default), never a batch rebuild of book_files. Already
+    # there after a downgrade on SQLite before 3.35 (see downgrade), with counts nothing kept
+    # current since: cleared, so the backfill below and the app count again.
+    if "pages" not in {c["name"] for c in sa.inspect(op.get_bind()).get_columns("book_files")}:
+        op.add_column("book_files", sa.Column("pages", sa.Integer(), nullable=True))
+    else:
+        op.execute("UPDATE book_files SET pages = NULL")
     for name, table, cols in _INDEXES:
         op.create_index(name, table, cols)
     _backfill(op.get_bind())
@@ -137,7 +142,11 @@ def upgrade() -> None:
 def downgrade() -> None:
     for name, table, _cols in reversed(_INDEXES):
         op.drop_index(name, table_name=table)
-    op.drop_column("book_files", "pages")
+    # ALTER TABLE … DROP COLUMN needs SQLite 3.35. Before that the column stays: it is
+    # nullable and 0017's code never reads it, and a batch rebuild of book_files would DROP the
+    # table, which with foreign_keys=ON cascades into every row that references a file.
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("book_files", "pages")
     op.drop_index("ix_reading_states_last_read", table_name="reading_states")
     op.drop_index("ix_reading_states_work_id", table_name="reading_states")
     op.drop_table("reading_states")
