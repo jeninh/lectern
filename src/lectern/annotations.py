@@ -8,7 +8,8 @@ Pull
     devices that share a book's sidecar, is one row. A newer ``datetime_updated`` (a note edited
     on the device) updates the row. ``sources`` remembers which devices' latest snapshot has
     the highlight: one missing from a device's snapshot loses that device, and the row goes
-    when no live (unrevoked) device has it any more (deleted on the device).
+    when no live (unrevoked) device has it any more (deleted on the device). A device never
+    deletes a highlight it did not hold.
 
 Place
     A highlight is placed on the work's text as the web reader opens it, the primary EPUB
@@ -248,9 +249,10 @@ def sync_document(
 ) -> dict:
     """Apply one device's snapshot of ``document``'s highlights. Caller commits.
 
-    ``sources`` only ever counts the user's live sync keys: a revoked or deleted key (a device
-    replaced by a new one) stops holding highlights up, so a highlight missing from this
-    snapshot is deleted unless another live device still has it."""
+    ``sources`` only ever counts the user's live sync keys. A highlight missing from this
+    snapshot is deleted only if this device held it and no other live device still does; one
+    it never held (a revoked device's, another device's) is kept. A re-paired plugin sends
+    every book again, so a replacement device holds what it has before it deletes anything."""
     live = set(
         db.scalars(
             select(SyncKey.id).where(SyncKey.user_id == user.id, SyncKey.revoked_at.is_(None))
@@ -301,12 +303,18 @@ def sync_document(
             changed.append(row)
     deleted = 0
     for key, row in existing.items():
-        left = [s for s in (row.sources or []) if s in live and (key in seen or s != sync_key_id)]
-        if key not in seen and not left:
-            db.delete(row)
-            deleted += 1
-        elif left != (row.sources or []):
-            row.sources = left
+        held = [s for s in (row.sources or []) if s in live]
+        if key not in seen and sync_key_id in held:
+            # Deleted on this device: it lets go; the row goes when no live device holds it.
+            held = [s for s in held if s != sync_key_id]
+            if not held:
+                db.delete(row)
+                deleted += 1
+                continue
+        # A snapshot only deletes what this device held: a highlight it never had (one only a
+        # revoked device synced, or another device's) stays, even with no live source left.
+        if held != (row.sources or []):
+            row.sources = held
     db.flush()
     locate(db, library, changed)
     return {"document": document, "added": added, "updated": updated, "deleted": deleted,

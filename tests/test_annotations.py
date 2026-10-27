@@ -174,7 +174,7 @@ def test_a_replaced_device_does_not_keep_deleted_highlights_alive(client, owner,
     assert put(client, new_ko, doc, [a1, a2]).json()["added"] == 0
     assert put(client, new_ko, doc, [a2]).json()["deleted"] == 1
     assert [a["text"] for a in shown(client, book["work_id"])] == [OTHER]
-    # A replacement that never synced the highlight at all: its snapshot still decides.
+    # Deleted there too: the new key held it (it synced a2 above), so it goes.
     assert put(client, new_ko, doc, []).json()["deleted"] == 1
     assert shown(client, book["work_id"]) == []
     # A live second device keeps its highlight when another one deletes it.
@@ -182,6 +182,24 @@ def test_a_replaced_device_does_not_keep_deleted_highlights_alive(client, owner,
     put(client, book["kobo"], doc, [a1], device="Kobo")
     assert put(client, book["kindle"], doc, []).json()["deleted"] == 0
     assert len(shown(client, book["work_id"])) == 1
+
+
+def test_a_new_device_never_deletes_highlights_it_did_not_have(client, owner, book):
+    """Only a revoked device synced PHRASE: a new device's snapshot without it (it opened the
+    book without the old sidecar) keeps it; Lectern may hold the only copy."""
+    doc = book["doc"]
+    old = make_sync_key_full(client, owner["csrf"], "old kindle")
+    put(client, ko_headers("owner", old["secret"]), doc, [ann(PHRASE, "2026-10-01 09:30:00")])
+    api_post(client, f"/api/devices/sync-keys/{old['sync_key']['id']}/revoke", owner["csrf"])
+    new_ko = ko_headers("owner", make_sync_key(client, owner["csrf"], "new kobo"))
+    r = put(client, new_ko, doc, [ann(OTHER, "2026-10-05 10:00:00")], device="Kobo").json()
+    assert (r["added"], r["deleted"]) == (1, 0)
+    assert put(client, new_ko, doc, []).json()["deleted"] == 1  # OTHER: it held that one
+    assert [a["text"] for a in shown(client, book["work_id"])] == [PHRASE]
+    # Another live device's highlight is not deleted by a device that never had it either.
+    put(client, book["kindle"], doc, [ann(OTHER, "2026-10-06 10:00:00")])
+    assert put(client, new_ko, doc, []).json()["deleted"] == 0
+    assert len(shown(client, book["work_id"])) == 2
 
 
 def test_a_highlight_from_another_edition_lands_on_the_same_passage(client, book, settings):

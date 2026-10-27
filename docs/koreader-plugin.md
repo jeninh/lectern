@@ -140,9 +140,10 @@ plugin, with the same credentials and the same Wi‑Fi-off outbox as positions:
 - **Once, with edits and deletions:** a highlight's id is its book, creation time, and start
   position, so a re-sync or a second device with the same sidecar stores it once. A newer edit
   time (a changed note) updates it; an older copy from another device does not undo it. A
-  highlight is deleted in Lectern when a device that syncs the book no longer has it and no
-  other device of yours (still connected, not revoked) does. A revoked or replaced device no
-  longer counts, and a plugin paired again sends every book's highlights again.
+  highlight is deleted in Lectern when a device that had it no longer does and no other device
+  of yours (not revoked) still has it. A device never deletes highlights it did not have, so a
+  replaced device's highlights stay in Lectern until the new device syncs them and then deletes
+  them; a plugin paired again sends every book's highlights again.
 - **On the right passage:** each highlight is placed on the text the web reader opens (the
   book's primary EPUB) by finding its text there, ignoring line breaks, spacing, and case, nearest
   to where the device says it was. So a highlight made in the EPUB or the PDF of a book lands on
