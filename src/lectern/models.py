@@ -905,6 +905,38 @@ class MatchSuggestion(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     resolution: Mapped[str | None] = mapped_column(String(16), default=None)  # merged|dismissed
+    # Migration 0019: "ingest" (a new file looked like an existing work) or "library" (the
+    # duplicate scan, lectern.duplicates). A dismissed pair, either way round, is never
+    # flagged again.
+    origin: Mapped[str] = mapped_column(String(16), default="ingest", server_default="ingest")
+
+
+class MetadataSuggestion(Base):
+    """Migration 0019: the automatic metadata pass for one work (lectern.autometa).
+
+    Both the job and its result: ``queued`` → ``running`` → ``ready`` (``fields`` holds
+    suggestions for fields the work was missing), ``no_match``, or ``error`` (``error``
+    names why); a person then ``applied`` or ``dismissed`` it. Nothing here writes to the
+    work; applying is an ordinary edit with a revision.
+    """
+
+    __tablename__ = "metadata_suggestions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    # {field: {"value", "provider", "provider_name", "source_url"}}
+    fields: Mapped[dict | None] = mapped_column(JSON, default=None)
+    error: Mapped[str | None] = mapped_column(String(64), default=None)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    requested_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
 
 
 # --- Add & edit books (migration 0007) -----------------------------------------------------

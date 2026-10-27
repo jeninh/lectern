@@ -19,8 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import covergen, editing, egress, idempotency, instance, lookup, trash
-from lectern.access import can_see_work, shelf_perms, visible_path
+from lectern import autometa, covergen, editing, egress, idempotency, instance, lookup, trash
+from lectern.access import can_see_work, shelf_perms, visible_path, visible_works
 from lectern.align import jobs as align_jobs
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS
 from lectern.editing import EditError, Journal, WorkPatch
@@ -28,6 +28,7 @@ from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest import formats
 from lectern.models import (
     Alignment,
+    MetadataSuggestion,
     Role,
     ShelfItem,
     TrashedFile,
@@ -849,6 +850,151 @@ def metadata_lookup(request: Request, auth: Editor, db: DbDep, body: lookup.Quer
     )
     db.commit()
     return result
+
+
+# --- automatic metadata pass ---------------------------------------------------------------------
+
+
+def _lookup_or_raise(db) -> None:
+    why = autometa.unavailable(db)
+    if why == "lookup_disabled":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, why)
+    if why:
+        raise HTTPException(status.HTTP_409_CONFLICT, why)
+
+
+class FixIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    work_ids: list[int] = Field(default_factory=list, max_length=BULK_MAX)
+    selection: Selection | None = None
+    # The whole library (every book this person can see), instead of a selection.
+    library: bool = False
+
+
+@router.post("/metadata/fix")
+def fix_metadata(request: Request, auth: Editor, db: DbDep, body: FixIn) -> dict:
+    """Queue the metadata pass (``lectern.autometa``) for a selection or the whole library.
+    Per-work ``status`` now; the lookups run in the background and land as suggestions."""
+    _lookup_or_raise(db)
+    if body.library:
+        ids = list(
+            db.scalars(
+                select(Work.id)
+                .where(Work.trashed_at.is_(None), visible_works(auth.user))
+                .order_by(Work.id)
+            )
+        )
+    else:
+        ids = resolve_selection(db, auth.user, body.work_ids, body.selection, limit=BULK_MAX)
+    results = autometa.queue(db, auth.user, ids, library_pass=body.library)
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    _audit(
+        db,
+        request,
+        auth,
+        "metadata.fix",
+        "library" if body.library else "selection",
+        ", ".join(f"{k} {v}" for k, v in sorted(counts.items())),
+    )
+    db.commit()
+    if (runner := getattr(request.app.state, "jobs", None)) is not None:
+        runner.wake.set()
+    return {"counts": counts, "results": [] if body.library else results}
+
+
+def _suggestion_row_json(db, row: MetadataSuggestion, work: Work) -> dict:
+    current = metadata_of(work)
+    return {
+        "work_id": work.id,
+        "version": work.version,
+        "title": work.title,
+        "author": work.author,
+        "status": row.status,
+        "error": row.error,
+        "fields": row.fields or {},
+        "current": {f: current[f] for f in autometa.FIELDS},
+        "updated_at": iso(row.updated_at),
+    }
+
+
+@router.get("/metadata/suggestions")
+def metadata_suggestions(auth: EditorRead, db: DbDep) -> dict:
+    """Works waiting for review (``ready``) and the pass's other open results (queued, no
+    match, error), with counts by status, for the books this person can see."""
+    rows = db.execute(
+        select(MetadataSuggestion, Work)
+        .join(Work, Work.id == MetadataSuggestion.work_id)
+        .where(
+            MetadataSuggestion.status.in_(("queued", "ready", "no_match", "error")),
+            Work.trashed_at.is_(None),
+            visible_works(auth.user),
+        )
+        .order_by(MetadataSuggestion.updated_at.desc())
+    ).all()
+    counts: dict[str, int] = {}
+    for row, _ in rows:
+        counts[row.status] = counts.get(row.status, 0) + 1
+    return {
+        "counts": counts,
+        "items": [_suggestion_row_json(db, row, work) for row, work in rows[:200]],
+        "lookup_enabled": instance.get(db, "metadata_lookup_enabled"),
+        "lookup_offline": egress.offline(),
+    }
+
+
+def _open_metadata(db, user, work_id: int, statuses: tuple[str, ...]) -> MetadataSuggestion:
+    _work(db, user, work_id)
+    row = db.scalar(select(MetadataSuggestion).where(MetadataSuggestion.work_id == work_id))
+    if row is None or row.status not in statuses:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    return row
+
+
+class ApplyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(ge=1)
+    fields: list[Literal[autometa.FIELDS]] = Field(min_length=1, max_length=len(autometa.FIELDS))
+
+
+@router.post("/metadata/suggestions/{work_id}/apply")
+def apply_metadata_suggestion(
+    request: Request, auth: Editor, db: DbDep, settings: SettingsDep, work_id: int, body: ApplyIn
+) -> dict:
+    """Apply the chosen fields as an ordinary edit (a revision, undoable). Only the fields
+    named are written; the rest of the suggestion is discarded with it. ``409
+    version_conflict`` if the work changed since the person looked."""
+    with LIBRARY_LOCK:
+        row = _open_metadata(db, auth.user, work_id, ("ready",))
+        if set(body.fields) - set(row.fields or {}):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "field_not_suggested")
+        work = _work(db, auth.user, work_id)
+        meta = metadata_of(work)
+        for f in body.fields:
+            meta[f] = row.fields[f]["value"]
+        try:
+            result, journal = _save(
+                request, auth, db, settings, work, WorkPatch(version=body.version, metadata=meta)
+            )
+        except EditError as exc:
+            raise _edit_error(exc) from None
+        with _rollback_on_error(db, journal):
+            row.status, row.resolved_at = "applied", utcnow()
+            db.commit()
+    return {"changed": result.changed, "version": work.version}
+
+
+@router.post("/metadata/suggestions/{work_id}/dismiss")
+def dismiss_metadata_suggestion(auth: Editor, db: DbDep, work_id: int) -> dict:
+    """Close it without changing the work: a ready suggestion, or a no-match or error result.
+    A later library pass leaves a dismissed work alone (selecting it asks again)."""
+    row = _open_metadata(db, auth.user, work_id, ("ready", "no_match", "error"))
+    row.status, row.resolved_at = "dismissed", utcnow()
+    db.commit()
+    return {"ok": True}
 
 
 # --- settings ----------------------------------------------------------------------------------------

@@ -280,7 +280,13 @@ read-aloud EPUB).
 - **Metadata suggestions (optional, off by default).** The owner can enable them in Admin.
   The editor then asks Open Library and Google Books (no key) for the ISBN, or the title and
   first author, and shows suggestions side by side with their source. You apply them field by
-  field; nothing is written until you save.
+  field; nothing is written until you save. **Fix metadata** in the selection bar (or Library
+  tools → Review metadata → whole library) looks up the missing description, series,
+  ISBN, and subjects in the background and lists them for the same field-by-field review;
+  fields you have edited are never looked up, and nothing goes out in offline mode.
+- **Possible duplicates.** Every hour (or Library tools → Find duplicates) Lectern compares the
+  books you already have, locally: same ISBN, same file, or same title and author. Review each
+  pair: merge it, or ignore it for good.
 
 Readers never see add, edit, or trash controls, and the API refuses them (`403`).
 

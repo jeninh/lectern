@@ -14,7 +14,7 @@ Admin → Offline mode lists these with whether each is on right now.
 
 | Feature | Contacts | When |
 |---|---|---|
-| Metadata suggestions (off by default) | `openlibrary.org`, `www.googleapis.com` | Someone asks for suggestions in the book editor: the ISBN, or title and first author |
+| Metadata suggestions (off by default) | `openlibrary.org`, `www.googleapis.com` | Someone asks for suggestions in the book editor, or runs Fix metadata on books in the Library: the ISBN, or title and first author |
 | ElevenLabs narration (only with your key) | `api.elevenlabs.io` | Testing the key, voices, previews, estimates, and narrations you confirmed |
 | Alignment model download (`align` image) | `huggingface.co` | Once, at the server's first alignment, unless the model is already downloaded |
 | Kokoro download (`LECTERN_TTS_KOKORO_LOCAL=1`) | `huggingface.co` | Once, at the server's first Kokoro narration, unless already downloaded |

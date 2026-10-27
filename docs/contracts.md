@@ -736,11 +736,40 @@ rate limits. Returns `{sent, suggestions: [{provider, provider_name, source_url,
 fields}], errors}`; fields are validated against the same `Metadata` schema. Nothing is ever
 written by a lookup.
 
+### Fix metadata (automatic pass) — `/api/metadata/fix`, `/api/metadata/suggestions`
+
+Owners and members. `POST /api/metadata/fix {work_ids | selection | library: true}` queues a
+lookup for every listed book that is missing a description, series (and number), ISBN, or
+tags (subjects) and returns `{counts, results: [{work_id, status}]}` (`queued`,
+`already_queued`, `nothing_missing`, `not_found`; the whole-library pass returns counts only
+and also skips `waiting_review` and `dismissed` books). `403 lookup_disabled` when the owner
+has not turned metadata suggestions on, `409 lookup_offline` in offline mode; requests never
+fetch anything themselves. The job runner works through the queue a few books per tick with
+the same transport, per-provider limit, and 24 h cache as the editor's lookup (a book over the
+limit stays queued); if lookups are turned off or offline mode comes on, queued books close as
+`error` without contacting anything. Fields are suggested only when empty **and** never
+changed by a saved edit or undo (`work_revisions`); a title search must return the same book
+(title and author close, as ingest matching measures them), an ISBN search is trusted.
+`GET /api/metadata/suggestions` → `{counts, items: [{work_id, version, status, error, fields:
+{field: {value, provider, provider_name, source_url}}, current}]}`.
+`POST /api/metadata/suggestions/{work_id}/apply {version, fields: [...]}` writes only the
+named fields as an ordinary edit (`work.edit` audit, a revision, undoable; `409
+version_conflict` if the work changed); `…/dismiss` closes it. Audit: `metadata.fix`.
+
+### Possible duplicates in the library — `POST /api/suggestions/scan`
+
+Purely local. Works sharing an ISBN or a file (SHA-256 of an EPUB, PDF, or audio track), or
+whose title and author match as ingest matching measures them (title ≥ 92, author ≥ 85; two
+different volumes of one series excepted), become `match_suggestions` rows with `origin:
+"library"`, the newer work as `work`. They join `GET /api/suggestions`; *merge* uses the
+existing merge path and *dismiss* ignores the pair for good: a pair with any row, open or
+resolved, either way round, is never flagged again. The hourly housekeeping runs the same scan.
+
 ### Audit actions added
 
 `import.file`, `import.auto_file`, `import.combine`, `import.discard`, `work.edit`,
 `work.bulk_edit`, `work.bulk`, `work.bulk_undo`, `work.undo`, `work.trash`, `work.restore`,
-`work.purge`, `file.restore`, `file.purge`, `metadata.lookup`, `settings.change`,
+`work.purge`, `file.restore`, `file.purge`, `metadata.lookup`, `metadata.fix`, `settings.change`,
 `readaloud.regenerate`, `tts.request`, `tts.retry`, `integration.elevenlabs.set`,
 `integration.elevenlabs.test`, `integration.elevenlabs.revoke`, `integration.elevenlabs.preview`,
 `integration.elevenlabs.use`, `ocr.start`, `ocr.delete`.

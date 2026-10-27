@@ -13,13 +13,15 @@ import { SendToDevice } from "../components/SendToDevice";
 import { DownloadButton } from "../components/Offline";
 import { OverflowMenu, type MenuAction } from "../components/Menu";
 import { BulkBar, type BulkTarget } from "../components/BulkBar";
+import { MetadataReview } from "../components/MetadataReview";
+import { duplicateBanner, duplicateCopy } from "../lib/autometa";
 import { Breadcrumbs, canNestIn, DeleteShelfDialog, dragProps, FolderCell, folderSummary, FolderPicker, ShelfNameDialog } from "../components/Folders";
 import { del, get, post, put } from "../lib/api";
 import { clausesOf, extractChips, formatQuery, SORTS, type Clause } from "../lib/filters";
 import type { Items } from "../lib/folders";
 import { childrenOf, pathLabel, shelfKey, splitKeys, workKey, worksIn, type FolderId } from "../lib/shelves";
 import { clock, usePlayer } from "../lib/player";
-import type { MatchSuggestion, Shelf, ShelfGrant, User } from "../lib/types";
+import type { MatchSuggestion, MetaSuggestions, Shelf, ShelfGrant, User } from "../lib/types";
 import { fold } from "../lib/fuzzy";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -108,6 +110,8 @@ export function LibraryPage() {
   const [sharing, setSharing] = useState<Shelf | null>(null);
   const [moving, setMoving] = useState<{ items: Items; title: string } | null>(null);
   const review = params.get("review") === "1";
+  const metaReview = params.get("metadata") === "1";
+  const [meta, setMeta] = useState<MetaSuggestions | null>(null);
   const reader = me?.user.role === "reader";
 
   const loadSuggestions = useCallback(async () => {
@@ -121,6 +125,32 @@ export function LibraryPage() {
   useEffect(() => {
     loadSuggestions().catch(() => {});
   }, [loadSuggestions, works.length]);
+
+  const loadMeta = useCallback(async () => {
+    if (!canUpload) return;
+    setMeta(await get<MetaSuggestions>("/api/metadata/suggestions"));
+  }, [canUpload]);
+  useEffect(() => {
+    loadMeta().catch(() => {});
+  }, [loadMeta]);
+  // While the Fix metadata pass is looking books up, check back for its results.
+  const metaQueued = meta?.counts.queued ?? 0;
+  useEffect(() => {
+    if (!metaQueued) return;
+    const t = window.setInterval(() => loadMeta().catch(() => {}), 5000);
+    return () => window.clearInterval(t);
+  }, [metaQueued, loadMeta]);
+  const metaReady = meta?.counts.ready ?? 0;
+  const findDuplicates = async () => {
+    try {
+      const r = await post<{ found: number }>("/api/suggestions/scan");
+      toast(r.found ? `Found ${r.found} possible ${r.found === 1 ? "duplicate" : "duplicates"} to review.` : "No new possible duplicates.");
+      await loadSuggestions();
+      if (r.found) setParam("review", "1", "");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
 
   // Chips, a smart shelf, or a sort the app cannot do itself: the server lists the books.
   // With chips, a folder means everything in it and below it; at the root, the whole library.
@@ -373,8 +403,14 @@ export function LibraryPage() {
       )}
       {suggestions.length > 0 && (
         <div className="alert review-banner" role="status">
-          <span><strong>{suggestions.length === 1 ? "One upload" : `${suggestions.length} uploads`}</strong> might belong to a book you already have.</span>
+          <span>{duplicateBanner(suggestions)}.</span>
           <button className="btn sm" onClick={() => setParam("review", "1", "")}>Review</button>
+        </div>
+      )}
+      {metaReady > 0 && (
+        <div className="alert review-banner" role="status" data-testid="metadata-banner">
+          <span><strong>{metaReady === 1 ? "One book" : `${metaReady} books`}</strong> {metaReady === 1 ? "has" : "have"} metadata suggestions to review.</span>
+          <button className="btn sm" onClick={() => setParam("metadata", "1", "")}>Review</button>
         </div>
       )}
       <div className="folder-bar">
@@ -384,6 +420,15 @@ export function LibraryPage() {
           <button className="btn sm ghost" onClick={() => setNaming({ parent: folder, shelf: null })}><Folder /> New shelf</button>
         )}
         {!everything && current?.permission === "owner" && <OverflowMenu label={`More for ${current.name}`} actions={folderMenu(current).slice(1)} />}
+        {canUpload && (
+          <OverflowMenu
+            label="Library tools"
+            actions={[
+              { label: `Review metadata${metaReady ? ` (${metaReady})` : ""}`, onSelect: () => setParam("metadata", "1", "") },
+              { label: "Find duplicates", onSelect: () => void findDuplicates() },
+            ]}
+          />
+        )}
         <div className="seg seg-text" role="group" aria-label="Library view">
           <button aria-pressed={!everything} onClick={() => setMode(false)} title="Shelves as folders"><Folder /> Folders</button>
           <button aria-pressed={everything} onClick={() => setMode(true)} title="Every book, flat"><Book /> Everything</button>
@@ -574,6 +619,7 @@ export function LibraryPage() {
           onDone={async () => {
             await refreshLibrary().catch(() => {});
           }}
+          onFixed={() => void loadMeta().catch(() => {})}
           canEdit={canEdit}
           canAlign={canEdit}
           onSend={() => setSendingMany(true)}
@@ -630,9 +676,13 @@ export function LibraryPage() {
       <Sheet open={manageShelves} onClose={() => setManageShelves(false)} title="Shelves" labelledBy="shelves-title">
         <ShelvesManager shelves={shelves} canCreate={canCreateHere} folder={folder} reload={() => refreshLibrary().catch(() => {})} onOpen={(sid) => { setManageShelves(false); openFolder(sid); }} />
       </Sheet>
-      <Sheet open={review} onClose={() => setParam("review", "", "")} title="Review matches" labelledBy="review-title">
+      <Sheet open={metaReview} onClose={() => setParam("metadata", "", "")} title="Metadata suggestions" labelledBy="metadata-title">
+        <MetadataReview data={meta} onChanged={loadMeta} />
+      </Sheet>
+      <Sheet open={review} onClose={() => setParam("review", "", "")} title="Review possible duplicates" labelledBy="review-title">
         <SuggestionReview
           items={suggestions}
+          onScan={findDuplicates}
           onResolved={async (msg) => {
             toast(msg);
             await Promise.all([loadSuggestions(), refreshLibrary()]).catch(() => {});
@@ -889,9 +939,15 @@ function MergeForm({ work, works, onCancel, onDone }: { work: Work; works: Work[
   );
 }
 
-function SuggestionReview({ items, onResolved }: { items: MatchSuggestion[]; onResolved: (msg: string) => Promise<void> }) {
+function SuggestionReview({ items, onResolved, onScan }: { items: MatchSuggestion[]; onResolved: (msg: string) => Promise<void>; onScan: () => Promise<void> }) {
   const { toast } = useStore();
-  if (!items.length) return <p className="hint">Nothing to review. Uploads that only loosely match a book you have show up here.</p>;
+  const scan = (
+    <div className="row" style={{ justifyContent: "space-between" }}>
+      <p className="hint" style={{ margin: 0 }}>Books with the same ISBN, the same file, or the same title and author. Checked every hour; nothing leaves the server.</p>
+      <button className="btn sm" onClick={() => void onScan()}>Find duplicates now</button>
+    </div>
+  );
+  if (!items.length) return <div className="stack">{scan}<p className="hint">Nothing to review. Uploads that only loosely match a book you have, and books that look like duplicates, show up here.</p></div>;
   const act = async (s: MatchSuggestion, what: "merge" | "dismiss") => {
     try {
       await post(`/api/suggestions/${s.id}/${what}`);
@@ -902,15 +958,17 @@ function SuggestionReview({ items, onResolved }: { items: MatchSuggestion[]; onR
   };
   const label = (w: Work) => [[...new Set(bookFiles(w).map(formatOf))].join(", ") || null, w.audio ? `audio ${clock(w.audio.duration_s)}` : null].filter(Boolean).join(" + ");
   return (
+    <div className="stack">
+    {scan}
     <ul className="review-list">
       {items.map((s) => (
         <li key={s.id} className="card">
-          <p className="sub" style={{ marginTop: 0 }}>Is the new upload the same book? <span className="badge">{Math.round(s.score)}% match · {s.reason}</span></p>
+          <p className="sub" style={{ marginTop: 0 }}>{duplicateCopy(s).question} <span className="badge">{Math.round(s.score)}% match · {s.reason}</span></p>
           <div className="pair">
             <div style={tintStyle(s.work)}>
               <Cover work={s.work} />
               <strong>{s.work.title}</strong>
-              <span className="hint">{s.work.author} · {label(s.work)} · new</span>
+              <span className="hint">{s.work.author} · {label(s.work)} · {duplicateCopy(s).newLabel}</span>
             </div>
             <div style={tintStyle(s.candidate)}>
               <Cover work={s.candidate} />
@@ -919,12 +977,13 @@ function SuggestionReview({ items, onResolved }: { items: MatchSuggestion[]; onR
             </div>
           </div>
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button className="btn ghost" onClick={() => act(s, "dismiss")}>Different books</button>
-            <button className="btn primary" onClick={() => act(s, "merge")}>Same book — merge</button>
+            <button className="btn ghost" onClick={() => act(s, "dismiss")}>{duplicateCopy(s).keep}</button>
+            <button className="btn primary" onClick={() => act(s, "merge")}>{duplicateCopy(s).merge}</button>
           </div>
         </li>
       ))}
     </ul>
+    </div>
   );
 }
 

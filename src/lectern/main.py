@@ -153,7 +153,12 @@ def create_app(
         # Transcodes and the hourly upload sweep run even with ingest off. Tests that pass
         # start_watcher=False opt out of every background thread.
         if run_watcher or start_watcher is None:
-            runner = JobRunner(session_factory(), settings, busy=app.state.readaloud.is_generating)
+            runner = JobRunner(
+                session_factory(),
+                settings,
+                busy=app.state.readaloud.is_generating,
+                fetch=lambda url: app.state.lookup_fetch(url),
+            )
             runner.start()
         app.state.watcher = watcher
         app.state.jobs = runner
@@ -240,7 +245,8 @@ def create_app(
             window_seconds=settings.mcp_burst_window_seconds,
         ),
     }
-    # The only outbound HTTP Lectern makes; tests swap in a fake upstream.
+    # The metadata lookup's transport (the editor and the background metadata pass); tests
+    # swap in a fake upstream.
     app.state.lookup_fetch = lookup_http_get
     app.state.challenges = ChallengeStore()
     app.state.readaloud = ReadAloudBuilder()

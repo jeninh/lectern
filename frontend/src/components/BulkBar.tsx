@@ -1,10 +1,11 @@
 import { useRef, useState, type ReactNode } from "react";
 import { post } from "../lib/api";
+import { fixSummary } from "../lib/autometa";
 import { bulkSummary } from "../lib/editor";
 import { MOD } from "../lib/hooks";
 import { pathLabel } from "../lib/shelves";
 import { useStore } from "../lib/store";
-import type { BulkResult, Shelf } from "../lib/types";
+import type { BulkResult, FixStatus, Shelf } from "../lib/types";
 import { Close, Send, Trash } from "./Icons";
 import { ChipInput } from "./MetadataForm";
 import { Sheet } from "./Sheet";
@@ -43,8 +44,8 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 
 /** The Library's selection bar: one change to many books, with Undo. `count` is everything
  * selected (shelves too); `books` the books among it, which every book action applies to. */
-export function BulkBar({ open, ready, count, books, all, total, target, titles, shelves, onSelectAll, onClear, onDone, canEdit = true, canAlign = false, onSend, onMove }: { open: boolean; ready: boolean; count: number; books?: number; all: boolean; total: number; target: () => BulkTarget | null; titles: string[]; shelves: Shelf[]; onSelectAll: () => void; onClear: () => void; onDone: () => Promise<void>; canEdit?: boolean; canAlign?: boolean; onSend?: () => void; onMove?: () => void }) {
-  const { toast } = useStore();
+export function BulkBar({ open, ready, count, books, all, total, target, titles, shelves, onSelectAll, onClear, onDone, canEdit = true, canAlign = false, onSend, onMove, onFixed }: { open: boolean; ready: boolean; count: number; books?: number; all: boolean; total: number; target: () => BulkTarget | null; titles: string[]; shelves: Shelf[]; onSelectAll: () => void; onClear: () => void; onDone: () => Promise<void>; canEdit?: boolean; canAlign?: boolean; onSend?: () => void; onMove?: () => void; onFixed?: () => void }) {
+  const { toast, me } = useStore();
   const [dialog, setDialog] = useState<Action | null>(null);
   const [busy, setBusy] = useState(false);
   const n = books ?? count;
@@ -115,6 +116,24 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
     }
   };
 
+  /** Fix metadata: queue the lookup pass (lectern.autometa); results arrive for review. */
+  const lookupOff = !me?.library_settings?.metadata_lookup_enabled ? "Metadata suggestions are off (Admin)" : me?.offline_mode ? "Offline mode is on: nothing is looked up" : undefined;
+  const fix = async () => {
+    const t = target();
+    if (!t) return;
+    setBusy(true);
+    try {
+      const r = await post<{ counts: Partial<Record<FixStatus, number>>; results: { work_id: number; status: FixStatus }[] }>("/api/metadata/fix", t);
+      const { text, queued } = fixSummary(r.results, r.counts);
+      toast(text, queued || r.results.some((x) => x.status !== "not_found") ? "info" : "error");
+      onFixed?.();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <SelectionBar open={open} count={count} all={all} total={total} onSelectAll={onSelectAll} onClear={onClear} label={`${count} selected`}>
@@ -128,6 +147,7 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
             {shelves.length > 0 && <button className="btn sm" disabled={off("edit")} title={over("edit")} onClick={() => setDialog("shelves")}>Shelves</button>}
           </>
         )}
+        {canEdit && <button className="btn sm" disabled={off("edit") || !!lookupOff} title={over("edit") ?? lookupOff ?? "Look up missing description, series, ISBN, and subjects to review"} onClick={fix}>Fix metadata</button>}
         {canAlign && <button className="btn sm" disabled={off("align")} title={over("align")} onClick={align}>Align</button>}
         {canEdit && (
           <button

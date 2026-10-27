@@ -471,6 +471,7 @@ def _suggestion_json(db, s: MatchSuggestion) -> dict:
     new, cand = db.get(Work, s.work_id), db.get(Work, s.candidate_work_id)
     return {
         "id": s.id,
+        "origin": s.origin,
         "score": s.score,
         "reason": s.reason,
         "created_at": iso(s.created_at),
@@ -493,6 +494,17 @@ def suggestions(auth: Manager, db: DbDep) -> dict:
         .limit(100)
     ).all()
     return {"suggestions": [_suggestion_json(db, s) for s in rows]}
+
+
+@router.post("/suggestions/scan")
+def scan_duplicates(auth: Manager, db: DbDep) -> dict:
+    """Look for likely duplicates among the works already in the library (local only; the
+    hourly sweep runs the same scan). New pairs join the review list above."""
+    from lectern import duplicates
+
+    found = duplicates.scan(db)
+    db.commit()
+    return {"found": found}
 
 
 def _open_suggestion(db, suggestion_id: int) -> MatchSuggestion:
