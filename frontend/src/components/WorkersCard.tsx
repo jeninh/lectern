@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { helpPath } from "../lib/help";
 import { del, get, patch, post } from "../lib/api";
 import { relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
@@ -261,7 +263,7 @@ function AddWorker({ onDone }: { onDone: () => void }) {
           </button>
           <button className="btn primary" onClick={onDone} data-autofocus>Done</button>
         </div>
-        <p className="hint">Behind a school or office proxy? Add <code style={{ whiteSpace: "nowrap" }}>--proxy http://proxy:port</code> (and <code style={{ whiteSpace: "nowrap" }}>--ca-bundle</code> if it inspects HTTPS). See docs/mac-worker.md.</p>
+        <p className="hint">Behind a school or office proxy? Add <code style={{ whiteSpace: "nowrap" }}>--proxy http://proxy:port</code> (and <code style={{ whiteSpace: "nowrap" }}>--ca-bundle</code> if it inspects HTTPS). See <Link to={helpPath("workerProxy")}>school and proxy mode</Link>.</p>
       </div>
     );
   }

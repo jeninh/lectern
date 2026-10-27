@@ -72,6 +72,18 @@ def pwa_image(name: str):
     )
 
 
+@router.get("/app/doc-media/{name}", include_in_schema=False)
+def doc_media(auth: Auth, name: str):
+    """Screenshots in the Docs tab (docs/screenshots, copied by vite.config.ts), for signed-in
+    users. Outside /app/assets so the service worker does not precache them."""
+    path = APP_DIR / "doc-media" / name
+    if "/" in name or not name.endswith(".png") or not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    return FileResponse(
+        path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"}
+    )
+
+
 @router.get("/app", include_in_schema=False)
 @router.get("/app/{path:path}", include_in_schema=False)
 def spa(request: Request, auth: Auth, path: str = ""):

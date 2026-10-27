@@ -2,8 +2,10 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { build } from "esbuild";
 import { createHash } from "node:crypto";
-import { cpSync, readdirSync, readFileSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
+import { docLinks, parseDoc } from "./src/lib/docs";
 
 const OUT = resolve(__dirname, "../src/lectern/static/app");
 
@@ -15,6 +17,31 @@ const pdfjsAssets = () => ({
   closeBundle() {
     for (const dir of ["cmaps", "standard_fonts", "wasm"]) {
       cpSync(resolve(__dirname, "node_modules/pdfjs-dist", dir), resolve(OUT, "pdfjs", dir), { recursive: true });
+    }
+  },
+});
+
+// YAML (docs/index.yml, the Docs tab's manifest) imports as its parsed data.
+const yaml = () => ({
+  name: "lectern-yaml",
+  transform(code: string, id: string) {
+    return id.endsWith(".yml") ? { code: `export default ${JSON.stringify(parseYaml(code))};`, map: null } : undefined;
+  },
+});
+
+// The screenshots the docs show (only those; docs/screenshots also holds PR captures), outside
+// assets/ so the service worker does not precache megabytes of images. routes/spa.py serves
+// them to signed-in users at /app/doc-media/.
+const docMedia = () => ({
+  name: "lectern-doc-media",
+  apply: "build" as const,
+  closeBundle() {
+    const docs = resolve(__dirname, "../docs");
+    mkdirSync(resolve(OUT, "doc-media"), { recursive: true });
+    for (const f of readdirSync(docs).filter((n) => n.endsWith(".md"))) {
+      for (const l of docLinks(parseDoc(readFileSync(resolve(docs, f), "utf8")).tokens, new Set())) {
+        if (l.to.kind === "image") cpSync(resolve(docs, "screenshots", l.to.name), resolve(OUT, "doc-media", l.to.name));
+      }
     }
   },
 });
@@ -54,7 +81,7 @@ const serviceWorker = () => ({
 
 // Build output is served by FastAPI from src/lectern/static/app at /app.
 export default defineConfig({
-  plugins: [react(), pdfjsAssets(), serviceWorker()],
+  plugins: [react(), yaml(), pdfjsAssets(), docMedia(), serviceWorker()],
   base: "/app/",
   build: {
     outDir: OUT,
@@ -63,6 +90,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // The Docs tab bundles ../docs.
+    fs: { allow: [".", "../docs"] },
     // Keep the browser's Host (changeOrigin: false) so the backend's same-origin CSRF check
     // accepts writes from :5173. That only applies with LECTERN_INSECURE_HTTP=1.
     proxy: Object.fromEntries(

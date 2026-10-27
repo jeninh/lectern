@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { ApiError, csrf } from "../lib/api";
+import { helpPath } from "../lib/help";
 import {
   REASONS,
   audiobookState,
@@ -21,6 +23,8 @@ import { useStore } from "../lib/store";
 import type { Work } from "../lib/types";
 import { Headphones, Play } from "./Icons";
 import { Sheet } from "./Sheet";
+
+const KOKORO_WAIT = "Queued: waiting for a worker with Kokoro";
 
 const POLL_MS = 4000;
 
@@ -84,7 +88,7 @@ export function MakeAudiobookRow({ work }: { work: Work }) {
           : job.attempts > 0 && job.error
             ? `Retrying after: ${job.error}`
             : job.engine === "kokoro" && !st.engines.find((e) => e.id === "kokoro")?.available
-              ? "Queued: waiting for a worker with Kokoro"
+              ? KOKORO_WAIT
               : "Queued"
         : `Narrating${pct != null ? ` · ${pct}%` : ""}${job.eta ? ` · about ${duration(job.eta.seconds)} left` : ""}${job.lease && job.lease.worker !== "local" ? ` on ${job.lease.worker}` : ""}`;
     if (job.engine === "elevenlabs" && job.spent_credits != null) hint += ` · ${Math.round(job.spent_credits)} of ${Math.round(job.cap_credits ?? 0)} credits`;
@@ -105,7 +109,11 @@ export function MakeAudiobookRow({ work }: { work: Work }) {
         <Headphones />
         <span>
           <strong>Audiobook</strong>{" "}
-          <span className="hint" aria-live="polite">{hint}{error && ` · ${error}`}</span>
+          <span className="hint" aria-live="polite">
+            {hint}
+            {hint === KOKORO_WAIT && <> · <Link to={helpPath("kokoro")}>Running Kokoro</Link></>}
+            {error && ` · ${error}`}
+          </span>
           {running && job?.progress != null && (
             <span className="progress-bar" role="progressbar" aria-label="Narration progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(job.progress * 100)}>
               <span style={{ width: `${job.progress * 100}%` }} />
@@ -337,7 +345,7 @@ function MakeAudiobookSheet({ work, state, onClose, onQueued }: { work: Work; st
                 ? "Made on this server."
                 : builtIn
                   ? <>Standard sample at 1×, not this book or your speed: “{builtIn.text}”</>
-                  : "Samples need the engine on this server."}
+                  : <>Samples need the engine on this server. <Link to={helpPath("voiceSamples")}>About samples</Link></>}
           </span>
           {sample && <audio ref={audio} src={sample} controls style={{ height: 32 }} />}
         </div>

@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/Shell";
 import { StoreProvider, useStore } from "./lib/store";
@@ -14,6 +15,10 @@ import { TrashPage } from "./pages/Trash";
 import { DownloadsPage } from "./pages/Downloads";
 import { ReaderPage } from "./pages/Reader";
 import { PlayerProvider } from "./lib/player";
+
+// The docs and their Markdown parser load on first visit (they are precached for offline use).
+const DocsPage = lazy(() => import("./pages/Docs"));
+const docs = <Suspense fallback={<div className="hint">Loading…</div>}><DocsPage /></Suspense>;
 
 function OwnerOnly({ children }: { children: JSX.Element }) {
   const { me } = useStore();
@@ -46,6 +51,8 @@ export default function App() {
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
           <Route path="/app/trash" element={<EditorsOnly><TrashPage /></EditorsOnly>} />
+          <Route path="/app/docs" element={docs} />
+          <Route path="/app/docs/:slug" element={docs} />
           <Route path="/app/admin" element={<OwnerOnly><AdminPage /></OwnerOnly>} />
           <Route path="/app/users" element={<Navigate to="/app/admin" replace />} />
           <Route path="*" element={<Navigate to="/app" replace />} />
