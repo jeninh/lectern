@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createPortal } from "react-dom";
-import { get, logout } from "../lib/api";
+import { ApiError, get, logout } from "../lib/api";
 import { clearDevice } from "../lib/offline/store";
 import { makeBackgroundInert } from "../lib/hooks";
 import { relativeTime } from "../lib/format";
@@ -19,6 +19,7 @@ import { Book, Devices, Download, Filter, Folder, Gear, Headphones, Help, Home, 
 type Group = "Filter" | "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books";
 const ORDER: Group[] = ["Filter", "Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings", "Docs"];
 type DocsModule = typeof import("../lib/docsData");
+type Docs = { mod: DocsModule; list: Awaited<ReturnType<DocsModule["loadDocs"]>> };
 
 interface Item {
   id: string;
@@ -49,8 +50,10 @@ export function CommandPalette() {
   const [sel, setSel] = useState(0);
   const [devices, setDevices] = useState<Device[]>([]);
   const [text, setText] = useState<TextSearch | null>(null);
+  /** Why "In books" has no answer: the server's message (a rate limit, a query too long). */
+  const [textError, setTextError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
-  const [docs, setDocs] = useState<DocsModule | null>(null);
+  const [docs, setDocs] = useState<Docs | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const restore = useRef<HTMLElement | null>(null);
@@ -72,8 +75,11 @@ export function CommandPalette() {
     const undoInert = makeBackgroundInert();
     setSel(0);
     input.current?.focus();
-    // The docs load with the palette ("Docs: backups"); the module is precached like the app.
-    import("../lib/docsData").then(setDocs).catch(() => {});
+    // The docs load with the palette ("Docs: backups"): those for everyone are precached like the
+    // app, and members' and owners' come from the server (lib/docsData.ts).
+    import("../lib/docsData")
+      .then((mod) => mod.loadDocs(me?.user.role).then((list) => setDocs({ mod, list })))
+      .catch(() => {});
     get<{ devices: Device[] }>("/api/devices")
       .then((d) => setDevices(d.devices.filter((x) => !x.revoked_at)))
       .catch(() => {});
@@ -167,16 +173,16 @@ export function CommandPalette() {
 
     const needle = filterMode ? typed.rest.trim() : q.trim();
     if (docs && needle) {
-      const visible = docs.DOCS.filter((d) => docs.canSee(d.audience, me?.user.role));
+      const visible = docs.list;
       for (const d of visible) {
-        all.push({ id: `doc-${d.slug}`, group: "Docs", label: `Docs: ${d.title}`, detail: d.section, keywords: d.description, icon: <Book />, run: () => go(docs.docPath(d.slug)) });
+        all.push({ id: `doc-${d.slug}`, group: "Docs", label: `Docs: ${d.title}`, detail: d.section, keywords: d.description, icon: <Book />, run: () => go(docs.mod.docPath(d.slug)) });
       }
       // "docs: restore" searches the docs only; any other query also finds docs by their text.
       const words = needle.replace(/^docs?(?::|\s)\s*/i, "");
       if (words.length >= 3) {
-        for (const h of docs.searchDocs(visible, words, 8)) {
+        for (const h of docs.mod.searchDocs(visible, words, 8)) {
           if (!h.id) continue;
-          all.push({ id: `doc-${h.doc.slug}#${h.id}`, group: "Docs", label: h.heading, detail: h.doc.title, keywords: `docs ${h.doc.title}`, score: h.score - 40, icon: <Book />, run: () => go(docs.docPath(h.doc.slug, h.id)) });
+          all.push({ id: `doc-${h.doc.slug}#${h.id}`, group: "Docs", label: h.heading, detail: h.doc.title, keywords: `docs ${h.doc.title}`, score: h.score - 40, icon: <Book />, run: () => go(docs.mod.docPath(h.doc.slug, h.id)) });
         }
       }
     }
@@ -231,6 +237,7 @@ export function CommandPalette() {
   useEffect(() => {
     if (!paletteOpen || q.trim().length < TEXT_MIN || filterMode) {
       setText(null);
+      setTextError(null);
       setSearching(false);
       return;
     }
@@ -239,8 +246,17 @@ export function CommandPalette() {
     const t = window.setTimeout(() => {
       // A trailing space means the last word is finished; otherwise it matches as a prefix.
       get<TextSearch>(`/api/search/text?q=${encodeURIComponent(q.trim())}&limit=6&partial=${/\s$/.test(q) ? "false" : "true"}`)
-        .then((d) => live && setText(d))
-        .catch(() => live && setText({ results: [], too_broad: false }))
+        .then((d) => {
+          if (!live) return;
+          setText(d);
+          setTextError(null);
+        })
+        .catch((e) => {
+          if (!live) return;
+          setText({ results: [], too_broad: false });
+          // Offline or unreachable: no note, the palette's other groups still work.
+          setTextError(e instanceof ApiError ? e.message : null);
+        })
         .finally(() => live && setSearching(false));
     }, TEXT_DEBOUNCE_MS);
     return () => {
@@ -262,7 +278,7 @@ export function CommandPalette() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groups, text, works]);
   const flat = shown.flatMap((g) => g.items);
-  const textNote = filterMode || q.trim().length < TEXT_MIN || text?.results.length ? null : searching ? "Searching inside books…" : text?.too_broad ? "Too many passages match. Add another word." : null;
+  const textNote = filterMode || q.trim().length < TEXT_MIN || text?.results.length ? null : searching ? "Searching inside books…" : textError ? textError : text?.too_broad ? "Too many passages match. Add another word." : null;
 
   useEffect(() => setSel(0), [q]);
   useEffect(() => {

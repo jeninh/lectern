@@ -2,10 +2,10 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { build } from "esbuild";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { docLinks, parseDoc } from "./src/lib/docs";
+import { docLinks, parseDoc, type Manifest } from "./src/lib/docs";
 
 const OUT = resolve(__dirname, "../src/lectern/static/app");
 
@@ -18,14 +18,6 @@ const pdfjsAssets = () => ({
     for (const dir of ["cmaps", "standard_fonts", "wasm"]) {
       cpSync(resolve(__dirname, "node_modules/pdfjs-dist", dir), resolve(OUT, "pdfjs", dir), { recursive: true });
     }
-  },
-});
-
-// YAML (docs/index.yml, the Docs tab's manifest) imports as its parsed data.
-const yaml = () => ({
-  name: "lectern-yaml",
-  transform(code: string, id: string) {
-    return id.endsWith(".yml") ? { code: `export default ${JSON.stringify(parseYaml(code))};`, map: null } : undefined;
   },
 });
 
@@ -43,6 +35,49 @@ const docMedia = () => ({
         if (l.to.kind === "image") cpSync(resolve(docs, "screenshots", l.to.name), resolve(OUT, "doc-media", l.to.name));
       }
     }
+  },
+});
+
+// The docs' text, split by audience (docs/index.yml). Only "everyone" docs go into the bundle
+// (virtual:lectern-docs): /app/assets is public and precached, so anything there reaches every
+// browser. Every doc goes into doc-text.json, outside assets/, which routes/spa.py serves at
+// /app/doc-text filtered by the signed-in person's role. The dev server answers that route
+// itself with every doc.
+const DOCS_DIR = resolve(__dirname, "../docs");
+const VIRTUAL_DOCS = "virtual:lectern-docs";
+function docText(publicOnly: boolean) {
+  const manifest = parseYaml(readFileSync(resolve(DOCS_DIR, "index.yml"), "utf8")) as Manifest;
+  return {
+    sections: manifest.sections
+      .map((s) => ({
+        title: s.title,
+        docs: s.docs
+          .filter((d) => !publicOnly || (d.audience ?? "everyone") === "everyone")
+          .filter((d) => existsSync(resolve(DOCS_DIR, d.file)))
+          .map((d) => ({ ...d, source: readFileSync(resolve(DOCS_DIR, d.file), "utf8") })),
+      }))
+      .filter((s) => s.docs.length),
+  };
+}
+const docsText = () => ({
+  name: "lectern-docs-text",
+  resolveId(id: string) {
+    return id === VIRTUAL_DOCS ? `\0${VIRTUAL_DOCS}` : undefined;
+  },
+  load(this: { addWatchFile(f: string): void }, id: string) {
+    if (id !== `\0${VIRTUAL_DOCS}`) return undefined;
+    this.addWatchFile(resolve(DOCS_DIR, "index.yml"));
+    for (const f of readdirSync(DOCS_DIR).filter((n) => n.endsWith(".md"))) this.addWatchFile(resolve(DOCS_DIR, f));
+    return `export default ${JSON.stringify(docText(true))};`;
+  },
+  configureServer(server: { middlewares: { use(path: string, fn: (req: unknown, res: { setHeader(k: string, v: string): void; end(b: string): void }) => void): void } }) {
+    server.middlewares.use("/app/doc-text", (_req, res) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(docText(false)));
+    });
+  },
+  closeBundle() {
+    writeFileSync(resolve(OUT, "doc-text.json"), JSON.stringify(docText(false)));
   },
 });
 
@@ -81,7 +116,7 @@ const serviceWorker = () => ({
 
 // Build output is served by FastAPI from src/lectern/static/app at /app.
 export default defineConfig({
-  plugins: [react(), yaml(), pdfjsAssets(), docMedia(), serviceWorker()],
+  plugins: [react(), docsText(), pdfjsAssets(), docMedia(), serviceWorker()],
   base: "/app/",
   build: {
     outDir: OUT,
@@ -90,8 +125,6 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // The Docs tab bundles ../docs.
-    fs: { allow: [".", "../docs"] },
     // Keep the browser's Host (changeOrigin: false) so the backend's same-origin CSRF check
     // accepts writes from :5173. That only applies with LECTERN_INSECURE_HTTP=1.
     proxy: Object.fromEntries(
