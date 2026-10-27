@@ -6454,3 +6454,47 @@ table.compare td:first-child {
   overflow-wrap: anywhere;
   font-size: 0.95em;
 }
+
+/* KOReader highlights and notes (components/BookHighlights.tsx) */
+.highlights-head {
+  justify-content: space-between;
+  align-items: baseline;
+}
+.highlights-head .detail-h .hint {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.highlight-group h4 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.highlight-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.highlight blockquote {
+  margin: 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--tint);
+  font-family: var(--font-display);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.highlight-note {
+  margin: 6px 0 0 15px;
+  white-space: pre-wrap;
+}
+.highlight-meta {
+  margin: 4px 0 0 15px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.highlight-meta .btn {
+  margin-left: auto;
+}

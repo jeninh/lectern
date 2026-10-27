@@ -4,6 +4,7 @@ import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { MakeAudiobookRow } from "../components/MakeAudiobook";
 import { ConvertPdfRow } from "../components/ConvertPdfRow";
+import { BookHighlights } from "../components/BookHighlights";
 import { OcrStatus } from "../components/OcrStatus";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, SmartFolder, Upload } from "../components/Icons";
@@ -880,6 +881,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
           <ReadAloudFormats work={work} active />
         </ul>
       </div>
+      <BookHighlights work={work} />
       {editable.length > 0 && (
         <div>
           <h3 className="detail-h">Shelves</h3>

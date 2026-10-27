@@ -5,8 +5,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Chevron, TextSize, Toc } from "../components/Icons";
+import { BookHighlights } from "../components/BookHighlights";
+import { ArrowLeft, Chevron, Highlighter, TextSize, Toc } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
+import { annotationPath } from "../lib/annotations";
 import { ApiError, get, OfflineError } from "../lib/api";
 import { getBook, orOffline } from "../lib/offline/store";
 import { savePosition } from "../lib/offline/sync";
@@ -167,7 +169,7 @@ function EpubReader() {
   const [loading, setLoading] = useState(true);
   const [loc, setLoc] = useState<{ fraction: number; chapter: string } | null>(null);
   const [toc, setToc] = useState<TocItem[]>([]);
-  const [panel, setPanel] = useState<"toc" | "type" | null>(null);
+  const [panel, setPanel] = useState<"toc" | "type" | "highlights" | null>(null);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [chrome, setChrome] = useState(true);
   const host = useRef<HTMLDivElement>(null);
@@ -397,6 +399,7 @@ function EpubReader() {
           <span>{loc?.chapter || work?.author}</span>
         </div>
         <button className="icon-btn ghost" onClick={() => setPanel("toc")} aria-label="Contents" title="Contents" disabled={!toc.length}><Toc /></button>
+        <button className="icon-btn ghost" onClick={() => setPanel("highlights")} aria-label="Highlights" title="Highlights from KOReader" disabled={!work}><Highlighter /></button>
         <button className="icon-btn ghost" onClick={() => setPanel("type")} aria-label="Text and layout" title="Text and layout"><TextSize /></button>
       </header>
 
@@ -455,6 +458,27 @@ function EpubReader() {
 
       <Sheet open={panel === "toc"} onClose={() => setPanel(null)} title="Contents" labelledBy="toc-title">
         <TocList items={toc} current={loc?.chapter} onPick={(href) => { view.current?.goTo(href); setPanel(null); }} />
+      </Sheet>
+      <Sheet open={panel === "highlights"} onClose={() => setPanel(null)} title="Highlights" labelledBy="highlights-title">
+        {work && panel === "highlights" && (
+          <BookHighlights
+            work={work}
+            heading={false}
+            empty={<p className="hint">No highlights yet. Highlights and notes you make in KOReader on a device with the Lectern plugin show up here after it syncs.</p>}
+            onPick={(a) => {
+              const at = a.location;
+              const v = view.current;
+              setPanel(null);
+              if (!at || !v) {
+                const to = annotationPath(work, a);
+                if (to) nav(to);
+                return;
+              }
+              setHandoff(null);
+              v.renderer.goTo({ index: at.spine_index, anchor: (doc) => highlight(doc, at.char, at.char + at.length) ?? doc.body }).catch(() => {});
+            }}
+          />
+        )}
       </Sheet>
       <Sheet open={panel === "type"} onClose={() => setPanel(null)} title="Text and layout" labelledBy="type-title">
         <TypePanel s={s} set={set} reset={() => { setSettings(DEFAULTS); toast("Reader settings reset"); }} />

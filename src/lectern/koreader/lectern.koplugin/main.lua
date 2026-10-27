@@ -12,6 +12,11 @@ close and suspend, and every N page turns), with pushes that cannot reach the se
 an outbox and retried quietly once Wi-Fi (and Tailscale) is back, instead of prompting to turn
 Wi-Fi on. Menu: Sync now, Books sent to this device, connection status, settings, Pair.
 
+Highlights and notes go to Lectern the same way (docs/koreader-plugin.md#highlights-and-notes):
+the open book's whenever its position is pushed and shortly after one is made, edited, or
+deleted; Sync now also checks the sidecars of recently read books. Only books whose highlights
+changed are sent, through the same outbox and retries. Their text is never logged.
+
 Whether the network is up is decided by trying the request (short timeouts), never by
 KOReader's NetworkMgr alone: on jailbroken Kindles whose Wi-Fi is brought up outside KOReader
 it reports offline forever. NetworkMgr only decides how soon to retry.
@@ -75,6 +80,9 @@ function Lectern:init()
     }
     self.retry_attempt = 0
     self.retry_task = function() self:retry() end
+    self.annotations_task = function()
+        if not self.retry_pending then self:flush() end
+    end
     -- Home Wi-Fi or Tailscale (docs/home-network.md): checked again after start, wake, and
     -- network changes, and every Core.ROUTE_TTL while KOReader runs.
     self.route_task = function()
@@ -104,7 +112,7 @@ end
 function Lectern:start()
     if self.core:bootstrapSecret() and not self.core:isPaired() then
         self:trySetup()
-    elseif #self.core:outbox() > 0 then
+    elseif self.core:pending() > 0 then
         self:retrySoon(2)
     end
 end
@@ -321,7 +329,11 @@ function Lectern:hookKOSync()
     end
 end
 
-function Lectern:queueCurrent(ks)
+function Lectern:deviceName(ks)
+    return (ks and ks.settings and ks.settings.kosync_hostname) or Device.model
+end
+
+function Lectern:queueCurrent(ks, force_annotations)
     local ok, err = pcall(function()
         local digest = ks:getDocumentDigest()
         if not digest then return end
@@ -329,16 +341,67 @@ function Lectern:queueCurrent(ks)
             document = digest,
             progress = ks:getLastProgress(),
             percentage = ks:getLastPercent(),
-            device = (ks.settings and ks.settings.kosync_hostname) or Device.model,
+            device = self:deviceName(ks),
             device_id = ks.device_id or G_reader_settings:readSetting("device_id"),
         }
     end)
     if not ok then self.core:log("warn", "could not read the position:", err) end
+    self:queueAnnotations(ks, force_annotations)
+end
+
+--- The open book's highlights (KOReader 2024.07 and later keep them in ReaderAnnotation).
+function Lectern:queueAnnotations(ks, force)
+    local list = self.ui and self.ui.annotation and self.ui.annotation.annotations
+    if type(list) ~= "table" then return false end
+    local ok, queued = pcall(function()
+        local digest = ks:getDocumentDigest()
+        if not digest then return false end
+        return self.core:queueAnnotations(digest, Core.annotationsFrom(list), self:deviceName(ks), force)
+    end)
+    if not ok then self.core:log("warn", "could not read the highlights:", queued) end
+    return ok and queued
+end
+
+--- Highlights in the sidecars of recently read books (not the open one: queueCurrent has its
+-- newer copy). Only books whose highlights changed since they were last sent are queued.
+function Lectern:scanHistory()
+    local ok_h, ReadHistory = pcall(require, "readhistory")
+    local ok_d, DocSettings = pcall(require, "docsettings")
+    if not ok_h or not ok_d or type(ReadHistory.hist) ~= "table" then return 0 end
+    local open = self.ui and self.ui.document and self.ui.document.file
+    local device, n = self:deviceName(self.ui and self.ui.kosync), 0
+    for i, item in ipairs(ReadHistory.hist) do
+        if i > Core.HISTORY_SCAN then break end
+        local file = item.file
+        if file and file ~= open and not item.dim then
+            local ok, queued = pcall(function()
+                if DocSettings.hasSidecarFile and not DocSettings:hasSidecarFile(file) then return false end
+                local ds = DocSettings:open(file)
+                local digest = ds:readSetting("partial_md5_checksum")
+                local list = ds:readSetting("annotations")
+                if not digest or type(list) ~= "table" then return false end
+                return self.core:queueAnnotations(digest, Core.annotationsFrom(list), device)
+            end)
+            if ok and queued then n = n + 1 end
+        end
+    end
+    return n
+end
+
+--- A highlight was made, edited, or deleted in the open book: send soon, quietly.
+function Lectern:onAnnotationsModified()
+    local k = self.ui and self.ui.kosync
+    if not self:managed() or not k or not self.ui.document then return end
+    if self:queueAnnotations(k) then
+        UIManager:unschedule(self.annotations_task)
+        UIManager:scheduleIn(15, self.annotations_task)
+    end
 end
 
 --- Send the outbox now; on failure retry later with backoff while the network stays up.
 function Lectern:flush()
-    local sent, left, why = self.core:drain()
+    UIManager:unschedule(self.annotations_task)
+    local sent, left, why, books = self.core:drain()
     if left == 0 then
         self.retry_attempt = 0
         self.retry_pending = false
@@ -347,7 +410,7 @@ function Lectern:flush()
         self.retry_attempt = self.retry_attempt + 1
         self:scheduleRetry(self.core:retryDelay(self.retry_attempt))
     end
-    return sent, left, why
+    return sent, left, why, books
 end
 
 function Lectern:scheduleRetry(seconds)
@@ -373,7 +436,7 @@ function Lectern:retry()
         if self.setup_pending then return end -- trySetup scheduled the next try
         self.retry_attempt = 0
     end
-    if #self.core:outbox() == 0 then return end
+    if self.core:pending() == 0 then return end
     self:flush()
 end
 
@@ -395,7 +458,7 @@ function Lectern:onNetworkConnected()
     -- Tailscale may need a few seconds after Wi-Fi to bring the tailnet up.
     self.retry_attempt = 0
     self:recheckHome(3)
-    if self.setup_pending or #self.core:outbox() > 0 then
+    if self.setup_pending or self.core:pending() > 0 then
         self:scheduleRetry(3)
     end
 end
@@ -403,12 +466,13 @@ end
 function Lectern:onResume()
     -- Woken up, maybe elsewhere (Wi-Fi managed outside KOReader sends no network events).
     self:recheckHome(5)
-    if #self.core:outbox() > 0 then self:retrySoon(5) end
+    if self.core:pending() > 0 then self:retrySoon(5) end
 end
 
 function Lectern:onCloseWidget()
     UIManager:unschedule(self.retry_task)
     UIManager:unschedule(self.route_task)
+    UIManager:unschedule(self.annotations_task)
     self.retry_pending = false
 end
 
@@ -423,8 +487,9 @@ function Lectern:syncNow()
     end
     self.core:route(true)
     local k = self.ui and self.ui.kosync
-    if k and self.ui.document then self:queueCurrent(k) end
-    local sent, left, why = self:flush()
+    if k and self.ui.document then self:queueCurrent(k, true) end
+    self:scanHistory()
+    local sent, left, why, books = self:flush()
     if k and self.ui.document and k.getProgress then
         pcall(k.getProgress, k, false, false)
     end
@@ -433,12 +498,15 @@ function Lectern:syncNow()
     if why == "unauthorized" or err == "unauthorized" then
         text = _("Lectern refused this device's key. It was revoked or paired again elsewhere.\n\nUse Lectern → Pair with a code.")
     elseif left > 0 or not status then
-        text = string.format(_("Lectern is not reachable right now (%s). %d position(s) will be sent automatically when it is."), why or err or "offline", left)
+        text = string.format(_("Lectern is not reachable right now (%s). %d item(s) (positions, highlights of a book) will be sent automatically when it is."), why or err or "offline", left)
         if left > 0 and self.retry_pending then
             text = text .. string.format(_("\n\nNext try in %s."), inTime(self.core:retryDelay(self.retry_attempt)))
         end
     else
         text = string.format(_("Synced with Lectern.\n%d position(s) sent. %d book(s) waiting for this device."), sent, status.queue and status.queue.pending or 0)
+        if (books or 0) > 0 then
+            text = text .. string.format(_("\nHighlights and notes of %d book(s) sent."), books)
+        end
     end
     UIManager:show(InfoMessage:new{ text = text, timeout = 5 })
 end
@@ -521,6 +589,7 @@ function Lectern:showStatus()
     local function show()
         add(_("Status"), self.core:statusLine(online(), ago))
         add(_("Waiting to send"), #self.core:outbox())
+        add(_("Highlights waiting (books)"), #self.core:annotationOutbox())
         local last = self.store:readSetting("last_push_at")
         add(_("Last push"), last and ago(last) or _("never"))
         UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
@@ -597,7 +666,7 @@ function Lectern:addToMainMenu(menu_items)
             },
             {
                 text = _("Sync automatically"),
-                help_text = _("Pull the latest position when a book opens; push it when the book closes, when the device sleeps, and every few pages. Without Wi-Fi, positions wait and are sent when the connection is back."),
+                help_text = _("Pull the latest position when a book opens; push it when the book closes, when the device sleeps, and every few pages. Highlights and notes go to Lectern too. Without Wi-Fi, they wait and are sent when the connection is back."),
                 checked_func = function() return core:options().auto_sync end,
                 callback = function() core:setOption("auto_sync", not core:options().auto_sync) end,
             },

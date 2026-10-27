@@ -23,7 +23,6 @@ interface NavEntry {
   icon: JSX.Element;
   keys?: string;
   end?: boolean;
-  soon?: boolean;
 }
 
 const READ: NavEntry[] = [
@@ -31,7 +30,7 @@ const READ: NavEntry[] = [
   { to: "/app/library", label: "Library", icon: <Library />, keys: "g l" },
   { to: "/app/listening", label: "Listening", icon: <Headphones />, keys: "g p" },
   { to: "/app/downloads", label: "Downloads", icon: <Download />, keys: "g o" },
-  { to: "/app/highlights", label: "Highlights", icon: <Highlighter />, soon: true },
+  { to: "/app/highlights", label: "Highlights", icon: <Highlighter /> },
 ];
 const MANAGE: NavEntry[] = [
   { to: "/app/devices", label: "Devices", icon: <Devices />, keys: "g d" },
@@ -50,7 +49,7 @@ function NavItem({ n, collapsed }: { n: NavEntry; collapsed: boolean }) {
     <NavLink to={n.to} end={n.end} className="nav-item" title={collapsed ? n.label : undefined}>
       {n.icon}
       <span className="label">{n.label}</span>
-      {n.soon ? <span className="soon">Soon</span> : n.keys && <kbd aria-hidden="true">{n.keys.toUpperCase()}</kbd>}
+      {n.keys && <kbd aria-hidden="true">{n.keys.toUpperCase()}</kbd>}
     </NavLink>
   );
 }
