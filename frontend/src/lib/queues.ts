@@ -1,5 +1,6 @@
 // Pure helpers for per-device queues, kept out of the components so they can be tested.
-import type { QueueDevice, QueueResult } from "./types";
+import { pathLabel } from "./shelves";
+import type { AppPassword, QueueDevice, QueueResult, Shelf } from "./types";
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -46,4 +47,25 @@ export function groupDevices(devices: QueueDevice[]): { label: string; devices: 
     groups.push({ label: u.display_name || u.username, devices: list });
   }
   return groups;
+}
+
+/** Shelves a device can follow: every shelf this person sees (nested and smart ones too),
+ * labelled with its path, in tree order. */
+export function followOptions(shelves: readonly Shelf[]): { id: number; label: string }[] {
+  return shelves.map((s) => ({ id: s.id, label: `${pathLabel(s)}${s.smart ? " (smart)" : ""}` }));
+}
+
+/** The device card's chips for shelf sync: the followed shelf (its path and clean-up in the
+ * tooltip) and automatic downloads; none when it is all off. A followed shelf this person can
+ * no longer see is named as such, never by a stale name. */
+export function shelfSyncChips(ap: Pick<AppPassword, "follow_shelf_id" | "follow_cleanup" | "auto_download"> | null | undefined, shelves: readonly Shelf[]): { text: string; title: string }[] {
+  if (!ap) return [];
+  const chips: { text: string; title: string }[] = [];
+  if (ap.follow_shelf_id != null) {
+    const s = shelves.find((x) => x.id === ap.follow_shelf_id);
+    const cleanup = ap.follow_cleanup ? "; books that leave it are removed" : "";
+    chips.push(s ? { text: `Follows ${s.name}`, title: `Follows ${pathLabel(s)}${cleanup}` } : { text: "Follows a hidden shelf", title: `Follows a shelf you can’t see${cleanup}` });
+  }
+  if (ap.auto_download) chips.push({ text: "Auto-download", title: "The KOReader plugin downloads queued books by itself" });
+  return chips;
 }

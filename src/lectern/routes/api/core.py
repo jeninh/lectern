@@ -469,6 +469,8 @@ _ACTIVITY_ACTIONS = {
     "queue.add",
     "queue.remove",
     "queue.delivered",
+    "queue.follow",
+    "device.shelf_sync",
     "koplugin.download",
     "koplugin.bootstrap",
     "koplugin.bootstrap_failed",
@@ -502,11 +504,12 @@ def activity(
         audit_stmt = audit_stmt.where(
             or_(
                 AuditLog.actor_user_id == auth.user.id,
-                # Plugin rows name a device, not a person: a device labelled "bob" must not
-                # show its addresses to Bob.
+                # Plugin and shelf-sync rows name a device, not a person: a device labelled
+                # "bob" must not show its addresses or shelves to Bob.
                 and_(
                     AuditLog.target == auth.user.username,
                     AuditLog.action.not_like("koplugin.%"),
+                    AuditLog.action != "device.shelf_sync",
                 ),
             )
         )

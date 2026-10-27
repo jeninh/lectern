@@ -240,6 +240,13 @@ local function run_tasks()
     return #tasks
 end
 
+--- When ``fn`` (one of the plugin's tasks) is due, if it is scheduled.
+local function due(fn)
+    for _, t in ipairs(UI.tasks) do
+        if t.fn == fn then return t.s end
+    end
+end
+
 local function file_exists(p) local f = io.open(p) if f then f:close() return true end return false end
 local function read_settings(name) local s = LuaSettings:open(settings_dir .. "/" .. name) return s.data end
 
@@ -276,14 +283,16 @@ elseif command == "offline-push" then
     out.outbox = #p.core:outbox()
     out.prompts = NET.prompts
     out.messages = #UI.shown
-    out.retry_in = UI.tasks[1] and UI.tasks[1].s
+    out.retry_in = due(p.retry_task)
     out.status_line = p.core:statusLine(false)
     p.store:flush()
 elseif command == "reconnect" then
     NET.online, NET.connected = true, true
     local p = make(false)
+    UI.tasks = {} -- what reconnecting schedules, not what the start did
     p:onNetworkConnected()
     out.scheduled = #UI.tasks
+    out.fetch_in = due(p.fetch_task)
     out.ran = run_tasks()
     out.outbox = #p.core:outbox()
     out.messages = #UI.shown
@@ -295,9 +304,9 @@ elseif command == "server-down" then
     store:saveSetting("server_url", arg[4])
     ui.kosync:updateProgress(false, false)
     out.outbox = #p.core:outbox()
-    out.retry_in = UI.tasks[1] and UI.tasks[1].s
+    out.retry_in = due(p.retry_task)
     run_tasks()
-    out.retry_in_2 = UI.tasks[1] and UI.tasks[1].s
+    out.retry_in_2 = due(p.retry_task)
     out.messages = #UI.shown
     out.status_line = p.core:statusLine(true)
 elseif command == "setup-retry" then
@@ -326,6 +335,22 @@ elseif command == "status" then
         os.execute("mkdir -p '" .. settings_dir .. "/books'")
         out.downloaded = p.core:download(status.queue.items[1], settings_dir .. "/books")
     end
+elseif command == "auto" then
+    -- The quiet check of the queue (shelf sync), in the file browser or, with "reading"
+    -- and a path, with that book open. Downloads go to the device's home folder.
+    NET.online, NET.connected = true, true
+    os.execute("mkdir -p '" .. settings_dir .. "/books'")
+    local p, ui = make(arg[4] == "reading")
+    if arg[4] == "reading" then ui.document.file = arg[5] end
+    UI.tasks = {}
+    p.store:delSetting("last_fetch_at")
+    out.planned, out.deleted = p:autoFetch()
+    out.fetch_in = due(p.fetch_task)
+    -- A second automatic check right away is held back to one per minute.
+    out.again = p:autoFetch()
+    out.again_in = due(p.fetch_task)
+    out.messages = #UI.shown
+    out.downloads = p.core:downloads()
 elseif command == "pair" then
     local p = make(false)
     p:doPair(arg[4], arg[5], arg[6])

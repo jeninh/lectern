@@ -11,13 +11,16 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from lectern import koplugin, lan
+from lectern import device_queue, koplugin, lan
+from lectern.access import shelf_permission
 from lectern.models import (
     AppPassword,
     BookFile,
     DeviceBootstrap,
+    DeviceFollow,
     ReadingProgress,
     Role,
+    Shelf,
     SyncKey,
     User,
     Work,
@@ -315,6 +318,55 @@ def set_device_download_cap(
         detail="default" if body.cap is None else str(body.cap),
     )
     db.commit()
+    return {"app_password": app_password_json(row)}
+
+
+class ShelfSyncIn(BaseModel):
+    shelf_id: int | None = None  # None: follow no shelf
+    cleanup: bool = False
+    auto_download: bool = False
+
+
+@router.post("/app-passwords/{pw_id}/shelf-sync")
+def set_shelf_sync(
+    request: Request, auth: AuthCsrf, db: DbDep, pw_id: int, body: ShelfSyncIn
+) -> dict:
+    """Shelf sync for one of the caller's devices (docs/device-queues.md#following-a-shelf):
+    the shelf it follows (any shelf the caller sees, nested or smart), whether books leaving
+    it are cleaned up, and whether the KOReader plugin downloads queued books by itself. The
+    queue is topped up at once."""
+    row = db.get(AppPassword, pw_id)
+    if row is None or row.user_id != auth.user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    if row.revoked_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "device_revoked")
+    shelf = db.get(Shelf, body.shelf_id) if body.shelf_id is not None else None
+    if body.shelf_id is not None and (
+        shelf is None or shelf_permission(db, auth.user, shelf) is None
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "shelf_not_found")
+    follow = db.get(DeviceFollow, row.id)
+    if shelf is None:
+        if follow is not None:
+            db.delete(follow)
+    elif follow is None:
+        db.add(DeviceFollow(app_password_id=row.id, shelf_id=shelf.id, cleanup=body.cleanup))
+    else:
+        follow.shelf_id, follow.cleanup = shelf.id, body.cleanup
+    row.auto_download = body.auto_download
+    audit.record(
+        db,
+        "device.shelf_sync",
+        actor_user_id=auth.user.id,
+        target=row.label,
+        ip=client_ip(request),
+        detail=(f"shelf {shelf.name}" if shelf else "no shelf")
+        + (", clean-up" if shelf and body.cleanup else "")
+        + (", auto-download" if body.auto_download else ""),
+    )
+    db.commit()
+    device_queue.sync_follow(db, row.id)
+    db.refresh(row)
     return {"app_password": app_password_json(row)}
 
 

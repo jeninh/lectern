@@ -2,7 +2,8 @@
 
 ``POST /koplugin/bootstrap``  one-time setup secret from the zip -> the device's credentials
 ``POST /koplugin/pair``       username + 6-digit code from the web app -> the same
-``GET  /koplugin/status``     HTTP Basic with the device's app password: who it is, its queue
+``GET  /koplugin/status``     HTTP Basic with the device's app password: who it is, its queue,
+                              its shelf-sync settings, and the books to clean up
 ``POST /koplugin/hello``      device id + nonce -> proof that this is the device's Lectern, so the
                               plugin can trust the home Wi-Fi address (lectern.lan)
 ``PUT  /koplugin/annotations`` kosync headers (the device's sync key): one book's highlights and
@@ -19,8 +20,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import annotations, device_queue, koplugin, lan
-from lectern.models import BookFile, FileKind, SyncKey, User, Work, utcnow
+from lectern import access, annotations, device_queue, koplugin, lan
+from lectern.models import BookFile, DeviceFollow, FileKind, Shelf, SyncKey, User, Work, utcnow
 from lectern.routes.api.serializers import iso
 from lectern.security.deps import DbDep, KoSync, OpdsUser, SettingsDep
 from lectern.security.sessions import client_ip
@@ -161,8 +162,12 @@ def _file_json(f: BookFile) -> dict:
 
 @router.get("/status", include_in_schema=False)
 def plugin_status(request: Request, user: OpdsUser, db: DbDep, settings: SettingsDep) -> dict:
-    """What the plugin shows under Lectern → Connection status and Books sent here."""
+    """What the plugin shows under Lectern → Connection status and Books sent here, and what
+    its quiet automatic sync acts on: ``auto_download`` (download the queue's books by
+    itself) and ``remove`` (works that left the followed shelf with clean-up on; the plugin
+    deletes only copies it downloaded). Following a shelf tops up the queue first."""
     pw = request.state.app_password
+    device_queue.sync_follow(db, pw.id)
     key = db.get(SyncKey, pw.sync_key_id) if pw.sync_key_id else None
     total = device_queue.pending_count(db, pw.id, user)
     rows = db.execute(
@@ -193,7 +198,20 @@ def plugin_status(request: Request, user: OpdsUser, db: DbDep, settings: Setting
         "lan_url": koplugin.home_url(settings),
         "last_sync_at": iso(key.last_used_at) if key else None,
         "queue": {"pending": total, "items": items},
+        "auto_download": pw.auto_download,
+        "follow": _follow_json(db, pw, user),
+        "remove": device_queue.cleanup_work_ids(db, pw),
     }
+
+
+def _follow_json(db, pw, user: User) -> dict | None:
+    follow = db.get(DeviceFollow, pw.id)
+    if follow is None:
+        return None
+    shelf = db.get(Shelf, follow.shelf_id)
+    # The name only if the device's user may still see the shelf.
+    name = shelf.name if shelf and access.shelf_permission(db, user, shelf) else None
+    return {"shelf": name, "cleanup": follow.cleanup}
 
 
 class AnnotationIn(BaseModel):

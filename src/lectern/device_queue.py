@@ -13,6 +13,16 @@ Who may queue to which device
     read, so unsharing a shelf hides its works from the feed and the queue list at once.
     Members cannot see or touch other people's devices; to them those ids do not exist (404).
 
+Following a shelf
+    A device may follow one shelf (manual with its sub-shelves, or smart): :func:`sync_follow`
+    queues the shelf's books for it, as its user sees them, whenever the device reads its
+    queue, so a book put on the shelf or a changed smart-shelf rule reaches the device at its
+    next sync. At most :data:`FOLLOW_WINDOW` followed books wait at once, so a large shelf
+    trickles in. With clean-up on, followed books that leave the shelf are dequeued (removed
+    with ``removed_by`` NULL) and listed by :func:`cleanup_work_ids` for the KOReader plugin,
+    which deletes only the files it downloaded itself. A book a person took off the queue is
+    never queued again by the shelf; one sent by hand is never cleaned up.
+
 Concurrency
     Enqueue is one ``INSERT … ON CONFLICT DO UPDATE … WHERE status <> 'PENDING'`` per work, so
     two requests racing to queue the same book leave one pending row; delivery is one
@@ -24,18 +34,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
+from lectern import filters
 from lectern.access import can_see_work, visible_works
 from lectern.models import (
     AppPassword,
     BookFile,
+    DeviceFollow,
     DeviceQueueItem,
     FileKind,
     QueueStatus,
     Role,
+    Shelf,
     User,
     Work,
     utcnow,
@@ -44,6 +57,11 @@ from lectern.security import audit
 
 MAX_BATCH = 200
 HISTORY_LIMIT = 50
+# Followed books waiting at once: a large shelf is queued a batch at a time, as the device
+# downloads what is already waiting, so neither the Pi nor the e-reader takes it in one go.
+FOLLOW_WINDOW = 25
+# Works the plugin is told to delete, newest first (it ignores those it did not download).
+CLEANUP_LIMIT = 200
 
 
 @dataclass
@@ -143,6 +161,7 @@ def enqueue(db: Session, actor: User, t: Target, work_ids: list[int], ip: str | 
                 "status": QueueStatus.PENDING.name,
                 "position": next_pos,
                 "queued_by": actor.id,
+                "followed": False,
                 "queued_at": now,
                 "delivered_at": None,
                 "delivered_file_id": None,
@@ -335,6 +354,167 @@ def mark_delivered(pw_id: int, file_id: int, ip: str | None, item: tuple[int, da
         )
         db.commit()
         return True
+
+
+def _next_position(pw_id: int):
+    return (
+        select(func.coalesce(func.max(DeviceQueueItem.position), 0) + 1)
+        .where(DeviceQueueItem.app_password_id == pw_id)
+        .scalar_subquery()
+    )
+
+
+def shelf_work_ids(db: Session, owner: User, shelf: Shelf) -> list[int] | None:
+    """Works on ``shelf`` as ``owner`` sees it, with a book file, in the shelf's order: a
+    smart shelf's matches, else the books on it and on every shelf nested below it (as the
+    ``shelf:`` filter). A shelf the owner cannot see holds nothing. ``None`` for a smart shelf
+    whose rule this version cannot read, so a follow never empties a device by mistake."""
+    if shelf.rule is not None and filters.rule_query(shelf) is None:
+        return None
+    ctx = filters.Context(db, owner, strict=False)
+    clause = filters.Clause("shelf", (filters.Value("=", f"#{shelf.id}"),))
+    order = filters.smart_order(shelf, owner) if shelf.rule else filters.order_by("title", owner)
+    return list(
+        db.scalars(
+            select(Work.id)
+            .where(
+                visible_works(owner),
+                filters.clause_pred(ctx, clause),
+                exists().where(BookFile.work_id == Work.id, BookFile.kind == FileKind.EBOOK),
+            )
+            .order_by(*order)
+        )
+    )
+
+
+def sync_follow(db: Session, pw_id: int) -> tuple[int, int]:
+    """Bring the device's queue in line with the shelf it follows: queue new books (up to
+    :data:`FOLLOW_WINDOW` followed books waiting) and, with clean-up on, dequeue followed books
+    that left it. Returns ``(queued, removed)``; commits when anything changed. Safe to run
+    concurrently: inserts and removals are conditional, as in :func:`enqueue`."""
+    pw = db.get(AppPassword, pw_id)
+    follow = db.get(DeviceFollow, pw_id)
+    if pw is None or follow is None or pw.revoked_at is not None:
+        return 0, 0
+    owner = db.get(User, pw.user_id)
+    shelf = db.get(Shelf, follow.shelf_id)
+    if owner is None or not owner.is_active or shelf is None:
+        return 0, 0
+    members = shelf_work_ids(db, owner, shelf)
+    if members is None:
+        return 0, 0
+    wanted = set(members)
+    rows = {
+        r.work_id: (r.id, r.status, r.followed, r.removed_by)
+        for r in db.execute(
+            select(
+                DeviceQueueItem.id,
+                DeviceQueueItem.work_id,
+                DeviceQueueItem.status,
+                DeviceQueueItem.followed,
+                DeviceQueueItem.removed_by,
+            ).where(DeviceQueueItem.app_password_id == pw.id)
+        )
+    }
+    now = utcnow()
+    removed = 0
+    if follow.cleanup:
+        for work_id, (item_id, status, followed, _by) in rows.items():
+            if not followed or work_id in wanted or status == QueueStatus.REMOVED:
+                continue
+            removed += db.execute(
+                update(DeviceQueueItem)
+                .where(
+                    DeviceQueueItem.id == item_id,
+                    DeviceQueueItem.followed.is_(True),
+                    DeviceQueueItem.status != QueueStatus.REMOVED.name,
+                )
+                .values(
+                    status=QueueStatus.REMOVED.name, removed_at=now, removed_by=None, updated_at=now
+                )
+                .execution_options(synchronize_session=False)
+            ).rowcount
+    waiting = sum(
+        1
+        for work_id, (_id, status, followed, _by) in rows.items()
+        if followed and status == QueueStatus.PENDING and work_id in wanted
+    )
+    queued = 0
+    for work_id in members:
+        if waiting + queued >= FOLLOW_WINDOW:
+            break
+        row = rows.get(work_id)
+        if row is None:
+            stmt = (
+                insert(DeviceQueueItem)
+                .values(
+                    app_password_id=pw.id,
+                    user_id=pw.user_id,
+                    work_id=work_id,
+                    status=QueueStatus.PENDING.name,
+                    position=_next_position(pw.id),
+                    queued_by=None,
+                    queued_at=now,
+                    updated_at=now,
+                    followed=True,
+                )
+                .on_conflict_do_nothing(index_elements=["app_password_id", "work_id"])
+            )
+        elif row[1] == QueueStatus.REMOVED and row[2] and row[3] is None:
+            # Left the shelf (clean-up) and came back: queue it again.
+            stmt = (
+                update(DeviceQueueItem)
+                .where(
+                    DeviceQueueItem.id == row[0],
+                    DeviceQueueItem.status == QueueStatus.REMOVED.name,
+                    DeviceQueueItem.followed.is_(True),
+                    DeviceQueueItem.removed_by.is_(None),
+                )
+                .values(
+                    status=QueueStatus.PENDING.name,
+                    position=_next_position(pw.id),
+                    queued_at=now,
+                    delivered_at=None,
+                    delivered_file_id=None,
+                    removed_at=None,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+        else:
+            continue  # waiting, delivered, sent by hand, or taken off the queue by a person
+        queued += db.execute(stmt).rowcount
+    if queued or removed:
+        audit.record(
+            db,
+            "queue.follow",
+            actor_user_id=owner.id,
+            target=f"shelf:{shelf.id}",
+            detail=f"device {pw.label}: {queued} queued, {removed} removed",
+        )
+        db.commit()
+    return queued, removed
+
+
+def cleanup_work_ids(db: Session, pw: AppPassword) -> list[int]:
+    """Works that left the followed shelf with clean-up on (newest first): the KOReader plugin
+    deletes its own downloads of them. Empty while clean-up is off."""
+    follow = db.get(DeviceFollow, pw.id)
+    if follow is None or not follow.cleanup:
+        return []
+    return list(
+        db.scalars(
+            select(DeviceQueueItem.work_id)
+            .where(
+                DeviceQueueItem.app_password_id == pw.id,
+                DeviceQueueItem.followed.is_(True),
+                DeviceQueueItem.status == QueueStatus.REMOVED.name,
+                DeviceQueueItem.removed_by.is_(None),
+            )
+            .order_by(DeviceQueueItem.removed_at.desc(), DeviceQueueItem.id.desc())
+            .limit(CLEANUP_LIMIT)
+        )
+    )
 
 
 def _device_detail(t: Target) -> str:

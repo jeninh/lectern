@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { groupDevices, moveItem, summarizeQueueResults } from "../queues";
-import type { QueueDevice } from "../types";
+import { followOptions, groupDevices, moveItem, shelfSyncChips, summarizeQueueResults } from "../queues";
+import type { QueueDevice, Shelf } from "../types";
 
 const dev = (id: number, label: string, own: boolean, user = { id: own ? 1 : 2, username: own ? "owner" : "rex", display_name: own ? "" : "Rex" }): QueueDevice => ({
   id, device_id: `k${id}`, label, own, user, last_used_at: null, revoked: false, pending: 0,
@@ -50,5 +50,33 @@ describe("groupDevices", () => {
       ["Rex", ["Boox"]],
       ["mia", ["Kindle"]],
     ]);
+  });
+});
+
+describe("shelf sync", () => {
+  const shelf = (id: number, path: string[], smart = false): Shelf => ({
+    id, name: path[path.length - 1], parent_id: null, path, owner: "owner", owner_id: 1, permission: "view",
+    work_count: 0, shelf_count: 0, grant_count: 0, smart,
+  });
+  const shelves = [shelf(1, ["Fiction"]), shelf(2, ["Fiction", "Sci-fi"]), shelf(3, ["New", "This month"], true)];
+
+  it("offers every shelf by its path, nested and smart ones included", () => {
+    expect(followOptions(shelves)).toEqual([
+      { id: 1, label: "Fiction" },
+      { id: 2, label: "Fiction / Sci-fi" },
+      { id: 3, label: "New / This month (smart)" },
+    ]);
+  });
+  it("shows the followed shelf by name, its path and clean-up on hover, and auto-download", () => {
+    expect(shelfSyncChips({ follow_shelf_id: 2, follow_cleanup: true, auto_download: true }, shelves)).toEqual([
+      { text: "Follows Sci-fi", title: "Follows Fiction / Sci-fi; books that leave it are removed" },
+      { text: "Auto-download", title: "The KOReader plugin downloads queued books by itself" },
+    ]);
+    expect(shelfSyncChips({ follow_shelf_id: 1, follow_cleanup: false, auto_download: false }, shelves)).toEqual([{ text: "Follows Fiction", title: "Follows Fiction" }]);
+    expect(shelfSyncChips({ follow_shelf_id: null, follow_cleanup: true, auto_download: false }, shelves)).toEqual([]);
+    expect(shelfSyncChips(null, shelves)).toEqual([]);
+  });
+  it("never names a followed shelf this person can no longer see", () => {
+    expect(shelfSyncChips({ follow_shelf_id: 9, follow_cleanup: false, auto_download: false }, shelves)).toEqual([{ text: "Follows a hidden shelf", title: "Follows a shelf you can’t see" }]);
   });
 });

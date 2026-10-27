@@ -38,6 +38,70 @@ pull, so the queue is just a personal shelf for one catalogue password.
 | ![Send dialog](screenshots/m5-queues-send-dialog.png) | ![Selecting books on a phone](screenshots/m5-queues-library-select-mobile.png) |
 | ![Selecting books: Send to device in the bulk bar](screenshots/m5-queues-library-select.png) | |
 
+## Following a shelf
+
+A device can follow one shelf so it stays stocked without sending books one by one. On
+**Devices**, open the device's **⋯ → Shelf sync…**:
+
+- **Follow a shelf**: any shelf you see, including nested shelves and smart shelves
+  ([filters.md](filters.md)). A manual shelf brings its own books and those on every shelf
+  inside it (as the `shelf:` filter does); a smart shelf brings whatever its filter matches.
+  Only books with a book file (EPUB, PDF, CBZ) that the device's user can see are queued.
+- **Remove books that leave the shelf** (clean-up, off by default): a followed book that leaves
+  the shelf (taken off it, no longer matched by the rule, unshared, or trashed) is taken off
+  the queue, and the KOReader plugin deletes the copy it downloaded. Catalogue-only devices
+  just see it leave **Queued for this device**.
+- **Download queued books automatically** (off by default): the KOReader plugin downloads the
+  device's queued books by itself on its quiet automatic sync, whether they were sent by hand
+  or queued by the followed shelf.
+
+The device's card shows **Follows …** and **Auto-download** when they are on.
+
+**When it happens.** Nothing is pushed. The queue is brought in line with the shelf whenever
+the device reads it: the catalogue's root and **Queued for this device** feeds, the plugin's
+status check, and **Open queue** in the web app, and once when the setting is saved. So a book
+put on the shelf, or a smart shelf's changed rule, takes effect at the device's next sync.
+
+**A batch at a time.** At most 25 followed books wait at once; as the device downloads them,
+the next ones in the shelf's order (title, or the smart shelf's own sort) are queued. A large
+shelf trickles onto the e-reader instead of arriving in one go.
+
+**What the shelf never touches.**
+
+- A book sent by hand is never cleaned up, even when it is not on the shelf.
+- A book a person took off the queue (**Remove** in **Open queue**) is not queued again by the
+  shelf; **Queue again** from **Recently** brings it back.
+- A followed book that left the shelf (clean-up) and comes back is queued again.
+- Clean-up off: books that leave the shelf stay queued and on the device.
+- Unfollowing, or deleting the followed shelf, stops the follow and changes nothing else.
+- A smart shelf whose rule this version cannot read queues and removes nothing.
+
+### In the KOReader plugin
+
+With **Sync automatically** on, the plugin checks the device's queue quietly (no messages, no
+Wi‑Fi prompt) about 10 s after KOReader starts, 5 s after Wi‑Fi comes back, 8 s after waking,
+and every 15 minutes while KOReader runs, at most once a minute. **Sync now** checks at once.
+Each check:
+
+1. deletes the copies it downloaded of books that left the followed shelf (clean-up on), and
+2. with **Download queued books automatically** on, downloads up to 3 queued books it has no
+   copy of yet into KOReader's download folder, one after the other, as **Books sent to this
+   device** does by hand. A refused download (offline, or `429` when the device's hourly
+   download limit is reached) stops the batch until the next check.
+
+The plugin keeps a list of the files it downloaded (`downloads` in `settings/lectern.lua`).
+Clean-up deletes only those, and only while unchanged: a file the reader replaced or changed
+(for example annotations written into a PDF) is the reader's and is kept, as is the book open
+in the reader (deleted at a later check, once closed). KOReader's sidecar folder (`.sdr`, with
+highlights and notes) is never touched, and nothing else in the folder ever is.
+
+Setting it: `POST /api/devices/app-passwords/{app_password_id}/shelf-sync`
+`{"shelf_id": 12 | null, "cleanup": bool, "auto_download": bool}` (own devices only, like the
+download limit; `404 shelf_not_found` for a shelf you cannot see, `409 device_revoked`).
+`GET /api/devices` reports `follow_shelf_id`, `follow_cleanup`, and `auto_download` on each
+app password. The audit log records `device.shelf_sync` and, when a sync changed the queue,
+`queue.follow` ("device Kindle: 3 queued, 1 removed").
+
 ## Who can send what to whom
 
 A queue belongs to one OPDS **app password** (one device), not to a person: your Kobo and
@@ -135,5 +199,10 @@ OPDS (HTTP Basic with the device's app password; the per-IP Basic rate limit app
 
 `device_queue_items` (migration `0008`): `app_password_id`, `user_id` (the device's owner),
 `work_id`, `status` (`pending`/`delivered`/`removed`), `position`, `queued_by`, `queued_at`,
-`delivered_at`, `delivered_file_id`, `removed_at`, `removed_by`, `updated_at`. Deleting a
-device's app password, a user, or a work deletes their items.
+`delivered_at`, `delivered_file_id`, `removed_at`, `removed_by`, `updated_at`, and `followed`
+(migration `0019`: queued by the followed shelf; with `removed_by` empty, removed because it
+left the shelf). Deleting a device's app password, a user, or a work deletes their items.
+
+`device_follows` (migration `0019`): `app_password_id` (primary key), `shelf_id`, `cleanup`,
+`created_at`; deleting the shelf or the app password deletes the follow.
+`app_passwords.auto_download` (migration `0019`, default off).
