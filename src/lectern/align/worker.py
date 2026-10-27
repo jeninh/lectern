@@ -721,6 +721,7 @@ class RemoteWorker:
         proxy: str | None = None,
         verify=True,
         trust_env: bool = True,
+        transport=None,
         crash_marker: Path | None = None,
         withheld: dict[str, str] | None = None,
     ) -> None:
@@ -763,6 +764,7 @@ class RemoteWorker:
             proxy=proxy,
             verify=verify,
             trust_env=trust_env,
+            transport=transport,
         )
 
     @property
