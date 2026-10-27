@@ -4,6 +4,13 @@
 // and `scopeProps` on the element that contains every item (it needs `position: relative` for
 // the marquee).
 //
+// Selection mode (like Google Photos): in a collection whose items open (`onOpen`), a plain
+// click or tap opens an item until something is selected, through the item's circle
+// (`data-sel-toggle`), a long press, a modifier click, the keyboard, or the Select button.
+// While anything is selected, a plain click or tap toggles; opening then takes Enter (or the
+// item's own menu). The mode ends when the last item is deselected or on Esc. Collections
+// without `onOpen` (Trash, Review) keep desktop clicks: a plain click selects one.
+//
 // Never hijacked: keys typed in inputs and other controls inside items, Cmd/Ctrl+K, and pages
 // without a collection (the reader). Behind a dialog, only the dialog's own collection listens.
 
@@ -49,8 +56,11 @@ export interface Selection<K extends S.Key> {
   isSelected: (k: K) => boolean;
   /** Selected keys among the loaded ones, in view order. */
   selectedKeys: () => K[];
-  /** Touch selection mode (after a long press, or the Select button): taps toggle. */
+  /** Selection mode: anything is selected, or the Select button was pressed. Plain clicks
+   * and taps toggle. */
   selecting: boolean;
+  /** Selection mode was entered with the Select button or a long press (not just a click). */
+  armed: boolean;
   setSelecting: (v: boolean) => void;
   selectAll: () => void;
   clear: () => void;
@@ -71,7 +81,6 @@ export interface CellProps {
   "data-selecting"?: true;
   onFocus: (e: React.FocusEvent) => void;
   onClick: (e: React.MouseEvent) => void;
-  onDoubleClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
   onPointerDown: (e: React.PointerEvent) => void;
   onPointerMove: (e: React.PointerEvent) => void;
@@ -96,10 +105,13 @@ function fromControl(e: { target: EventTarget; currentTarget: EventTarget }): bo
 
 export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection<K> {
   const [state, setState] = useState<S.SelState<K>>(S.initialState);
-  const [selecting, setSelecting] = useState(false);
+  const [armed, setSelecting] = useState(false);
   const [marquee, setMarquee] = useState<CSSProperties | null>(null);
-  const live = useRef({ o, state, selecting });
-  live.current = { o, state, selecting };
+  const total = o.total ?? o.keys.length;
+  const count = S.selectedCount(state.sel, total);
+  const selecting = armed || count > 0;
+  const live = useRef({ o, state, selecting, armed });
+  live.current = { o, state, selecting, armed };
   const pendingFocus = useRef(false);
   /** The item that last held focus, while focus is meant to be in the collection. */
   const focusedEl = useRef<HTMLElement | null>(null);
@@ -117,8 +129,15 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
     });
   }, [o.keys]);
 
-  const total = o.total ?? o.keys.length;
-  const count = S.selectedCount(state.sel, total);
+  // Deselecting the last item leaves selection mode, so the next plain click opens again.
+  const hadSelection = useRef(false);
+  useEffect(() => {
+    if (count > 0) hadSelection.current = true;
+    else if (hadSelection.current) {
+      hadSelection.current = false;
+      setSelecting(false);
+    }
+  }, [count]);
 
   /** Commit a new state; with `moveFocus`, bring the focused item into view and focus it. */
   const apply = useCallback((next: S.SelState<K>, moveFocus = false) => {
@@ -229,7 +248,7 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
         p.timer = window.setTimeout(() => {
           p.timer = null;
           p.long = true;
-          setSelecting(true);
+          setSelecting(true); // drag stays off while selecting by touch
           apply(S.add(live.current.state, k));
           navigator.vibrate?.(12);
         }, LONG_PRESS_MS);
@@ -252,7 +271,9 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
         const p = press.current;
         press.current = null;
         if (p?.long) return; // the long press already selected it
-        const { state, selecting, o } = live.current;
+        const { state, o } = live.current;
+        // Without anything to open, clicks stay desktop clicks until the mode is armed.
+        const selecting = o.onOpen ? live.current.selecting : live.current.armed;
         const toggleHit = !!(e.target as Element).closest("[data-sel-toggle]");
         if (p?.type === "touch" || p?.type === "pen") {
           if (selecting || toggleHit) apply(S.toggle(state, k));
@@ -260,13 +281,10 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
           return;
         }
         if (foreignMod(e) || e.detail > 1) return; // Ctrl+click on a Mac; 2nd click of a double-click
-        if (toggleHit || (selecting && !e.shiftKey && !modOf(e))) return apply(S.toggle(state, k));
+        const plain = !e.shiftKey && !modOf(e);
+        if (toggleHit || (selecting && plain)) return apply(S.toggle(state, k));
+        if (plain && o.onOpen) return o.onOpen(k);
         apply(S.click(state, o.keys, k, { toggle: modOf(e), shift: e.shiftKey }));
-      },
-      onDoubleClick: (e) => {
-        if (fromControl(e) || (e.target as Element).closest("[data-sel-toggle]")) return;
-        if (live.current.selecting || e.shiftKey || modOf(e)) return;
-        live.current.o.onOpen?.(k);
       },
     };
   };
@@ -326,6 +344,7 @@ export function useSelection<K extends S.Key>(o: SelectionOptions<K>): Selection
     isSelected: (k) => S.isSelected(state.sel, k),
     selectedKeys: () => S.selectedKeys(state.sel, o.keys),
     selecting,
+    armed,
     setSelecting,
     selectAll: () => apply(S.selectAll(live.current.state)),
     clear: () => apply(S.clear(live.current.state)),

@@ -2,7 +2,7 @@
 // seeded library of 360 books (e2e/seed.py): 6 columns at 1280×800, so 60 rows, of which only
 // the ones near the viewport are in the DOM.
 import { expect, test, type Page } from "@playwright/test";
-import { api, book, countText, focusedLabel, grid, idOf, library, selectedTitles, signIn, titles } from "./desktop-helpers";
+import { api, book, circle, countText, focusedLabel, grid, idOf, library, selectedTitles, signIn, titles } from "./desktop-helpers";
 
 test.beforeEach(async ({ page }) => {
   await signIn(page);
@@ -31,18 +31,55 @@ test("ARIA grid with roving focus and windowed rows", async ({ page }) => {
   expect(outline).toBe("solid");
 });
 
-test("click selects one; Ctrl+click toggles; Shift+click ranges; Ctrl+Shift+click adds ranges", async ({ page }) => {
+test("selection mode: a click opens until the circle selects, then clicks toggle until the last is off", async ({ page }) => {
+  const pick = (title: string) => book(page, title).locator("[data-sel-toggle]");
+  // Not selecting: a plain click opens the book, and no circles show without hovering.
   await book(page, "Book 001").click();
-  await expect(countText(page)).toHaveText("1 selected");
-  await book(page, "Book 003").click();
-  expect(await selectedTitles(page)).toEqual(["Book 003"]);
+  await expect(page.getByRole("dialog", { name: "Book 001" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByTestId("selection-bar")).toHaveCount(0);
+  await page.mouse.move(0, 0);
+  await expect(pick("Book 006")).toBeHidden();
 
+  // The circle starts selecting; then every card shows its circle, with a 44 px target.
+  await circle(book(page, "Book 001"));
+  await expect(countText(page)).toHaveText("1 selected");
+  await page.mouse.move(0, 0);
+  await expect(pick("Book 006")).toBeVisible();
+  await expect(grid(page)).toHaveAttribute("data-has-selection", "true");
+  const target = await pick("Book 006").evaluate((el) => {
+    const s = getComputedStyle(el, "::before");
+    return [parseFloat(s.width), parseFloat(s.height)];
+  });
+  expect(Math.min(...target)).toBeGreaterThanOrEqual(44);
+
+  // Selecting: a plain click anywhere on a card toggles it, and opens nothing.
+  await book(page, "Book 003").click();
+  expect(await selectedTitles(page)).toEqual(["Book 001", "Book 003"]);
+  await book(page, "Book 001").click();
+  expect(await selectedTitles(page)).toEqual(["Book 003"]);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  // Deselecting the last one leaves selection mode: the next click opens again.
+  await book(page, "Book 003").click();
+  await expect(page.getByTestId("selection-bar")).toHaveCount(0);
+  await expect(grid(page)).not.toHaveAttribute("data-has-selection", "true");
+  await book(page, "Book 004").click();
+  await expect(page.getByRole("dialog", { name: "Book 004" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("Ctrl+click starts selecting and toggles; Shift+click ranges; Ctrl+Shift+click adds ranges", async ({ page }) => {
   await book(page, "Book 005").click({ modifiers: ["Control"] });
+  await expect(countText(page)).toHaveText("1 selected");
+  await book(page, "Book 003").click({ modifiers: ["Control"] });
+  expect(await selectedTitles(page)).toEqual(["Book 003", "Book 005"]);
   await book(page, "Book 003").click({ modifiers: ["Control"] });
   expect(await selectedTitles(page)).toEqual(["Book 005"]);
 
-  // Shift: anchor (Book 005, the last plain or Ctrl click) to the item, replacing the rest.
-  await book(page, "Book 001").click();
+  // Shift: anchor (Book 001, the last plain or Ctrl click) to the item, replacing the rest.
+  await book(page, "Book 001").click(); // selecting, so a plain click adds it
   await book(page, "Book 004").click({ modifiers: ["Shift"] });
   expect(await selectedTitles(page)).toEqual(titles(1, 4));
   await book(page, "Book 002").click({ modifiers: ["Shift"] });
@@ -57,14 +94,24 @@ test("click selects one; Ctrl+click toggles; Shift+click ranges; Ctrl+Shift+clic
   expect(await selectedTitles(page)).toEqual([...titles(1, 2), ...titles(7, 9)]);
   await expect(countText(page)).toHaveText("5 selected");
 
-  // Esc clears.
+  // Esc clears and leaves selection mode.
   await press(page, "Escape");
   await expect(page.getByTestId("selection-bar")).toHaveCount(0);
   expect(await selectedTitles(page)).toEqual([]);
+  await book(page, "Book 002").click();
+  await expect(page.getByRole("dialog", { name: "Book 002" })).toBeVisible();
+});
+
+test("Shift+click with nothing selected starts selecting from the anchor", async ({ page }) => {
+  await book(page, "Book 002").click({ modifiers: ["Shift"] });
+  expect(await selectedTitles(page)).toEqual(["Book 002"]);
+  await book(page, "Book 004").click({ modifiers: ["Shift"] });
+  expect(await selectedTitles(page)).toEqual(titles(2, 4));
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 test("keyboard: 2D arrows, Shift+Arrow, Home/End, Ctrl+Arrow, Space, Enter, Esc", async ({ page }) => {
-  await book(page, "Book 001").click(); // selects 1, focus 1
+  await circle(book(page, "Book 001")); // selects 1, focus 1
   await press(page, "ArrowRight");
   expect(await focusedLabel(page)).toBe("Book 002");
   await press(page, "ArrowDown"); // 6 columns: 2 → 8
@@ -98,21 +145,29 @@ test("keyboard: 2D arrows, Shift+Arrow, Home/End, Ctrl+Arrow, Space, Enter, Esc"
   await press(page, "Space"); // toggles 13 off
   expect(await selectedTitles(page)).toEqual(["Book 001", ...titles(7, 12)]);
 
-  await press(page, "Escape");
-  expect(await selectedTitles(page)).toEqual([]);
-  // Enter opens the focused book.
+  // While selecting, Enter still opens the focused book, and the selection stays.
   await press(page, "Enter");
   await expect(page.getByRole("dialog", { name: "Book 013" })).toBeVisible();
   await press(page, "Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  // Double-click opens too.
-  await book(page, "Book 004").dblclick();
-  await expect(page.getByRole("dialog", { name: "Book 004" })).toBeVisible();
+  await expect(countText(page)).toHaveText("7 selected");
+
+  await press(page, "Escape");
+  expect(await selectedTitles(page)).toEqual([]);
+  // Not selecting: Enter opens the focused book; Space starts selecting.
+  await book(page, "Book 013").focus();
+  await press(page, "Enter");
+  await expect(page.getByRole("dialog", { name: "Book 013" })).toBeVisible();
+  await press(page, "Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await book(page, "Book 013").focus();
+  await press(page, "Space");
+  expect(await selectedTitles(page)).toEqual(["Book 013"]);
 });
 
 test("virtualized: keyboard reaches unrendered books and Ctrl+A selects the whole view", async ({ page }) => {
   await expect(book(page, "Book 360")).toHaveCount(0); // not in the DOM yet
-  await book(page, "Book 001").click();
+  await circle(book(page, "Book 001"));
   await press(page, "Control+End");
   await expect(book(page, "Book 360")).toBeFocused();
   await expect(book(page, "Book 001")).toHaveCount(0); // scrolled out and unrendered
@@ -144,7 +199,7 @@ test("virtualized: focus survives its row scrolling away, and the grid keeps a t
   await expect(page.locator('[role="gridcell"][tabindex="0"]')).toHaveCount(1);
   await page.evaluate(() => window.scrollTo(0, 0));
 
-  await book(page, "Book 001").click();
+  await circle(book(page, "Book 001"));
   await page.mouse.wheel(0, 6000);
   await expect(book(page, "Book 001")).toHaveCount(0);
   // Focus stays on the grid (not <body>), so keys still drive the selection.
@@ -160,7 +215,7 @@ test("list view: one column, arrows by one, Shift+End to the end", async ({ page
   expect(await cols(page)).toBe(1);
   await expect(grid(page)).toHaveAttribute("aria-rowcount", "360");
   expect(await page.getByRole("gridcell").count()).toBeLessThan(80);
-  await book(page, "Book 001").click();
+  await circle(book(page, "Book 001"));
   await press(page, "ArrowDown");
   expect(await focusedLabel(page)).toBe("Book 002");
   await press(page, "Shift+End");
@@ -176,7 +231,7 @@ test("filtered view: Ctrl+A sends a server-side selection for books never loaded
   test.setTimeout(120_000); // 60 per-work transactions on the server
   await page.getByPlaceholder("Filter by title or author").fill("Book 3");
   await expect(page.getByText("61 of 360 books shown")).toBeAttached();
-  await book(page, "Book 300").click();
+  await circle(book(page, "Book 300"));
   await press(page, "Control+a");
   await expect(countText(page)).toHaveText("All 61 selected");
   await book(page, "Book 301").click({ modifiers: ["Control"] });
@@ -206,7 +261,7 @@ test("filtered view: Ctrl+A sends a server-side selection for books never loaded
 test("search results: Shift ranges follow the filtered order", async ({ page }) => {
   await page.getByPlaceholder("Filter by title or author").fill("Author 05");
   await expect(book(page, "Book 005")).toBeVisible();
-  await book(page, "Book 005").click();
+  await circle(book(page, "Book 005"));
   await book(page, "Book 029").click({ modifiers: ["Shift"] });
   expect(await selectedTitles(page)).toEqual(["Book 005", "Book 017", "Book 029"]);
   // A different view starts a fresh selection.
@@ -220,7 +275,7 @@ test("shelves: add the selection to a shelf, then select all on that shelf", asy
   const { id } = await a.post("/api/shelves", { name });
   await page.reload();
   await page.getByPlaceholder("Filter by title or author").fill("Book 04");
-  await book(page, "Book 040").click();
+  await circle(book(page, "Book 040"));
   await book(page, "Book 042").click({ modifiers: ["Shift"] });
   await page.getByRole("button", { name: "Shelves", exact: true }).last().click();
   await page.getByRole("dialog").getByRole("button", { name }).click();
@@ -231,7 +286,7 @@ test("shelves: add the selection to a shelf, then select all on that shelf", asy
   await expect(page).toHaveURL(new RegExp(`shelf=${id}`));
   const g = page.getByRole("grid", { name: `Shelves and books in ${name}` });
   await expect(g.getByRole("gridcell")).toHaveCount(3);
-  await book(page, "Book 041").click();
+  await circle(book(page, "Book 041"));
   await press(page, "Control+a");
   await expect(countText(page)).toHaveText("All 3 selected");
 });
@@ -239,14 +294,14 @@ test("shelves: add the selection to a shelf, then select all on that shelf", asy
 test("selection bar: send to a device and align (after a confirmation)", async ({ page }) => {
   const a = await api(page);
   await a.post("/api/devices", { label: "E2E Kobo" });
-  await book(page, "Book 001").click();
+  await circle(book(page, "Book 001"));
   await book(page, "Book 003").click({ modifiers: ["Shift"] });
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const send = page.getByRole("dialog", { name: "Send 3 books to a device" });
   await send.getByRole("button", { name: "Send 3 books" }).click();
   await expect(page.locator(".toast").filter({ hasText: "Sent 3 books to E2E Kobo" })).toBeVisible();
 
-  await book(page, "Book 001").click();
+  await circle(book(page, "Book 001"));
   await book(page, "Book 002").click({ modifiers: ["Shift"] });
   // Declining the confirmation sends nothing.
   let asked = "";
@@ -271,7 +326,7 @@ test("selection bar: send to a device and align (after a confirmation)", async (
 test("selection bar: trash, then Undo", async ({ page }) => {
   page.on("dialog", (d) => d.accept());
   await page.getByPlaceholder("Filter by title or author").fill("Book 35");
-  await book(page, "Book 350").click();
+  await circle(book(page, "Book 350"));
   await book(page, "Book 352").click({ modifiers: ["Shift"] });
   await page.getByRole("button", { name: "Trash" }).click();
   await expect(page.locator(".toast").filter({ hasText: "Moved to trash" })).toBeVisible();
@@ -301,7 +356,7 @@ test("marquee: drag across empty space to select a rectangle", async ({ page }) 
 
 test("never hijacks inputs, Ctrl+K, or the reader", async ({ page }) => {
   const filter = page.getByPlaceholder("Filter by title or author");
-  await book(page, "Book 001").click();
+  await circle(book(page, "Book 001"));
   await filter.fill("Book");
   await filter.press("Control+a"); // selects the text, not the books
   expect(await filter.evaluate((el: HTMLInputElement) => [el.selectionStart, el.selectionEnd])).toEqual([0, 4]);
@@ -309,7 +364,7 @@ test("never hijacks inputs, Ctrl+K, or the reader", async ({ page }) => {
   await filter.press("Escape"); // clears the filter, as before
   await expect(filter).toHaveValue("");
 
-  await book(page, "Book 002").click();
+  await circle(book(page, "Book 002"));
   await press(page, "Control+k");
   const palette = page.getByRole("dialog", { name: "Search and commands" });
   await expect(palette).toBeVisible();

@@ -3887,7 +3887,6 @@ fieldset.match > legend {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  display: grid;
   place-items: center;
   font-size: 13px;
   font-weight: 700;
@@ -3905,6 +3904,22 @@ fieldset.match > legend {
   .book[role="gridcell"]:hover .pick {
     display: grid;
   }
+  .book[role="gridcell"] .pick:hover,
+  [data-has-selection] .book[aria-selected="false"]:hover .pick {
+    border-color: var(--accent);
+  }
+}
+/* A 44 px touch target around the 24 px circle. */
+.book .pick::before,
+.import-card .pick::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  translate: -50% -50%;
+  border-radius: 50%;
 }
 .book[aria-selected="true"] .pick,
 .import-card[aria-selected="true"] .pick {

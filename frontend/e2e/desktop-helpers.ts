@@ -16,6 +16,11 @@ export async function signIn(page: Page, path = "/app/library?view=everything") 
 export const grid = (page: Page) => page.getByRole("grid").first();
 /** A Library cell by its book title. */
 export const book = (page: Page, title: string) => page.getByRole("gridcell", { name: new RegExp(`^${title} by `) });
+/** Clicks a cell's selection circle (shown on hover): selects it, or toggles it, without opening. */
+export async function circle(cell: Locator) {
+  await cell.hover();
+  await cell.locator("[data-sel-toggle]").click();
+}
 export const selectedTitles = async (page: Page) =>
   (await page.locator('[role="gridcell"][aria-selected="true"]').evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")?.split(" by ")[0] ?? "")))
     .sort();
