@@ -5,6 +5,10 @@ text lives only in ``annotations``), kept in step by triggers, so every create, 
 from the KOReader sync (and a user's deletion, by cascade) updates it in the same transaction.
 Filled from the existing rows here; ``lectern highlights-reindex`` rebuilds it.
 
+Write ``annotations`` with INSERT/UPDATE/DELETE only: INSERT OR REPLACE deletes the old row
+without firing the delete trigger (SQLite's recursive_triggers is off), and the index drifts
+(``lectern highlights-reindex`` recovers).
+
 A later migration that recreates ``annotations`` (a batch ALTER on SQLite) drops these
 triggers with the old table and must create them again.
 

@@ -814,10 +814,7 @@ def test_migration_0018_backfills_states_and_pages(tmp_path):
 
 
 def test_migration_0019_downgrades_keep_rows_on_any_sqlite(tmp_path):
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    from lectern.models import Base
+    from tests.conftest import schema_diff
 
     engine = make_engine(f"sqlite:///{tmp_path / 'm19.db'}")
     cfg = alembic_config(str(engine.url))
@@ -906,7 +903,7 @@ def test_migration_0019_downgrades_keep_rows_on_any_sqlite(tmp_path):
         assert origins == [(1, "ingest"), (2, "library")]
         # Left stale while downgraded: cleared, so the PDF's OCR text is built again.
         assert conn.execute(sa.text("SELECT ocr_sha256 FROM pdf_texts")).all() == [(None,)]
-        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+        assert schema_diff(conn) == []
 
 
 def test_page_counts_are_filled_in(settings, client, owner):

@@ -172,7 +172,7 @@ Words from a highlight or from its note find it:
   passage, marked (a PDF highlight that could not be placed opens at its page).
 - **The Highlights page** lists all your highlights, best match first when you search. Filter
   by book, author, tag, and date (KOReader's creation date). **Export these as Markdown**
-  downloads exactly the highlights shown.
+  downloads every highlight that matches the search and filters (the page shows the first 200).
 
 Search works like the search inside books ([search.md](search.md)): case and accents do not
 matter, the words are tried as a phrase first and then anywhere in the highlight, and the last
