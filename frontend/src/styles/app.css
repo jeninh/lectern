@@ -6787,3 +6787,14 @@ table.compare td:first-child {
 .dict-admin-form input[type="file"].input { padding: 4px; }
 .dict-save { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; }
 .dict-save-err { color: var(--danger); }
+
+/* Vocabulary list (pages/Vocabulary.tsx) */
+.vocab-head { justify-content: space-between; align-items: baseline; flex-wrap: wrap; }
+.vocab-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.vocab-item { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; }
+.vocab-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.vocab-word { font-size: 17px; }
+.vocab-def, .vocab-note { margin: 0; white-space: pre-line; }
+.vocab-context { margin: 0; padding-left: 10px; border-left: 3px solid var(--border); font-style: italic; }
+.vocab-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.vocab-edit textarea { width: 100%; }

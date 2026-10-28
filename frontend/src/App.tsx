@@ -10,6 +10,7 @@ import { ReadAlongPage } from "./pages/ReadAlong";
 import { SecurityPage } from "./pages/Security";
 import { AdminPage } from "./pages/Admin";
 import { HighlightsPage } from "./pages/Highlights";
+import { VocabularyPage } from "./pages/Vocabulary";
 import { HealthPage } from "./pages/Health";
 import { ListeningPage } from "./pages/Listening";
 import { TrashPage } from "./pages/Trash";
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="/app/downloads" element={<DownloadsPage />} />
           <Route path="/app/reader/:id" element={<ReaderPage />} />
           <Route path="/app/highlights" element={<HighlightsPage />} />
+          <Route path="/app/vocabulary" element={<VocabularyPage />} />
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
           <Route path="/app/jobs" element={<JobsPage />} />

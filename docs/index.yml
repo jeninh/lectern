@@ -99,6 +99,10 @@ sections:
         title: Dictionary and translation
         description: Look up a word while reading, from offline dictionaries stored on your server.
         icon: book
+      - file: vocabulary.md
+        title: Vocabulary list
+        description: Save words from the dictionary with the sentence they were in, then edit and export them for Anki.
+        icon: book
       - file: filters.md
         title: Library filters and smart shelves
         description: Filter the Library by any field, type filters, and save them as live smart shelves.
