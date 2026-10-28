@@ -253,7 +253,8 @@ cancels every live transcode job) and an owner or member for one work with
 undoable like any save). Either way `POST …/transcode` answers `409 data_saver_off` or
 `409 data_saver_off_for_work`, `LECTERN_AUDIO_LOW_AUTO` skips the work, and existing copies
 keep playing until deleted. `DELETE /api/works/{id}/transcode` (owner, member) cancels the
-work's job and deletes every rendition in its `derived/audio/` (stale ones of replaced tracks
+work's job (`403 not_your_job` for a member while someone else's, or an automatic, copy is
+being made) and deletes every rendition in its `derived/audio/` (stale ones of replaced tracks
 too), returning `{"deleted_bytes"}`; `POST` makes them again. `GET /api/admin/data-saver`
 (owner) sums it up for the library: the switch, `local_ffmpeg`, `worker_online`,
 `unavailable`, audiobooks with copies, bytes, and live jobs.
@@ -451,12 +452,16 @@ first (page size 50). Shape of one job:
 the existing active job for that work (the partial unique index makes a duplicate impossible).
 With `force: true` an existing active job is cancelled first (the cancel rule below applies).
 `POST …/cancel` moves a `queued`/`leased` job to `cancelled`; a worker still holding the
-lease gets `409 lease_lost` on its next call. Who may cancel is the same rule as on the Jobs page
-(`POST /api/job-queue/jobs/{id}/cancel`, below): the owner, or whoever started the job; so
-does every request that cancels a job as a side effect (`force: true`, OCR in another
-language, `DELETE /api/files/{id}/ocr`). A member gets `403 not_your_job` for anyone else's
-job, including one queued automatically (an alignment queued when a book gains its EPUB +
-audio has no starter, so only the owner can cancel it). Each job in these responses, and the `job` of a book's narration
+lease gets `409 lease_lost` on its next call. Who may cancel is the same rule as on the Jobs
+page (`POST /api/job-queue/jobs/{id}/cancel`, below): the owner, or whoever started the job;
+so does every request that stops a run to replace or discard its output (`force: true`, OCR in
+another language, `DELETE /api/files/{id}/ocr`, `DELETE /api/works/{id}/transcode`). A member
+gets `403 not_your_job` for anyone else's job, including one queued automatically (an
+alignment queued when a book gains its EPUB + audio has no starter, so only the owner can
+cancel it). The exceptions cancel without that check because the book, its inputs, or the
+feature went away: trashing a book, an edit or new audio that makes the job's inputs stale,
+data saver turned off for the library or for one book, and the owner's storage cleanup. Each
+job in these responses, and the `job` of a book's narration
 (`GET /api/works/{id}/audiobook`) and PDF conversion (`GET /api/works/{id}/pdf-epub`) state,
 carries `can_cancel`; the book page shows "Only the owner or whoever started it can cancel" in
 place of Cancel when it is `false`. A cancel is conditional on the row (as pause, resume, and
