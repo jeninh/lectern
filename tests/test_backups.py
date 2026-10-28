@@ -929,10 +929,14 @@ def test_no_pre_restore_copy_replaces_a_folder_where_a_file_belongs(
 
 
 def _fingerprint(*roots: Path) -> dict[str, tuple]:
-    """Bytes, mode, and mtime of everything under ``roots``: a drill must change none of it."""
+    """Bytes, mode, and mtime of ``roots`` and everything under them: a drill must change none
+    of it (a file created and removed again still changes its folder's mtime)."""
     out: dict[str, tuple] = {}
     for root in roots:
-        for p in sorted(root.rglob("*")):
+        if not root.exists():
+            out[str(root)] = ()  # absent, and must stay so
+            continue
+        for p in [root, *sorted(root.rglob("*"))]:
             st = p.lstat()
             body = p.read_bytes() if p.is_file() and not p.is_symlink() else b""
             out[str(p)] = (body, st.st_mode, st.st_mtime_ns)
@@ -1003,9 +1007,29 @@ def _damage_db(stage: Path) -> None:
     db.write_bytes(bytes(data))
 
 
-@pytest.mark.parametrize("corrupt", ["pack", "database", "library-file"])
+def _symlink_in_stage(stage: Path) -> None:
+    (stage / "data" / "align").mkdir(parents=True, exist_ok=True)
+    (stage / "data" / "align" / "evil.json").symlink_to("/etc/passwd")
+
+
+def _secret_missing(stage: Path) -> None:
+    (stage / "secrets" / "secret_key").unlink()  # the manifest still lists it
+
+
+CRAFTED = {"database": _damage_db, "snapshot": _symlink_in_stage, "manifest": _secret_missing}
+EXPECTED = {
+    "pack": ("repository", "repository contains errors"),
+    "database": ("database", "malformed"),
+    "library-file": ("files", "SHA-256"),
+    "snapshot": ("snapshot", "symlink"),
+    "manifest": ("manifest", "secret_key is missing"),
+    "space": ("space", "MiB free"),
+}
+
+
+@pytest.mark.parametrize("corrupt", list(EXPECTED))
 def test_restore_drill_fails_with_the_right_reason_and_cleans_up(
-    bclient, bowner, bsettings, tmp_path, corrupt
+    bclient, bowner, bsettings, tmp_path, monkeypatch, corrupt
 ):
     work = _add_book(bsettings, "Corrupted")
     if corrupt == "library-file":
@@ -1014,8 +1038,8 @@ def test_restore_drill_fails_with_the_right_reason_and_cleans_up(
         data = bytearray(epub.read_bytes())
         data[-10] ^= 0xFF
         epub.write_bytes(bytes(data))
-    if corrupt == "database":
-        _crafted_snapshot(bsettings, tmp_path, _damage_db)
+    if corrupt in CRAFTED:
+        _crafted_snapshot(bsettings, tmp_path, CRAFTED[corrupt])
         with session_factory()() as db:
             backups.save_config(db, BackupConfig(enabled=True), 1)
             db.commit()
@@ -1023,15 +1047,17 @@ def test_restore_drill_fails_with_the_right_reason_and_cleans_up(
         assert _run(bsettings, include_library=True)["last_result"] == "ok"
     if corrupt == "pack":
         _flip_largest_pack(bsettings)
+    if corrupt == "space":  # a nearly full backup volume
+        usage = shutil.disk_usage(bsettings.backup_dir)
+        monkeypatch.setattr(drill.shutil, "disk_usage", lambda p: usage._replace(free=2**20))
     settings = _drill_settings(bsettings, restore_drill_days=7)
     before = _live(settings)
 
     result = drill.run_drill(settings)
 
-    expected = {"pack": "repository", "database": "database", "library-file": "files"}[corrupt]
+    expected, reason = EXPECTED[corrupt]
     assert result["result"] == "failed" and result["check"] == expected, result
-    if corrupt == "library-file":
-        assert "SHA-256" in result["error"]
+    assert reason in result["error"], result
     assert _live(settings) == before
     assert not drill.scratch_dir(settings).exists()
 
@@ -1135,3 +1161,29 @@ def test_restore_drill_schedule():
     skipped = {**passed, "last_attempt_at": "2026-10-29T03:06:00Z"}
     assert not drill.due(weekly, cfg, next_week, skipped, at("2026-10-29T03:20"))
     assert drill.due(weekly, cfg, next_week, skipped, at("2026-10-29T03:40"))  # retried
+
+
+def test_a_nightly_backup_blocked_by_a_drill_runs_once_the_drill_is_done(
+    bclient, bowner, bsettings
+):
+    """Review: a busy target must not count as the night's attempt, or the night is lost."""
+    now = datetime.now(UTC)
+    assert _run(bsettings, hour_utc=now.hour)["last_result"] == "ok"
+    with session_factory()() as db:
+        backups.record_status(db, last_attempt_at="2020-01-01T00:00:00Z")  # tonight not done
+        db.commit()
+    fd = os.open(bsettings.backup_dir / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a restore drill (or another backup) holds the target
+        assert backups.tick(session_factory(), bsettings, now)
+    finally:
+        os.close(fd)
+    with session_factory()() as db:
+        status = backups.load_status(db)
+        assert status["last_attempt_at"] == "2020-01-01T00:00:00Z"
+        assert due(backups.load_config(db), status, now)
+    assert backups.tick(session_factory(), bsettings, now)  # the next tick backs up
+    with session_factory()() as db:
+        status = backups.load_status(db)
+    assert status["last_result"] == "ok" and status["last_attempt_at"] > "2020"
+    assert not due(BackupConfig(enabled=True, hour_utc=now.hour), status, now)

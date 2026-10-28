@@ -568,14 +568,16 @@ def _iso(dt: datetime) -> str:
 
 def run_and_record(session_factory, settings: Settings, *, reason: str) -> dict:
     """Run a backup with the stored settings, store the outcome, alert owners on failure.
-    Returns the new status, with ``skipped: True`` (not stored) when another backup was
-    already running, here or in another process; that is not a failure and alerts nobody."""
+    Returns the new status, with ``skipped: True`` (not stored) when another backup or a
+    restore drill was already running, here or in another process; that is not a failure,
+    alerts nobody, and does not count as the night's attempt (it is retried on the next tick)."""
     if not _RUN_LOCK.acquire(blocking=False):
         with session_factory() as db:
             return {**load_status(db), "skipped": True}
     try:
         with session_factory() as db:
             cfg = load_config(db)
+            before = load_status(db)
             record_status(db, last_attempt_at=_iso(utcnow()), last_reason=reason)
             db.commit()
         started = utcnow()
@@ -583,8 +585,16 @@ def run_and_record(session_factory, settings: Settings, *, reason: str) -> dict:
             result = run_backup(settings, cfg)
         except BackupBusy:
             log.info("backup skipped: another backup or a restore drill is running on the target")
+            # Not an attempt: the nightly backup stays due and runs once the target is free,
+            # instead of losing the night to a restore drill (or another process's backup).
             with session_factory() as db:
-                return {**load_status(db), "skipped": True}
+                status = record_status(
+                    db,
+                    last_attempt_at=before.get("last_attempt_at"),
+                    last_reason=before.get("last_reason"),
+                )
+                db.commit()
+                return {**status, "skipped": True}
         except Exception as exc:  # noqa: BLE001 - every failure must reach the owner
             message = str(exc) or type(exc).__name__
             if not isinstance(exc, BackupError | OSError | sqlite3.Error):

@@ -22,7 +22,7 @@ LIMIT_FIELDS = tuple(
     for knob in ("concurrency", "threads", "memory_limit_mb", "nice")
     if (feature, knob) != ("convert", "threads")
 ) + ("heavy_jobs_max",)
-# The restore drill's knobs (lectern.drill): a typo must not stop the server either.
+# The restore drill's knobs (lectern.drill): an invalid value stops the server, naming the key.
 DRILL_FIELDS = (
     "restore_drill_days",
     "restore_drill_read_data_parts",
@@ -34,7 +34,10 @@ DRILL_FIELDS = (
 class Settings(BaseSettings):
     # An empty value means "the default", so the compose file can pass every key through as
     # ${KEY:-} without repeating the defaults here.
-    model_config = SettingsConfigDict(env_prefix="LECTERN_", extra="ignore", env_ignore_empty=True)
+    # hide_input_in_errors: a startup error names the key, never the value (it may be a secret).
+    model_config = SettingsConfigDict(
+        env_prefix="LECTERN_", extra="ignore", env_ignore_empty=True, hide_input_in_errors=True
+    )
 
     data_dir: Path = Field(default=Path("/data"))
     library_dir: Path = Field(default=Path("/library"))
@@ -315,7 +318,7 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    @field_validator(*LIMIT_FIELDS, *DRILL_FIELDS, mode="wrap")
+    @field_validator(*LIMIT_FIELDS, mode="wrap")
     @classmethod
     def _limit_or_default(cls, v, handler, info):
         try:
@@ -329,6 +332,19 @@ class Settings(BaseSettings):
                 "(automatic)" if default is None else default,
             )
             return default
+
+    @field_validator(*DRILL_FIELDS, mode="wrap")
+    @classmethod
+    def _drill_key(cls, v, handler, info):
+        try:
+            return handler(v)
+        except ValidationError:
+            meta = cls.model_fields[info.field_name].metadata
+            lo = next(m.ge for m in meta if hasattr(m, "ge"))
+            hi = next(m.le for m in meta if hasattr(m, "le"))
+            raise ValueError(
+                f"LECTERN_{info.field_name.upper()} must be a whole number from {lo} to {hi}"
+            ) from None
 
     @field_validator("base_url")
     @classmethod
