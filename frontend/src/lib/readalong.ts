@@ -131,6 +131,7 @@ export function alignmentHint(a: AlignmentSummary | null | undefined, now = Date
     return { ...base, text: parts.join(" · "), progress: job.progress ?? 0 };
   }
   if (job?.status === "queued") {
+    if (job.paused) return { ...base, text: "Paused by the owner (Jobs page)" };
     if (a.unavailable) return { ...base, text: a.unavailable.message, docsUrl: a.unavailable.docs_url };
     const wait = job.run_after ? (new Date(job.run_after).getTime() - now) / 1000 : 0;
     if (job.error && job.attempts > 0) {

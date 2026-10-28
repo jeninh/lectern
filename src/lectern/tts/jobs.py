@@ -156,6 +156,8 @@ def claim_local(
     """
     now = now or utcnow()
     reclaim(db, now)
+    if queue.queue_paused(db):
+        return None
     rows = db.execute(
         select(Job.id, Job.payload, Job.created_at)
         .where(Job.kind == KIND, Job.status == JobStatus.QUEUED, Job.run_after <= now)
@@ -853,7 +855,8 @@ def job_json(
         "spent_credits": round(spent_credits(db, p.get("cap_group")), 3)
         if p.get("engine") == ELEVENLABS
         else None,
-        "run_after": _iso(job.run_after),
+        "run_after": None if queue.is_paused(job) else _iso(job.run_after),
+        "paused": queue.is_paused(job),
         "created_at": _iso(job.created_at),
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),

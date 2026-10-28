@@ -1004,7 +1004,10 @@ def job_json(job: Job) -> dict:
         "freed_bytes": result.get("freed_bytes") or 0,
         "errors": result.get("errors") or [],
         "error": job.error,
-        "run_after": job.run_after.isoformat().replace("+00:00", "Z") if job.run_after else None,
+        "run_after": job.run_after.isoformat().replace("+00:00", "Z")
+        if job.run_after and not queue.is_paused(job)
+        else None,
+        "paused": queue.is_paused(job),
         "created_at": job.created_at.isoformat().replace("+00:00", "Z"),
         "finished_at": job.finished_at.isoformat().replace("+00:00", "Z")
         if job.finished_at

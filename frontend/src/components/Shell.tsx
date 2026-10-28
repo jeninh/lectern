@@ -9,7 +9,7 @@ import { usePlayer } from "../lib/player";
 import { CommandPalette } from "./CommandPalette";
 import { NotificationBell, UploadTray } from "./Notifications";
 import { MiniPlayer } from "./Player";
-import { Book, Devices, Download, Gear, Headphones, Heart, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
+import { Book, Devices, Download, Gear, Headphones, Heart, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Sync, Trash, Upload } from "./Icons";
 import { clearDevice } from "../lib/offline/store";
 import { ConflictPrompt, OfflineBanner, OfflineStatus, UpdateReady } from "./Offline";
 import { Sheet } from "./Sheet";
@@ -37,6 +37,7 @@ const MANAGE: NavEntry[] = [
   { to: "/app/devices", label: "Devices", icon: <Devices />, keys: "g d" },
   { to: "/app/security", label: "Security", icon: <Shield />, keys: "g s" },
   { to: "/app/activity", label: "Activity", icon: <Pulse />, keys: "g a" },
+  { to: "/app/jobs", label: "Jobs", icon: <Sync /> },
 ];
 const ADMIN: NavEntry = { to: "/app/admin", label: "Admin", icon: <Gear />, keys: "g u" };
 const HEALTH: NavEntry = { to: "/app/health", label: "Health", icon: <Heart /> };

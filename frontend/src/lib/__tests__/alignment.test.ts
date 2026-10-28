@@ -29,6 +29,10 @@ describe("alignmentHint", () => {
     expect(h?.text).toBe("Attempt 1 of 3 failed: lease expired · retrying in 2 min");
     expect(h?.detail).toBe("lease expired\nmore detail");
   });
+  it("says a job the owner paused on the Jobs page is paused, not retrying", () => {
+    const h = alignmentHint(al({ job: job({ attempts: 1, error: "lease expired", paused: true }) }), NOW);
+    expect(h?.text).toBe("Paused by the owner (Jobs page)");
+  });
   it("offers Retry with the same model once attempts are exhausted", () => {
     const h = alignmentHint(al({ status: "failed", model: "faster-whisper-small-int8", error: "lease expired", retry_model: "small", job: job({ status: "failed", attempts: 3, error: "lease expired" }) }), NOW);
     expect(h).toMatchObject({ text: "Alignment failed: lease expired", retryModel: "small", retryLabel: "Retry" });

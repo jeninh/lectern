@@ -193,7 +193,10 @@ test("virtualized: keyboard reaches unrendered books and Ctrl+A selects the whol
 });
 
 test("virtualized: focus survives its row scrolling away, and the grid keeps a tab stop", async ({ page }) => {
-  // Scrolled away without focusing the grid: the first rendered cell is the tab stop.
+  // Scrolled away without focusing the grid: the first rendered cell is the tab stop. The
+  // pointer goes over the grid first: at (0, 0) it is over the sidebar, which scrolls itself
+  // when it is taller than the window.
+  await grid(page).hover();
   await page.mouse.wheel(0, 6000);
   await expect(book(page, "Book 001")).toHaveCount(0);
   await expect(page.locator('[role="gridcell"][tabindex="0"]')).toHaveCount(1);

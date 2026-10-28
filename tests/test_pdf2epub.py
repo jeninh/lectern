@@ -541,10 +541,10 @@ def test_bulk_convert_queues_eligible_works_and_reports_the_rest(
 
     real = pj.enqueue
 
-    def flaky(db, settings_, work, user_id=None):
+    def flaky(db, settings_, work, user_id=None, **kw):
         if work.id == text_b:
             raise RuntimeError("boom")
-        return real(db, settings_, work, user_id)
+        return real(db, settings_, work, user_id, **kw)
 
     monkeypatch.setattr(pj, "enqueue", flaky)
     ids = [text_a, epub, 999999, text_b, scanned, audio]
@@ -561,6 +561,10 @@ def test_bulk_convert_queues_eligible_works_and_reports_the_rest(
         audio: (False, "skipped", "unsupported"),
     }
     job_a = r.json()["results"][0]["job_id"]
+    # the job queue page shows what this request queued as one batch row
+    (batch,) = client.get("/api/job-queue").json()["batches"]
+    assert batch["id"] == r.json()["batch_id"]
+    assert [(j["id"], j["status"]) for j in batch["jobs"]] == [(job_a, "queued")]
     monkeypatch.setattr(pj, "enqueue", real)
 
     # asking again: the live job is reported, not duplicated; the failed work queues now
