@@ -25,7 +25,7 @@ import shutil
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -169,6 +169,32 @@ def claimable(advertised: Iterable[str], cred: WorkerCredential | None) -> list[
     if allowed is not None and ALIGN in allowed:
         allowed = [*allowed, ALIGN_PDF]
     return [c for c in caps if c not in SERVER_ONLY and (allowed is None or c in allowed)]
+
+
+# --- pausing (the job queue page, lectern.jobqueue) --------------------------------------------
+
+# A paused job stays ``queued`` with its ``run_after`` this far ahead: every claim takes only
+# jobs whose ``run_after`` has passed, so none starts it, and it still holds its work's one
+# live job of its kind. Resuming sets ``run_after`` back to now.
+PAUSED_UNTIL = datetime(9000, 1, 1, tzinfo=UTC)
+
+
+def is_paused(job: Job) -> bool:
+    from lectern.models import JobStatus
+
+    return (
+        job.status == JobStatus.QUEUED
+        and job.run_after is not None
+        and job.run_after >= PAUSED_UNTIL
+    )
+
+
+def queue_paused(db: Session) -> bool:
+    """The owner paused the whole queue: no runner or worker claims a new job (running ones
+    finish). Every claim checks it."""
+    from lectern import instance
+
+    return instance.get(db, "queue_paused")
 
 
 # --- presence ---------------------------------------------------------------------------------

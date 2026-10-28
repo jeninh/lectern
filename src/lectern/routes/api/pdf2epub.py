@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -413,11 +414,13 @@ def convert_many(
     ``status`` ``queued`` or ``already_queued`` (and the ``job_id``), or not ``ok`` with
     ``status`` ``skipped`` or ``failed`` and an ``error`` (:func:`_skip_reason`, ``analysing``
     while the work's PDF is being analysed for review, ``not_found``, ``internal_error``); each with the work's ``title`` when it was found. At most
-    ``CONVERT_MANY_MAX`` works per request."""
+    ``CONVERT_MANY_MAX`` works per request. ``batch_id`` names the jobs it queued (``null``
+    when none), the batch the job queue page shows as one row."""
     if not request.app.state.limiters["bulk_jobs"].allow(f"user:{auth.user.id}"):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "rate_limited")
     ids = resolve_selection(db, auth.user, body.work_ids, body.selection, limit=CONVERT_MANY_MAX)
     results, queued = [], []
+    batch = secrets.token_hex(8)  # the jobs queued here, as one row on the job queue page
     for wid in ids:
         item: dict = {"work_id": wid}
         try:
@@ -432,7 +435,7 @@ def convert_many(
             elif (reason := _skip_reason(db, settings, work)) is not None:
                 item.update(ok=False, status="skipped", error=reason)
             else:
-                job = pj.enqueue(db, settings, work, auth.user.id)
+                job = pj.enqueue(db, settings, work, auth.user.id, batch=batch)
                 db.commit()
                 queued.append(job.id)
                 item.update(ok=True, status="queued", job_id=job.id)
@@ -450,7 +453,7 @@ def convert_many(
     db.commit()
     if queued:
         _wake(request)
-    return {"results": results}
+    return {"results": results, "batch_id": batch if queued else None}
 
 
 @router.get("/pdf-epub/jobs")

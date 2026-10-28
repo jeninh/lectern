@@ -156,6 +156,8 @@ def claim_local(
     """
     now = now or utcnow()
     reclaim(db, now)
+    if queue.queue_paused(db):
+        return None
     rows = db.execute(
         select(Job.id, Job.payload, Job.created_at)
         .where(Job.kind == KIND, Job.status == JobStatus.QUEUED, Job.run_after <= now)

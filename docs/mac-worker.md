@@ -176,6 +176,10 @@ kill) no longer takes the job down with the worker:
 worker and why it cannot take the job (offline, paused and why, not offering it and why, its
 allowlist, busy with another job), the lease holder and expiry, when a backoff ends, attempts,
 crashes, and the last error. `GET /api/jobs?status=active` returns the same as `waiting`.
+The **Jobs** page (`/app/jobs`) lists every job, grouped running, waiting, paused, failed,
+and done. From there you can cancel a job (a worker running it stops at its next heartbeat and
+is free for the next job), pause or reorder waiting ones, retry failures, or pause the whole
+queue.
 
 ### Troubleshooting: Kokoro jobs stuck at 0 % ("No virtual environment found")
 

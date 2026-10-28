@@ -283,10 +283,13 @@ def status(db) -> dict:
     from sqlalchemy import select
 
     from lectern.models import Job, JobStatus
+    from lectern.queue import PAUSED_UNTIL
 
     queued: dict[str, int] = {}
     for kind, payload in db.execute(
-        select(Job.kind, Job.payload).where(Job.status == JobStatus.QUEUED)
+        select(Job.kind, Job.payload).where(
+            Job.status == JobStatus.QUEUED, Job.run_after < PAUSED_UNTIL
+        )  # paused jobs wait for the owner, not for a limit
     ):
         if feature := feature_of(kind, payload):
             queued[feature] = queued.get(feature, 0) + 1

@@ -96,6 +96,48 @@ def main(base: Path) -> None:
                 )
             )
         db.commit()
+        seed_jobs(db)
+
+
+# The Jobs page (e2e/jobs.spec.ts). Background jobs are off on the e2e server, so these stay
+# where they are put: alignment and OCR waiting, a narration, a failed OCR run, and a bulk
+# request of three books (one batch row). Only kinds the e2e server never runs itself (the
+# in-process runner would run a conversion at once).
+JOB_BATCH = "e2e0000000000001"
+
+
+def seed_jobs(db) -> None:
+    from datetime import timedelta
+
+    from lectern.models import Job, JobStatus, utcnow
+
+    owner = db.scalar(select(User.id).where(User.username == "owner"))
+    ids = dict(db.execute(select(Work.title, Work.id)).all())
+    t0 = utcnow() - timedelta(hours=1)
+    rows = [
+        ("Book 301", "align", {"model": "small"}, JobStatus.QUEUED, None),
+        ("Book 302", "ocr", {}, JobStatus.QUEUED, None),
+        ("Book 303", "ocr", {}, JobStatus.FAILED, "Tesseract crashed"),
+        ("Book 304", "ocr", {"batch": JOB_BATCH}, JobStatus.QUEUED, None),
+        ("Book 305", "ocr", {"batch": JOB_BATCH}, JobStatus.QUEUED, None),
+        ("Book 306", "ocr", {"batch": JOB_BATCH}, JobStatus.QUEUED, None),
+        ("Book 307", "tts", {"engine": "kokoro"}, JobStatus.QUEUED, None),
+    ]
+    for i, (title, kind, payload, status, error) in enumerate(rows):
+        db.add(
+            Job(
+                kind=kind,
+                work_id=ids[title],
+                status=status,
+                payload=payload,
+                error=error,
+                created_by=owner,
+                created_at=t0 + timedelta(minutes=i),
+                run_after=t0,
+                finished_at=t0 if status == JobStatus.FAILED else None,
+            )
+        )
+    db.commit()
 
 
 if __name__ == "__main__":

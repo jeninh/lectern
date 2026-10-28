@@ -206,9 +206,11 @@ def enqueue(
     *,
     mode: str = "convert",
     rules: Rules | None = None,
+    batch: str | None = None,
 ) -> Job:
     """Queue an analysis or a conversion of the work's text PDF (the caller checked
-    eligibility). A live job of the work is returned instead of a second one."""
+    eligibility). A live job of the work is returned instead of a second one. ``batch``: the
+    bulk request it belongs to (the job queue page shows a batch as one row)."""
     existing = active_job(db, work.id)
     if existing is not None:
         return existing
@@ -225,6 +227,7 @@ def enqueue(
             "text_sha256": row.text_sha256 or "",
             "mode": mode,
             "rules": rules.model_dump() if rules is not None else None,
+            **({"batch": batch} if batch else {}),
         },
         created_by=user_id,
     )

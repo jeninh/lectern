@@ -473,6 +473,8 @@ def claim(
     if not kinds or not caps:
         return None
     reclaim_expired(db, now, stall_s=stall_s)
+    if queue.queue_paused(db):
+        return None
     token = new_secret()
     routable = Job.capability.in_(caps)
     if credential_id is None and defer_s > 0:

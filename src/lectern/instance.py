@@ -14,6 +14,8 @@ DEFAULTS: dict[str, bool] = {
     "metadata_lookup_enabled": False,
     "offline_mode": False,
     "data_saver_enabled": True,
+    # The owner paused the whole job queue (lectern.queue.queue_paused, the Jobs page).
+    "queue_paused": False,
 }
 # The library settings editors see and the owner changes through /api/library-settings.
 LIBRARY = ("metadata_lookup_enabled", "data_saver_enabled")

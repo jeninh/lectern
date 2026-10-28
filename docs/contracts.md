@@ -461,6 +461,40 @@ credential, with its pause reason or why it does not offer the capability) and t
 `summary` are for the owner only, as on Admin → Workers: members get `workers: []` and a
 summary without worker names or reasons.
 
+### Job queue page — `/api/job-queue` (issue #87)
+
+The Jobs page (`/app/jobs`, `lectern.jobqueue`). `GET /api/job-queue` returns
+`{queue_paused, can_manage, jobs, batches}`: every queued and leased job in claim order, the
+latest 50 failed and 30 succeeded or cancelled. Each job has `group` (`running`, `waiting`,
+`paused`, `failed`, `done`), `kind`, `detail` (engine, mode, or model), `title`, `runs_on`
+(a worker's label or `this server`), `progress`, `waiting` (the `explain_wait` summary for the
+first 30 in each line, else its place), `limit` (`feature_limit` / `global_limit` while a
+[resource limit](resource-limits.md) holds it back: "waiting: limit reached"), `error`, and
+`batch`. Jobs queued by one bulk request (`POST /api/works/pdf-epub`, which now also returns
+`batch_id`) carry `payload.batch` and are listed only inside their entry in `batches`
+(`{id, kind, group, counts, total, mine, jobs}`).
+
+Owners see and manage every job. Members and readers see only jobs they started (never a
+storage cleanup), get `title: null` for a book they cannot see, and readers get no `error`.
+Writes are session + CSRF; a job someone may not see is `404`:
+
+- `POST /api/job-queue/jobs/{id}/cancel`: any kind, the owner or whoever started it. A worker
+  holding the lease gets `409 lease_lost` on its next call, which stops it; uploaded artifacts
+  are removed at once, except a narration's (a Retry resumes from them).
+- `POST /api/job-queue/jobs/{id}/pause` and `/resume` (owner): a paused job stays `queued`
+  with `run_after` far in the future (`lectern.queue.PAUSED_UNTIL`), so no claim takes it and
+  it still holds its work's one live job of its kind. `409 not_waiting` for a running job.
+- `POST /api/job-queue/jobs/{id}/move` `{"to": "top" | "bottom"}` (owner): sets `priority`
+  one ahead of (behind) every other queued job. It still runs only where its capability can.
+- `POST /api/job-queue/jobs/{id}/retry` (owner): a failed job is queued again in place (same
+  payload, attempts reset). `409 already_running`, `work_gone`, or, for an alignment that ran
+  out of memory, `retry_from_book` (the book's Retry picks a smaller model).
+- `POST /api/job-queue/pause` `{"paused": bool}` (owner): pauses the whole queue
+  (`instance_settings.queue_paused`). Every claim (local runners and `POST
+  /api/worker/jobs/claim`) takes nothing while it is set; running jobs finish.
+- `POST /api/job-queue/batches/{batch}/cancel` (the owner or whoever queued it), `/pause`,
+  `/resume` (owner): the rest of a batch.
+
 ### PDF text and read-along on PDF pages — `/api/files/{id}/text`, `/api/files/{id}/sentences`
 
 See [pdf-read-along.md](pdf-read-along.md#api). Boxes are `[page, x0, y0, x1, y1]`: a 0-based

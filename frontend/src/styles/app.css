@@ -6620,3 +6620,72 @@ table.compare td:first-child {
   align-items: center;
   gap: 10px;
 }
+
+/* Jobs page (#87): grouped tables, batch rows that expand into their books. */
+.job-group h2 {
+  margin: 10px 0 4px;
+  font-size: 16px;
+}
+.job-group h2 .hint {
+  font-weight: 400;
+  margin-left: 4px;
+}
+.jobs-table td:last-child {
+  width: 1%;
+}
+.job-actions {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+.job-state {
+  overflow-wrap: anywhere;
+}
+.jobs-table .progress-bar {
+  margin-top: 4px;
+  max-width: 220px;
+}
+.batch-toggle {
+  margin-left: -8px;
+  text-align: left;
+}
+.batch-toggle svg {
+  transform: rotate(-90deg);
+  transition: transform var(--dur);
+}
+.batch-toggle[aria-expanded="true"] svg {
+  transform: none;
+}
+.jobs-table tr.nested td:first-child {
+  padding-left: 28px;
+}
+/* Phones: each job is a small card, book and status side by side, actions in a row below. */
+@media (max-width: 640px) {
+  .jobs-table thead,
+  .jobs-table td:nth-child(3) {
+    display: none;
+  }
+  .jobs-table tr {
+    display: grid;
+    grid-template-columns: 1fr 1.4fr;
+    border-bottom: 1px solid var(--line);
+  }
+  .jobs-table tr:last-child {
+    border-bottom: none;
+  }
+  table.list.jobs-table td {
+    border-bottom: none;
+  }
+  table.list.jobs-table td:last-child {
+    grid-column: 1 / -1;
+    width: auto;
+    padding-top: 0;
+  }
+  .jobs-table td:last-child:not(:has(button)) {
+    display: none;
+  }
+  .job-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
