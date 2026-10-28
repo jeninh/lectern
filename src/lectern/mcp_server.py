@@ -51,7 +51,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import Receive, Scope, Send
 
-from lectern import __version__, ai_keys, device_queue, filters, imports
+from lectern import __version__, ai_keys, device_queue, filters, imports, reviews
 from lectern.access import can_edit_library, can_see_work, visible_works
 from lectern.config import Settings
 from lectern.db import session_factory
@@ -89,6 +89,8 @@ You act as one person, with only their permissions and only the scopes their AI 
   detected metadata and the proposed match, and confirm_import (accept, edit fields, join an
   existing book, or file as new; needs the file scope, and only for imports you uploaded) or cancel_import. Ask the person when
   the match is not certain.
+- With the reviews scope only: get_review (this person's private rating, notes, and read
+  dates for a book), list_finished (what they finished in a year), and rating: in filters.
 - Find books with search_library / list_recent and inspect one with get_book. Book ids are
   numbers; use them for every other tool. search_library takes the Library's filters, e.g.
   format:epub -has:audio author:"Tolstoy" year:1850..1900 progress:<50% status:reading.
@@ -705,11 +707,14 @@ def search_library(
 ) -> dict:
     """Find books this person can see, with the Library's filters (docs/filters.md): a
     leading - negates a filter, a,b matches either value, and numbers, sizes, lengths, and
-    dates take <, >, or a..b. Scope: read."""
+    dates take <, >, or a..b. Scope: read; rating: and sorting by rating also need reviews."""
     with _call(ctx, "search_library", "read") as c:
+        ratings = c.has_scope("reviews")
+        if sort == "rating" and not ratings:
+            raise ToolError(_needs("reviews"))
         try:
             q = filters.parse(query)
-            where = filters.predicate(filters.Context(c.db, c.user), q)
+            where = filters.predicate(filters.Context(c.db, c.user, ratings=ratings), q)
         except filters.FilterError as exc:
             raise ToolError(f"invalid_filter: {exc.message}") from None
         stmt = select(Work).options(selectinload(Work.files)).where(where)
@@ -799,6 +804,26 @@ def list_recent(
             .limit(limit)
         ).all()
         return {"books": [{**_summary(w), "last_read_at": iso(at)} for w, at in rows]}
+
+
+# --- tools: reviews -------------------------------------------------------------------------------
+
+
+def get_review(ctx: Context, book_id: int) -> dict:
+    """This person's own private rating (stars, ½ to 5), Markdown notes, and read-throughs
+    (the days they started and finished each read) of one book. Scope: reviews."""
+    with _call(ctx, "get_review", "reviews") as c:
+        _visible(c.db, c.user, book_id)
+        out = reviews.review_json(c.db, c.user, book_id)
+        return {k: out[k] for k in ("rating", "notes", "read_throughs", "finished")}
+
+
+def list_finished(ctx: Context, year: Annotated[int, Field(ge=1900, le=2999)]) -> dict:
+    """The books this person finished in a year, by date, with their own ratings and the dates
+    as they corrected them. A re-read counts each time. Scope: reviews."""
+    with _call(ctx, "list_finished", "reviews") as c:
+        items = reviews.finished_in(c.db, c.user, year)
+        return {"year": year, "count": len(items), "books": items}
 
 
 # --- tools: organize ------------------------------------------------------------------------------
@@ -1200,6 +1225,8 @@ _TOOLS: list[tuple[Any, ToolAnnotations]] = [
     (search_library, READ),
     (get_book, READ),
     (list_recent, READ),
+    (get_review, READ),
+    (list_finished, READ),
     (list_shelves, READ),
     (add_to_shelf, WRITE),
     (remove_from_shelf, DESTRUCTIVE),

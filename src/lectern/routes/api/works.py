@@ -528,12 +528,14 @@ def _merge_commit(
     """Merge under the caller's library lock: file moves are journalled and put back if the
     commit fails; the emptied source folder and its history go only after it succeeds.
     ``keep_owner_data`` (library duplicates): the source's metadata, positions, and reading
-    states fill what the target lacks first (``lectern.duplicates.carry_over``)."""
-    from lectern import duplicates
+    states fill what the target lacks first (``lectern.duplicates.carry_over``). Each
+    person's rating, notes, and read-throughs always move (``lectern.reviews.move``)."""
+    from lectern import duplicates, reviews
 
     journal = Journal()
     try:
         restore = duplicates.carry_over(db, source, target) if keep_owner_data else None
+        reviews.move(db, source.id, target.id)  # what people wrote is never dropped
         finish = merge_work(db, settings, source, target, journal)
         if restore:
             restore()

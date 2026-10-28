@@ -40,7 +40,7 @@ from lectern.workmeta import NoControls
 router = APIRouter(prefix="/ai-keys")
 
 MAX_ACTIVE_KEYS = 50
-Scope = Literal["upload", "file", "read", "organize"]
+Scope = Literal["upload", "file", "read", "organize", "reviews"]
 
 
 def key_json(k: AIKey) -> dict:

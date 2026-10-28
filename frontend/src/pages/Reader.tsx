@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { BookHighlights } from "../components/BookHighlights";
+import { RatePrompt } from "../components/BookReview";
 import { ArrowLeft, Chevron, Highlighter, TextSize, Toc } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { annotationPath } from "../lib/annotations";
@@ -378,6 +379,9 @@ function EpubReader() {
           </span>
         </div>
       )}
+
+      {/* At the end (lectern.reading_state FINISHED): "Rate it?", unless rated or dismissed. */}
+      {!handoff && work && loc && loc.fraction >= 0.985 && <RatePrompt workId={work.id} className="handoff reader-handoff" />}
 
       <div className="reader-stage">
         {s.flow === "paginated" && !loading && !error && (

@@ -42,6 +42,8 @@ TOOL_SCOPES = {
     "search_library": "read",
     "get_book": "read",
     "list_recent": "read",
+    "get_review": "reviews",
+    "list_finished": "reviews",
     "list_shelves": "read",
     "add_to_shelf": "organize",
     "remove_from_shelf": "organize",
@@ -60,6 +62,8 @@ ARGS = {
     "confirm_import": {"import_id": "nope"},
     "cancel_import": {"import_id": "nope"},
     "get_book": {"book_id": 1},
+    "get_review": {"book_id": 1},
+    "list_finished": {"year": 2026},
     "add_to_shelf": {"book_id": 1, "shelf": "Shared"},
     "remove_from_shelf": {"book_id": 1, "shelf": "Shared"},
     "create_shelf": {"path": "New"},
@@ -261,7 +265,8 @@ def test_an_ai_key_opens_nothing_but_mcp(app, home):
 def test_readers_cannot_hold_upload_and_default_to_read(app, home):
     rex = home["rex"]
     listed = rex.http.get("/api/ai-keys").json()
-    assert listed["scopes"] == ["read", "organize"] and listed["default_scopes"] == ["read"]
+    assert listed["scopes"] == ["read", "organize", "reviews"]
+    assert listed["default_scopes"] == ["read"]
     r = api_post(rex.http, "/api/ai-keys", rex.csrf, {"label": "x", "scopes": ["upload"]})
     assert r.status_code == 403
     r = api_post(rex.http, "/api/ai-keys", rex.csrf, {"label": "x"})
@@ -312,7 +317,7 @@ def test_no_tool_result_carries_a_download_link(app, home, settings):
 @pytest.mark.parametrize("tool", sorted(TOOL_SCOPES))
 def test_every_tool_requires_its_scope(app, home, tool):
     needed = TOOL_SCOPES[tool]
-    others = [s for s in ("upload", "file", "read", "organize") if s != needed]
+    others = [s for s in ("upload", "file", "read", "organize", "reviews") if s != needed]
     owner = home["owner"]
     without = MCP(app, owner.key(*others, label="without"))
     ok, err = without.call(tool, **ARGS.get(tool, {}))

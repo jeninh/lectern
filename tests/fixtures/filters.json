@@ -60,6 +60,13 @@
     {"input": "added:2026-13", "error": "bad_date"},
     {"input": "added:2026-02-30", "error": "bad_date"},
     {"input": "added:yesterday", "error": "bad_date"},
-    {"input": "read:2026..30d", "error": "bad_date"}
+    {"input": "read:2026..30d", "error": "bad_date"},
+    {"input": "rating:4.5", "canonical": "rating:4.5"},
+    {"input": "Stars:>=4 -rated:0..5", "canonical": "rating:>=4 -rating:0..5"},
+    {"input": "rating:3,5", "canonical": "rating:3,5"},
+    {"input": "rating:6", "error": "bad_rating"},
+    {"input": "rating:4.3", "error": "bad_rating"},
+    {"input": "rating:5.5", "error": "bad_rating"},
+    {"input": "rating:great", "error": "bad_rating"}
   ]
 }

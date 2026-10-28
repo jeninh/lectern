@@ -51,6 +51,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Session
 
+from lectern import reviews
 from lectern.access import shelf_perms, visible_path, visible_shelf_ids, visible_works
 from lectern.models import (
     Alignment,
@@ -108,10 +109,11 @@ class FilterError(ValueError):
 
 # --- the fields -------------------------------------------------------------------------------
 
-ENUM, TEXT, NUMBER, SIZE, DURATION, PERCENT, DATE, SHELF, USER, DEVICE = (
+ENUM, TEXT, NUMBER, SIZE, DURATION, PERCENT, DATE, SHELF, USER, DEVICE, RATING = (
     "enum", "text", "number", "size", "duration", "percent", "date", "shelf", "user", "device",
+    "rating",
 )  # fmt: skip
-COMPARABLE = {NUMBER, SIZE, DURATION, PERCENT, DATE}
+COMPARABLE = {NUMBER, SIZE, DURATION, PERCENT, DATE, RATING}
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,7 @@ FIELDS: dict[str, Field] = {
         Field("read", DATE, "Last read", "Reading", aliases=("last-read", "lastread")),
         Field("started", DATE, "Started", "Reading"),
         Field("finished", DATE, "Finished", "Reading"),
+        Field("rating", RATING, "Your rating", "Reading", aliases=("rated", "stars")),
         Field("title", TEXT, "Title", "Book details"),
         Field("author", TEXT, "Author", "Book details", aliases=("by-author", "authors")),
         Field("series", TEXT, "Series", "Book details"),
@@ -293,6 +296,7 @@ _OP_RE = re.compile(r"^(<=|>=|<|>|=)")
 _SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(b|k|kb|kib|m|mb|mib|g|gb|gib|t|tb|tib)?$")
 _DUR_RE = re.compile(r"^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?:in)?)?(?:(\d+(?:\.\d+)?)s)?$")
 _PCT_RE = re.compile(r"^(\d+(?:\.\d+)?)%?$")
+_RATING_RE = re.compile(r"^[0-5](?:\.[05])?$")
 _DATE_RE = re.compile(r"^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$")
 _AGE_RE = re.compile(r"^(\d+)(d|w|m|y)$")
 
@@ -352,6 +356,11 @@ def _check_scalar(f: Field, text: str) -> str:
     if f.kind == NUMBER:
         if not re.fullmatch(r"\d{1,9}", t):
             raise FilterError("bad_number", f"{f.label}: “{text}” is not a whole number.", f.key)
+    elif f.kind == RATING:
+        if not _RATING_RE.match(t) or float(t) > 5:
+            raise FilterError(
+                "bad_rating", f"{f.label}: “{text}” is not 0 to 5 stars in halves (4.5).", f.key
+            )
     elif f.kind == SIZE:
         _num(t, "bad_size", f.label, f.key, _SIZE_RE)
     elif f.kind == DURATION:
@@ -562,6 +571,8 @@ def _compare(x, f: Field, v: Value, now: datetime):
             return seconds_of(t)
         if f.kind == PERCENT:
             return float(_PCT_RE.match(t).group(1)) / 100, 0.01  # type: ignore[union-attr]
+        if f.kind == RATING:
+            return float(t), 0.5
         return float(int(t)), 1.0
 
     if v.op == "..":
@@ -573,7 +584,7 @@ def _compare(x, f: Field, v: Value, now: datetime):
         return and_(*parts)
     n, unit = num(v.a)
     if v.op == "=":
-        if f.kind == NUMBER:
+        if f.kind in (NUMBER, RATING):
             return x == n
         # "length:10h" or "size:100MB": equal when rounded to the unit written.
         return and_(x >= n - unit / 2, x < n + unit / 2)
@@ -600,9 +611,14 @@ class Context:
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
     # Inside a smart shelf's rule: a smart shelf named there matches nothing (no recursion).
     nested: bool = False
+    # The person's private ratings (``rating:``): off for an AI key without the reviews scope.
+    ratings: bool = True
 
     def lenient(self) -> Context:
-        return Context(self.db, self.user, False, self.offline_ids, self.now, nested=True)
+        return Context(
+            self.db, self.user, False, self.offline_ids, self.now, nested=True,
+            ratings=self.ratings,
+        )  # fmt: skip
 
 
 def _has_file(media_type: str):
@@ -917,8 +933,9 @@ def _scalar(f: Field, u: User):
         "year": year_of,
         "progress": lambda: fraction_of(u),
         "read": lambda: _state(u, ReadingState.last_read_at),
-        "started": lambda: _state(u, ReadingState.started_at),
-        "finished": lambda: _state(u, ReadingState.finished_at),
+        "started": lambda: reviews.latest_date(u.id, "started"),
+        "finished": lambda: reviews.latest_date(u.id, "finished"),
+        "rating": lambda: reviews.rating_of(u.id),
         "added": lambda: Work.created_at,
     }[f.key]()
 
@@ -935,6 +952,19 @@ def clause_pred(ctx: Context, c: Clause) -> ColumnElement[bool]:
         pred = or_(*(_enum_pred(ctx, f, v.a) for v in c.values))
     elif f.kind == TEXT:
         pred = or_(*(_text_pred(f, v.a) for v in c.values))
+    elif f.key in ("started", "finished"):
+        # Any read-through's date; the reading state's for a work with none saved.
+        pred = reviews.date_pred(
+            ctx.user.id, f.key, lambda x: or_(*(_compare(x, f, v, ctx.now) for v in c.values))
+        )
+    elif f.kind == RATING and not ctx.ratings:
+        if ctx.strict:
+            raise FilterError(
+                "field_not_allowed",
+                "Your rating: this AI key needs the reviews scope to filter by rating.",
+                c.key,
+            )
+        pred = false()
     else:
         x = _scalar(f, ctx.user)
         pred = or_(*(_compare(x, f, v, ctx.now) for v in c.values))
@@ -984,6 +1014,7 @@ SORTS: dict[str, tuple[str, bool]] = {
     "read": ("Last read", True),
     "started": ("Started", True),
     "finished": ("Finished", True),
+    "rating": ("Your rating", True),
     "lang": ("Language", False),
     "publisher": ("Publisher", False),
 }
