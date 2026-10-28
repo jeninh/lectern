@@ -109,3 +109,15 @@ export function pushLine(p: PushInfo): string {
       return `On: ${p.kind === "ntfy" ? "ntfy" : "webhook"} at ${p.server}${p.token_set ? " (with a token)" : ""}.`;
   }
 }
+
+export interface DrillStep {
+  id: string;
+  title: string;
+  ok: boolean;
+  note: string;
+}
+
+/** The restore drill's checks, in order, from its Health detail (lectern.drill). */
+export function drillSteps(detail: Record<string, unknown>): DrillStep[] {
+  return Array.isArray(detail.checks) ? (detail.checks as DrillStep[]) : [];
+}

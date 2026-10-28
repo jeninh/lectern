@@ -154,7 +154,8 @@ class Housekeeping:
 
 class Maintenance:
     """One thread for the owner's opt-in nightly backup (off by default; each tick reads the
-    switch from the database) and the health checks and their alerts (``lectern.health``,
+    switch from the database), the restore drill that follows it (``lectern.drill``, off by
+    default), and the health checks and their alerts (``lectern.health``,
     every ``health.POLL_S``)."""
 
     def __init__(self, session_factory: sessionmaker, settings: Settings) -> None:
@@ -171,7 +172,7 @@ class Maintenance:
         self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        from lectern import backups, health, storage
+        from lectern import backups, drill, health, storage
 
         next_health = 0.0
         while not self._stop.wait(self.settings.maintenance_poll_seconds):
@@ -179,6 +180,10 @@ class Maintenance:
                 backups.tick(self.session_factory, self.settings)
             except Exception:  # noqa: BLE001
                 log.exception("backup tick failed")
+            try:
+                drill.tick(self.session_factory, self.settings)  # after the backup, never with it
+            except Exception:  # noqa: BLE001
+                log.exception("restore drill tick failed")
             try:
                 storage.tick(self.session_factory, self.settings, background=True)
             except Exception:  # noqa: BLE001

@@ -105,6 +105,11 @@ services:
       LECTERN_OFFLINE: ${LECTERN_OFFLINE:-0}
       # Admin → Storage flags a volume with less free space than this percentage (docs/storage.md).
       LECTERN_STORAGE_WARN_FREE_PERCENT: ${LECTERN_STORAGE_WARN_FREE_PERCENT:-10}
+      # Restore drill (docs/backups.md#restore-drill): empty or 0 days = off; 7 = weekly.
+      LECTERN_RESTORE_DRILL_DAYS: ${LECTERN_RESTORE_DRILL_DAYS:-}
+      LECTERN_RESTORE_DRILL_READ_DATA_PARTS: ${LECTERN_RESTORE_DRILL_READ_DATA_PARTS:-}
+      LECTERN_RESTORE_DRILL_SAMPLE: ${LECTERN_RESTORE_DRILL_SAMPLE:-}
+      LECTERN_RESTORE_DRILL_TIMEOUT_MINUTES: ${LECTERN_RESTORE_DRILL_TIMEOUT_MINUTES:-}
       # Email-in (docs/email-in.md): off unless LECTERN_EMAIL_IN=1. Lectern reads one mailbox
       # over IMAP with TLS (outbound only; nothing here listens for mail). Empty = default.
       LECTERN_EMAIL_IN: ${LECTERN_EMAIL_IN:-}
