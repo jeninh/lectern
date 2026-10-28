@@ -3568,7 +3568,7 @@ pre.ra-b {
 }
 .swatches {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
   gap: 8px;
 }
 .swatch {
@@ -3604,6 +3604,30 @@ pre.ra-b {
 .swatch.dark {
   background: #1b1712;
   color: #e6dccb;
+}
+.swatch.contrast {
+  background: #ffffff;
+  color: #000000;
+}
+.font-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+}
+.font-choices button {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  font-size: 15px;
+  text-align: start;
+  cursor: pointer;
+}
+.font-choices button[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 @media (max-width: 900px) {
   /* Title keeps a readable width; actions wrap under it on phones. */

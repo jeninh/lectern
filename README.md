@@ -296,8 +296,12 @@ Readers never see add, edit, or trash controls, and the API refuses them (`403`)
 
 - **Reader** (`/app/reader/<id>`, **Read** on any book): the EPUB rendered with
   [foliate-js](https://github.com/johnfactotum/foliate-js), in pages or as one scroll.
-  Typography (font, size, line spacing, margins, line length, justification) and themes
-  (light, warm, warm dark, or follow the app) are kept per browser. `←`/`→` turn pages.
+  Typography (font, size, line, letter, word, and paragraph spacing, heavier text, margins,
+  line length, justification) and themes (light, warm, warm dark, high contrast, or follow
+  the app) are saved to your account, so they follow you to every browser; **Just this book**
+  keeps different settings for one book. The fonts include OpenDyslexic, Atkinson
+  Hyperlegible, and Lexend, served by Lectern itself ([`frontend/fonts`](frontend/fonts/README.md)).
+  The page viewer for PDFs and comics uses the same theme. `←`/`→` turn pages.
 - **Listening** (`/app/listening`, `G` `P`): chapters across all tracks, 0.8–3× speed,
   ±15/30 s skips, a sleep timer (minutes or end of chapter) that fades out and rewinds to the
   start of the last sentence heard, lock-screen and headphone controls (Media Session), and a
