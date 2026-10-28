@@ -18,6 +18,8 @@ services:
       LECTERN_TRUST_CF_CONNECTING_IP: ${LECTERN_TRUST_CF_CONNECTING_IP:-0}
       # 1 = offline mode: no outbound internet connections from Lectern (docs/offline-mode.md).
       LECTERN_OFFLINE: ${LECTERN_OFFLINE:-0}
+      # Admin → Storage flags a volume with less free space than this percentage (docs/storage.md).
+      LECTERN_STORAGE_WARN_FREE_PERCENT: ${LECTERN_STORAGE_WARN_FREE_PERCENT:-10}
     volumes:
       - lectern-data:/data
       - ./library:/library

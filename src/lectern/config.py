@@ -175,6 +175,10 @@ class Settings(BaseSettings):
     # another volume; on a Pi that is the SD card). Data files are always kept.
     restore_keep_replaced: bool = True
 
+    # Storage dashboard (docs/storage.md): a volume with less free space than this percentage
+    # is flagged low (Admin → Storage; the threshold to share with the health page, #75).
+    storage_warn_free_percent: float = Field(default=10.0, ge=0.0, le=100.0)
+
     # Seconds between checks whether the nightly backup is due.
     maintenance_poll_seconds: float = 60.0
 

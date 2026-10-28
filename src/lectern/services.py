@@ -170,13 +170,17 @@ class Maintenance:
         self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        from lectern import backups
+        from lectern import backups, storage
 
         while not self._stop.wait(self.settings.maintenance_poll_seconds):
             try:
                 backups.tick(self.session_factory, self.settings)
             except Exception:  # noqa: BLE001
                 log.exception("backup tick failed")
+            try:
+                storage.tick(self.session_factory, self.settings, background=True)
+            except Exception:  # noqa: BLE001
+                log.exception("storage scan failed")
 
 
 def start_services(session_factory: sessionmaker, settings: Settings) -> list:
