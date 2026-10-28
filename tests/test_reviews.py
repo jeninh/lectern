@@ -401,7 +401,7 @@ def test_migration_0030_up_and_down(tmp_path):
         conn.commit()
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.downgrade(cfg, "0026_highlights_search")
+        command.downgrade(cfg, "0029_playback_speed")
     tables = sa.inspect(engine).get_table_names()
     assert "book_reviews" not in tables and "read_throughs" not in tables
     upgrade_to_head(engine)
