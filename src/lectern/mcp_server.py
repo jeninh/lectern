@@ -1110,6 +1110,7 @@ def job_status(
 ) -> dict:
     """An alignment job's state (queued, running with progress and ETA, done, failed) and the
     book's alignment. Give job_id or book_id. Scope: organize."""
+    from lectern import jobqueue
     from lectern.align import jobs
 
     with _call(ctx, "job_status", "organize") as c:
@@ -1124,7 +1125,13 @@ def job_status(
         if job is None or (job.work_id is not None and not can_see_work(c.db, c.user, job.work_id)):
             raise ToolError("not_found: no such job")
         alignment = jobs.work_alignment(c.db, job.work_id) if job.work_id else None
-        return {"job": jobs.job_json(c.db, job), "alignment": jobs.alignment_json(c.db, alignment)}
+        # the Jobs page's rule (lectern.jobqueue.shows_error): a job with a book got here only
+        # if the book is visible; one with no book shows its error to the owner alone
+        show_error = jobqueue.shows_error(c.user, job.work_id is not None)
+        return {
+            "job": jobs.job_json(c.db, job, show_error=show_error),
+            "alignment": jobs.alignment_json(c.db, alignment),
+        }
 
 
 def edit_metadata(

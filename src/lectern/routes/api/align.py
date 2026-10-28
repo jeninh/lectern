@@ -166,6 +166,9 @@ def request_align(
         # A worker is spending CPU-hours on it; force would throw that away on every click.
         # Cancelling is still possible, explicitly, with POST /api/jobs/{id}/cancel.
         raise HTTPException(status.HTTP_409_CONFLICT, "job_running")
+    if body.force and existing is not None and not jobqueue.may_see(existing, auth.user):
+        # Replacing is cancelling: the same rule as POST /api/jobs/{id}/cancel.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_job")
     alignment = jobs.work_alignment(db, work.id)
     retry = _retry_model(db, work.id)
     if (

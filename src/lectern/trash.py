@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lectern import queue
 from lectern.config import Settings
 from lectern.fsops import (
     TRASH_DIR,
@@ -41,7 +42,6 @@ from lectern.models import (
     BookFile,
     FileKind,
     Job,
-    JobStatus,
     TrashedFile,
     Work,
     WorkRevision,
@@ -66,12 +66,11 @@ def _cancel_jobs(db: Session, work_id: int) -> None:
 
     for job in db.scalars(
         select(Job).where(Job.work_id == work_id, Job.status.in_(JOB_ACTIVE_STATUSES))
-    ):
+    ).all():
         if job.kind == align_jobs.KIND_ALIGN:
             align_jobs.cancel_job(db, job)
         else:
-            job.status, job.finished_at = JobStatus.CANCELLED, utcnow()
-            job.lease_token_hash, job.lease_expires_at = None, None
+            queue.cancel_row(db, job)  # conditional: a job that finished meanwhile stays so
 
 
 def _digests(db: Session, work_id: int) -> dict[str, str]:

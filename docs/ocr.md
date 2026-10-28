@@ -145,8 +145,11 @@ which replaces it.
   default_language, languages, engine, worker, job, progress, message, error, result: {pages,
   pages_with_words, pages_failed, words, chars, language, engine}, download_url, size}`.
 - `POST /api/files/{id}/ocr` `{"language"?}` (owners, members): start, retry, or redo in another
-  language (`409 has_text | no_engine | another_pdf_running`, `422 invalid_language`).
-- `DELETE /api/files/{id}/ocr` (owners, members): stop a running job and delete the copy.
+  language (`409 has_text | no_engine | another_pdf_running`, `422 invalid_language`). Another
+  language replaces a run in progress, which is cancelling it: a member gets `403 not_your_job`
+  for a run they did not start (the owner may replace any).
+- `DELETE /api/files/{id}/ocr` (owners, members): stop a running job and delete the copy; the
+  same `403 not_your_job` while someone else's run is in progress.
 - `GET /api/files/{id}/ocr/pdf`: the searchable copy.
 
 Audit actions: `ocr.start`, `ocr.delete`. Worker contract: [contracts.md](contracts.md#ocr-on-external-workers).

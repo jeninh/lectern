@@ -358,6 +358,45 @@ def test_members_start_ocr_readers_cannot(client, owner, settings, scanned):
     assert api_post(client, f"/api/files/{book.id}/ocr", csrf).status_code in (403, 404)
 
 
+def test_only_the_owner_or_who_started_it_may_replace_or_stop_a_run(
+    client, owner, settings, scanned, monkeypatch
+):
+    """Issue #117 (2): another language, or deleting the copy, cancels the run in progress, so
+    both follow the cancel rule (POST /api/jobs/{id}/cancel): the owner or whoever started it."""
+    from tests.conftest import login, make_user
+
+    monkeypatch.setattr(ocr, "can_run", lambda _db, _settings: True)  # no engine needed
+    book, work = scanned
+    url = f"/api/files/{book.id}/ocr"
+    mia = make_user(client, owner["csrf"], "mia", "member")
+    m = TestClient(client.app)
+    m_csrf = login(m, "mia", mia["password"])
+
+    def live() -> Job | None:
+        with session_factory()() as db:
+            return ocr.active_job(db, work.id)
+
+    assert api_post(client, url, owner["csrf"], {"language": "eng"}).status_code == 200
+    theirs = live().id
+    r = api_post(m, url, m_csrf, {"language": "deu"})
+    assert (r.status_code, r.json()["detail"]) == (403, "not_your_job")
+    r = api_delete(m, url, m_csrf)
+    assert (r.status_code, r.json()["detail"]) == (403, "not_your_job")
+    assert (live().id, live().payload["language"]) == (theirs, "eng")
+    assert api_post(m, url, m_csrf, {"language": "eng"}).status_code == 200  # same: no cancel
+    assert live().id == theirs
+
+    # the owner may replace anyone's run; whoever started a run may replace or stop it
+    assert api_post(client, url, owner["csrf"], {"language": "fra"}).status_code == 200
+    with session_factory()() as db:
+        assert db.get(Job, theirs).status == JobStatus.CANCELLED
+        db.get(Job, live().id).created_by = mia["id"]
+        db.commit()
+    assert api_post(m, url, m_csrf, {"language": "deu"}).status_code == 200
+    assert (live().payload["language"], live().created_by) == ("deu", mia["id"])
+    assert api_delete(m, url, m_csrf).status_code == 200 and live() is None
+
+
 @needs_tesseract
 def test_a_worker_recognises_pages_and_the_server_builds_the_pdf(
     client, owner, settings, scanned, app
