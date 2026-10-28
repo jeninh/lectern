@@ -187,6 +187,28 @@ the device shows in search after the next sync. To rebuild it (it should never b
 `lectern highlights-reindex` beside the server. Search only ever reads your own highlights, and
 only for books you can still see, by the same rules as below.
 
+### Quotes and the highlight of the day
+
+- **Quotes** (the Highlights page's second view, `/app/highlights?view=quotes`) shows your
+  highlights as cards with their note, book, author, and cover, newest first (KOReader's creation
+  time) or **Shuffle**d (**Shuffle again** for another order). Filter by book, author, shelf, and
+  tag; *Open in reader* goes to the passage. The filters stay in the address, so a view can be
+  bookmarked.
+- **Favourite** (the heart) or **Hide** a quote to tune the feed: *Favourites* shows only those,
+  hidden quotes leave the feed and the highlight of the day and wait under *Hidden* (**Unhide**
+  brings one back). Marks are yours alone and survive later syncs of the same highlight; they do
+  not change the search list or the export. A highlight deleted on the device takes its marks
+  with it.
+- **Highlight of the day** on Home: one of your own highlights, not hidden, chosen from your
+  account and your local date (the browser's), so it is the same all day and another tomorrow
+  (two running are never the same when you have more than one). A new sync changes it only when a
+  new highlight outranks it. **Turn off** on the card hides it; the *Highlight of the day on
+  Home* box in Quotes turns it back on. Nothing shows when you have no highlights, or offline.
+
+Both use only your own highlights on books you can still see, by the same rules as below; the
+marks and the setting are in `lectern.db` (`annotations.favourite`, `annotations.hidden`,
+`users.quote_of_the_day`, migration `0032`). Audiobook clips (#81) are not in the feed yet.
+
 **Private.** Highlights belong to the person whose device sent them: nobody else sees them, not
 other household members nor the owner, and their owner sees them only while they can see the
 book (a book unshared from a reader takes its highlights out of their view until it is shared

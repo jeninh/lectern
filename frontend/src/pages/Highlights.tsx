@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { EmptyState } from "../components/EmptyState";
-import { Close, Download, Highlighter, Search as SearchIcon } from "../components/Icons";
+import { Close, Download, Highlighter, Quote as QuoteIcon, Search as SearchIcon } from "../components/Icons";
+import { QuoteFeed } from "../components/QuoteFeed";
 import { PageTitle } from "../components/Shell";
 import { ApiError, get } from "../lib/api";
 import { annotationWhere, type HighlightFilters, highlightHitPath, highlightsQuery } from "../lib/annotations";
@@ -19,7 +20,8 @@ function Marked({ parts, text }: { parts: [string, boolean][] | null; text: stri
 
 /** All your KOReader highlights and notes, searched and filtered by book, author, tag, and date,
  * with the Markdown export of what is shown (docs/koreader-plugin.md#searching-your-highlights).
- * The search and filters live in the URL, so a filtered view can be bookmarked. */
+ * The search and filters live in the URL, so a filtered view can be bookmarked. `view=quotes`
+ * shows them as the quotes feed instead (components/QuoteFeed.tsx, issue #83). */
 export function HighlightsPage() {
   const { works } = useStore();
   const [params, setParams] = useSearchParams();
@@ -29,6 +31,7 @@ export function HighlightsPage() {
   const [data, setData] = useState<HighlightSearch | null>(null);
   const [error, setError] = useState<string | null>(null);
   const query = highlightsQuery(filters);
+  const quotes = params.get("view") === "quotes";
 
   useEffect(() => {
     get<AnnotationsSummary>("/api/annotations").then(setSummary).catch((e) => setError((e as Error).message));
@@ -45,7 +48,7 @@ export function HighlightsPage() {
   }, [typed]);
 
   useEffect(() => {
-    if (!summary?.total) return;
+    if (!summary?.total || quotes) return;
     let live = true;
     get<HighlightSearch>(`/api/annotations/search?${query}${query ? "&" : ""}limit=${LIMIT}&partial=false`)
       .then((d) => {
@@ -57,7 +60,7 @@ export function HighlightsPage() {
     return () => {
       live = false;
     };
-  }, [query, summary?.total]);
+  }, [query, summary?.total, quotes]);
 
   const books = summary?.works ?? [];
   const authors = useMemo(() => [...new Set(books.map((w) => w.author).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [books]);
@@ -72,12 +75,19 @@ export function HighlightsPage() {
   return (
     <>
       <PageTitle sub="Notes and highlights from KOReader">Highlights</PageTitle>
+      {summary && summary.total > 0 && (
+        <div className="seg seg-text highlights-view" role="group" aria-label="Highlights view">
+          <button aria-pressed={!quotes} onClick={() => setParams(new URLSearchParams(), { replace: true })}><SearchIcon /> Search</button>
+          <button aria-pressed={quotes} onClick={() => setParams("view=quotes", { replace: true })}><QuoteIcon /> Quotes</button>
+        </div>
+      )}
+      {summary && summary.total > 0 && quotes && <QuoteFeed books={summary.works} />}
       {summary && summary.total === 0 && (
         <EmptyState icon={<Highlighter />} title="No highlights yet" action={<Link className="btn" to="/app/devices">Set up KOReader</Link>}>
           Passages you highlight in KOReader, and the notes you add to them, show up here and on each book once the Lectern plugin syncs.
         </EmptyState>
       )}
-      {summary && summary.total > 0 && (
+      {summary && summary.total > 0 && !quotes && (
         <div className="stack">
           <div className="filter-bar highlights-filters" role="search" aria-label="Highlights">
             <div className="filter-input">

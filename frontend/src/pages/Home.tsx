@@ -4,6 +4,7 @@ import { ContinueCard } from "../components/ContinueCard";
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { Book, Devices as DevicesIcon, Plus, Reader, Upload } from "../components/Icons";
+import { QuoteOfTheDayCard } from "../components/QuoteFeed";
 import { PageTitle } from "../components/Shell";
 import { get, OfflineError } from "../lib/api";
 import { listBooks } from "../lib/offline/store";
@@ -88,6 +89,8 @@ export function HomePage() {
               </div>
             )}
           </section>
+
+          <QuoteOfTheDayCard />
 
           {worksLoaded && works.length > 0 && (
             <section aria-labelledby="recent-h">
