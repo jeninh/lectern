@@ -105,17 +105,22 @@ def test_paths_resolve_against_the_repository_root(compose_config):
     assert Path(mounts["/data"]["source"]) == ROOT / "data" / "lectern"
     assert Path(mounts["/library"]["source"]) == ROOT / "library"
     assert Path(mounts["/backups"]["source"]) == ROOT / "backups"
-    # Created if missing so `git pull && up` works without it; backups are off by default.
-    # Older Compose prints create_host_path only when true; newer Compose defaults it to true,
-    # omits it then, and prints false explicitly. Accept either rendering of "true".
-    assert mounts["/backups"].get("bind", {}).get("create_host_path", True) is True
     assert Path(mounts["/var/lib/tailscale"]["source"]) == ROOT / "data" / "tailscale"
     assert Path(mounts["/config/serve.json"]["source"]) == SERVE
     assert mounts["/config/serve.json"]["read_only"] is True
-    # Missing data/library must fail instead of appearing as root-owned, unwritable dirs.
-    # (Older Compose omits create_host_path when false; newer Compose prints false.)
+
+    # /backups is created if missing so `git pull && up` works without it (backups are off by
+    # default); missing data/library must fail instead of appearing as root-owned, unwritable
+    # dirs. `docker compose config` omits one value of create_host_path: false on older
+    # Compose (v2.29.7), true on newer Compose (v5.6.1). So /backups prints true or nothing,
+    # /data and /library print false or nothing, and they must never print the same.
+    def host_path(target):
+        return (mounts[target].get("bind") or {}).get("create_host_path")
+
+    assert host_path("/backups") in (True, None)
     for target in ("/data", "/library"):
-        assert not mounts[target].get("bind", {}).get("create_host_path", False), target
+        assert host_path(target) in (False, None), target
+        assert host_path(target) != host_path("/backups"), target
     assert lectern["environment"]["LECTERN_BASE_URL"] == "https://lectern.tail1234.ts.net"
     assert ts["environment"]["TS_HOSTNAME"] == "lectern"
 
