@@ -23,7 +23,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from lectern import egress, email_in, instance, integrations
+from lectern import egress, email_in, instance, integrations, push_alerts
 from lectern.config import Settings
 
 KEY = "offline_mode"
@@ -124,6 +124,7 @@ def features(db: Session, settings: Settings, models_: dict | None = None) -> li
     offline = egress.offline()
     el = integrations.status(db, settings, integrations.ELEVENLABS)
     mail, _problems = email_in.load(settings)
+    push, _problems = push_alerts.load(settings)
     align, kokoro = m["align"], m["kokoro"]
     rows = [
         {
@@ -189,6 +190,18 @@ def features(db: Session, settings: Settings, models_: dict | None = None) -> li
                 "with TLS and reads new mail sent to people's email-in addresses."
                 if mail is not None
                 else "Not set up (LECTERN_EMAIL_IN in .env)."
+            ),
+        },
+        {
+            "id": "push_alerts",
+            "name": "Push alerts",
+            "contacts": ["the ntfy or webhook server set in .env"],
+            "on": push is not None,
+            "when": (
+                "When a health check turns amber or red, or recovers: its name, level, and a "
+                "short reason are sent. While offline mode is on they stay in the app."
+                if push is not None
+                else "Not set up (LECTERN_ALERT_NTFY_URL or LECTERN_ALERT_WEBHOOK_URL in .env)."
             ),
         },
     ]

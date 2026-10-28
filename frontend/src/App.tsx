@@ -10,6 +10,7 @@ import { ReadAlongPage } from "./pages/ReadAlong";
 import { SecurityPage } from "./pages/Security";
 import { AdminPage } from "./pages/Admin";
 import { HighlightsPage } from "./pages/Highlights";
+import { HealthPage } from "./pages/Health";
 import { ListeningPage } from "./pages/Listening";
 import { TrashPage } from "./pages/Trash";
 import { DownloadsPage } from "./pages/Downloads";
@@ -64,6 +65,7 @@ export default function App() {
           <Route path="/app/docs" element={docs} />
           <Route path="/app/docs/:slug" element={docs} />
           <Route path="/app/admin" element={<OwnerOnly><AdminPage /></OwnerOnly>} />
+          <Route path="/app/health" element={<OwnerOnly><HealthPage /></OwnerOnly>} />
           <Route path="/app/users" element={<Navigate to="/app/admin" replace />} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>

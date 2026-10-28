@@ -129,6 +129,11 @@ sections:
         description: Where the disk space goes, and safe cleanup of files Lectern can make again.
         icon: gear
         audience: owner
+      - file: health.md
+        title: Health and alerts
+        description: One page for backups, disk space, failed jobs, and workers; optional push alerts.
+        icon: shield
+        audience: owner
       - file: offline-mode.md
         title: Offline mode
         description: Guarantee the server makes no internet connections, with models downloaded first.
