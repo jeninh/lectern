@@ -45,15 +45,23 @@ def upgrade() -> None:
         "ix_metadata_suggestions_work_id", "metadata_suggestions", ["work_id"], unique=True
     )
     op.create_index("ix_metadata_suggestions_status", "metadata_suggestions", ["status"])
-    # Plain ADD COLUMN with a constant default, never a batch rebuild (see 0017).
-    op.add_column(
-        "match_suggestions",
-        sa.Column("origin", sa.String(length=16), nullable=False, server_default="ingest"),
-    )
+    # Plain ADD COLUMN with a constant default, never a batch rebuild (see 0017). Already
+    # there after a downgrade on SQLite before 3.35 (see downgrade): rows added since got the
+    # default, which is right, since 0018's code only makes ingest suggestions.
+    if "origin" not in {
+        c["name"] for c in sa.inspect(op.get_bind()).get_columns("match_suggestions")
+    }:
+        op.add_column(
+            "match_suggestions",
+            sa.Column("origin", sa.String(length=16), nullable=False, server_default="ingest"),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("match_suggestions", "origin")
+    # ALTER TABLE … DROP COLUMN needs SQLite 3.35. Before that the column stays: it has a
+    # server default, so 0018's code inserts rows without naming it, and never reads it.
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("match_suggestions", "origin")
     op.drop_index("ix_metadata_suggestions_status", table_name="metadata_suggestions")
     op.drop_index("ix_metadata_suggestions_work_id", table_name="metadata_suggestions")
     op.drop_table("metadata_suggestions")
