@@ -816,6 +816,102 @@ def test_migration_0018_backfills_states_and_pages(tmp_path):
         assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
 
 
+def test_migration_0019_downgrades_keep_rows_on_any_sqlite(tmp_path):
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from lectern.models import Base
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'm19.db'}")
+    cfg = alembic_config(str(engine.url))
+    upgrade_to_head(engine)
+    sql = [
+        "INSERT INTO works (id, title, sort_title, author, sort_author, dir_path, has_cover,"
+        " created_at, updated_at, version, readalong_enabled, data_saver_enabled, cover_seed)"
+        " VALUES "
+        + ", ".join(
+            f"({i}, 'W{i}', 'w{i}', 'A', 'a', 'A/W{i}', 0, '2026-01-01', '2026-01-01', 1, 1, 1, 0)"
+            for i in (1, 2)
+        ),
+        "INSERT INTO book_files (id, work_id, kind, rel_path, media_type, size, sha256,"
+        " partial_md5, added_at) VALUES (1, 1, 'EBOOK', 'b.pdf', 'application/pdf', 1, 's1',"
+        " 'doc1', '2026-01-01')",
+        "INSERT INTO pdf_texts (file_id, work_id, pdf_sha256, version, status, pages,"
+        " pages_with_text, chars, sentence_count, attempts, created_at, updated_at, ocr_sha256)"
+        " VALUES (1, 1, 's1', 1, 'ready', 3, 3, 1, 0, 0, '2026-01-01', '2026-01-01', 'o1')",
+        "INSERT INTO match_suggestions (work_id, candidate_work_id, score, reason, created_at,"
+        " origin) VALUES (2, 1, 0.9, '', '2026-01-01', 'library')",
+    ]
+    with engine.begin() as conn:
+        for s in sql:
+            conn.execute(sa.text(s))
+
+    def cols(table):
+        return {c["name"] for c in sa.inspect(engine).get_columns(table)}
+
+    def count(table):
+        with engine.connect() as conn:
+            return conn.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar()
+
+    # Later revisions go down normally; only the 0019 steps run under the version checked.
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, *_args):
+        statements.append(statement.upper())
+
+    def down_to_0018(version, hook):
+        with engine.begin() as conn:
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0020_merge_0019_heads")
+        real_version = engine.dialect.server_version_info
+        engine.dialect.server_version_info = version
+        sa.event.listen(engine, "before_cursor_execute", hook)
+        try:
+            with engine.begin() as conn:
+                cfg.attributes["connection"] = conn
+                command.downgrade(cfg, "0018_library_filters")
+        finally:
+            sa.event.remove(engine, "before_cursor_execute", hook)
+            engine.dialect.server_version_info = real_version
+
+    # SQLite 3.35+: the columns go, by DROP COLUMN, never by rebuilding either table.
+    down_to_0018(engine.dialect.server_version_info, record)
+    assert "origin" not in cols("match_suggestions")
+    assert "ocr_sha256" not in cols("pdf_texts")
+    assert not [s for s in statements if "DROP TABLE" in s and "METADATA_SUGGESTIONS" not in s]
+    assert (count("pdf_texts"), count("match_suggestions")) == (1, 1)
+    upgrade_to_head(engine)
+
+    # SQLite before 3.35 has no ALTER TABLE … DROP COLUMN: both downgrades still work and keep
+    # every row, and so does upgrading again.
+    def old_sqlite(_conn, _cursor, statement, *_args):
+        if "DROP COLUMN" in statement.upper():
+            raise sa.exc.OperationalError(statement, None, Exception('near "DROP": syntax error'))
+
+    with engine.begin() as conn:
+        conn.execute(sa.text("UPDATE pdf_texts SET ocr_sha256 = 'o1'"))
+        conn.execute(sa.text("UPDATE match_suggestions SET origin = 'library'"))
+    down_to_0018((3, 34, 1), old_sqlite)
+    assert "metadata_suggestions" not in sa.inspect(engine).get_table_names()
+    assert (count("pdf_texts"), count("match_suggestions")) == (1, 1)
+    with engine.begin() as conn:  # 0018's code: inserts without origin; never reads OCR hashes
+        conn.execute(
+            sa.text(
+                "INSERT INTO match_suggestions (work_id, candidate_work_id, score, reason,"
+                " created_at) VALUES (1, 2, 0.8, '', '2026-01-02')"
+            )
+        )
+    upgrade_to_head(engine)
+    with engine.connect() as conn:
+        origins = conn.execute(
+            sa.text("SELECT work_id, origin FROM match_suggestions ORDER BY work_id")
+        ).all()
+        assert origins == [(1, "ingest"), (2, "library")]
+        # Left stale while downgraded: cleared, so the PDF's OCR text is built again.
+        assert conn.execute(sa.text("SELECT ocr_sha256 FROM pdf_texts")).all() == [(None,)]
+        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+
+
 def test_page_counts_are_filled_in(settings, client, owner):
     import zipfile
 
