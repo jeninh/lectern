@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import shutil
 import threading
+from bisect import bisect_left
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -470,30 +471,21 @@ def _human_time(at: datetime, now: datetime) -> str:
     return f"{s} s" if s < 90 else f"{round(s / 60)} min" if s < 5400 else f"{s / 3600:.1f} h"
 
 
-def explain_wait(
-    db: Session,
-    job: Job,
-    *,
-    server_caps: set[str] | None = None,
-    for_owner: bool = True,
-    show_error: bool = True,
-    now: datetime | None = None,
-) -> dict | None:
-    """Why an active job is where it is, for the owner (Admin → Workers, the job detail):
-    the capability it needs, every worker that could take it and why it does not (offline,
-    paused, not offering it and why, not allowed by its allowlist, busy), the lease holder and
-    expiry, and ``run_after`` (backoff). ``server_caps``: capabilities this server runs
-    itself, when known. ``None`` for a finished job. Without ``for_owner`` (a member) the
-    workers, their labels, and their reasons are left out, as on Admin → Workers. Without
-    ``show_error`` the job's error (it can hold library paths) is left out of the summary and
-    ``last_error``. A paused job (:func:`is_paused`) says so, with no ``run_after``."""
-    from lectern.models import JOB_ACTIVE_STATUSES, Job, JobStatus, WorkerCredential, utcnow
+@dataclass(frozen=True)
+class WaitContext:
+    """What :func:`explain_wait` reads besides the job: who is busy, the non-revoked
+    credentials, and (``with_queue``) each capability's QUEUED jobs as sorted
+    ``(priority, created_at)`` keys. Built once per request by :func:`wait_context`."""
 
-    if job.status not in JOB_ACTIVE_STATUSES:
-        return None
-    now = now or utcnow()
-    cap = job.capability
-    cutoff = now - timedelta(seconds=WORKER_SEEN_S)
+    busy: dict[int, int]
+    credentials: list[WorkerCredential]
+    queued: dict[str, list[tuple[int, datetime]]] | None = None
+
+
+def wait_context(db: Session, *, with_queue: bool = False) -> WaitContext:
+    """One query each for the busy map, the credentials and (``with_queue``) the queue."""
+    from lectern.models import Job, JobStatus, WorkerCredential
+
     busy = {
         holder: job_id
         for job_id, holder in db.execute(
@@ -502,13 +494,59 @@ def explain_wait(
             )
         ).all()
     }
+    credentials = list(
+        db.scalars(
+            select(WorkerCredential)
+            .where(WorkerCredential.revoked_at.is_(None))
+            .order_by(WorkerCredential.id)
+        ).all()
+    )
+    queued = None
+    if with_queue:
+        queued = {}
+        for cap, priority, created_at in db.execute(
+            select(Job.capability, Job.priority, Job.created_at).where(
+                Job.status == JobStatus.QUEUED
+            )
+        ).all():
+            queued.setdefault(cap, []).append((priority, created_at))
+        for keys in queued.values():
+            keys.sort()
+    return WaitContext(busy, credentials, queued)
+
+
+def explain_wait(
+    db: Session,
+    job: Job,
+    *,
+    server_caps: set[str] | None = None,
+    for_owner: bool = True,
+    show_error: bool = True,
+    now: datetime | None = None,
+    ctx: WaitContext | None = None,
+) -> dict | None:
+    """Why an active job is where it is, for the owner (Admin → Workers, the job detail):
+    the capability it needs, every worker that could take it and why it does not (offline,
+    paused, not offering it and why, not allowed by its allowlist, busy), the lease holder and
+    expiry, and ``run_after`` (backoff). ``server_caps``: capabilities this server runs
+    itself, when known. ``None`` for a finished job. Without ``for_owner`` (a member) the
+    workers, their labels, and their reasons are left out, as on Admin → Workers. Without
+    ``show_error`` the job's error (it can hold library paths) is left out of the summary and
+    ``last_error``. A paused job (:func:`is_paused`) says so, with no ``run_after``. ``ctx``
+    (:func:`wait_context`) shares the worker state, and with its queue the place in line,
+    across many calls; without it each call reads its own."""
+    from lectern.models import JOB_ACTIVE_STATUSES, Job, JobStatus, WorkerCredential, utcnow
+
+    if job.status not in JOB_ACTIVE_STATUSES:
+        return None
+    now = now or utcnow()
+    cap = job.capability
+    cutoff = now - timedelta(seconds=WORKER_SEEN_S)
+    ctx = ctx or wait_context(db)
+    busy = ctx.busy
     workers = []
     ready = []
-    for c in db.scalars(
-        select(WorkerCredential)
-        .where(WorkerCredential.revoked_at.is_(None))
-        .order_by(WorkerCredential.id)
-    ).all():
+    for c in ctx.credentials:
         online = c.last_used_at is not None and c.last_used_at >= cutoff
         state = (c.state or "ready") if online else "offline"
         advertised = c.advertised if c.advertised is not None else [ALIGN]
@@ -535,7 +573,9 @@ def explain_wait(
             {"id": c.id, "label": c.label, "state": state, "eligible": why is None, "why": why}
         )
     ahead = 0
-    if job.status == JobStatus.QUEUED:
+    if job.status == JobStatus.QUEUED and ctx.queued is not None:
+        ahead = bisect_left(ctx.queued.get(cap, []), (job.priority, job.created_at))
+    elif job.status == JobStatus.QUEUED:
         ahead = db.scalar(
             select(func.count(Job.id)).where(
                 Job.status == JobStatus.QUEUED,
