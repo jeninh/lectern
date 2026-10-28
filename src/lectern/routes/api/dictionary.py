@@ -39,6 +39,7 @@ STATUS = {
     "not_found": status.HTTP_404_NOT_FOUND,
     "import_running": status.HTTP_409_CONFLICT,
     "archive_too_large": status.HTTP_413_CONTENT_TOO_LARGE,
+    "dictionary_too_large": status.HTTP_413_CONTENT_TOO_LARGE,
 }
 
 

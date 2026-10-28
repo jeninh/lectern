@@ -27,6 +27,8 @@ const WIDTH = { narrow: 560, normal: 680, wide: 860 };
 const GAP = { small: "4%", normal: "7%", large: "11%" };
 
 const FOUND = "lectern-found";
+/** The text highlight() selected itself, per section, where the browser has no Highlight API. */
+const marked = new WeakMap<Document, string>();
 
 /** Mark a search match in a section's document (the CSS Custom Highlight API where the
  * browser has it, else the selection), and return its range for the reader to show. */
@@ -48,6 +50,7 @@ function highlight(doc: Document, start: number, end: number): Range | null {
     const sel = doc.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
+    marked.set(doc, range.toString()); // not a selection to look up (watchSelection)
   }
   return range;
 }
@@ -462,14 +465,17 @@ function watchSelection(doc: Document, open: (r: LookupRequest | null) => void) 
   let timer = 0;
   let last = "";
   // The book is in its own frame: clicks and keys there never reach the popover's listeners.
-  doc.addEventListener("pointerdown", () => open(null));
+  doc.addEventListener("pointerdown", () => {
+    marked.delete(doc);
+    open(null);
+  });
   doc.addEventListener("keydown", (e) => e.key === "Escape" && open(null));
   doc.addEventListener("selectionchange", () => {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => {
       const sel = doc.getSelection();
       const text = sel && !sel.isCollapsed && sel.rangeCount ? sel.toString() : "";
-      const query = cleanQuery(text);
+      const query = marked.get(doc) === text ? null : cleanQuery(text);
       if (!query || !sel) {
         last = "";
         return;

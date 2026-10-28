@@ -278,6 +278,50 @@ def test_bad_archives_are_refused(client, owner, files, code):
     assert r.status_code == 422 and r.json()["detail"] == code, r.text
 
 
+def _with(files: dict[str, bytes], **changes: bytes) -> dict[str, bytes]:
+    out = {k: v for k, v in files.items() if k not in changes}
+    out.update(changes)
+    return out
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"t.idx": b"run-without-a-nul"},  # a headword with no terminator
+        {"t.idx": b"run\0\0\0"},  # truncated offsets
+        {"t.idx": b"run\0" + struct.pack(">II", 0, 0xFFFFFFFF)},  # past the end of .dict
+        {"t.idx.gz": b"not gzip at all"},
+        {"t.dict.dz": gzip.compress(b"x" * 100)[:-12]},  # cut short
+    ],
+)
+def test_corrupt_files_are_refused_not_crashed(client, owner, settings, broken):
+    base = stardict(ENGLISH)
+    if "t.idx.gz" in broken:
+        base.pop("t.idx")
+    r = install(client, owner["csrf"], _with(base, **broken))
+    assert r.status_code == 422 and r.json()["detail"] == "corrupt", r.text
+    assert dictionary.installed(settings) == []
+    assert list((settings.data_dir / "dictionaries" / ".staging").iterdir()) == []
+
+
+def test_decompressed_size_is_capped(client, owner, settings, monkeypatch):
+    """A small upload whose .idx.gz or .dict.dz inflates past the caps is refused while reading."""
+    monkeypatch.setattr(dictionary, "MAX_INDEX_BYTES", 64 * 1024)
+    bomb = stardict(ENGLISH)
+    bomb.pop("t.idx")
+    bomb["t.idx.gz"] = gzip.compress(b"\0" * (1 << 20))
+    r = install(client, owner["csrf"], bomb)
+    assert r.status_code == 413 and r.json()["detail"] == "dictionary_too_large", r.text
+    monkeypatch.setattr(dictionary, "MAX_UNPACKED_BYTES", 256 * 1024)
+    r = install(
+        client,
+        owner["csrf"],
+        _with(stardict(ENGLISH), **{"t.dict.dz": gzip.compress(b"\0" * (1 << 20))}),
+    )
+    assert r.status_code == 413 and r.json()["detail"] == "dictionary_too_large", r.text
+    assert dictionary.installed(settings) == []
+
+
 def test_archive_paths_cannot_escape(client, owner, settings):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:

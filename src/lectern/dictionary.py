@@ -41,8 +41,10 @@ import struct
 import tarfile
 import tempfile
 import threading
+import time
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -60,6 +62,8 @@ LICENCE_FILES = re.compile(r"^(licen[cs]e|copying|copyright|readme|notice)", re.
 MAX_UPLOAD_BYTES = 1024 * 2**20  # an uploaded archive
 MAX_UNPACKED_BYTES = 4 * 1024 * 2**20  # what an archive may unpack to
 MAX_ARCHIVE_MEMBERS = 2000
+MAX_INDEX_BYTES = 128 * 2**20  # an .idx or .syn, decompressed (read into memory)
+STALE_STAGING_S = 24 * 3600  # scratch left by an import that was killed
 MAX_BODY_CHARS = 20_000  # one entry's text, stored
 MAX_QUERY_CHARS = 100
 MAX_WORDS = 6
@@ -212,6 +216,7 @@ def import_path(
     try:
         base = root(settings)
         (base / STAGING).mkdir(parents=True, exist_ok=True)
+        _sweep_staging(base / STAGING)
         work = Path(tempfile.mkdtemp(prefix="import-", dir=base / STAGING))
         try:
             folder = _unpack(source, work / "src")
@@ -230,6 +235,52 @@ def import_path(
             shutil.rmtree(work, ignore_errors=True)
     finally:
         _import_lock.release()
+
+
+def _sweep_staging(staging: Path) -> None:
+    """Remove scratch a killed import or upload left behind (older than a day, so a CLI import
+    running beside the server keeps its own)."""
+    cutoff = time.time() - STALE_STAGING_S
+    for p in staging.iterdir():
+        with contextlib.suppress(OSError):
+            if p.lstat().st_mtime < cutoff:
+                shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
+
+
+def _too_large(name: str) -> DictionaryError:
+    return DictionaryError("dictionary_too_large", f"{name} unpacks too large.")
+
+
+def _open(path: Path):
+    return gzip.open(path, "rb") if path.name.endswith((".gz", ".dz")) else open(path, "rb")
+
+
+def _read_capped(path: Path, cap: int) -> bytes:
+    """A whole (possibly gzipped) file, refusing more than ``cap`` bytes once decompressed."""
+    buf = bytearray()
+    try:
+        with _open(path) as f:
+            while chunk := f.read(1 << 20):
+                buf += chunk
+                if len(buf) > cap:
+                    raise _too_large(path.name)
+    except (OSError, EOFError, zlib.error):
+        raise DictionaryError("corrupt", f"{path.name} could not be read.") from None
+    return bytes(buf)
+
+
+def _copy_capped(src: Path, dest: Path, cap: int) -> int:
+    total = 0
+    try:
+        with _open(src) as fin, open(dest, "wb") as fout:
+            while chunk := fin.read(1 << 20):
+                total += len(chunk)
+                if total > cap:
+                    raise _too_large(src.name)
+                fout.write(chunk)
+    except (OSError, EOFError, zlib.error):
+        raise DictionaryError("corrupt", f"{src.name} could not be read.") from None
+    return total
 
 
 def _unpack(source: Path, dest: Path) -> Path:
@@ -330,13 +381,8 @@ def _build(folder: Path, out: Path, *, lang: str, to: str, name: str | None) -> 
 
     out.mkdir(parents=True)
     plain = out / "dict.tmp"
-    opener = gzip.open if dict_path.name.endswith(".dz") else open
-    try:
-        with opener(dict_path, "rb") as fin, open(plain, "wb") as fout:
-            shutil.copyfileobj(fin, fout, 1 << 20)
-    except (OSError, EOFError, gzip.BadGzipFile):
-        raise DictionaryError("corrupt", f"{dict_path.name} could not be read.") from None
-    idx_bytes = (gzip.open if idx_path.name.endswith(".gz") else open)(idx_path, "rb").read()
+    dict_size = _copy_capped(dict_path, plain, MAX_UNPACKED_BYTES)
+    idx_bytes = _read_capped(idx_path, MAX_INDEX_BYTES)
 
     db = sqlite3.connect(out / INDEX)
     try:
@@ -351,6 +397,10 @@ def _build(folder: Path, out: Path, *, lang: str, to: str, name: str | None) -> 
         with open(plain, "rb") as data:
             batch_e, batch_k = [], []
             for n, (word, offset, size) in enumerate(_idx_entries(idx_bytes, offset_bits)):
+                if offset + size > dict_size:
+                    raise DictionaryError(
+                        "corrupt", f"{idx_path.name} points past the end of {dict_path.name}."
+                    )
                 data.seek(offset)
                 body = _render(data.read(size), types)[:MAX_BODY_CHARS]
                 batch_e.append((n, word, body))
@@ -365,7 +415,7 @@ def _build(folder: Path, out: Path, *, lang: str, to: str, name: str | None) -> 
         if count == 0:
             raise DictionaryError("empty", "That dictionary has no entries.")
         if syn_path is not None:
-            syn = (gzip.open if syn_path.name.endswith(".gz") else open)(syn_path, "rb").read()
+            syn = _read_capped(syn_path, MAX_INDEX_BYTES)
             db.executemany(
                 "INSERT INTO keys VALUES (?,?)",
                 ((fold(w), i) for w, i in _syn_entries(syn) if 0 <= i < count),
@@ -373,8 +423,8 @@ def _build(folder: Path, out: Path, *, lang: str, to: str, name: str | None) -> 
         db.execute("CREATE INDEX keys_key ON keys(key)")
         db.commit()
         db.execute("VACUUM")
-    except struct.error:
-        raise DictionaryError("corrupt", f"{idx_path.name} is truncated.") from None
+    except (struct.error, ValueError, MemoryError):  # truncated, or a word without its NUL
+        raise DictionaryError("corrupt", f"{idx_path.name} is truncated or malformed.") from None
     finally:
         db.close()
     plain.unlink()
