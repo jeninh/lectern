@@ -6785,3 +6785,5 @@ table.compare td:first-child {
 .dict-admin-form .field { margin: 0; flex: 1 1 110px; }
 .dict-admin-form .field:first-child { flex: 2 1 240px; }
 .dict-admin-form input[type="file"].input { padding: 4px; }
+.dict-save { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; }
+.dict-save-err { color: var(--danger); }

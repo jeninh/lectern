@@ -17,9 +17,10 @@ import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
 import { pickHandoff } from "../lib/handoff";
 import { useStore } from "../lib/store";
-import { hitTarget } from "../lib/formats";
+import { EPUB, hitTarget } from "../lib/formats";
 import { bookCss, FONT_LABELS, FONTS, fontFaces, PALETTE, resolveTheme, THEMES, useReaderSettings } from "../lib/reader";
-import { offsetOf, rangeAt, rangeBetween } from "../lib/textpos";
+import { normalizedText, offsetOf, rangeAt, rangeBetween } from "../lib/textpos";
+import { type Place, sentenceAround } from "../lib/vocabulary";
 import type { HandoffCandidate, Work, WorkProgressResponse } from "../lib/types";
 import { PageReader } from "./PageReader";
 
@@ -137,6 +138,8 @@ function EpubReader() {
   const closeLookup = useCallback(() => setLookup(null), []);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<FoliateView | null>(null);
+  const epubId = useRef<number | undefined>(undefined);
+  epubId.current = work?.files.find((f) => f.media_type === EPUB)?.id;
   const ready = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const lastSaved = useRef<string>("");
@@ -223,9 +226,10 @@ function EpubReader() {
           saveTimer.current = window.setTimeout(() => save().catch(() => {}), 1500);
         });
         v.addEventListener("load", (e: Event) => {
-          const doc = (e as CustomEvent<{ doc: Document }>).detail.doc;
+          // foliate's load detail carries the section's spine index with its document.
+          const { doc, index } = (e as CustomEvent<{ doc: Document; index: number }>).detail;
           doc.addEventListener("keydown", onKey);
-          watchSelection(doc, setLookup);
+          watchSelection(doc, setLookup, () => ({ work_id: id, file_id: epubId.current, spine_index: index }));
         });
         await v.open(new File([blob], "book.epub", { type: "application/epub+zip" }));
         setToc(v.book.toc ?? []);
@@ -461,7 +465,7 @@ function EpubReader() {
 
 /** Open a lookup when a word or short phrase is selected in a section's document (the
  * selection settles first, so dragging across a phrase asks once). */
-function watchSelection(doc: Document, open: (r: LookupRequest | null) => void) {
+function watchSelection(doc: Document, open: (r: LookupRequest | null) => void, where: () => Place) {
   let timer = 0;
   let last = "";
   // The book is in its own frame: clicks and keys there never reach the popover's listeners.
@@ -486,7 +490,12 @@ function watchSelection(doc: Document, open: (r: LookupRequest | null) => void) 
       const key = `${query}@${Math.round(r.left)},${Math.round(r.top)}`;
       if (key === last) return;
       last = key;
-      open({ query, rect: { left: frame.left + r.left, top: frame.top + r.top, bottom: frame.top + r.bottom, width: r.width } });
+      // Where the word is in the section's normalised text, and the sentence around it, for Save.
+      const range = sel.getRangeAt(0);
+      const char = offsetOf(doc, range.startContainer, range.startOffset);
+      const length = offsetOf(doc, range.endContainer, range.endOffset) - char;
+      const place = { ...where(), char, length, context: sentenceAround(normalizedText(doc), char, char + length) };
+      open({ query, place, rect: { left: frame.left + r.left, top: frame.top + r.top, bottom: frame.top + r.bottom, width: r.width } });
     }, 350);
   });
 }
