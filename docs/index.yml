@@ -119,6 +119,11 @@ sections:
         description: Nightly encrypted backups, and restoring from one.
         icon: shield
         audience: owner
+      - file: storage.md
+        title: Storage
+        description: Where the disk space goes, and safe cleanup of files Lectern can make again.
+        icon: gear
+        audience: owner
       - file: offline-mode.md
         title: Offline mode
         description: Guarantee the server makes no internet connections, with models downloaded first.

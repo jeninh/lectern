@@ -353,3 +353,126 @@ def prepare_models(request: Request, auth: OwnerWrite, db: DbDep, settings: Sett
     audit.record(db, "offline.prepare", actor_user_id=auth.user.id, ip=client_ip(request))
     db.commit()
     return offline_mode.report(db, settings)
+
+
+# --- storage dashboard (docs/storage.md) ------------------------------------------------------------
+
+
+def _storage_view(db, settings) -> dict:
+    from lectern import storage
+    from lectern.models import Job
+
+    cached = storage.load(db)
+    job = storage.active_job(db) or db.scalar(
+        select(Job).where(Job.kind == storage.CLEANUP).order_by(Job.id.desc()).limit(1)
+    )
+    return {
+        "volumes": storage.volumes(settings),
+        "warn_free_percent": settings.storage_warn_free_percent,
+        "scan": cached.get("result"),
+        "history": cached.get("history") or [],
+        "scanning": storage.scanning(),
+        "blocked": storage.blocked(settings),
+        "job": storage.job_json(job) if job is not None else None,
+    }
+
+
+@router.get("/storage")
+def storage_view(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict:
+    """Free space per volume (live) and the last scan's breakdown (cached; never a walk of
+    the disk on a page load). The first visit starts a scan when there is none yet."""
+    from lectern import storage
+
+    view = _storage_view(db, settings)
+    if view["scan"] is None and not view["scanning"]:
+        view["scanning"] = storage.start_scan(session_factory(), settings)
+    return view
+
+
+@router.post("/storage/scan", status_code=status.HTTP_202_ACCEPTED)
+def storage_rescan(auth: OwnerWrite, db: DbDep, settings: SettingsDep) -> dict:
+    from lectern import storage
+
+    storage.start_scan(session_factory(), settings)
+    return {**_storage_view(db, settings), "scanning": True}
+
+
+class CleanupIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(pattern="^(trash|renditions|covers|read_aloud|leftovers|pre_restore)$")
+    older_than_days: int | None = Field(default=None, ge=1, le=30)
+    work_id: int | None = Field(default=None, ge=1)
+    name: str | None = Field(default=None, pattern=r"^pre-restore-\d{8}T\d{6}Z$")
+
+
+def _params(body: CleanupIn) -> dict:
+    from lectern import storage
+
+    if body.older_than_days is not None and body.action != "trash":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "older_than_days_is_for_trash")
+    if body.work_id is not None and body.action not in storage.PER_WORK:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "not_per_work")
+    if body.action == "pre_restore" and body.name is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "name_required")  # one at a time
+    if body.name is not None and body.action != "pre_restore":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "name_is_for_pre_restore")
+    return body.model_dump(exclude={"action"}, exclude_none=True)
+
+
+@router.post("/storage/preview")
+def storage_preview(
+    request: Request, auth: OwnerWrite, db: DbDep, settings: SettingsDep, body: CleanupIn
+) -> dict:
+    """Exactly what a cleanup would remove now and how much it frees. Changes nothing."""
+    from lectern import storage
+
+    return storage.plan(db, settings, body.action, _params(body), _busy(request))
+
+
+class CleanupConfirmIn(CleanupIn):
+    # The keys of the previewed items to remove; the owner saw them in the preview.
+    keys: list[str] = Field(min_length=1, max_length=5000)
+    confirm: bool
+
+
+@router.post("/storage/cleanup", status_code=status.HTTP_202_ACCEPTED)
+def storage_cleanup(
+    request: Request, auth: OwnerWrite, db: DbDep, settings: SettingsDep, body: CleanupConfirmIn
+) -> dict:
+    """Queue a confirmed cleanup. Only keys that are still in a fresh preview are taken: a
+    key that is not (removed meanwhile, or never offered, such as an original) is refused."""
+    from lectern import storage
+
+    if not body.confirm:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirmation_required")
+    if storage.active_job(db) is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "cleanup_running")
+    base = CleanupIn.model_validate(body.model_dump(include=set(CleanupIn.model_fields)))
+    preview = storage.plan(db, settings, body.action, _params(base), _busy(request))
+    offered = {i["key"] for i in preview["items"]}
+    unknown = [k for k in body.keys if k not in offered]
+    if unknown:
+        raise HTTPException(status.HTTP_409_CONFLICT, {"detail": "preview_changed",
+                                                       "keys": unknown[:20]})  # fmt: skip
+    job = storage.enqueue(db, preview, body.keys, auth.user.id)
+    audit.record(
+        db,
+        "storage.cleanup",
+        actor_user_id=auth.user.id,
+        target=f"job:{job.id}",
+        ip=client_ip(request),
+        detail=f"{body.action}: {len(body.keys)} item(s), {job.payload['expected_bytes']} bytes"[
+            :200
+        ],
+    )
+    db.commit()
+    runner = getattr(request.app.state, "jobs", None)
+    if runner is not None:
+        runner.wake.set()
+    return {**_storage_view(db, settings), "job": storage.job_json(job)}
+
+
+def _busy(request: Request):
+    readaloud = getattr(request.app.state, "readaloud", None)
+    return readaloud.is_generating if readaloud is not None else (lambda _id: False)

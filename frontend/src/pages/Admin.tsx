@@ -13,6 +13,7 @@ import type { Invite, User } from "../lib/types";
 import { CapForm } from "./Devices";
 import { ElevenLabsCard } from "../components/ElevenLabsCard";
 import { EmailInAdminCard } from "../components/EmailIn";
+import { StorageCard } from "../components/Storage";
 
 /** Instance-wide switches. Metadata lookup is off by default because it sends data outside. */
 function LibrarySettingsCard() {
@@ -229,6 +230,7 @@ export function AdminPage() {
       <LibrarySettingsCard />
       <DataSaverCard />
       <BackupsCard />
+      {me?.user.role === "owner" && <StorageCard />}
       {me?.user.role === "owner" && <OfflineModeCard />}
       {me?.user.role === "owner" && <HomeNetworkCard />}
       {me?.user.role === "owner" && <EmailInAdminCard />}

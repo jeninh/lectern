@@ -50,6 +50,7 @@ from lectern.security.tokens import new_secret, sha256_hex
 log = logging.getLogger("lectern.jobs")
 
 TRANSCODE = "transcode"
+CLEANUP = "storage-cleanup"  # lectern.storage (the storage dashboard's cleanup)
 EXT = {"aac": "m4a", "opus": "opus"}
 MEDIA_TYPE = {"aac": "audio/mp4", "opus": "audio/ogg"}
 
@@ -410,7 +411,7 @@ def _publish_variant(db, settings, job, work, sha256: str, codec: str, scratch: 
             move_file(side, dest.with_name(dest.name + ".sha256"))
 
 
-def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
+def run_pending(session_factory: sessionmaker, settings: Settings, busy=lambda _id: False) -> int:
     """Run every queued in-process job now. Returns how many ran. Conversions (``pdf2epub``)
     and saved web articles (``article``) never wait for a transcode worker: they are claimed
     first, without the deferral.
@@ -420,7 +421,7 @@ def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
     n = 0
     while True:
         with session_factory() as db:
-            claimed = claim(db, kinds=(PDF2EPUB, ARTICLE))
+            claimed = claim(db, kinds=(PDF2EPUB, ARTICLE, CLEANUP))
             if claimed is None and transcodes:
                 claimed = claim(db, defer_s=settings.local_defer_seconds)
             if claimed is None:
@@ -429,6 +430,10 @@ def run_pending(session_factory: sessionmaker, settings: Settings) -> int:
                 from lectern.pdf2epub import jobs as pdf2epub
 
                 pdf2epub.run(db, settings, claimed[0])
+            elif claimed[0].kind == CLEANUP:
+                from lectern import storage
+
+                storage.run(db, settings, claimed[0], busy)
             elif claimed[0].kind == ARTICLE:
                 from lectern.article import jobs as article
 
@@ -641,7 +646,7 @@ def recover_local_leases(db: Session) -> int:
     res = db.execute(
         update(Job)
         .where(
-            Job.kind.in_((TRANSCODE, PDF2EPUB, ARTICLE)),
+            Job.kind.in_((TRANSCODE, PDF2EPUB, ARTICLE, CLEANUP)),
             Job.status == JobStatus.LEASED,
             Job.leased_by_id.is_(None),
         )
@@ -719,7 +724,7 @@ class JobRunner:
             recover_local_leases(db)
         while not self._stop.is_set():
             try:
-                run_pending(self.session_factory, self.settings)
+                run_pending(self.session_factory, self.settings, self.busy)
                 autometa.run_pending(self.session_factory, self.fetch)
                 if utcnow() - last_sweep > timedelta(hours=1):
                     housekeeping(self.session_factory, self.settings, self.busy)
