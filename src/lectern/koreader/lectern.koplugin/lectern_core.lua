@@ -34,6 +34,9 @@ Core.ANNOTATION_BOOKS_MAX = 50 -- books whose highlights wait to be sent
 Core.HISTORY_SCAN = 100 -- recent books whose sidecars Sync now checks for highlights
 Core.TEXT_MAX = 15000 -- bytes of a highlight's text or note sent (the server takes 20000 chars)
 Core.ROUTE_TTL = 600 -- seconds a home/Tailscale choice is trusted before it is checked again
+Core.FETCH_INTERVAL = 900 -- seconds between quiet checks of the queue while KOReader runs
+Core.FETCH_MIN = 60 -- at most one quiet check per minute (Wi-Fi flapping, repeated wake-ups)
+Core.AUTO_BATCH = 3 -- books one quiet check downloads at most (Lectern's hourly cap still applies)
 
 --- Looks like a home-network address (private IPv4, IPv6 link-local or unique-local, or an
 -- mDNS .local name). With home Wi-Fi access on, such an address is never the Tailscale
@@ -790,7 +793,77 @@ function Core:download(item, dir)
     end
     local ok = os.rename(tmp, path)
     if not ok then os.remove(tmp) return nil, "cannot_write" end
+    local work_id = tonumber(item.work_id)
+    if work_id then self:recordDownload(work_id, path) end
     return path
+end
+
+-- --- shelf sync: automatic downloads and clean-up -----------------------------------------
+
+local function file_size(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local size = f:seek("end")
+    f:close()
+    return size
+end
+
+--- Files this plugin downloaded, by work id: ``{ ["12"] = { path = ..., size = ... } }``.
+-- Clean-up only ever deletes these, and only while they are unchanged.
+function Core:downloads()
+    return self.store:readSetting("downloads") or {}
+end
+
+function Core:recordDownload(work_id, path)
+    local d = self:downloads()
+    d[tostring(work_id)] = { path = path, size = file_size(path), at = self.now() }
+    self.store:saveSetting("downloads", d)
+    self.store:flush()
+end
+
+--- The queued books to download by themselves: those this plugin has no copy of yet, in
+-- queue order, at most ``limit``.
+function Core:toDownload(items, limit)
+    local have, out = self:downloads(), {}
+    for _, it in ipairs(items or {}) do
+        if #out >= limit then break end
+        local rec = have[tostring(it.work_id)]
+        if not (rec and file_size(rec.path)) and it.files and it.files[1] then
+            out[#out + 1] = it
+        end
+    end
+    return out
+end
+
+--- Delete the copies of ``work_ids`` (books that left the followed shelf) that this plugin
+-- downloaded. A file the reader changed since (another size: annotations written into a PDF,
+-- a different book saved under that name) or that ``is_open(path)`` says is being read is
+-- kept: the former for good, the latter until the next check. KOReader's sidecar folder
+-- (highlights, notes) is never touched. Returns how many files were deleted.
+function Core:cleanUp(work_ids, is_open)
+    local have = self:downloads()
+    local deleted, changed = 0, false
+    for _, id in ipairs(work_ids or {}) do
+        local key = tostring(id)
+        local rec = have[key]
+        if rec then
+            local size = file_size(rec.path)
+            if size and size == rec.size and not (is_open and is_open(rec.path)) then
+                if os.remove(rec.path) then
+                    deleted = deleted + 1
+                    have[key], changed = nil, true
+                    self:log("info", "removed a book that left the followed shelf:", rec.path)
+                end
+            elseif not size or size ~= rec.size then
+                have[key], changed = nil, true -- gone, or no longer Lectern's copy
+            end
+        end
+    end
+    if changed then
+        self.store:saveSetting("downloads", have)
+        self.store:flush()
+    end
+    return deleted
 end
 
 --- One line for the menu: what state the connection is in.

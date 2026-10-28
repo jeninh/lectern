@@ -664,7 +664,9 @@ def test_plugin_end_to_end(live, settings, tmp_path):
 
     # Wi-Fi back: the queued position goes out quietly.
     out = lua(plugin, sdir, "reconnect")
-    assert out["scheduled"] == 1 and out["outbox"] == 0 and out["messages"] == 0
+    # The outbox retry, and the quiet check of the queue a little later.
+    assert out["scheduled"] == 2 and out["fetch_in"] == 5
+    assert out["outbox"] == 0 and out["messages"] == 0
     got = httpx.get(
         f"{base}/syncs/progress/0123456789abcdef0123456789abcdef",
         headers=ko("owner", s["userkey"]),
@@ -740,6 +742,99 @@ def test_plugin_end_to_end(live, settings, tmp_path):
     logged = "\n".join(LOGGED)
     assert "set up as device Kindle PW5" in logged
     for value in (secret, s["userkey"], s["app_password"], code):
+        assert value not in logged
+
+
+@needs_lua
+def test_plugin_shelf_sync_downloads_and_cleans_up_quietly(live, settings, tmp_path):
+    """Shelf sync (issue #68): with Auto-download on, the quiet check downloads the followed
+    shelf's books without a prompt, within the device's hourly cap; with clean-up on, it
+    deletes only its own unchanged copies of books that left the shelf, never the open book
+    or the reader's own files."""
+    http, base = live["http"], live["base"]
+    LOGGED.clear()
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    for title in ("Alpha", "Bravo", "Charlie"):
+        make_epub(settings.inbox_path / f"{title}.epub", title=title, authors=["Ann"])
+    w = InboxWatcher(settings.inbox_path, settings.library_dir, session_factory(), 0.01)
+    w.scan_once()
+    w.scan_once()
+    with session_factory()() as db:
+        ids = {wk.title: wk.id for wk in db.scalars(select(Work))}
+    dev = http.post("/api/devices", json={"label": "Kindle"}).json()
+    dev_id, pw_id = dev["device"]["id"], dev["device"]["app_password"]["id"]
+    shelf = http.post("/api/shelves", json={"name": "On the Kindle"}).json()
+    for t in ("Alpha", "Bravo"):
+        http.post(f"/api/shelves/{shelf['id']}/items", json={"work_id": ids[t]})
+
+    def shelf_sync(**opts):
+        body = {"shelf_id": shelf["id"], "cleanup": True, "auto_download": True, **opts}
+        r = http.post(f"/api/devices/app-passwords/{pw_id}/shelf-sync", json=body)
+        assert r.status_code == 200, r.text
+
+    shelf_sync()
+    z = http.post(f"/api/devices/{dev_id}/koplugin", json={"server_url": base})
+    root = tmp_path / "koreader"
+    (root / "plugins").mkdir(parents=True)
+    (root / "settings").mkdir()
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        zf.extractall(root / "plugins")
+    plugin, sdir = root / "plugins" / "lectern.koplugin", root / "settings"
+    assert lua(plugin, sdir, "setup")["paired"]
+    books = sdir / "books"
+    books.mkdir()
+    (books / "Mine.epub").write_bytes(b"the reader's own book")
+
+    out = lua(plugin, sdir, "auto")
+    assert out["planned"] == 2 and out["messages"] == 0
+    assert out["fetch_in"] == 900 and out["again"] == 0 and 55 <= out["again_in"] <= 60
+    alpha, bravo = books / "Alpha - Ann.epub", books / "Bravo - Ann.epub"
+    assert zipfile.is_zipfile(alpha) and zipfile.is_zipfile(bravo)
+    assert set(out["downloads"]) == {str(ids["Alpha"]), str(ids["Bravo"])}
+    for _ in range(50):
+        if http.get(f"/api/device-queues/{pw_id}").json()["pending"] == []:
+            break
+        time.sleep(0.1)
+    assert http.get(f"/api/device-queues/{pw_id}").json()["pending"] == []
+    # Nothing new: the next check downloads nothing again.
+    assert lua(plugin, sdir, "auto")["planned"] == 0
+
+    # Alpha leaves the shelf while it is open in the reader: kept until it is closed.
+    http.delete(f"/api/shelves/{shelf['id']}/items/{ids['Alpha']}")
+    out = lua(plugin, sdir, "auto", "reading", str(alpha))
+    assert out["deleted"] == 0 and alpha.exists()
+    out = lua(plugin, sdir, "auto")
+    assert out["deleted"] == 1 and not alpha.exists() and out["messages"] == 0
+    assert set(out["downloads"]) == {str(ids["Bravo"])}
+    assert (books / "Mine.epub").read_bytes() == b"the reader's own book" and bravo.exists()
+
+    # A copy the reader changed since (say, annotations saved into it) is theirs now: kept.
+    with bravo.open("ab") as f:
+        f.write(b"\0")
+    http.delete(f"/api/shelves/{shelf['id']}/items/{ids['Bravo']}")
+    out = lua(plugin, sdir, "auto")
+    assert out["deleted"] == 0 and bravo.exists() and out["downloads"] == {}
+
+    # Auto-download off: a new book on the shelf is queued but waits for a tap.
+    shelf_sync(auto_download=False)
+    http.post(f"/api/shelves/{shelf['id']}/items", json={"work_id": ids["Charlie"]})
+    out = lua(plugin, sdir, "auto")
+    assert out["planned"] == 0 and not (books / "Charlie - Ann.epub").exists()
+
+    # On again, but the device's hourly cap (2) is used up: refused quietly, tried later.
+    r = http.post(f"/api/devices/app-passwords/{pw_id}/download-cap", json={"cap": 2})
+    assert r.status_code == 200, r.text
+    shelf_sync()
+    out = lua(plugin, sdir, "auto")
+    assert out["planned"] == 1 and out["messages"] == 0
+    assert not (books / "Charlie - Ann.epub").exists() and out["downloads"] == {}
+    assert [
+        i["work"]["title"] for i in http.get(f"/api/device-queues/{pw_id}").json()["pending"]
+    ] == ["Charlie"]
+    s = out["settings"]
+    logged = "\n".join(LOGGED)
+    assert "automatic download stopped: server 429" in logged
+    for value in (s["userkey"], s["app_password"]):
         assert value not in logged
 
 

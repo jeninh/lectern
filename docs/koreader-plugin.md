@@ -91,6 +91,12 @@ KOReader's own progress sync does the work; the plugin turns it on and makes it 
   such as a 404 from a wrong address, keeps the outbox.
   **When Wi‑Fi is off → Turn Wi‑Fi on to sync** restores KOReader's behaviour of switching
   Wi‑Fi on for each sync (and sets *Action when Wi‑Fi is off* to *turn on*).
+- **Books sent to this device, by themselves:** with **Download queued books automatically**
+  on for the device (Lectern → Devices → ⋯ → Shelf sync), the plugin also checks the queue
+  quietly on start, wake, Wi‑Fi back, and every 15 minutes, downloads up to 3 queued books per
+  check within the device's hourly download limit, and, with clean-up on, deletes its own
+  copies of books that left the followed shelf. Details:
+  [Following a shelf](device-queues.md#following-a-shelf).
 - **Sync automatically** turns all of the above off; KOReader's Push and Pull still work.
 
 ## The Lectern menu (Tools → Lectern)
@@ -99,7 +105,7 @@ KOReader's own progress sync does the work; the plugin turns it on and makes it 
 | --- | --- |
 | *status line* | Connected, Offline/Retrying with how many positions (and books of highlights) wait, Not reachable, or *Device revoked or replaced: pair again*. Tap for details: server, account, device, last push, books waiting. |
 | **Sync now** | Sends the current position, highlights that changed, and the outbox, pulls, and always says what happened: synced, refused, or not reachable with the actual error. Before setup has finished it tries setup now and says *set up*, or the error and when it tries again. |
-| **Books sent to this device** | The device's Send to device queue. Tap a book to download it into KOReader's download folder (as `Title - Author (2).epub` if that name is taken; nothing is replaced); a complete download marks it delivered in Lectern, as with the catalogue. |
+| **Books sent to this device** | The device's Send to device queue. Tap a book to download it into KOReader's download folder (as `Title - Author (2).epub` if that name is taken; nothing is replaced); a complete download marks it delivered in Lectern, as with the catalogue. With **Download queued books automatically** on for the device in Lectern, the automatic sync downloads them by itself ([Following a shelf](device-queues.md#following-a-shelf)). |
 | **Sync automatically**, **Also push every N pages**, **When another device is further ahead**, **When Wi‑Fi is off** | The settings above. |
 | **Pair with a code…** | See below. |
 
@@ -252,7 +258,7 @@ do not enable *Force userspace mode*, for the same reason as above.
 | `POST /api/devices/{id}/pairing-code` | session + CSRF, own device | `{code, expires_at, attempts: 5, username}` |
 | `POST /koplugin/bootstrap` `{secret}` | the secret | credentials and `lan_url`, or `410 setup_secret_invalid` |
 | `POST /koplugin/pair` `{username, code}` | the code | credentials, `server_url` (the Tailscale address, if known), and `lan_url`, or `401 invalid_code` |
-| `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first), `lan_url` |
+| `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first), `lan_url`, `auto_download`, `follow` (`{shelf, cleanup}` or null), `remove` (work ids that left the followed shelf with clean-up on) |
 | `PUT /koplugin/annotations` `{document, device, annotations: [...]}` | kosync headers (the device's sync key) | the device's current highlights of one book: `{document, added, updated, deleted, total}` |
 | `GET /api/works/{id}/annotations`, `GET /api/works/{id}/annotations.md` | session, own highlights, visible work | one book's highlights; as Markdown |
 | `GET /api/annotations`, `GET /api/annotations.md` | session, own highlights | books with highlights and counts; all as Markdown |

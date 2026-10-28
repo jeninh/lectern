@@ -118,6 +118,10 @@ def app_password_json(k: AppPassword) -> dict:
         "last_used_at": iso(k.last_used_at),
         "revoked_at": iso(k.revoked_at),
         "download_cap_per_hour": k.download_cap_per_hour,
+        # Shelf sync (docs/device-queues.md#following-a-shelf)
+        "follow_shelf_id": k.follow.shelf_id if k.follow else None,
+        "follow_cleanup": bool(k.follow and k.follow.cleanup),
+        "auto_download": k.auto_download,
     }
 
 

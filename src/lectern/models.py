@@ -160,8 +160,13 @@ class AppPassword(Base):
     )
     # Override of LECTERN_DOWNLOAD_DEVICE_CAP_PER_HOUR for this device; NULL = default, 0 = off.
     download_cap_per_hour: Mapped[int | None] = mapped_column(Integer, default=None)
+    # The KOReader plugin downloads queued books on its quiet automatic sync
+    # (docs/device-queues.md#following-a-shelf).
+    auto_download: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped[User] = relationship(back_populates="app_passwords")
+    # The shelf this device follows, if any.
+    follow: Mapped[DeviceFollow | None] = relationship(passive_deletes=True)
 
     @property
     def active(self) -> bool:
@@ -1120,6 +1125,22 @@ class QueueStatus(enum.StrEnum):
     REMOVED = "removed"  # taken off the queue before delivery
 
 
+class DeviceFollow(Base):
+    """A device (app password) following a shelf: the shelf's books are queued for it by
+    themselves (lectern.device_queue.sync_follow). With ``cleanup``, books that leave the
+    shelf are dequeued and the KOReader plugin deletes the copies it downloaded. Deleting the
+    shelf or the device ends the follow."""
+
+    __tablename__ = "device_follows"
+
+    app_password_id: Mapped[int] = mapped_column(
+        ForeignKey("app_passwords.id", ondelete="CASCADE"), primary_key=True
+    )
+    shelf_id: Mapped[int] = mapped_column(ForeignKey("shelves.id", ondelete="CASCADE"), index=True)
+    cleanup: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
 class DeviceQueueItem(Base):
     """A work queued for one OPDS device (its app password).
 
@@ -1159,6 +1180,9 @@ class DeviceQueueItem(Base):
     removed_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), default=None
     )
+    # Queued by the device's followed shelf rather than by a person. A followed item that was
+    # removed with ``removed_by`` NULL left the shelf (clean-up), not a person's hand.
+    followed: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 

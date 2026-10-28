@@ -41,7 +41,7 @@ sections:
         icon: download
       - file: device-queues.md
         title: Sending books to a device
-        description: Queue a book at the top of one e-reader's catalogue.
+        description: Queue a book at the top of one e-reader's catalogue, or let it follow a shelf.
         icon: send
 
   - title: Adding books

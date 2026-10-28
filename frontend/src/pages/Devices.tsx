@@ -4,7 +4,7 @@ import { AIToolsSection } from "../components/AITools";
 import { EmptyState } from "../components/EmptyState";
 import { DeviceQueueView } from "../components/DeviceQueue";
 import { KOReaderPlugin } from "../components/KOReaderPlugin";
-import { Book, Close, Download, Plus, Reader, Send, Sync } from "../components/Icons";
+import { Book, Close, Download, Plus, Reader, Send, Shelf as ShelfIcon, Sync } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
@@ -12,8 +12,9 @@ import { get, post } from "../lib/api";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { pluginSetupText } from "../lib/koplugin";
+import { followOptions, shelfSyncChips } from "../lib/queues";
 import { useStore } from "../lib/store";
-import type { Device, QueueDevice } from "../lib/types";
+import type { AppPassword, Device, QueueDevice, Shelf } from "../lib/types";
 import { AddDeviceFlow } from "./AddDevice";
 
 const ACTIVE_MS = 5 * 60 * 1000;
@@ -26,13 +27,14 @@ export function deviceStatus(d: Device, now = Date.now()): { tone: "live" | "ok"
 }
 
 export function DevicesPage() {
-  const { me, toast, now } = useStore();
+  const { me, toast, now, shelves } = useStore();
   const nav = useNavigate();
   const loc = useLocation();
   const adding = loc.pathname.endsWith("/new");
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [confirm, setConfirm] = useState<Device | null>(null);
   const [capFor, setCapFor] = useState<Device | null>(null);
+  const [syncFor, setSyncFor] = useState<Device | null>(null);
   const [showRevoked, setShowRevoked] = useState(false);
   const [queues, setQueues] = useState<QueueDevice[]>([]);
   const [queueFor, setQueueFor] = useState<QueueDevice | null>(null);
@@ -99,7 +101,7 @@ export function DevicesPage() {
           ) : (
             <ul className="device-grid" aria-label="Active devices">
               {active.map((d) => (
-                <DeviceCard key={d.id} d={d} now={now} highlight={target === d.id} queue={queueOf(d)} onQueue={(q) => setQueueFor(q)} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} onPlugin={d.koplugin ? () => setPluginFor(d.id) : undefined} />
+                <DeviceCard key={d.id} d={d} now={now} shelves={shelves} highlight={target === d.id} queue={queueOf(d)} onQueue={(q) => setQueueFor(q)} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} onShelfSync={() => setSyncFor(d)} onPlugin={d.koplugin ? () => setPluginFor(d.id) : undefined} />
               ))}
             </ul>
           )}
@@ -129,7 +131,7 @@ export function DevicesPage() {
               {showRevoked && (
                 <ul className="device-grid" id="revoked-list">
                   {revoked.map((d) => (
-                    <DeviceCard key={d.id} d={d} now={now} />
+                    <DeviceCard key={d.id} d={d} now={now} shelves={shelves} />
                   ))}
                 </ul>
               )}
@@ -162,6 +164,21 @@ export function DevicesPage() {
           <button className="btn ghost" onClick={() => setConfirm(null)}>Keep device</button>
           <button className="btn danger" onClick={revoke} data-autofocus>Revoke</button>
         </div>
+      </Sheet>
+      <Sheet open={!!syncFor} onClose={() => setSyncFor(null)} title={syncFor ? `Shelf sync for ${syncFor.label}` : ""} variant="dialog" labelledBy="shelf-sync-title">
+        {syncFor?.app_password && (
+          <ShelfSyncForm
+            initial={syncFor.app_password}
+            shelves={shelves}
+            plugin={!!syncFor.koplugin}
+            onSave={async (body) => {
+              await post(`/api/devices/app-passwords/${syncFor.app_password!.id}/shelf-sync`, body);
+              toast(`Shelf sync for ${syncFor.label} saved`);
+              setSyncFor(null);
+              await load();
+            }}
+          />
+        )}
       </Sheet>
       <Sheet open={!!capFor} onClose={() => setCapFor(null)} title={capFor ? `Download limit for ${capFor.label}` : ""} variant="dialog" labelledBy="cap-title">
         {capFor?.app_password && (
@@ -215,9 +232,54 @@ export function CapForm({ initial, what, onSave, lowerOnly = false }: { initial:
   );
 }
 
-function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap, onPlugin }: { d: Device; now: number; highlight?: boolean; queue?: QueueDevice; onQueue?: (q: QueueDevice) => void; onRevoke?: () => void; onCap?: () => void; onPlugin?: () => void }) {
+type ShelfSync = { shelf_id: number | null; cleanup: boolean; auto_download: boolean };
+
+/** Shelf sync: the shelf a device follows, clean-up, and the plugin's automatic downloads. */
+export function ShelfSyncForm({ initial, shelves, plugin, onSave }: { initial: AppPassword; shelves: readonly Shelf[]; plugin: boolean; onSave: (body: ShelfSync) => Promise<void> }) {
+  const [shelfId, setShelfId] = useState<number | null>(initial.follow_shelf_id ?? null);
+  const [cleanup, setCleanup] = useState(!!initial.follow_cleanup);
+  const [auto, setAuto] = useState(!!initial.auto_download);
+  const [err, setErr] = useState<string | null>(null);
+  const options = followOptions(shelves);
+  const hidden = shelfId !== null && !options.some((o) => o.id === shelfId);
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        try {
+          await onSave({ shelf_id: shelfId, cleanup: shelfId !== null && cleanup, auto_download: auto });
+        } catch (ex) {
+          setErr((ex as Error).message);
+        }
+      }}
+    >
+      {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
+      <label className="field">
+        <span>Follow a shelf</span>
+        <select className="input" value={shelfId ?? ""} onChange={(e) => setShelfId(e.target.value ? Number(e.target.value) : null)}>
+          <option value="">No shelf</option>
+          {hidden && <option value={shelfId!}>A shelf you can’t see</option>}
+          {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+      </label>
+      <p className="hint">Books on the shelf, and on shelves inside it, are queued for this device by themselves, a few at a time; for a smart shelf, whatever its filter matches at the next sync.</p>
+      <fieldset className="radio-list">
+        <legend className="sr-only">Options</legend>
+        <label><input type="checkbox" checked={shelfId !== null && cleanup} disabled={shelfId === null} onChange={(e) => setCleanup(e.target.checked)} /> Remove books that leave the shelf</label>
+        <label><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Download queued books automatically</label>
+      </fieldset>
+      <p className="hint">
+        {plugin ? "The KOReader plugin downloads queued books when it syncs on its own, within this device’s download limit, and deletes only copies it downloaded itself. Other catalogue apps just see the queue change." : "Without the KOReader plugin, removing only takes books off this device’s queue, and nothing downloads by itself."}
+      </p>
+      <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn primary">Save</button></div>
+    </form>
+  );
+}
+
+function DeviceCard({ d, now, shelves, highlight, queue, onQueue, onRevoke, onCap, onShelfSync, onPlugin }: { d: Device; now: number; shelves: readonly Shelf[]; highlight?: boolean; queue?: QueueDevice; onQueue?: (q: QueueDevice) => void; onRevoke?: () => void; onCap?: () => void; onShelfSync?: () => void; onPlugin?: () => void }) {
   const s = deviceStatus(d, now);
   const plugin = d.revoked_at ? null : pluginSetupText(d.plugin, now);
+  const sync = d.revoked_at ? [] : shelfSyncChips(d.app_password, shelves);
   return (
     <li className="device-card" id={`device-${d.id}`} data-tone={s.tone} data-highlight={highlight || undefined}>
       <div className="device-head">
@@ -235,6 +297,7 @@ function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap, onPlug
             actions={[
               ...(onPlugin ? [{ label: "KOReader plugin…", icon: <Download />, onSelect: onPlugin }] : []),
               ...(queue && onQueue ? [{ label: "Queue…", icon: <Send />, onSelect: () => onQueue(queue) }] : []),
+              ...(d.app_password && onShelfSync ? [{ label: "Shelf sync…", icon: <ShelfIcon />, onSelect: onShelfSync }] : []),
               ...(d.app_password && onCap ? [{ label: "Download limit…", icon: <Download />, onSelect: onCap }] : []),
               { label: "Revoke device", icon: <Close />, danger: true, onSelect: onRevoke },
             ]}
@@ -259,6 +322,7 @@ function DeviceCard({ d, now, highlight, queue, onQueue, onRevoke, onCap, onPlug
         {d.sync_key && <span className="cap"><Sync /> Progress sync</span>}
         {d.app_password && <span className="cap"><Book /> Catalogue</span>}
         {plugin && <span className={`cap plugin-${plugin.tone}`}><Reader /> {plugin.text}</span>}
+        {sync.map((c) => <span key={c.text} className="cap" title={c.title}>{c.text.startsWith("Follows") ? <ShelfIcon /> : <Download />} {c.text}</span>)}
         {d.app_password?.download_cap_per_hour != null && <span className="cap"><Download /> {d.app_password.download_cap_per_hour ? `${d.app_password.download_cap_per_hour}/h` : "no limit"}</span>}
       </div>
       {queue && onQueue && (

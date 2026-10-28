@@ -101,6 +101,7 @@ def root(request: Request, user: OpdsUser, db: DbDep) -> Response:
     device's queue) before the whole library, each with its size, so the book you want is
     one tap away on a slow screen. The order never changes; empty lists say so."""
     pw = request.state.app_password
+    device_queue.sync_follow(db, pw.id)
     n_continue = len(continue_items(db, user, PAGE_SIZE))
     n_next = len(up_next_ids(db, user))
     n_queue = device_queue.pending_count(db, pw.id, user)
@@ -227,6 +228,8 @@ def queue_feed(request: Request, user: OpdsUser, db: DbDep, page: int = 1) -> Re
     request sees it; an entry leaves once this device downloaded the whole EPUB."""
     page = max(1, page)
     pw = request.state.app_password
+    if page == 1:
+        device_queue.sync_follow(db, pw.id)
     total = device_queue.pending_count(db, pw.id, user)
     rows = db.execute(
         device_queue.pending_query(pw.id, user)

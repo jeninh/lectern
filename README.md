@@ -379,8 +379,10 @@ values to enter, then waits and confirms the device's first sync live.
 e-reader. It shows up first in that device's catalogue and leaves the queue when that device
 has downloaded the whole EPUB; another device, a browser download, a range request, or a
 conditional `304` never counts. Everyone sends to their own devices; the owner can send to
-anyone's, but only books that person can see. Queues are on **Devices → Open queue**. Details,
-delivery rules, and the API: [`docs/device-queues.md`](docs/device-queues.md).
+anyone's, but only books that person can see. Queues are on **Devices → Open queue**. A device
+can also **follow a shelf** (nested or smart): its books are queued by themselves, the KOReader
+plugin can download them on its automatic sync, and books that leave the shelf can be removed
+again. Details, delivery rules, and the API: [`docs/device-queues.md`](docs/device-queues.md).
 
 ## Read-along
 

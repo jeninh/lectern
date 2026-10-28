@@ -17,6 +17,11 @@ the open book's whenever its position is pushed and shortly after one is made, e
 deleted; Sync now also checks the sidecars of recently read books. Only books whose highlights
 changed are sent, through the same outbox and retries. Their text is never logged.
 
+Shelf sync (docs/device-queues.md#following-a-shelf): a quiet check of the device's queue on
+start, wake, Wi-Fi back, and every Core.FETCH_INTERVAL, which downloads queued books by itself
+when the device's Auto-download setting in Lectern is on, and deletes the copies it downloaded
+of books that left the followed shelf when clean-up is on.
+
 Whether the network is up is decided by trying the request (short timeouts), never by
 KOReader's NetworkMgr alone: on jailbroken Kindles whose Wi-Fi is brought up outside KOReader
 it reports offline forever. NetworkMgr only decides how soon to retry.
@@ -83,6 +88,7 @@ function Lectern:init()
     self.annotations_task = function()
         if not self.retry_pending then self:flush() end
     end
+    self.fetch_task = function() self:autoFetch() end
     -- Home Wi-Fi or Tailscale (docs/home-network.md): checked again after start, wake, and
     -- network changes, and every Core.ROUTE_TTL while KOReader runs.
     self.route_task = function()
@@ -115,6 +121,7 @@ function Lectern:start()
     elseif self.core:pending() > 0 then
         self:retrySoon(2)
     end
+    if self.core:isPaired() then self:fetchSoon(10) end
 end
 
 local function inTime(seconds)
@@ -461,19 +468,85 @@ function Lectern:onNetworkConnected()
     if self.setup_pending or self.core:pending() > 0 then
         self:scheduleRetry(3)
     end
+    self:fetchSoon(5)
 end
 
 function Lectern:onResume()
     -- Woken up, maybe elsewhere (Wi-Fi managed outside KOReader sends no network events).
     self:recheckHome(5)
     if self.core:pending() > 0 then self:retrySoon(5) end
+    self:fetchSoon(8)
 end
 
 function Lectern:onCloseWidget()
     UIManager:unschedule(self.retry_task)
     UIManager:unschedule(self.route_task)
     UIManager:unschedule(self.annotations_task)
+    UIManager:unschedule(self.fetch_task)
     self.retry_pending = false
+end
+
+-- --- shelf sync: the quiet check of the queue -----------------------------------------------
+
+function Lectern:fetchSoon(seconds)
+    if not self:managed() then return end
+    UIManager:unschedule(self.fetch_task)
+    UIManager:scheduleIn(seconds, self.fetch_task)
+end
+
+--- The file open in the reader right now, which clean-up never deletes.
+function Lectern:isOpen(path)
+    local doc = self.ui and self.ui.document
+    return doc ~= nil and doc.file == path
+end
+
+--- Quietly check the queue: delete copies of books that left the followed shelf (clean-up)
+-- and, with Auto-download on in Lectern, download up to Core.AUTO_BATCH queued books, one per
+-- UI tick, stopping at the first failure (offline, or Lectern's hourly cap: 429); not while a
+-- book is open, since downloads block the UI. Automatic
+-- checks happen at most once per Core.FETCH_MIN, and only with Sync automatically on;
+-- ``status`` (from Sync now) skips both and the request. Never prompts. Returns how many books
+-- it is downloading and how many it deleted.
+function Lectern:autoFetch(status)
+    local forced = status ~= nil
+    if not status then
+        UIManager:unschedule(self.fetch_task)
+        if not self:managed() then return 0, 0 end
+        local now = os.time()
+        local last = self.store:readSetting("last_fetch_at") or 0
+        if now - last >= 0 and now - last < Core.FETCH_MIN then
+            UIManager:scheduleIn(Core.FETCH_MIN - (now - last), self.fetch_task)
+            return 0, 0
+        end
+        UIManager:scheduleIn(Core.FETCH_INTERVAL, self.fetch_task)
+        self.store:saveSetting("last_fetch_at", now)
+        self.store:flush()
+        status = self.core:status()
+        if not status then return 0, 0 end
+    end
+    local deleted = self.core:cleanUp(status.remove, function(path) return self:isOpen(path) end)
+    if deleted > 0 and self.ui and self.ui.file_chooser then
+        pcall(self.ui.file_chooser.refreshPath, self.ui.file_chooser)
+    end
+    -- Downloads block the UI, so a quiet check leaves them while a book is open; Sync now
+    -- (``forced``) and the next check in the file browser get them.
+    local reading = not forced and self.ui and self.ui.document ~= nil
+    local items = status.auto_download == true and not reading
+        and self.core:toDownload(status.queue and status.queue.items, Core.AUTO_BATCH) or {}
+    local planned = #items
+    local dir = self:downloadDir()
+    local function nextBook()
+        local item = table.remove(items, 1)
+        if not item then return end
+        local path, err = self.core:download(item, dir)
+        if not path then
+            self.core:log("info", "automatic download stopped:", err)
+            return
+        end
+        if #items > 0 then UIManager:nextTick(nextBook) end
+    end
+    nextBook()
+    return planned, deleted
 end
 
 -- --- Sync now ------------------------------------------------------------------------------
@@ -494,6 +567,7 @@ function Lectern:syncNow()
         pcall(k.getProgress, k, false, false)
     end
     local status, err = self.core:status()
+    local got = status and self:autoFetch(status) or 0
     local text
     if why == "unauthorized" or err == "unauthorized" then
         text = _("Lectern refused this device's key. It was revoked or paired again elsewhere.\n\nUse Lectern → Pair with a code.")
@@ -506,6 +580,9 @@ function Lectern:syncNow()
         text = string.format(_("Synced with Lectern.\n%d position(s) sent. %d book(s) waiting for this device."), sent, status.queue and status.queue.pending or 0)
         if (books or 0) > 0 then
             text = text .. string.format(_("\nHighlights and notes of %d book(s) sent."), books)
+        end
+        if got > 0 then
+            text = text .. string.format(_("\n%d book(s) downloading."), got)
         end
     end
     UIManager:show(InfoMessage:new{ text = text, timeout = 5 })

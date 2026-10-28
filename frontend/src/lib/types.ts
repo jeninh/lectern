@@ -202,6 +202,12 @@ export interface SyncKey {
 
 export interface AppPassword extends SyncKey {
   download_cap_per_hour?: number | null;
+  /** Shelf sync (docs/device-queues.md#following-a-shelf): the shelf whose books are queued
+   * for this device by themselves, whether books leaving it are cleaned up, and whether the
+   * KOReader plugin downloads queued books on its own. */
+  follow_shelf_id?: number | null;
+  follow_cleanup?: boolean;
+  auto_download?: boolean;
 }
 
 export interface Passkey {
