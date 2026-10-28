@@ -21,7 +21,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from lectern import egress, integrations
+from lectern import egress, integrations, jobqueue
 from lectern.models import Role, WorkerCredential
 from lectern.routes.api.align import server_capabilities
 from lectern.routes.api.readalong import visible_work
@@ -89,13 +89,16 @@ def audiobook_state(auth: Viewer, db: DbDep, settings: SettingsDep, work_id: int
         "reason": reason,
         "chapters": chapters,
         **svc.catalog(db, settings, auth.user),
-        "job": tj.job_json(
-            db,
-            job,
-            _workers(db),
-            server_caps=server_capabilities(db, settings),
-            for_owner=auth.user.role == Role.OWNER,
-        )  # fmt: skip
+        "job": {
+            **tj.job_json(
+                db,
+                job,
+                _workers(db),
+                server_caps=server_capabilities(db, settings),
+                for_owner=auth.user.role == Role.OWNER,
+            ),
+            "can_cancel": jobqueue.may_see(job, auth.user),
+        }
         if job
         else None,
         "edition": (

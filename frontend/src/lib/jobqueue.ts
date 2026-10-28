@@ -1,6 +1,9 @@
 /** The job queue page (GET /api/job-queue, issue #87). */
 import type { Blocked } from "./limits";
 
+/** In place of Cancel on a book's page: POST /api/jobs/{id}/cancel follows the Jobs page's rule. */
+export const CANCEL_NOT_YOURS = "Only the owner or whoever started it can cancel";
+
 export type JobGroup = "running" | "waiting" | "paused" | "failed" | "done";
 export const GROUPS: JobGroup[] = ["running", "waiting", "paused", "failed", "done"];
 export const GROUP_LABEL: Record<JobGroup, string> = {

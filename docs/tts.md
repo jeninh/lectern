@@ -187,7 +187,8 @@ external worker, so the key never leaves the server.
 - **ETA** is measured, never guessed: characters left divided by the median characters per
   second of the last five finished narrations with the same engine; before any, extrapolated
   from this run once it is 5 % done.
-- **Cancel**: `POST /api/jobs/{id}/cancel` (the row's Cancel). The runner stops at its next
+- **Cancel**: `POST /api/jobs/{id}/cancel` (the row's Cancel), for the owner or whoever started
+  the narration; anyone else sees why there is no Cancel. The runner stops at its next
   sentence.
 - **Retry**: a failed or cancelled narration's row offers **Retry** (`POST
   /api/works/{id}/audiobook/retry`), which queues it again with the same settings and cap.

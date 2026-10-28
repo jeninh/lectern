@@ -57,6 +57,8 @@ export interface TtsJob {
   lease: { worker: string } | null;
   crashes?: number;
   waiting?: { summary: string } | null;
+  /** On GET …/audiobook: false when only the owner or whoever started it may cancel. */
+  can_cancel?: boolean;
 }
 
 export interface AudiobookState {

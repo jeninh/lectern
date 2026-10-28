@@ -18,6 +18,7 @@ export interface OcrInfo {
   progress: number | null;
   message: string | null;
   error: string | null;
+  job: { id: number; status: string; attempts: number; paused: boolean } | null;
   result: { words: number; pages: number; pages_failed: number; language: string } | null;
   download_url: string | null;
   size: number | null;
@@ -95,9 +96,11 @@ export function OcrStatus({ file, title }: { file: BookFile; title: string }) {
       )}
       {info.status === "unavailable" && <span className="hint"><strong>Scanned PDF</strong> · {info.message}</span>}
       {info.status === "unreadable" && <span className="hint"><strong>Scanned PDF</strong> · this PDF can’t be read for text recognition ({info.error})</span>}
-      {info.status === "queued" && (
+      {info.status === "queued" && (info.job?.paused ? (
+        <span className="hint">Text recognition queued · Paused by the owner (Jobs page)</span>
+      ) : (
         <span className="hint"><span className="spinner sm" role="img" aria-label="Queued" /> Text recognition queued{info.message ? ` · ${info.message}` : ""}{info.error ? ` · retrying after: ${info.error}` : ""}</span>
-      )}
+      ))}
       {info.status === "running" && (
         <>
           <span className="hint">Recognising text in {langName(info.language ?? info.default_language)}{info.message ? ` · ${info.message}` : ""}</span>

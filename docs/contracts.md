@@ -442,7 +442,20 @@ first (page size 50). Shape of one job:
 the existing active job for that work (the partial unique index makes a duplicate impossible).
 With `force: true` an existing active job is cancelled first. `POST …/cancel` moves a
 `queued`/`leased` job to `cancelled`; a worker still holding the lease gets `409 lease_lost` on
-its next call.
+its next call. Who may cancel is the same rule as on the Jobs page
+(`POST /api/job-queue/jobs/{id}/cancel`, below): the owner, or whoever started the job. A
+member gets `403 not_your_job` for anyone else's job, including one queued automatically
+(an alignment queued when a book gains its EPUB + audio has no starter, so only the owner can
+cancel it). Each job in these responses, and the `job` of a book's narration
+(`GET /api/works/{id}/audiobook`) and PDF conversion (`GET /api/works/{id}/pdf-epub`) state,
+carries `can_cancel`; the book page shows "Only the owner or whoever started it can cancel" in
+place of Cancel when it is `false`. A cancel is conditional on the row (as pause, resume, and
+retry below): a job that finished in the meantime stays finished, its output published, and
+the cancel is a no-op returning the finished job.
+
+Error text follows the Jobs page too: `error` and the "after: …" in `waiting.summary` /
+`waiting.last_error` are `null` (left out) for a member on a job whose book they cannot see
+(or that has no book); the owner always gets them.
 
 Implemented (milestone 3). `force: true` is refused with `409 job_running` while a worker
 holds the active job's lease (cancel it explicitly instead); a queued job is replaced. Each job
@@ -479,7 +492,9 @@ storage cleanup), get `title: null` for a book they cannot see, and readers, and
 job whose book they cannot see, get no error text (no `error`, and no "after: …" in `waiting`).
 Writes are session + CSRF; a job someone may not see is `404`:
 
-- `POST /api/job-queue/jobs/{id}/cancel`: any kind, the owner or whoever started it. A worker
+- `POST /api/job-queue/jobs/{id}/cancel`: any kind, the owner or whoever started it (the same
+  rule as `POST /api/jobs/{id}/cancel`, which answers `403 not_your_job` rather than `404`
+  because `GET /api/jobs` lists every job to members). A worker
   holding the lease gets `409 lease_lost` on its next call, which stops it; uploaded artifacts
   are removed at once, except a narration's (a Retry resumes from them). On this server, OCR,
   alignment, and narration stop at their next lease check and a transcode between tracks; a

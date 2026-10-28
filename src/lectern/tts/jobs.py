@@ -330,15 +330,7 @@ def reclaim(db: Session, now: datetime | None = None, *, orphaned_local: bool = 
 def cancel(db: Session, job: Job) -> bool:
     """Cancel a tts job. Unlike ``align.jobs.cancel_job`` it leaves the work's alignment
     alone: a narration has nothing to do with an existing alignment row. Caller commits."""
-    if job.status not in JOB_ACTIVE_STATUSES:
-        return False
-    job.status = JobStatus.CANCELLED
-    job.lease_token_hash = None
-    job.lease_expires_at = None
-    job.heartbeat_at = None
-    job.finished_at = utcnow()
-    db.flush()
-    return True
+    return queue.cancel_row(db, job)  # conditional: a job that finished meanwhile stays so
 
 
 def sweep(db: Session, data_dir: Path, now: datetime | None = None) -> int:
@@ -822,7 +814,9 @@ def job_json(
     detailed: bool = True,
     server_caps: set[str] | None = None,
     for_owner: bool = False,
+    show_error: bool = True,
 ) -> dict:
+    """``show_error=False`` leaves the error text out (``lectern.jobqueue.shows_error``)."""
     p = job.payload or {}
     r = job.result or {}
     lease = None
@@ -865,10 +859,14 @@ def job_json(
         if job.status == JobStatus.LEASED
         else (1.0 if job.status == JobStatus.SUCCEEDED else None),
         "message": r.get("message") if job.status == JobStatus.LEASED else None,
-        "error": job.error if detailed else (None if job.error is None else "failed"),
+        "error": (job.error if show_error else None)
+        if detailed
+        else (None if job.error is None else "failed"),
         "result": _success_body(job) if job.status == JobStatus.SUCCEEDED else None,
         "eta": eta(db, job),
-        "waiting": queue.explain_wait(db, job, server_caps=server_caps, for_owner=for_owner)
+        "waiting": queue.explain_wait(
+            db, job, server_caps=server_caps, for_owner=for_owner, show_error=show_error
+        )
         if detailed
         else None,
     }

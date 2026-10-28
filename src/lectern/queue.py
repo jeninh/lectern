@@ -398,6 +398,33 @@ def hold_lease(db: Session, job: Job, now: datetime | None = None) -> bool:
     return True
 
 
+def cancel_row(db: Session, job: Job) -> bool:
+    """Move a live job to ``cancelled`` and drop its lease; ``False`` when it is no longer live.
+
+    Conditional on the row, not this session's copy: a job that finished in another session
+    after this one read it stays finished (its output is published). Caller commits."""
+    from sqlalchemy import update
+
+    from lectern.models import JOB_ACTIVE_STATUSES, Job, JobStatus, utcnow
+
+    now = utcnow()
+    done = db.execute(
+        update(Job)
+        .where(Job.id == job.id, Job.status.in_(JOB_ACTIVE_STATUSES))
+        .values(
+            status=JobStatus.CANCELLED,
+            lease_token_hash=None,
+            lease_expires_at=None,
+            heartbeat_at=None,
+            finished_at=now,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    db.expire(job)
+    return done == 1
+
+
 class ArtifactBudget:
     """In-process reservations for artifact uploads in flight: bytes and slots per job, taken
     atomically before the body is read and given back when the request ends (a crash of the
