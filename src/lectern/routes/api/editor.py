@@ -153,6 +153,8 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
                 "url": covergen.cover_url(work) if not work.has_cover else None,
                 "style": work.cover_style,
                 "seed": work.cover_seed or 0,
+                "font": work.cover_font or covergen.DEFAULT_FONT,
+                "fonts": list(covergen.FONTS),
                 "effective_style": covergen.design_of(work).style,
                 "styles": list(covergen.STYLES),
             },

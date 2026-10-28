@@ -135,6 +135,7 @@ class CoverChange(BaseModel):
     # "generate": None = the style the title/author hash picks; seed = palette shuffle.
     style: Literal["classic", "modern", "minimal"] | None = None
     seed: int = Field(default=0, ge=0, le=1_000_000)
+    font: Literal["display", "text", "noto"] = "display"
 
 
 class WorkPatch(BaseModel):
@@ -382,6 +383,7 @@ def _cover_state(work: Work) -> dict:
         "tint": work.cover_tint,
         "style": work.cover_style,
         "seed": work.cover_seed or 0,
+        "font": work.cover_font,
     }
 
 
@@ -418,6 +420,7 @@ def apply_cover(
             work.has_cover, work.cover_tint, work.cover_source = False, None, None
             if change.action == "generate":
                 work.cover_style, work.cover_seed = change.style, change.seed
+                work.cover_font = None if change.font == "display" else change.font
         else:
             new.replace(cover)
             work.has_cover, work.cover_source = True, change.action
@@ -439,6 +442,7 @@ def _restore_cover(settings: Settings, work: Work, state: dict) -> None:
     work.cover_tint = state.get("tint") if work.has_cover else None
     if "style" in state:  # revisions saved before generated covers lack these
         work.cover_style, work.cover_seed = state.get("style"), state.get("seed") or 0
+        work.cover_font = state.get("font")
 
 
 # --- text and audio invalidation ---------------------------------------------------------------

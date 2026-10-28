@@ -44,6 +44,10 @@ log = logging.getLogger(__name__)
 RENDERER_VERSION = 2
 WIDTH, HEIGHT = 800, 1200
 STYLES = ("classic", "modern", "minimal")
+# The title face: "display" (Newsreader Display, the default), "text" (Newsreader Text), or
+# "noto" (Noto Serif). Only the title's first face changes; fallbacks and the author line do not.
+FONTS = ("display", "text", "noto")
+DEFAULT_FONT = "display"
 PATTERNS = ("stripes", "arcs", "grid", "dots")
 MAX_TEXT = 512  # characters of title or author considered (bounds render cost)
 DERIVED_DIR = "derived"
@@ -137,26 +141,31 @@ class Design:
     pattern: str
     ornament: int
     lang: str | None
+    font: str = DEFAULT_FONT
+
+    def __post_init__(self) -> None:
+        if self.font not in FONTS:
+            raise ValueError(f"unknown cover font {self.font!r}")
 
     @property
     def key(self) -> str:
         """Everything the image depends on, fonts included (names ``derived/cover-<key>.jpg``)."""
-        raw = json.dumps(
-            [
-                RENDERER_VERSION,
-                self.title,
-                self.author,
-                self.style,
-                self.palette.name,
-                self.pattern,
-                self.ornament,
-                _cjk_variant(self.lang),
-                _bundled_fonts_digest(),
-                # Only CJK text is drawn with the system CJK font: its file and content.
-                _cjk_fonts_digest() if any(_is_cjk(c) for c in self.title + self.author) else "",
-            ],
-            ensure_ascii=False,
-        )
+        parts = [
+            RENDERER_VERSION,
+            self.title,
+            self.author,
+            self.style,
+            self.palette.name,
+            self.pattern,
+            self.ornament,
+            _cjk_variant(self.lang),
+            _bundled_fonts_digest(),
+            # Only CJK text is drawn with the system CJK font: its file and content.
+            _cjk_fonts_digest() if any(_is_cjk(c) for c in self.title + self.author) else "",
+        ]
+        if self.font != DEFAULT_FONT:  # appended only then: existing keys (and ?v=) stay valid
+            parts.append(self.font)
+        raw = json.dumps(parts, ensure_ascii=False)
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -167,6 +176,7 @@ def design_for(
     style: str | None = None,
     seed: int = 0,
     lang: str | None = None,
+    font: str | None = None,
 ) -> Design:
     """The deterministic design for a title and author. ``style`` overrides the hashed style;
     ``seed`` (the editor's shuffle) steps through the palettes from the hashed one."""
@@ -182,6 +192,7 @@ def design_for(
         pattern=PATTERNS[digest[5] % len(PATTERNS)],
         ornament=digest[6] % 3,
         lang=lang,
+        font=font or DEFAULT_FONT,
     )
 
 
@@ -191,7 +202,12 @@ UNKNOWN_AUTHOR = "Unknown Author"  # lectern.workmeta.display_author's placehold
 def design_of(work) -> Design:
     author = "" if work.author == UNKNOWN_AUTHOR else work.author
     return design_for(
-        work.title, author, style=work.cover_style, seed=work.cover_seed or 0, lang=work.language
+        work.title,
+        author,
+        style=work.cover_style,
+        seed=work.cover_seed or 0,
+        lang=work.language,
+        font=work.cover_font,
     )
 
 
@@ -729,7 +745,7 @@ def _pattern(kind: str, colour: str, x0: float, y0: float, x1: float, y1: float)
 def svg(design: Design) -> str:
     """The cover as an SVG document (``WIDTH`` × ``HEIGHT``)."""
     p = design.palette
-    title_chain = _chain(DISPLAY, design.lang)
+    title_chain = _chain({"text": TEXT, "noto": NOTO_SERIF}.get(design.font, DISPLAY), design.lang)
     text_chain = _chain(TEXT, design.lang)
     author = design.author
     author_tracking = 0.1 if _tracked(author) else 0.0

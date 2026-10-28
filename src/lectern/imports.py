@@ -613,7 +613,17 @@ def _resolve_target(db: Session, imp: Import, decision: Decision) -> Work | None
     return work
 
 
-_FILLABLE = ("isbn", "language", "description", "publisher", "published", "series", "series_index")
+_FILLABLE = (
+    "isbn",
+    "language",
+    "description",
+    "publisher",
+    "published",
+    "series",
+    "series_index",
+    "subtitle",
+    "original_published",
+)
 
 
 def _fill_empty(work: Work, meta: Metadata) -> list[str]:
@@ -626,6 +636,8 @@ def _fill_empty(work: Work, meta: Metadata) -> list[str]:
             filled.append(k)
     if not work.narrators and data.get("narrators"):
         work.narrators, filled = data["narrators"], [*filled, "narrators"]
+    if not work.contributors and data.get("contributors"):
+        work.contributors, filled = data["contributors"], [*filled, "contributors"]
     if not work.tags and data.get("tags"):
         work.tags, filled = data["tags"], [*filled, "tags"]
     return filled

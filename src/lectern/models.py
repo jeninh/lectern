@@ -281,6 +281,14 @@ class Work(Base):
     cover_seed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Optimistic concurrency: every edit is ``UPDATE ... WHERE version = <seen>``.
     version: Mapped[int] = mapped_column(Integer, default=1)
+    # --- Migration 0042 (cover and metadata editor, issue #85) -----------------------------
+    # cover_font None = the default display face. contributors: [{"name", "role"}], at most
+    # lectern.workmeta.CONTRIBUTOR_ROLES, at most 20, no duplicates (checked there).
+    cover_font: Mapped[str | None] = mapped_column(String(16), default=None)
+    subtitle: Mapped[str | None] = mapped_column(String(512), default=None)
+    original_published: Mapped[str | None] = mapped_column(String(32), default=None)
+    contributors: Mapped[list | None] = mapped_column(JSON, default=None)
+    # --- end migration 0042 columns --------------------------------------------------------
     # Trash: hidden from everyone, files under <library>/_trash/, purged after 30 days.
     trashed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None, index=True)
     trashed_by: Mapped[int | None] = mapped_column(

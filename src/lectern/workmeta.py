@@ -26,6 +26,7 @@ from pydantic_core import PydanticCustomError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lectern import covergen
 from lectern.fsops import write_json_atomic
 from lectern.ingest.epub import normalize_isbn
 from lectern.ingest.library import safe_component
@@ -84,6 +85,18 @@ class AuthorIn(BaseModel):
         return reject_controls(v)
 
 
+class ContributorIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    role: Literal["translator", "editor", "illustrator", "foreword"]
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _controls(cls, v):
+        return reject_controls(v)
+
+
 class Metadata(BaseModel):
     """Every editable descriptive field. Used by imports (review) and the work editor alike,
     and by any later automation client: validation lives here, not in a UI."""
@@ -104,6 +117,14 @@ class Metadata(BaseModel):
     published: Annotated[str, StringConstraints(strip_whitespace=True, max_length=32)] | None = None
     tags: list[Short] = Field(default_factory=list, max_length=50)
     narrators: list[Short] = Field(default_factory=list, max_length=20)
+    # Issue #85. Every field here must also be in metadata_of and apply_metadata: applying a
+    # metadata suggestion saves the whole object, so a missing one would be wiped.
+    subtitle: Line | None = None
+    original_published: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=32)] | None
+    ) = None
+    contributors: list[ContributorIn] = Field(default_factory=list, max_length=20)
+    cover_font: Literal["display", "text", "noto"] | None = None
 
     @field_validator(
         "title",
@@ -116,6 +137,8 @@ class Metadata(BaseModel):
         "published",
         "tags",
         "narrators",
+        "subtitle",
+        "original_published",
         mode="before",
     )
     @classmethod
@@ -141,7 +164,7 @@ class Metadata(BaseModel):
             raise ValueError("not a valid ISBN-10 or ISBN-13")
         return isbn
 
-    @field_validator("published")
+    @field_validator("published", "original_published")
     @classmethod
     def _date(cls, v: str | None) -> str | None:
         if not v:
@@ -158,7 +181,15 @@ class Metadata(BaseModel):
             seen.setdefault(item.casefold(), item)
         return list(seen.values())
 
-    @field_validator("series", "publisher", "sort_title", "description")
+    @field_validator("contributors")
+    @classmethod
+    def _dedupe_contributors(cls, v: list[ContributorIn]) -> list[ContributorIn]:
+        seen: dict[tuple[str, str], ContributorIn] = {}
+        for c in v:
+            seen.setdefault((c.name.casefold(), c.role), c)
+        return list(seen.values())
+
+    @field_validator("series", "publisher", "sort_title", "description", "subtitle")
     @classmethod
     def _blank(cls, v: str | None) -> str | None:
         return v if v and v.strip() else None
@@ -199,6 +230,10 @@ def metadata_of(work: Work) -> dict:
         "published": work.published,
         "tags": list(work.tags or []),
         "narrators": list(work.narrators or []),
+        "subtitle": work.subtitle,
+        "original_published": work.original_published,
+        "contributors": [dict(c) for c in work.contributors or []],
+        "cover_font": work.cover_font,
     }
 
 
@@ -222,6 +257,10 @@ def apply_metadata(work: Work, meta: Metadata | dict) -> None:
     work.published = m.published
     work.tags = m.tags or None
     work.narrators = m.narrators or None
+    work.subtitle = m.subtitle
+    work.original_published = m.original_published
+    work.contributors = [c.model_dump() for c in m.contributors] or None
+    work.cover_font = m.cover_font
 
 
 def desired_dir_parts(work: Work) -> tuple[str, str]:
@@ -256,7 +295,11 @@ def book_json(db: Session, work: Work) -> dict:
         "readalong_enabled": work.readalong_enabled,
         "primary_file_id": work.primary_file_id,
         "cover": "cover.jpg" if work.has_cover else None,
-        "generated_cover": {"style": work.cover_style, "seed": work.cover_seed or 0},
+        "generated_cover": {
+            "style": work.cover_style,
+            "seed": work.cover_seed or 0,
+            "font": work.cover_font or covergen.DEFAULT_FONT,
+        },
         "files": [
             {
                 "id": f.id,

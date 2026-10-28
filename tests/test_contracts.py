@@ -706,3 +706,21 @@ def test_migration_0007_backfills_authors_and_round_trips(tmp_path):
     assert "authors" not in {c["name"] for c in insp.get_columns("works")}
     with engine.connect() as conn:
         assert conn.execute(sa.text("SELECT title FROM works")).scalar() == "Kim"
+
+
+def test_migration_0042_cover_metadata_round_trips(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'm42.db'}")
+    upgrade_to_head(engine)
+    new = {"cover_font", "subtitle", "original_published", "contributors"}
+
+    def cols():
+        return {c["name"] for c in sa.inspect(engine).get_columns("works")}
+
+    assert new <= cols()
+    cfg = alembic_config(str(engine.url))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.downgrade(cfg, "0029_playback_speed")
+    assert not new & cols()
+    upgrade_to_head(engine)
+    assert new <= cols()

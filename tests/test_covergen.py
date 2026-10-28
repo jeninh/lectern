@@ -350,3 +350,39 @@ def test_opds_lists_and_serves_the_generated_cover(client, owner, settings):
     rels = {ln.get("rel"): ln.get("href") for ln in tree.find("a:entry", ns).findall("a:link", ns)}
     assert rels["http://opds-spec.org/image"] == f"/opds/works/{wid}/cover.jpg"
     _jpeg(client.get(rels["http://opds-spec.org/image/thumbnail"], headers=auth))
+
+
+# --- font variants (issue #85) ---------------------------------------------------------------
+
+# The key of a default-font design. Hard-coded: changing it re-renders every cached cover and
+# changes every ?v=, so a key change must be deliberate (bump RENDERER_VERSION and this value).
+GOLDEN_DEFAULT_KEY = "60af652b8c0fdd42678d2c63aa264548"
+
+
+def test_default_font_key_is_golden_and_other_fonts_change_it():
+    d = cg.design_for("Middlemarch", "George Eliot", lang="en")
+    assert d.font == "display" and d.key == GOLDEN_DEFAULT_KEY
+    assert cg.design_for("Middlemarch", "George Eliot", lang="en", font="display").key == d.key
+    keys = {
+        f: cg.design_for("Middlemarch", "George Eliot", lang="en", font=f).key for f in cg.FONTS
+    }
+    assert len(set(keys.values())) == len(cg.FONTS)
+
+
+def test_unknown_font_is_refused():
+    with pytest.raises(ValueError):
+        cg.design_for("Middlemarch", "George Eliot", font="comic")
+
+
+@pytest.mark.parametrize("style", cg.STYLES)
+@pytest.mark.parametrize("font", cg.FONTS)
+def test_every_font_renders_in_every_style(font, style):
+    d = cg.design_for("Middlemarch", "George Eliot", style=style, font=font)
+    img = cg.render_png(d, width=200)
+    assert img.startswith(b"\x89PNG")
+    others = [
+        cg.render_png(cg.design_for("Middlemarch", "George Eliot", style=style, font=f), width=200)
+        for f in cg.FONTS
+        if f != font
+    ]
+    assert img not in others  # the face actually changes the drawing
