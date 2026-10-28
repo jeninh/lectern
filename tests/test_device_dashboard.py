@@ -175,6 +175,10 @@ def test_a_late_report_does_not_replace_a_newer_one_and_needs_the_devices_passwo
     wrong = basic("rex", "not-the-password")
     assert client.put("/koplugin/report", json={"battery": 5}, headers=wrong).status_code == 401
     assert report(client, rex["basic"], battery=101).status_code == 422
+    # A work id SQLite cannot hold is refused, so the dashboard keeps loading.
+    assert report(client, rex["basic"], books=[{"work_id": 2**63}]).status_code == 422
+    assert rex["http"].get("/api/devices/dashboard").status_code == 200
+    assert rex["http"].get(f"/api/devices/dashboard/{rex['pw']}").status_code == 200
 
 
 def test_update_available_compares_versions_as_numbers(monkeypatch):

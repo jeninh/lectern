@@ -220,7 +220,8 @@ class ReportBookIn(BaseModel):
     """One Lectern book on the device: the work id of a file the plugin downloaded from
     Lectern, or the KOReader document digest of a book with a sidecar; its position 0..1."""
 
-    work_id: int | None = Field(default=None, ge=1)
+    # Bounded: the ids are later bound into SQLite queries (64-bit INTEGER).
+    work_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
     document: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,128}$")
     percentage: float | None = Field(default=None, ge=0, le=1)
 
