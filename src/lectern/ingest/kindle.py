@@ -191,6 +191,8 @@ def to_epub(path: Path, dest: Path) -> None:
 
 
 def _convert(path: Path, dest: Path) -> None:
+    from lectern import limits
+
     with tempfile.TemporaryDirectory(prefix="lectern-kindle-") as tmp:
         out = Path(tmp) / "book.epub"
         try:
@@ -206,7 +208,11 @@ def _convert(path: Path, dest: Path) -> None:
                 capture_output=True,
                 timeout=TIMEOUT_S,
                 check=False,
-                env={"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"},
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "LANG": "C.UTF-8",
+                    **limits.GOVERNOR.limit(limits.CONVERT).child_env(),
+                },
                 cwd=tmp,
             )
         except subprocess.TimeoutExpired:
@@ -1206,8 +1212,11 @@ def _unpack(src: Path, dest: Path) -> None:
 def _limit(file_limit: int) -> None:
     import resource
 
+    from lectern.limits import child_memory_bytes, lower_priority
+
     for which, value in (
-        (resource.RLIMIT_AS, MEMORY_LIMIT_BYTES),
+        # LECTERN_CONVERT_MEMORY_LIMIT_MB and LECTERN_CONVERT_NICE, passed down by the parent
+        (resource.RLIMIT_AS, child_memory_bytes(MEMORY_LIMIT_BYTES)),
         (resource.RLIMIT_CPU, CPU_LIMIT_S),
         (resource.RLIMIT_FSIZE, file_limit),
         (resource.RLIMIT_CORE, 0),
@@ -1216,10 +1225,7 @@ def _limit(file_limit: int) -> None:
             resource.setrlimit(which, (value, value))
         except (ValueError, OSError):
             pass  # best effort where the platform refuses a limit
-    try:
-        os.nice(10)
-    except OSError:
-        pass
+    lower_priority(10)
 
 
 def main(argv: list[str]) -> int:

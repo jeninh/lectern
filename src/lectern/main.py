@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 
-from lectern import __version__, backups, egress, mcp_server, offline_mode, search
+from lectern import __version__, backups, egress, limits, mcp_server, offline_mode, search
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
@@ -123,6 +123,8 @@ def create_app(
     _configure_logging(settings)
     # Before anything can open a connection; the owner's Admin switch is read at startup.
     egress.enforce(settings.offline)
+    # Before any runner starts: every heavy job asks lectern.limits for a slot.
+    limits.GOVERNOR.configure(limits.Limits.from_settings(settings))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

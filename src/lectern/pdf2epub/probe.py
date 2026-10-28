@@ -36,6 +36,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from lectern import limits
 from lectern.ingest import pdf as pdf_ingest
 from lectern.ingest.formats import PARSER_SLOTS, FormatError, ProbeBusy
 from lectern.pdftext.extract import _SPACES
@@ -105,7 +106,11 @@ def _run(argv: list[str]) -> dict:
                     capture_output=True,
                     timeout=pdf_ingest.TIMEOUT_S,
                     check=False,
-                    env={"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"},
+                    env={
+                        "PATH": os.environ.get("PATH", ""),
+                        "LANG": "C.UTF-8",
+                        **limits.GOVERNOR.limit(limits.CONVERT).child_env(),
+                    },
                     cwd=tmp,
                 )
             except subprocess.TimeoutExpired:

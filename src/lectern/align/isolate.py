@@ -12,7 +12,7 @@ Limits (all best effort, so they work wherever the platform allows):
   Linux), so an out-of-memory kill takes the alignment and not the server;
 - the supervisor watches the child's resident memory (``/proc/<pid>/status``) and kills it
   above ``memory_limit_mb``;
-- the child runs at a lower CPU priority (``nice`` +10), never dumps core, and exits when the
+- the child runs at a lower CPU priority (``nice`` +10, ``LECTERN_ALIGN_NICE``), never dumps core, and exits when the
   server that started it goes away.
 
 Outcomes (:class:`Outcome.kind`): ``ok``; ``error`` (the pipeline raised; retryable as decided
@@ -38,6 +38,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from lectern import limits
 
 log = logging.getLogger("lectern.align.isolate")
 
@@ -163,6 +165,7 @@ def run(
             stderr=stderr,
             close_fds=True,
             start_new_session=True,  # a Ctrl-C to the server's terminal is the server's
+            env={**os.environ, limits.CHILD_NICE: str(limits.GOVERNOR.limit(limits.ALIGN).nice)},
         )
     finally:
         if log_path:

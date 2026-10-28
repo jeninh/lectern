@@ -14,7 +14,9 @@ from lectern.security.proxy import Network, parse_networks
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="LECTERN_", extra="ignore")
+    # An empty value means "the default", so the compose file can pass every key through as
+    # ${KEY:-} without repeating the defaults here.
+    model_config = SettingsConfigDict(env_prefix="LECTERN_", extra="ignore", env_ignore_empty=True)
 
     data_dir: Path = Field(default=Path("/data"))
     library_dir: Path = Field(default=Path("/library"))
@@ -120,6 +122,34 @@ class Settings(BaseSettings):
     # lowest CPU priority, on one thread, with ffmpeg's address space capped at this many MiB
     # (0 = no cap of our own). External workers use their own limits.
     transcode_memory_limit_mb: int = Field(default=1024, ge=0)
+    transcode_threads: int = Field(default=1, ge=1, le=64)
+    transcode_nice: int = Field(default=19, ge=0, le=19)
+
+    # Resource limits of the server's own heavy jobs (lectern.limits, docs/resource-limits.md).
+    # Defaults suit a Raspberry Pi 4B with 8 GB that also serves the reader and KOReader sync:
+    # one heavy job at a time, each feature's child capped and at a low CPU priority. Jobs that
+    # external workers run never count. *_CONCURRENCY = 0 leaves that feature to workers.
+    heavy_jobs_max: int = Field(default=1, ge=0, le=64)
+    transcode_concurrency: int = Field(default=1, ge=0, le=16)
+    # Kokoro (PyTorch) and Piper (ONNX) run in a supervised child: its resident memory is
+    # capped (0 = no cap of our own), it uses at most *_THREADS CPUs, at this nice level.
+    kokoro_concurrency: int = Field(default=1, ge=0, le=16)
+    kokoro_threads: int = Field(default=2, ge=1, le=64)
+    kokoro_memory_limit_mb: int = Field(default=3072, ge=0)
+    kokoro_nice: int = Field(default=10, ge=0, le=19)
+    piper_concurrency: int = Field(default=1, ge=0, le=16)
+    piper_threads: int = Field(default=2, ge=1, le=64)
+    piper_memory_limit_mb: int = Field(default=1024, ge=0)
+    piper_nice: int = Field(default=10, ge=0, le=19)
+    # PDF → EPUB jobs; the memory cap and nice level also apply to MOBI/AZW3 conversion at
+    # import (which shares the parser slots instead of counting as a heavy job).
+    convert_concurrency: int = Field(default=1, ge=0, le=16)
+    convert_memory_limit_mb: int = Field(default=1536, ge=256, le=65536)
+    convert_nice: int = Field(default=10, ge=0, le=19)
+    ocr_concurrency: int = Field(default=1, ge=0, le=16)
+    ocr_nice: int = Field(default=10, ge=0, le=19)
+    align_concurrency: int = Field(default=1, ge=0, le=16)
+    align_nice: int = Field(default=10, ge=0, le=19)
 
     # Alignment (text <-> audio). The in-process worker runs only when faster-whisper is
     # installed (`lectern[align]`); a weak host sets LECTERN_ALIGN_LOCAL_WORKER=0 and runs

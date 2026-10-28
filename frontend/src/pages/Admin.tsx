@@ -5,6 +5,7 @@ import { OverflowMenu } from "../components/Menu";
 import { BackupsCard, OfflineModeCard } from "../components/Maintenance";
 import { Sheet } from "../components/Sheet";
 import { WorkersCard } from "../components/WorkersCard";
+import { ResourceLimitsCard } from "../components/ResourceLimits";
 import { PageTitle } from "../components/Shell";
 import { del, get, post, put } from "../lib/api";
 import { absoluteTime, bytes, relativeTime } from "../lib/format";
@@ -229,6 +230,7 @@ export function AdminPage() {
       <WorkersCard />
       <LibrarySettingsCard />
       <DataSaverCard />
+      <ResourceLimitsCard />
       <BackupsCard />
       {me?.user.role === "owner" && <StorageCard />}
       {me?.user.role === "owner" && <OfflineModeCard />}
