@@ -251,6 +251,8 @@ def quote_of_the_day(
     ``quote`` is null when it is turned off or there is none."""
     try:
         today = date.fromisoformat(day) if day else date.today()
+        if not date.min < today < date.max:  # the pick looks at the day before and after
+            raise ValueError
     except ValueError:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Not a date") from None
     hit = None

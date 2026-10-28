@@ -3156,7 +3156,7 @@ pre.ra-b {
      scrolling (issue #36). Long lists show a window around the current chapter instead. */
   overflow: clip;
   border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border-radius: 12px;
   background: var(--surface);
 }
 .chapters button {

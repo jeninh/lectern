@@ -579,6 +579,9 @@ def test_highlight_of_the_day_is_one_per_day_and_can_be_turned_off(client, owner
     assert today(client, "2026-11-02")["day"] == "2026-11-02"
     assert client.get("/api/quotes/today", params={"day": "2026-13-40"}).status_code == 422
     assert client.get("/api/quotes/today", params={"day": "tomorrow"}).status_code == 422
+    for edge in ("0001-01-01", "9999-12-31"):  # no day before or after: refused, not a 500
+        assert client.get("/api/quotes/today", params={"day": edge}).status_code == 422
+    assert today(client, "0001-01-02")["quote"] and today(client, "9999-12-30")["quote"]
     assert today(client, "2026-11-02")["quote"]["title"]
 
     # A hidden highlight is never the highlight of the day.

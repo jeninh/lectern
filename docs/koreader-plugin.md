@@ -201,8 +201,9 @@ only for books you can still see, by the same rules as below.
   with it.
 - **Highlight of the day** on Home: one of your own highlights, not hidden, chosen from your
   account and your local date (the browser's), so it is the same all day and another tomorrow
-  (two running are never the same when you have more than one). A new sync changes it only when a
-  new highlight outranks it. **Turn off** on the card hides it; the *Highlight of the day on
+  (two running are never the same when you have more than one). It stays put while your
+  highlights stay the same; a sync that adds or deletes highlights (or hiding one) can change the
+  day's pick. **Turn off** on the card hides it; the *Highlight of the day on
   Home* box in Quotes turns it back on. Nothing shows when you have no highlights, or offline.
 
 Both use only your own highlights on books you can still see, by the same rules as below; the

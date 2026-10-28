@@ -616,8 +616,10 @@ def of_the_day(db: Session, library: Path, user: User, day: date):
     Each highlight gets a per-person, per-day rank from its stable ``key``. On even days (by
     ordinal) the best wins; on odd days the best that is neither neighbouring day's, so two days
     running never show the same one. The pick depends only on the person, the day, and which
-    highlights there are: the same all day, and a new sync changes it only when a new highlight
-    outranks it. With two, they take turns."""
+    highlights there are (not hidden, still visible), so it is the same all day while those stay
+    the same. A sync that adds or removes highlights can change it: on an even day only if the
+    new one outranks it, on an odd day also by changing a neighbouring day's pick. With two, they
+    take turns. ``day`` must have a day before and after it (not 0001-01-01 or 9999-12-31)."""
     pool = [(w, a, f) for w, pairs in visible(db, library, user) for a, f in pairs if not a.hidden]
     if len(pool) < 3:
         pool.sort(key=lambda h: _digest(user.id, h[1].key))
