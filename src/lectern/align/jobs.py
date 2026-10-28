@@ -1039,7 +1039,8 @@ def job_json(
         "priority": job.priority,
         "model": (job.payload or {}).get("model"),
         "audio_s": round(_payload_duration(job), 3),
-        "run_after": _iso(job.run_after),
+        "run_after": None if queue.is_paused(job) else _iso(job.run_after),
+        "paused": queue.is_paused(job),
         "created_at": _iso(job.created_at),
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
@@ -1198,7 +1199,10 @@ def alignment_activity(db: Session, work_id: int, settings, *, detailed: bool = 
             "progress": result.get("progress") if leased else None,
             "message": result.get("message") if leased else None,
             "heartbeat_at": _iso(job.heartbeat_at),
-            "run_after": _iso(job.run_after) if job.status == JobStatus.QUEUED else None,
+            "run_after": _iso(job.run_after)
+            if job.status == JobStatus.QUEUED and not queue.is_paused(job)
+            else None,
+            "paused": queue.is_paused(job),
             "eta_s": estimate["seconds"] if estimate else None,
             "error": job.error if detailed else None,
         },

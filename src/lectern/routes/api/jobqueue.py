@@ -113,12 +113,12 @@ def retry(request: Request, auth: OwnerOnly, db: DbDep, job_id: int) -> dict:
 
 @router.post("/jobs/{job_id}/pause")
 def pause(request: Request, auth: OwnerOnly, db: DbDep, job_id: int) -> dict:
-    return _owner_action(request, auth, db, job_id, "pause", jobqueue.pause)
+    return _owner_action(request, auth, db, job_id, "pause", lambda j: jobqueue.pause(db, j))
 
 
 @router.post("/jobs/{job_id}/resume")
 def resume(request: Request, auth: OwnerOnly, db: DbDep, job_id: int) -> dict:
-    return _owner_action(request, auth, db, job_id, "resume", jobqueue.resume)
+    return _owner_action(request, auth, db, job_id, "resume", lambda j: jobqueue.resume(db, j))
 
 
 @router.post("/jobs/{job_id}/move")
@@ -133,6 +133,21 @@ def _batch(db, auth: AuthContext, batch: str) -> list[Job]:
     if not found:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     return found
+
+
+def _each(db, jobs: list[Job], group: str, fn) -> int:
+    """``fn`` on every job of the batch in ``group``; one that moved on meanwhile (claimed,
+    finished) is skipped. Returns how many it applied to."""
+    n = 0
+    for j in jobs:
+        if jobqueue.group_of(j) != group:
+            continue
+        try:
+            fn(db, j)
+            n += 1
+        except jobqueue.Refused:
+            pass
+    return n
 
 
 @router.post("/batches/{batch}/cancel")
@@ -153,20 +168,16 @@ def cancel_batch(
 
 @router.post("/batches/{batch}/pause")
 def pause_batch(request: Request, auth: OwnerOnly, db: DbDep, batch: BatchId) -> dict:
-    jobs = [j for j in _batch(db, auth, batch) if jobqueue.group_of(j) == "waiting"]
-    for j in jobs:
-        jobqueue.pause(j)
-    _audit(db, request, auth, "batch.pause", f"batch:{batch}", f"{len(jobs)} jobs")
+    n = _each(db, _batch(db, auth, batch), "waiting", jobqueue.pause)
+    _audit(db, request, auth, "batch.pause", f"batch:{batch}", f"{n} jobs")
     db.commit()
-    return {"paused": len(jobs)}
+    return {"paused": n}
 
 
 @router.post("/batches/{batch}/resume")
 def resume_batch(request: Request, auth: OwnerOnly, db: DbDep, batch: BatchId) -> dict:
-    jobs = [j for j in _batch(db, auth, batch) if jobqueue.group_of(j) == "paused"]
-    for j in jobs:
-        jobqueue.resume(j)
-    _audit(db, request, auth, "batch.resume", f"batch:{batch}", f"{len(jobs)} jobs")
+    n = _each(db, _batch(db, auth, batch), "paused", jobqueue.resume)
+    _audit(db, request, auth, "batch.resume", f"batch:{batch}", f"{n} jobs")
     db.commit()
     _wake(request)
-    return {"resumed": len(jobs)}
+    return {"resumed": n}

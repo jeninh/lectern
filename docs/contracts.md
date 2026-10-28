@@ -475,15 +475,23 @@ first 30 in each line, else its place), `limit` (`feature_limit` / `global_limit
 (`{id, kind, group, counts, total, mine, jobs}`).
 
 Owners see and manage every job. Members and readers see only jobs they started (never a
-storage cleanup), get `title: null` for a book they cannot see, and readers get no `error`.
+storage cleanup), get `title: null` for a book they cannot see, and readers, and members on a
+job whose book they cannot see, get no error text (no `error`, and no "after: …" in `waiting`).
 Writes are session + CSRF; a job someone may not see is `404`:
 
 - `POST /api/job-queue/jobs/{id}/cancel`: any kind, the owner or whoever started it. A worker
   holding the lease gets `409 lease_lost` on its next call, which stops it; uploaded artifacts
-  are removed at once, except a narration's (a Retry resumes from them).
+  are removed at once, except a narration's (a Retry resumes from them). On this server, OCR,
+  alignment, and narration stop at their next lease check and a transcode between tracks; a
+  conversion (`pdf2epub`) finishes its current stage, keeping its resource-limit slot until
+  then, and publishes nothing.
 - `POST /api/job-queue/jobs/{id}/pause` and `/resume` (owner): a paused job stays `queued`
   with `run_after` far in the future (`lectern.queue.PAUSED_UNTIL`), so no claim takes it and
   it still holds its work's one live job of its kind. `409 not_waiting` for a running job.
+  Elsewhere (`GET /api/jobs`, `waiting`, a book's alignment, OCR, and narration status) a
+  paused job has `paused: true`, `run_after: null`, and the summary "Paused by the owner".
+  Pause, resume, move, and retry are conditional on the row's status: `409` when a claim,
+  finish, or cancel got there first.
 - `POST /api/job-queue/jobs/{id}/move` `{"to": "top" | "bottom"}` (owner): sets `priority`
   one ahead of (behind) every other queued job. It still runs only where its capability can.
 - `POST /api/job-queue/jobs/{id}/retry` (owner): a failed job is queued again in place (same

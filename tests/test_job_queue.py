@@ -4,6 +4,8 @@ and do what."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 from tests.conftest import api_post, login, make_user
@@ -115,6 +117,10 @@ def test_pause_and_resume_a_job_or_the_whole_queue_stop_every_claim_path(client,
         assert tts_jobs.claim_local(db, {"kokoro"}) is None
         # still each work's one live job of its kind: a paused job is not a free slot
         assert queue.is_paused(db.get(Job, convert))
+    # elsewhere (the book's status, GET /api/jobs) a paused job says so: no year-9000 wait
+    shown = client.get(f"/api/jobs/{tts}").json()
+    assert (shown["paused"], shown["run_after"]) == (True, None)
+    assert shown["waiting"]["summary"] == "Paused by the owner"
     for j in (convert, ocr, tts):
         assert act(client, owner, j, "resume").status_code == 200
 
@@ -224,11 +230,25 @@ def test_members_and_readers_see_and_cancel_only_their_own_jobs(client, owner, s
     add_job("storage-cleanup", None, created_by=member["id"])  # owner-only kind
     reader_job = add_job("ocr", hidden, created_by=reader["id"], status=JobStatus.FAILED,
                          error="/srv/library/secret path")  # fmt: skip
+    # Waiting out a backoff: the owner's "waiting" quotes the error ("… after: <error>").
+    leak = "/srv/library/Owner/Owner's private book/book.pdf: boom"
+    backoff = dict(attempts=1, error=leak, run_after=utcnow() + timedelta(minutes=5))
+    reader_wait = add_job("transcode", hidden, created_by=reader["id"], **backoff)
+    gone = add_work("Trashed later")
+    member_wait = add_job("transcode", gone, created_by=member["id"], **backoff)
+    with session_factory()() as db:
+        db.get(Work, gone).trashed_at = utcnow()
+        db.commit()
+    assert leak in by_id(overview(client))[reader_wait]["waiting"]  # the owner sees it
     m = TestClient(client.app)
     m_csrf = login(m, "mia", member["password"])
     data = overview(m)
     assert data["can_manage"] is False
-    assert set(by_id(data)) == {theirs, in_batch}
+    assert set(by_id(data)) == {theirs, in_batch, member_wait}
+    # a member's own job on a book they cannot see (now in the trash): no error text either
+    row = by_id(data)[member_wait]
+    assert (row["title"], row["error"]) == (None, None)
+    assert row["waiting"].startswith("Waiting") and "boom" not in row["waiting"]
     assert api_post(m, f"/api/job-queue/jobs/{others}/cancel", m_csrf).status_code == 404
     for action in ("pause", "retry"):
         assert api_post(m, f"/api/job-queue/jobs/{theirs}/{action}", m_csrf).status_code == 403
@@ -242,10 +262,39 @@ def test_members_and_readers_see_and_cancel_only_their_own_jobs(client, owner, s
 
     r = TestClient(client.app)
     login(r, "rex", reader["password"])
-    (row,) = overview(r)["jobs"]
-    # their own job, on a book they cannot see: no title, and no error text for readers
-    assert (row["id"], row["title"], row["error"]) == (reader_job, None, None)
-    assert row["work_id"] == hidden  # the id alone says nothing
+    rows = by_id(overview(r))
+    assert set(rows) == {reader_job, reader_wait}
+    # their own jobs, on a book they cannot see: no title, and no error text for readers,
+    # not even inside the "why it waits" summary
+    assert (rows[reader_job]["title"], rows[reader_job]["error"]) == (None, None)
+    assert rows[reader_job]["work_id"] == hidden  # the id alone says nothing
+    wait = rows[reader_wait]
+    assert (wait["title"], wait["error"]) == (None, None)
+    assert wait["waiting"].startswith("Waiting") and "private book" not in wait["waiting"]
+
+
+def test_pause_move_and_retry_lose_cleanly_to_a_claim_or_finish_that_got_there_first(client, owner):
+    from lectern import jobqueue
+
+    w = [add_work(f"Book {i}") for i in range(2)]
+    queued = add_job("pdf2epub", w[0])
+    failed = add_job("ocr", w[1], status=JobStatus.FAILED, error="boom")
+    with session_factory()() as db:
+        stale_q, stale_f = db.get(Job, queued), db.get(Job, failed)  # loaded before the race
+        with session_factory()() as other:
+            assert local_claim(other, kinds=("pdf2epub",))[0].id == queued
+            other.get(Job, failed).status = JobStatus.CANCELLED  # changed meanwhile
+            other.commit()
+        for fn in (jobqueue.pause, lambda d, j: jobqueue.move(d, j, "top")):
+            with pytest.raises(jobqueue.Refused) as exc:
+                fn(db, stale_q)
+            assert exc.value.code == "not_waiting"
+        with pytest.raises(jobqueue.Refused) as exc:
+            jobqueue.retry(db, stale_f)
+        assert exc.value.code == "not_failed"
+        db.rollback()
+    j = job(queued)
+    assert (j.status, j.run_after < queue.PAUSED_UNTIL) == (JobStatus.LEASED, True)
 
 
 def test_batch_pause_resume_and_cancel_act_on_the_rest_of_the_batch(client, owner):

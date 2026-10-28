@@ -7,9 +7,10 @@ to EPUB, #61) is listed inside its batch, one row with per-book status.
 Controls, none of which needs a schema change:
 
 - **Cancel** any kind (``lectern.tts.jobs.cancel`` for narration, ``lectern.align.jobs.cancel_job``
-  for the rest, as ``POST /api/jobs/{id}/cancel``). A local runner stops at its next lease
-  check and a worker's next heartbeat or upload answers ``409 lease_lost``, which stops it
-  and frees it. Partial uploads are removed at once (:func:`drop_partial`), except a
+  for the rest, as ``POST /api/jobs/{id}/cancel``). A worker's next heartbeat or upload
+  answers ``409 lease_lost``, which stops it and frees it. Local OCR, alignment, and
+  narration stop at their next lease check; a local transcode stops between tracks; a local
+  conversion (``pdf2epub``) runs to the end of its current stage and then publishes nothing. Partial uploads are removed at once (:func:`drop_partial`), except a
   narration's, kept so a Retry resumes (the tts sweep removes them after 7 days).
 - **Pause / resume** a waiting job: it stays ``queued`` with ``run_after`` at
   :data:`lectern.queue.PAUSED_UNTIL`, which no claim takes. **Pause the queue**:
@@ -28,7 +29,7 @@ from __future__ import annotations
 import shutil
 from datetime import datetime
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, update
 from sqlalchemy.orm import Session
 
 from lectern import limits, queue
@@ -147,6 +148,10 @@ def listing(db: Session, user: User, server_caps: set[str] | None) -> dict:
         payload, result = j.payload or {}, j.result or {}
         feature = limits.feature_of(j.kind, payload)
         limit = blocked.get(feature) if group == "waiting" and feature else None
+        title = titles.get(j.work_id)
+        # Error texts can hold library paths (Author/Title) and engine logs: never for readers,
+        # and for members not on a job whose book they cannot see.
+        show_error = owner or (user.role != Role.READER and title is not None)
         summary = None
         if group == "running":
             holder = workers.get(j.leased_by_id) if j.leased_by_id is not None else None
@@ -159,7 +164,8 @@ def listing(db: Session, user: User, server_caps: set[str] | None) -> dict:
             elif limit in LIMIT_REACHED:
                 summary = "Waiting: limit reached"
             elif j.id in explained:
-                wait = queue.explain_wait(db, j, server_caps=server_caps, for_owner=owner, now=now)
+                wait = queue.explain_wait(db, j, server_caps=server_caps, for_owner=owner,
+                                          show_error=show_error, now=now)  # fmt: skip
                 summary = wait["summary"] if wait else None
             else:
                 summary = f"Waiting ({ahead[j.id]} ahead)"
@@ -169,7 +175,7 @@ def listing(db: Session, user: User, server_caps: set[str] | None) -> dict:
             "detail": _detail(j),
             "capability": j.capability,
             "work_id": j.work_id,
-            "title": titles.get(j.work_id),
+            "title": title,
             "status": j.status.value,
             "group": group,
             "priority": j.priority,
@@ -187,8 +193,7 @@ def listing(db: Session, user: User, server_caps: set[str] | None) -> dict:
             "ahead": ahead.get(j.id),
             "attempts": j.attempts,
             "max_attempts": j.max_attempts,
-            # error texts can hold file paths and engine logs: not for readers
-            "error": j.error if user.role != Role.READER else None,
+            "error": j.error if show_error else None,
             "batch": batch_of(j),
             "mine": j.created_by == user.id,
             "created_at": _iso(j.created_at),
@@ -267,35 +272,48 @@ def drop_partial(data_dir, job: Job) -> None:
         shutil.rmtree(queue.artifacts_dir(data_dir, job.id), ignore_errors=True)
 
 
-def pause(job: Job) -> None:
-    if job.status != JobStatus.QUEUED:
-        raise Refused(409, "not_waiting")
-    job.run_after = queue.PAUSED_UNTIL
+def _update(db: Session, job: Job, code: str, *where, **values) -> None:
+    """A conditional ``UPDATE`` of the row, not this session's copy: a claim, finish, or
+    cancel that committed meanwhile wins, and the caller gets ``409 code``."""
+    done = db.execute(
+        update(Job)
+        .where(Job.id == job.id, *where)
+        .values(updated_at=utcnow(), **values)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if done != 1:
+        raise Refused(409, code)
+    db.expire(job)
 
 
-def resume(job: Job) -> None:
-    if not queue.is_paused(job):
-        raise Refused(409, "not_paused")
-    job.run_after = utcnow()
+def pause(db: Session, job: Job) -> None:
+    _update(db, job, "not_waiting", Job.status == JobStatus.QUEUED, run_after=queue.PAUSED_UNTIL)
+
+
+def resume(db: Session, job: Job) -> None:
+    _update(db, job, "not_paused", Job.status == JobStatus.QUEUED,
+            Job.run_after >= queue.PAUSED_UNTIL, run_after=utcnow())  # fmt: skip
 
 
 def move(db: Session, job: Job, to: str) -> None:
     """``top``: ahead of every other queued job; ``bottom``: behind them all."""
-    if job.status != JobStatus.QUEUED:
-        raise Refused(409, "not_waiting")
     others = select(Job.priority).where(Job.status == JobStatus.QUEUED, Job.id != job.id)
+    priority = job.priority
     if to == "top":
         lo = db.scalar(others.order_by(Job.priority).limit(1))
         if lo is not None:
-            job.priority = min(job.priority, lo - 1)
+            priority = min(priority, lo - 1)
     else:
         hi = db.scalar(others.order_by(Job.priority.desc()).limit(1))
         if hi is not None:
-            job.priority = max(job.priority, hi + 1)
+            priority = max(priority, hi + 1)
+    _update(db, job, "not_waiting", Job.status == JobStatus.QUEUED, priority=priority)
 
 
 def retry(db: Session, job: Job) -> None:
     """Queue a failed job again, in place: same payload and priority, attempts reset."""
+    from sqlalchemy.exc import IntegrityError
+
     from lectern.align import jobs as align_jobs
     from lectern.models import AlignmentStatus
 
@@ -312,27 +330,24 @@ def retry(db: Session, job: Job) -> None:
         )
         if db.scalar(select(live)):
             raise Refused(409, "already_running")
-    if job.kind == align_jobs.KIND_ALIGN:
-        # After running out of memory the book's own Retry picks a smaller model.
-        if align_jobs.out_of_memory(job.error):
-            raise Refused(409, "retry_from_book")
-        alignment = align_jobs.work_alignment(db, job.work_id)
+    # After running out of memory the book's own Retry picks a smaller model.
+    if job.kind == align_jobs.KIND_ALIGN and align_jobs.out_of_memory(job.error):
+        raise Refused(409, "retry_from_book")
+    kind, work_id = job.kind, job.work_id
+    try:
+        _update(db, job, "not_failed", Job.status == JobStatus.FAILED,
+                status=JobStatus.QUEUED, attempts=0, crashes=0, error=None, result=None,
+                run_after=utcnow(), started_at=None, finished_at=None, leased_by_id=None,
+                lease_token_hash=None, lease_expires_at=None, heartbeat_at=None)  # fmt: skip
+    except IntegrityError:  # another live job of the work and kind appeared meanwhile
+        db.rollback()
+        raise Refused(409, "already_running") from None
+    if kind == align_jobs.KIND_ALIGN:
+        alignment = align_jobs.work_alignment(db, work_id)
         if alignment is not None and alignment.status in (
             AlignmentStatus.FAILED,
             AlignmentStatus.RUNNING,
         ):
             alignment.status = AlignmentStatus.PENDING
             alignment.error = None
-    job.status = JobStatus.QUEUED
-    job.attempts = 0
-    job.crashes = 0
-    job.error = None
-    job.result = None
-    job.run_after = utcnow()
-    job.started_at = None
-    job.finished_at = None
-    job.leased_by_id = None
-    job.lease_token_hash = None
-    job.lease_expires_at = None
-    job.heartbeat_at = None
     db.flush()

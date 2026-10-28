@@ -335,6 +335,8 @@ export interface AlignmentJob {
   message: string | null;
   heartbeat_at: string | null;
   run_after: string | null;
+  /** Held on the Jobs page by the owner (#87): no run_after then. */
+  paused?: boolean;
   eta_s: number | null;
   error: string | null;
 }
