@@ -12,6 +12,7 @@ from lectern.routes.api import (
     books,
     core,
     devices,
+    dictionary,
     editor,
     email_in,
     health,
@@ -60,6 +61,7 @@ router.include_router(notifications.router)
 router.include_router(readalong.router)
 router.include_router(reader.router)
 router.include_router(search.router)
+router.include_router(dictionary.router)
 router.include_router(pages.router)
 router.include_router(pdftext.router)
 router.include_router(align.router)

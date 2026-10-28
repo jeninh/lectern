@@ -16,8 +16,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { DictionaryPopover, type LookupRequest } from "../components/DictionaryPopover";
 import { ArrowLeft, Chevron, Follow, NextSentence, Pause, Play, PrevSentence } from "../components/Icons";
 import { ApiError, get } from "../lib/api";
+import { wordAt } from "../lib/dictionary";
 import { getPdfInfo, orOffline } from "../lib/offline/store";
 import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
@@ -118,9 +120,13 @@ const SOURCES = { web: "Lectern", audio: "the audiobook", koreader: "KOReader" }
 
 export function PageReader({ workId, fileId }: { workId: number; fileId: number }) {
   const nav = useNavigate();
-  const { deviceName, now, resolvedTheme } = useStore();
+  const { deviceName, now, resolvedTheme, works } = useStore();
   // The reader's theme for this book (lib/reader.ts) colours the chrome around the pages.
   const readerTheme = resolveTheme(useReaderSettings(workId).settings.theme, resolvedTheme);
+  // Word lookup: double-click a word on a PDF page (pdf.js's reading of its text).
+  const [lookup, setLookup] = useState<LookupRequest | null>(null);
+  const closeLookup = useCallback(() => setLookup(null), []);
+  const toggleChrome = useCallback(() => setChrome((c) => !c), []);
   // Opened from a search hit ("In books" in Cmd/Ctrl+K): that page, with the match marked.
   const [search] = useSearchParams();
   const findPage = Number(search.get("page")) || 0;
@@ -504,6 +510,8 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
         </div>
       )}
 
+      {lookup && <DictionaryPopover request={lookup} lang={works.find((w) => w.id === workId)?.language} onClose={closeLookup} />}
+
       <div className="reader-stage">
         {!loading && !error && total > 0 && (
           <>
@@ -511,12 +519,12 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
             <button className="page-zone right" aria-label={rtl ? "Previous page" : "Next page"} onClick={right}><Chevron /></button>
           </>
         )}
-        <div className="pages-stage" ref={stage} onDoubleClick={() => setChrome((c) => !c)}>
+        <div className="pages-stage" ref={stage} onDoubleClick={toggleChrome}>
           {!loading && !error && total > 0 && (
             <div className="pages-spread" data-count={display.length} dir="ltr">
               {display.map((n) =>
                 info?.url ? (
-                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} find={n === findPage ? findText : ""} onPick={readalong ? pick : undefined} onMarked={keepInView} />
+                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} find={n === findPage ? findText : ""} onPick={readalong ? pick : undefined} onMarked={keepInView} onWord={setLookup} onMiss={toggleChrome} />
                 ) : (
                   <ComicPage key={n} fileId={fileId} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} />
                 ),
@@ -607,9 +615,14 @@ interface PdfCanvasProps extends PageProps {
   onMarked?: (marks: HTMLElement) => void;
   /** A search match to mark on this page (opened from "In books" in Cmd/Ctrl+K). */
   find: string;
+  /** Word lookup: the word double-clicked on this page, where it is on screen. */
+  onWord?: (r: LookupRequest) => void;
+  /** A double-click with no word under it (blank space, an image, a scan): what the stage's
+   * own double-click does (show or hide the toolbars). */
+  onMiss?: () => void;
 }
 
-export function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked, find }: PdfCanvasProps) {
+export function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked, find, onWord, onMiss }: PdfCanvasProps) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [found, setFound] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
   const markLayer = useRef<HTMLDivElement>(null);
@@ -672,13 +685,50 @@ export function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick
     };
   }, [doc, n, count, fit, zoom, stage.w, stage.h, dark, find]);
   const click = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!onPick || !css || window.getSelection()?.toString()) return;
+    // The second click of a double-click is a word lookup, not another read-along pick.
+    if (!onPick || !css || e.detail > 1 || window.getSelection()?.toString()) return;
     const r = e.currentTarget.getBoundingClientRect();
     const [x, y] = toPdfPoint(css.t, e.clientX - r.left, e.clientY - r.top);
     if (onPick(n, x, y)) e.stopPropagation();
   };
+  const dblclick = async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!onWord || !css) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const y = e.clientY - r.top;
+    const { clientX, clientY } = e;
+    // Whether a word is here is known only once the text is read: the stage's show/hide
+    // toolbars waits, and onMiss does it when there is none.
+    e.stopPropagation();
+    let items: PdfTextItem[] = [];
+    try {
+      const page = await doc.getPage(n);
+      items = (await page.getTextContent()).items.filter((it): it is PdfTextItem => "str" in it && !!it.str);
+    } catch {
+      /* no text: a miss */
+    }
+    const scale = Math.hypot(css.t[0], css.t[1]);
+    const measure = document.createElement("canvas").getContext("2d")!;
+    measure.font = "100px sans-serif";
+    for (const it of items) {
+      const t = multiply(css.t, it.transform);
+      const h = Math.hypot(t[2], t[3]);
+      const w = it.width * scale;
+      if (x < t[4] || x > t[4] + w || y < t[5] - h || y > t[5] + h * 0.3) continue;
+      // The character under the point: the item's width split as in the search marks above.
+      const full = Math.max(1, measure.measureText(it.str).width);
+      const frac = (x - t[4]) / Math.max(1, w);
+      let k = 0;
+      while (k < it.str.length - 1 && measure.measureText(it.str.slice(0, k + 1)).width / full < frac) k++;
+      const query = wordAt(it.str, k);
+      if (!query) break;
+      onWord({ query, rect: { left: clientX - 20, top: clientY - h / 2, bottom: clientY + h / 2, width: 40 } });
+      return;
+    }
+    onMiss?.();
+  };
   return (
-    <div className="pdf-page-wrap" data-pickable={onPick ? "" : undefined} onClick={click} style={css ? { width: css.w, height: css.h } : undefined}>
+    <div className="pdf-page-wrap" data-pickable={onPick ? "" : undefined} onClick={click} onDoubleClick={onWord ? (e) => void dblclick(e) : undefined} style={css ? { width: css.w, height: css.h } : undefined}>
       <canvas ref={canvas} className="pages-page" role="img" aria-label={`Page ${n}`} style={css ? { width: css.w, height: css.h } : undefined} />
       {css && marks.length > 0 && (
         <div className="pdf-ra-marks" aria-hidden="true" ref={markLayer}>
