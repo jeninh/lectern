@@ -22,6 +22,13 @@ LIMIT_FIELDS = tuple(
     for knob in ("concurrency", "threads", "memory_limit_mb", "nice")
     if (feature, knob) != ("convert", "threads")
 ) + ("heavy_jobs_max",)
+# The restore drill's knobs (lectern.drill): a typo must not stop the server either.
+DRILL_FIELDS = (
+    "restore_drill_days",
+    "restore_drill_read_data_parts",
+    "restore_drill_sample",
+    "restore_drill_timeout_minutes",
+)
 
 
 class Settings(BaseSettings):
@@ -217,6 +224,18 @@ class Settings(BaseSettings):
     # deletes them once the restore succeeded (they are copied there when the library is on
     # another volume; on a Pi that is the SD card). Data files are always kept.
     restore_keep_replaced: bool = True
+    # Restore drill (docs/backups.md, "Restore drill"): every this many days, right after a
+    # nightly backup, restore the latest snapshot into scratch space on the backup volume,
+    # check it, report on Health, and delete it. 0 = off (the default); 7 = weekly.
+    restore_drill_days: int = Field(default=0, ge=0, le=365)
+    # `restic check --read-data-subset=k/N`: each drill reads the next 1/N of the pack data, so
+    # N drills read it all. 1 = every pack on every drill; 0 = structure only.
+    restore_drill_read_data_parts: int = Field(default=20, ge=0, le=10000)
+    # Files sampled per kind (book.json and covers, sentence maps and cover backups, library
+    # files), restored and checked against their recorded sizes and hashes.
+    restore_drill_sample: int = Field(default=20, ge=1, le=1000)
+    # A drill that takes longer is stopped and counted as failed.
+    restore_drill_timeout_minutes: int = Field(default=120, ge=5, le=24 * 60)
 
     # Storage dashboard (docs/storage.md): a volume with less free space than this percentage
     # is flagged low (Admin → Storage; the threshold to share with the health page, #75).
@@ -296,7 +315,7 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    @field_validator(*LIMIT_FIELDS, mode="wrap")
+    @field_validator(*LIMIT_FIELDS, *DRILL_FIELDS, mode="wrap")
     @classmethod
     def _limit_or_default(cls, v, handler, info):
         try:

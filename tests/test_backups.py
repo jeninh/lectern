@@ -28,7 +28,7 @@ from tests.conftest import (
     put_json,
 )
 
-from lectern import backups, cli
+from lectern import backups, cli, drill
 from lectern.backups import BackupConfig, due
 from lectern.db import get_engine, session_factory
 from lectern.fsops import LIBRARY_LOCK
@@ -923,3 +923,215 @@ def test_no_pre_restore_copy_replaces_a_folder_where_a_file_belongs(
     assert (work / "cover.jpg").is_file()
     assert (bsettings.data_dir / "restored-lectern.env").is_file()  # the steps after the swap ran
     assert not list(bsettings.library_dir.rglob(".*.replaced-*"))
+
+
+# --- restore drill (lectern.drill, #76) ---------------------------------------------------------
+
+
+def _fingerprint(*roots: Path) -> dict[str, tuple]:
+    """Bytes, mode, and mtime of everything under ``roots``: a drill must change none of it."""
+    out: dict[str, tuple] = {}
+    for root in roots:
+        for p in sorted(root.rglob("*")):
+            st = p.lstat()
+            body = p.read_bytes() if p.is_file() and not p.is_symlink() else b""
+            out[str(p)] = (body, st.st_mode, st.st_mtime_ns)
+    return out
+
+
+def _drill_settings(bsettings, **kw):
+    return bsettings.model_copy(update={"restore_drill_read_data_parts": 1, **kw})
+
+
+def _live(bsettings) -> dict[str, tuple]:
+    return _fingerprint(bsettings.data_dir, bsettings.library_dir, bsettings.backup_dir / "restic")
+
+
+def test_restore_drill_passes_and_touches_nothing_live(bclient, bowner, bsettings):
+    _add_book(bsettings, "Drilled")
+    (bsettings.data_dir / "align").mkdir(exist_ok=True)
+    (bsettings.data_dir / "align" / "1.json").write_text('{"map": 1}')
+    assert _run(bsettings, include_library=True)["last_result"] == "ok"
+    settings = _drill_settings(bsettings)
+    before = _live(settings)
+
+    result = drill.run_drill(settings)
+
+    assert result["result"] == "ok", result
+    assert [c["id"] for c in result["checks"]] == [
+        "repository",
+        "snapshot",
+        "restore",
+        "manifest",
+        "database",
+        "files",
+    ]
+    assert all(c["ok"] for c in result["checks"])
+    assert "1 library file(s) hashed" in result["checks"][-1]["note"]
+    assert result["read_data"] == "1/1" and result["snapshot_id"]
+    assert _live(settings) == before  # data, library, and the repository: byte for byte
+    assert not drill.scratch_dir(settings).exists()
+
+    # Recorded, shown on Health (OK), and in Admin → Nightly backups.
+    status = drill.run_and_record(session_factory(), settings, reason="test")
+    assert status["last_result"] == "ok" and status["last_success_at"]
+    with session_factory()() as db:
+        check = drill.health_check(
+            db, settings.model_copy(update={"restore_drill_days": 7}), datetime.now(UTC)
+        )
+    assert check.level == "ok" and check.summary.startswith("Passed")
+    assert bclient.get("/api/admin/backups").json()["drill"]["last_result"] == "ok"
+
+
+def _flip_largest_pack(bsettings) -> None:
+    pack = max(
+        (bsettings.backup_dir / "restic" / "data").rglob("*"),
+        key=lambda p: p.stat().st_size if p.is_file() else -1,
+    )
+    pack.chmod(0o600)
+    data = bytearray(pack.read_bytes())
+    for i in range(len(data) // 3, len(data) // 3 + 64):
+        data[i] ^= 0xFF
+    pack.write_bytes(bytes(data))
+
+
+def _damage_db(stage: Path) -> None:
+    db = stage / "db" / "lectern.db"
+    data = bytearray(db.read_bytes())
+    for i in range(4096 + 100, len(data), 4096):  # every page past the header: garbage
+        data[i : i + 200] = b"\xa5" * 200
+    db.write_bytes(bytes(data))
+
+
+@pytest.mark.parametrize("corrupt", ["pack", "database", "library-file"])
+def test_restore_drill_fails_with_the_right_reason_and_cleans_up(
+    bclient, bowner, bsettings, tmp_path, corrupt
+):
+    work = _add_book(bsettings, "Corrupted")
+    if corrupt == "library-file":
+        # Same size, other bytes than the database recorded: the backup holds a bad copy.
+        epub = work / "book.epub"
+        data = bytearray(epub.read_bytes())
+        data[-10] ^= 0xFF
+        epub.write_bytes(bytes(data))
+    if corrupt == "database":
+        _crafted_snapshot(bsettings, tmp_path, _damage_db)
+        with session_factory()() as db:
+            backups.save_config(db, BackupConfig(enabled=True), 1)
+            db.commit()
+    else:
+        assert _run(bsettings, include_library=True)["last_result"] == "ok"
+    if corrupt == "pack":
+        _flip_largest_pack(bsettings)
+    settings = _drill_settings(bsettings, restore_drill_days=7)
+    before = _live(settings)
+
+    result = drill.run_drill(settings)
+
+    expected = {"pack": "repository", "database": "database", "library-file": "files"}[corrupt]
+    assert result["result"] == "failed" and result["check"] == expected, result
+    if corrupt == "library-file":
+        assert "SHA-256" in result["error"]
+    assert _live(settings) == before
+    assert not drill.scratch_dir(settings).exists()
+
+    status = drill.run_and_record(session_factory(), settings, reason="test")
+    assert status["last_failed_check"] == expected
+    # A failed drill is red on Health and alerts the owners there.
+    view = bclient.get("/api/admin/health").json()
+    check = next(c for c in view["checks"] if c["id"] == drill.CHECK_ID)
+    assert check["level"] == "critical" and check["detail"]["last_error"]
+    notes = bclient.get("/api/notifications").json()["items"]
+    assert any(n["title"] == "Restore drill: critical" for n in notes)
+
+
+def test_restore_drill_cleans_up_after_a_killed_run(bclient, bowner, bsettings, monkeypatch):
+    assert _run(bsettings)["last_result"] == "ok"
+    settings = _drill_settings(bsettings)
+    before = _live(settings)
+
+    def killed(self):
+        assert any(self.out.rglob("lectern.db"))  # the plaintext copy is there now
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(drill._Drill, "check_database", killed)
+    with pytest.raises(KeyboardInterrupt):
+        drill.run_drill(settings)
+    assert not drill.scratch_dir(settings).exists()
+    assert _live(settings) == before
+
+    # A run killed outright (the server stopped) leaves it behind, read-only folders and all:
+    # the next maintenance tick removes it, due or not.
+    left = drill.scratch_dir(settings) / "restore" / "db"
+    left.mkdir(parents=True)
+    (left / "lectern.db").write_text("plaintext")
+    left.chmod(0o500)
+    assert not drill.tick(session_factory(), settings)
+    assert not drill.scratch_dir(settings).exists()
+
+
+def test_restore_drill_skips_while_a_backup_or_restore_runs(bclient, bowner, bsettings):
+    assert _run(bsettings)["last_result"] == "ok"
+    settings = _drill_settings(bsettings, restore_drill_days=7)
+    fd = os.open(bsettings.backup_dir / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a backup in another process
+        status = drill.run_and_record(session_factory(), settings, reason="test")
+    finally:
+        os.close(fd)
+    assert status["skipped"] is True and "backup" in status["last_skipped_reason"]
+    assert "last_result" not in status
+
+    backups.journal_path(settings).write_text("{}")  # a restore was interrupted
+    try:
+        status = drill.run_and_record(session_factory(), settings, reason="test")
+    finally:
+        backups.journal_path(settings).unlink()
+    assert status["skipped"] is True and "interrupted" in status["last_skipped_reason"]
+    assert not drill.scratch_dir(settings).exists()
+    with session_factory()() as db:
+        check = drill.health_check(db, settings, datetime.now(UTC))
+    assert check.level == "info" and "skipped" in check.detail["reason"]
+    notes = bclient.get("/api/notifications").json()["items"]
+    assert not [n for n in notes if "drill" in n["title"].lower()]
+
+
+def test_restore_drill_schedule():
+    def at(s: str) -> datetime:
+        return datetime.fromisoformat(s).replace(tzinfo=UTC)
+
+    from lectern.config import Settings
+
+    weekly = Settings(restore_drill_days=7)
+    cfg = BackupConfig(enabled=True, hour_utc=3)
+    backed_up = {
+        "last_attempt_at": "2026-10-22T03:00:10Z",
+        "last_success_at": "2026-10-22T03:05:00Z",
+    }
+    assert drill.due(weekly, cfg, backed_up, {}, at("2026-10-22T03:06"))
+    assert not drill.due(Settings(), cfg, backed_up, {}, at("2026-10-22T03:06"))  # off by default
+    assert not drill.due(
+        weekly, cfg.model_copy(update={"enabled": False}), backed_up, {}, at("2026-10-22T03:06")
+    )
+    assert not drill.due(weekly, cfg, backed_up, {}, at("2026-10-22T12:00"))  # not mid-day
+    assert not drill.due(
+        weekly, cfg, backed_up, {}, at("2026-10-23T03:30")
+    )  # tonight's backup first
+    passed = {"last_attempt_at": "2026-10-22T03:06:00Z", "last_success_at": "2026-10-22T03:20:00Z"}
+    next_week = {
+        "last_attempt_at": "2026-10-29T03:00:10Z",
+        "last_success_at": "2026-10-29T03:05:00Z",
+    }
+    assert not drill.due(
+        weekly,
+        cfg,
+        {**backed_up, "last_attempt_at": "2026-10-28T03:00:10Z"},
+        passed,
+        at("2026-10-28T03:06"),
+    )
+    assert drill.due(
+        weekly, cfg, next_week, passed, at("2026-10-29T03:06")
+    )  # same night, a week on
+    skipped = {**passed, "last_attempt_at": "2026-10-29T03:06:00Z"}
+    assert not drill.due(weekly, cfg, next_week, skipped, at("2026-10-29T03:20"))
+    assert drill.due(weekly, cfg, next_week, skipped, at("2026-10-29T03:40"))  # retried

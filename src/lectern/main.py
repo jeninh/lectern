@@ -16,6 +16,7 @@ from starlette.routing import Route
 from lectern import (
     __version__,
     backups,
+    drill,
     egress,
     limits,
     mcp_server,
@@ -134,6 +135,7 @@ def create_app(
     egress.enforce(settings.offline)
     # Before any runner starts: every heavy job asks lectern.limits for a slot.
     limits.GOVERNOR.configure(limits.Limits.from_settings(settings))
+    drill.register()  # the restore drill's line on the Health page
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

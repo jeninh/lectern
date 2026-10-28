@@ -115,6 +115,25 @@ export function BackupsCard() {
         <dd>
           {view.running ? <span className="badge accent">running…</span> : failedLast ? <span className="badge danger">failed</span> : s.last_result === "ok" ? <span className="badge ok">ok</span> : <span className="badge">{c.enabled ? "waiting for the first night" : "off"}</span>}
         </dd>
+        <dt>Restore drill</dt>
+        <dd>
+          {view.drill.running ? (
+            <span className="badge accent">running…</span>
+          ) : view.drill.every_days <= 0 ? (
+            <span className="hint">off · set <code>LECTERN_RESTORE_DRILL_DAYS</code> in <code>.env</code></span>
+          ) : view.drill.last_result === "failed" ? (
+            <>
+              <span className="badge danger">failed</span> <time title={absoluteTime(view.drill.last_error_at)}>{relativeTime(view.drill.last_error_at)}</time>: {view.drill.last_error}
+            </>
+          ) : view.drill.last_success_at ? (
+            <>
+              <span className="badge ok">passed</span> <time title={absoluteTime(view.drill.last_success_at)}>{relativeTime(view.drill.last_success_at)}</time>
+            </>
+          ) : (
+            <span className="hint">every {view.drill.every_days} days, after a nightly backup; none yet</span>
+          )}
+          {" · "}<Link to="/app/health">Health</Link>
+        </dd>
         <dt>Folder</dt>
         <dd>
           <code>{t.path}</code>

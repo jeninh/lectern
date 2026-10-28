@@ -541,7 +541,7 @@ def run_backup(settings: Settings, cfg: BackupConfig) -> dict:
         raise BackupError(
             f"backup target {target} is not writable by this user (uid {os.getuid()})"
         )
-    with _exclusive(target / ".lock", BackupBusy("another backup is already running")):
+    with _exclusive(target / ".lock", BackupBusy("another backup or a restore drill is running")):
         staging = target / STAGING_DIR
         # Left by a run that was killed (the server stopped mid-backup): plaintext database and
         # secrets on the target. We hold the target lock, so nothing else is using it.
@@ -582,7 +582,7 @@ def run_and_record(session_factory, settings: Settings, *, reason: str) -> dict:
         try:
             result = run_backup(settings, cfg)
         except BackupBusy:
-            log.info("backup skipped: another backup is already running on the target")
+            log.info("backup skipped: another backup or a restore drill is running on the target")
             with session_factory() as db:
                 return {**load_status(db), "skipped": True}
         except Exception as exc:  # noqa: BLE001 - every failure must reach the owner
