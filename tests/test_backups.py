@@ -444,6 +444,25 @@ def test_restore_refuses_a_manifest_that_points_outside_the_backup(
     assert not list(bsettings.data_dir.glob("pre-restore-*"))
 
 
+def test_restore_refuses_a_book_folder_that_is_now_a_symlink_loop(
+    bclient, bowner, bsettings, monkeypatch
+):
+    """Where a loop leads cannot be known: refused before anything is touched, on every Python
+    (since 3.13 a non-strict resolve() returns a path inside the library instead of raising)."""
+    work = _add_book(bsettings, "Loop")
+    assert _run(bsettings)["last_result"] == "ok"
+    make_user(bclient, bowner["csrf"], "later", "member")
+    _stop(bclient)
+    shutil.rmtree(work)
+    work.symlink_to(work.with_name("other"))
+    work.with_name("other").symlink_to(work)
+    with pytest.raises(SystemExit) as exc:
+        _restore(bsettings, monkeypatch)
+    assert "a symlink loop" in str(exc.value)
+    assert "later" in _usernames(bsettings)
+    assert not list(bsettings.data_dir.glob("pre-restore-*"))
+
+
 def test_restore_never_follows_links_inside_the_snapshot(
     bclient, bowner, bsettings, monkeypatch, tmp_path
 ):
