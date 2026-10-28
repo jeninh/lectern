@@ -232,13 +232,26 @@ def _walk(
                 yield p
 
 
+def _resolved(path: Path) -> Path | None:
+    """``path.resolve()``, or None when it runs into a symlink loop. A non-strict resolve()
+    raises on a loop only before Python 3.13 (later it returns a path, as if there were none);
+    a strict one raises on every version, and on a missing target too, which is no loop."""
+    try:
+        return path.resolve(strict=True)
+    except RuntimeError:  # a loop, on Python 3.12
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return None
+    return path.resolve()
+
+
 def _report_links(links: list[Path], roots: tuple[Path, ...]) -> list[str]:
     """Log skipped symlinks; return those that resolve outside every backed-up root."""
     outside = []
     for link in dict.fromkeys(links):
-        try:
-            target = link.resolve()
-        except (OSError, RuntimeError):  # a symlink loop (RuntimeError on Python 3.12)
+        target = _resolved(link)
+        if target is None:
             outside.append(str(link))
             log.warning("backup skipped %s: a symlink that cannot be resolved (a loop?)", link)
             continue
@@ -666,7 +679,9 @@ def _find_stage(root: Path) -> Path:
 
 
 def _inside(path: Path, root: Path) -> bool:
-    return path.resolve().is_relative_to(root.resolve())
+    """False for a path through a symlink loop: where it leads cannot be known."""
+    target = _resolved(path)
+    return target is not None and target.is_relative_to(root.resolve())
 
 
 def _check_revision(revision: str | None) -> None:
@@ -1219,7 +1234,7 @@ def restore(
                         if not _inside(dest, library):
                             raise BackupError(
                                 f"refusing to restore {rel}: it would be written outside the "
-                                f"library, to {dest.resolve()}"
+                                f"library, to {_resolved(dest) or 'a symlink loop'}"
                             )
                         if dest in seen:
                             continue
