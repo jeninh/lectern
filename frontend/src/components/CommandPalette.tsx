@@ -7,7 +7,8 @@ import { makeBackgroundInert } from "../lib/hooks";
 import { relativeTime } from "../lib/format";
 import { fuzzyScore } from "../lib/fuzzy";
 import { useStore } from "../lib/store";
-import type { Device, TextHit, TextSearch, Work } from "../lib/types";
+import type { Device, HighlightHit, HighlightSearch, TextHit, TextSearch, Work } from "../lib/types";
+import { highlightHitPath } from "../lib/annotations";
 import { Cover } from "./Cover";
 import { folderSummary } from "./Folders";
 import { usePlayer } from "../lib/player";
@@ -16,7 +17,7 @@ import { clauseLabel, extractChips, formatQuery } from "../lib/filters";
 import { pathLabel } from "../lib/shelves";
 import { Book, Devices, Download, Filter, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
 
-type Group = "Filter" | "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books";
+type Group = "Filter" | "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books" | "Highlights";
 const ORDER: Group[] = ["Filter", "Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings", "Docs"];
 type DocsModule = typeof import("../lib/docsData");
 type Docs = { mod: DocsModule; list: Awaited<ReturnType<DocsModule["loadDocs"]>> };
@@ -33,6 +34,8 @@ interface Item {
   work?: Work;
   /** A passage found inside a book (the "In books" section, below everything else). */
   hit?: TextHit;
+  /** One of your own highlights or notes (the "Highlights" section, above "In books"). */
+  mine?: HighlightHit;
   /** Score when the label does not match (a docs hit found in the text under a heading). */
   score?: number;
   run: () => void;
@@ -53,6 +56,9 @@ export function CommandPalette() {
   /** Why "In books" has no answer: the server's message (a rate limit, a query too long). */
   const [textError, setTextError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
+  /** "Highlights": your own highlights and notes matching the query, and why there are none. */
+  const [mine, setMine] = useState<HighlightSearch | null>(null);
+  const [mineError, setMineError] = useState<string | null>(null);
   const [docs, setDocs] = useState<Docs | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -265,6 +271,33 @@ export function CommandPalette() {
     };
   }, [q, paletteOpen, filterMode]);
 
+  // "Highlights": your own highlights and notes, asked the same way as "In books".
+  useEffect(() => {
+    if (!paletteOpen || q.trim().length < TEXT_MIN || filterMode) {
+      setMine(null);
+      setMineError(null);
+      return;
+    }
+    let live = true;
+    const t = window.setTimeout(() => {
+      get<HighlightSearch>(`/api/annotations/search?q=${encodeURIComponent(q.trim())}&limit=5&partial=${/\s$/.test(q) ? "false" : "true"}`)
+        .then((d) => {
+          if (!live) return;
+          setMine(d);
+          setMineError(null);
+        })
+        .catch((e) => {
+          if (!live) return;
+          setMine(null);
+          setMineError(e instanceof ApiError ? e.message : null);
+        });
+    }, TEXT_DEBOUNCE_MS);
+    return () => {
+      live = false;
+      window.clearTimeout(t);
+    };
+  }, [q, paletteOpen, filterMode]);
+
   const shown = useMemo(() => {
     const hits = (text?.results ?? []).map<Item>((h, n) => ({
       id: `t${n}-${h.work_id}`,
@@ -274,11 +307,18 @@ export function CommandPalette() {
       work: works.find((w) => w.id === h.work_id),
       run: () => go(hitPath(h)),
     }));
-    return hits.length ? [...groups, { group: "In books" as Group, items: hits }] : groups;
+    const own = (mine?.results ?? []).map<Item>((h) => {
+      const work = works.find((w) => w.id === h.work_id);
+      return { id: `hl${h.annotation.id}`, group: "Highlights", label: h.title, mine: h, work, run: () => go(highlightHitPath(h, work)) };
+    });
+    return [...groups, ...(own.length ? [{ group: "Highlights" as Group, items: own }] : []), ...(hits.length ? [{ group: "In books" as Group, items: hits }] : [])];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groups, text, works]);
+  }, [groups, text, mine, works]);
   const flat = shown.flatMap((g) => g.items);
   const textNote = filterMode || q.trim().length < TEXT_MIN || text?.results.length ? null : searching ? "Searching inside books…" : textError ? textError : text?.too_broad ? "Too many passages match. Add another word." : null;
+
+  // Shown only when it says something "In books" does not (a rate limit says it once).
+  const mineNote = filterMode || q.trim().length < TEXT_MIN || mine?.results.length || mineError === textError ? null : mineError;
 
   useEffect(() => setSel(0), [q]);
   useEffect(() => {
@@ -334,7 +374,7 @@ export function CommandPalette() {
               {typed.error.message}
             </div>
           )}
-          {flat.length === 0 && !textNote && !searching && !typed.error && (
+          {flat.length === 0 && !textNote && !mineNote && !searching && !typed.error && (
             <div className="palette-empty" role="presentation">
               <strong>No matches for “{q}”</strong>
               <span>Try an author’s surname, a device name, or “passkey”.</span>
@@ -357,7 +397,16 @@ export function CommandPalette() {
                       className="option"
                     >
                       {it.work ? <Cover work={it.work} /> : <span className="opt-icon">{it.icon ?? <Reader />}</span>}
-                      {it.hit ? (
+                      {it.mine ? (
+                        <div className="meta passage">
+                          <span className="opt-label">{it.label}{it.mine.field === "note" ? <span className="opt-detail"> · note</span> : null}</span>
+                          <span className="opt-snippet">
+                            {it.mine.snippet?.before && "…"}
+                            {(it.mine.snippet?.parts ?? [[it.mine.annotation.text, false]]).map(([t, m], k) => (m ? <mark key={k}>{t}</mark> : <span key={k}>{t}</span>))}
+                            {it.mine.snippet?.after && "…"}
+                          </span>
+                        </div>
+                      ) : it.hit ? (
                         <div className="meta passage">
                           <span className="opt-label">{it.label}{it.hit.page ? <span className="opt-detail"> · page {it.hit.page}</span> : null}</span>
                           <span className="opt-snippet">
@@ -379,6 +428,12 @@ export function CommandPalette() {
             </div>
           ))}
         </div>
+        {mineNote && (
+          <div className="palette-note" role="status">
+            <span className="group">Highlights</span>
+            {mineNote}
+          </div>
+        )}
         {textNote && (
           <div className="palette-note" role="status">
             <span className="group">In books</span>

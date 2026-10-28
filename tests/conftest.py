@@ -18,6 +18,19 @@ ORIGIN = "http://testserver"
 OWNER_PASSWORD = "correct horse battery staple"
 
 
+def schema_diff(conn) -> list:
+    """What the ORM models and the migrated database disagree on (the highlights' FTS5 index,
+    which the models do not describe, left out as autogenerate leaves it out)."""
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from lectern.migrate import include_name
+    from lectern.models import Base
+
+    ctx = MigrationContext.configure(conn, opts={"include_name": include_name})
+    return compare_metadata(ctx, Base.metadata)
+
+
 def make_epub(
     path: Path,
     title: str = "A Test Book",

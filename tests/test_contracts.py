@@ -656,15 +656,12 @@ def test_fixture_sentences_are_exact_epub_text_slices(fixture_map):
 
 def test_models_match_migrations_and_0006_round_trips(tmp_path):
     """The ORM models and the migration chain describe the same schema; 0006 downgrades."""
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    from lectern.models import Base
+    from tests.conftest import schema_diff
 
     engine = make_engine(f"sqlite:///{tmp_path / 'm6.db'}")
     upgrade_to_head(engine)
     with engine.connect() as conn:
-        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+        assert schema_diff(conn) == []
     m2 = {"notifications", "known_devices", "download_events", "match_suggestions"}
     assert m2 <= set(sa.inspect(engine).get_table_names())
     cfg = alembic_config(str(engine.url))
@@ -679,7 +676,6 @@ def test_models_match_migrations_and_0006_round_trips(tmp_path):
 
 def test_migration_0007_backfills_authors_and_round_trips(tmp_path):
     """Existing works get ``authors`` from their author columns; 0007 downgrades cleanly."""
-    from lectern.models import Base
 
     engine = make_engine(f"sqlite:///{tmp_path / 'm7.db'}")
     cfg = alembic_config(str(engine.url))
@@ -699,10 +695,9 @@ def test_migration_0007_backfills_authors_and_round_trips(tmp_path):
         row = conn.execute(sa.text("SELECT authors, version, readalong_enabled FROM works")).one()
         assert json.loads(row[0]) == [{"name": "Rudyard Kipling", "sort": "kipling, rudyard"}]
         assert (row[1], row[2]) == (1, 1)
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
+        from tests.conftest import schema_diff
 
-        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+        assert schema_diff(conn) == []
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
         command.downgrade(cfg, "0006")

@@ -1,6 +1,6 @@
 """KOReader highlights and notes (issue #65, lectern.annotations): the plugin's sync route,
 dedupe and edits across syncs and devices, placement on the work's text from the EPUB and
-from another edition, privacy, and the Markdown export.
+from another edition, privacy, the Markdown export, and searching them (issue #72).
 
 Expected positions come from the fixture's own text (``STORY.index(phrase)``), never from the
 code under test.
@@ -24,6 +24,7 @@ from tests.conftest import (
 )
 from tests.test_jobs import EPUB, ingest_fixture
 
+from lectern import annotations, search
 from lectern.db import session_factory
 from lectern.ingest.epub import read_spine
 from lectern.ingest.sentences import ensure_text_sentences
@@ -40,6 +41,7 @@ from lectern.models import (
 )
 from lectern.models import ShelfPermission as Perm
 from lectern.positions import TextPos, normalize_spine_text, text_to_xpointer
+from lectern.security.ratelimit import SlidingWindowLimiter
 
 with zipfile.ZipFile(EPUB) as _zf:
     STORY_XHTML = _zf.read(read_spine(EPUB)[2])
@@ -314,3 +316,159 @@ def test_bad_payloads_are_refused_without_echoing_them(client, book):
     assert r.status_code == 422
     r = put(client, book["kindle"], book["doc"], [{"text": secret_text, "pos0": "x"}])
     assert r.status_code == 422 and secret_text not in r.text
+
+
+# --- searching your highlights (issue #72) -------------------------------------------------------
+
+
+def found(http, q="", **params) -> list[dict]:
+    r = http.get("/api/annotations/search", params={"q": q, "partial": "false", **params})
+    assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
+    return r.json()["results"]
+
+
+def texts(http, q="", **params) -> list[str]:
+    return [h["annotation"]["text"] for h in found(http, q, **params)]
+
+
+def test_a_word_from_a_highlight_or_a_note_finds_it_and_edits_and_deletes_follow(
+    client, book, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    doc, kindle = book["doc"], book["kindle"]
+    a1 = ann(PHRASE, "2026-10-01 09:30:00")
+    a2 = ann(OTHER, "2026-10-01 09:41:12", note="Remember the Café scene")
+    put(client, kindle, doc, [a1, a2])
+
+    # A word of the highlighted text: the hit says where the passage is, the word marked.
+    [hit] = found(client, "counted")
+    assert hit["work_id"] == book["work_id"] and hit["field"] == "text"
+    assert hit["annotation"]["location"] == {"spine_index": 2, "char": STORY.index(PHRASE),
+                                             "length": len(PHRASE)}  # fmt: skip
+    assert ["counted", True] in hit["text_parts"]
+    assert "".join(t for t, _ in hit["text_parts"]) == PHRASE
+    assert hit["snippet"]["parts"] and hit["note_parts"] is None
+    # A word of a note, case and accents folded both ways.
+    [hit] = found(client, "CAFE")
+    assert hit["annotation"]["text"] == OTHER and hit["field"] == "note"
+    assert ["Café", True] in hit["note_parts"]
+    # One field only: "Della" is in both highlights' text, never in a note.
+    assert sorted(texts(client, "della")) == sorted([PHRASE, OTHER])
+    assert texts(client, "note: della") == [] and texts(client, "highlight: cafe") == []
+    assert texts(client, "note:remember") == [OTHER]
+    # The phrase first, then passages with every word; a prefix while typing.
+    assert texts(client, "della cry") == [OTHER]
+    assert texts(client, "coun", partial="true") == [PHRASE]
+    assert texts(client, "coun") == []
+
+    # The note edited on the device: the old words no longer find it, the new ones do.
+    edited = {**a2, "note": "rewritten entirely", "datetime_updated": "2026-10-02 08:00:00"}
+    put(client, kindle, doc, [a1, edited])
+    assert texts(client, "cafe") == [] and texts(client, "rewritten") == [OTHER]
+    # Deleted on the device: gone from search.
+    put(client, kindle, doc, [edited])
+    assert texts(client, "counted") == [] and texts(client, "della") == [OTHER]
+
+    # The rebuild command's work gives the same answers.
+    with session_factory()() as db:
+        assert annotations.reindex(db) == 1
+        db.commit()
+    assert texts(client, "rewritten") == [OTHER] and texts(client, "counted") == []
+    # Lectern logs neither (the test client's own request log is not the server's).
+    logged = "\n".join(r.getMessage() for r in caplog.records if r.name.startswith("lectern"))
+    assert "rewritten" not in logged and "Café" not in logged
+
+
+def test_search_is_only_your_own_highlights_on_books_you_can_see(client, owner, app, book):
+    doc = book["doc"]
+    put(client, book["kindle"], doc, [ann(PHRASE, "2026-10-01 09:30:00", note="owner secret")])
+    rita = make_user(client, owner["csrf"], "rita", "reader")
+    mia = make_user(client, owner["csrf"], "mia", "member")
+    rita_http, mia_http = TestClient(app), TestClient(app)
+    rita_csrf = login(rita_http, "rita", rita["password"])
+    mia_csrf = login(mia_http, "mia", mia["password"])
+    rita_ko = ko_headers("rita", make_sync_key(rita_http, rita_csrf, "rita's kobo"))
+    mia_ko = ko_headers("mia", make_sync_key(mia_http, mia_csrf, "mia's kobo"))
+    put(rita_http, rita_ko, doc, [ann(OTHER, "2026-10-05 10:00:00", note="rita secret")])
+    put(mia_http, mia_ko, doc, [ann(PHRASE, "2026-10-06 10:00:00", note="mia secret")])
+
+    # Each person finds only their own, though the words are in everyone's.
+    assert [h["annotation"]["note"] for h in found(client, "secret")] == ["owner secret"]
+    assert [h["annotation"]["note"] for h in found(mia_http, "secret")] == ["mia secret"]
+    assert found(mia_http, "owner") == [] and found(client, "rita") == []
+    # The reader cannot see the book: her own highlight in it is not found either.
+    assert found(rita_http, "secret") == [] and found(rita_http) == []
+    assert "rita secret" not in rita_http.get("/api/annotations.md", params={"q": "secret"}).text
+
+    with session_factory()() as db:
+        owner_id = db.scalar(select(User.id).where(User.username == "owner"))
+        rita_id = db.scalar(select(User.id).where(User.username == "rita"))
+        shelf = Shelf(owner_id=owner_id, name="For Rita")
+        db.add(shelf)
+        db.flush()
+        db.add(ShelfItem(shelf_id=shelf.id, work_id=book["work_id"]))
+        db.add(ShelfGrant(shelf_id=shelf.id, user_id=rita_id, permission=Perm.VIEW))
+        db.commit()
+    assert [h["annotation"]["note"] for h in found(rita_http, "secret")] == ["rita secret"]
+    # Unshared from her: out of her results again.
+    with session_factory()() as db:
+        db.delete(db.scalar(select(ShelfGrant).where(ShelfGrant.user_id == rita_id)))
+        db.commit()
+    assert found(rita_http, "secret") == []
+    # Trashed: out of its owner's results too. Without a session: nothing.
+    with session_factory()() as db:
+        from lectern.models import utcnow
+
+        db.get(Work, book["work_id"]).trashed_at = utcnow()
+        db.commit()
+    assert found(client, "secret") == []
+    assert TestClient(app).get("/api/annotations/search", params={"q": "x"}).status_code == 401
+
+
+def test_highlights_page_filters_and_exports_what_it_shows(client, book):
+    put(client, book["kindle"], book["doc"], [
+        ann(PHRASE, "2026-09-30 22:00:00"),
+        ann(OTHER, "2026-10-02 09:41:12", note="a note"),
+    ])  # fmt: skip
+    with session_factory()() as db:
+        w = db.get(Work, book["work_id"])
+        w.tags = ["christmas"]
+        author = w.author
+        db.commit()
+    # No query: every highlight, in reading order, under the filters.
+    assert texts(client) == [PHRASE, OTHER]
+    assert texts(client, since="2026-10-01") == [OTHER]
+    assert texts(client, until="2026-09-30") == [PHRASE]
+    assert texts(client, since="2026-10-03") == []
+    assert texts(client, author=author, tag="christmas", work=book["work_id"]) == [PHRASE, OTHER]
+    assert texts(client, author="Somebody Else") == [] and texts(client, tag="summer") == []
+    assert texts(client, work=book["work_id"] + 1) == []
+    assert texts(client, "della", since="2026-10-01") == [OTHER]
+    assert client.get("/api/annotations/search", params={"since": "Oct 1"}).status_code == 422
+    r = client.get("/api/annotations/search", params={"limit": 1}).json()
+    assert (len(r["results"]), r["total"], r["truncated"]) == (1, 2, True)
+    assert client.get("/api/annotations").json()["works"][0]["tags"] == ["christmas"]
+
+    # The export of the current results has exactly those.
+    md = client.get("/api/annotations.md", params={"q": "della", "since": "2026-10-01"}).text
+    assert f"> {OTHER}" in md and PHRASE not in md
+    md = client.get("/api/annotations.md", params={"q": "nothing matches this"}).text
+    assert "No highlights yet" in md and OTHER not in md
+
+
+def test_highlight_search_limits_match_the_search_inside_books(client, app, book):
+    secret = "x" * (search.MAX_QUERY_CHARS + 1)
+    r = client.get("/api/annotations/search", params={"q": secret})
+    assert r.status_code == 422 and r.json()["detail"] == "query_too_long"
+    assert secret not in r.text
+    r = client.get("/api/annotations/search", params={"q": " ".join("abcdefghijklm")})
+    assert r.status_code == 422 and r.json()["detail"] == "too_many_words"
+    # Its own budget per person: the palette's two searches do not halve each other's.
+    app.state.limiters["highlights"] = SlidingWindowLimiter(limit=2, window_seconds=60)
+    assert found(client, "della") == found(client, "della")
+    r = client.get("/api/annotations/search", params={"q": "della"})
+    assert r.status_code == 429 and r.headers["retry-after"] == "30"
+    assert r.json()["detail"] == "too_many_searches"
+    assert client.get("/api/annotations/search").status_code == 200  # listing is not a search
+    assert client.get("/api/search/text", params={"q": "della"}).status_code == 200

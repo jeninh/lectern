@@ -55,6 +55,10 @@ across the library (in thousands of passages). They cannot tell which book has i
 says. The AI tools (`/mcp`) do not offer text search: they never return book content
 ([mcp.md](mcp.md)).
 
+Your own KOReader highlights and notes are searched separately, in the palette's
+**Highlights** section and on the Highlights page, and only ever your own
+([koreader-plugin.md](koreader-plugin.md#searching-your-highlights)).
+
 ## Keeping the index up to date
 
 The index is `<data>/search.db`, a separate SQLite file (FTS5). A background thread, the
