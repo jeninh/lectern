@@ -111,6 +111,11 @@ sections:
         description: Run alignment and narration on a Mac's GPU for a Raspberry Pi server.
         icon: gear
         audience: members
+      - file: resource-limits.md
+        title: Resource limits
+        description: How many heavy jobs the server runs at once, and their CPU and memory caps.
+        icon: gear
+        audience: owner
 
   - title: Admin
     docs:

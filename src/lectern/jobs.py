@@ -28,6 +28,7 @@ calls in. The owner can turn copies off for the library (``instance_settings``) 
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -40,7 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from lectern import queue
+from lectern import limits, queue
 from lectern.article import ARTICLE
 from lectern.config import Settings
 from lectern.models import JOB_ACTIVE_STATUSES, AudioTrack, Job, JobStatus, Work, utcnow
@@ -257,23 +258,23 @@ def _ffmpeg_args(
     return [*args, str(dest)]
 
 
-def _throttle(memory_mb: int):
-    """``preexec_fn`` for the server's own ffmpeg: lowest CPU priority, no core dumps, and
+def _throttle(memory_mb: int | None, nice: int = 19):
+    """``preexec_fn`` for the server's own ffmpeg: a low CPU priority, no core dumps, and
     the address space capped (best effort where the platform refuses a limit). Only plain
     system calls run in the forked child: ``resource`` is imported here, in the parent."""
     import resource
 
     def limit() -> None:
-        limits = [(resource.RLIMIT_CORE, 0)]
+        caps = [(resource.RLIMIT_CORE, 0)]
         if memory_mb:
-            limits.append((resource.RLIMIT_AS, memory_mb * 1024 * 1024))
-        for which, value in limits:
+            caps.append((resource.RLIMIT_AS, memory_mb * 1024 * 1024))
+        for which, value in caps:
             try:
                 resource.setrlimit(which, (value, value))
             except (ValueError, OSError):
                 pass
         try:
-            os.nice(19)
+            os.nice(nice)
         except OSError:
             pass
 
@@ -282,18 +283,20 @@ def _throttle(memory_mb: int):
 
 def transcode_track(settings: Settings, src: Path, dest: Path, codec: str, kbps: int) -> None:
     """Render one track on this server (the Raspberry Pi fallback), throttled so playback and
-    sync stay responsive: one thread, ``nice`` 19, ``LECTERN_TRANSCODE_MEMORY_LIMIT_MB``."""
+    sync stay responsive: the ``transcode`` limits (lectern.limits; one thread, ``nice`` 19,
+    ``LECTERN_TRANSCODE_MEMORY_LIMIT_MB`` by default)."""
     if not local_transcoder(settings):
         raise RuntimeError("ffmpeg is not installed")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    lim = limits.GOVERNOR.limit(limits.TRANSCODE)
     try:
         res = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            _ffmpeg_args(settings.ffmpeg_path, src, tmp, codec, kbps, threads=1),
+            _ffmpeg_args(settings.ffmpeg_path, src, tmp, codec, kbps, threads=lim.threads),
             capture_output=True,
             timeout=6 * 3600,
             check=False,
-            preexec_fn=_throttle(settings.transcode_memory_limit_mb),
+            preexec_fn=_throttle(lim.memory_mb, lim.nice),
         )
         if res.returncode != 0:
             raise RuntimeError(res.stderr.decode(errors="replace")[-500:] or "ffmpeg failed")
@@ -411,35 +414,49 @@ def _publish_variant(db, settings, job, work, sha256: str, codec: str, scratch: 
             move_file(side, dest.with_name(dest.name + ".sha256"))
 
 
+# Heavy kinds this runner runs, by resource-limit feature (lectern.limits). Saved web articles
+# and storage cleanups are light and never wait for a slot.
+FEATURE_OF_KIND = {PDF2EPUB: limits.CONVERT, TRANSCODE: limits.TRANSCODE}
+
+
 def run_pending(session_factory: sessionmaker, settings: Settings, busy=lambda _id: False) -> int:
     """Run every queued in-process job now. Returns how many ran. Conversions (``pdf2epub``)
     and saved web articles (``article``) never wait for a transcode worker: they are claimed
     first, without the deferral.
     Transcodes run here only with ffmpeg; otherwise they wait for an external worker (and
-    say so, :func:`transcoder_unavailable`)."""
+    say so, :func:`transcoder_unavailable`). Conversions and transcodes start only while
+    their resource limits allow (:data:`lectern.limits.GOVERNOR`); until then they stay
+    queued."""
     transcodes = local_transcoder(settings)
     n = 0
     while True:
         with session_factory() as db:
-            claimed = claim(db, kinds=(PDF2EPUB, ARTICLE, CLEANUP))
-            if claimed is None and transcodes:
-                claimed = claim(db, defer_s=settings.local_defer_seconds)
-            if claimed is None:
-                return n
-            if claimed[0].kind == PDF2EPUB:
-                from lectern.pdf2epub import jobs as pdf2epub
+            with limits.GOVERNOR.gate(limits.CONVERT, limits.TRANSCODE) as gate:
+                light = (ARTICLE, CLEANUP)
+                kinds = (PDF2EPUB, *light) if limits.CONVERT in gate.allowed else light
+                claimed = claim(db, kinds=kinds)
+                if claimed is None and transcodes and limits.TRANSCODE in gate.allowed:
+                    claimed = claim(db, defer_s=settings.local_defer_seconds)
+                if claimed is None:
+                    return n
+                job = claimed[0]
+                feature = FEATURE_OF_KIND.get(job.kind)
+                slot = gate.admit(feature, job.id) if feature else contextlib.nullcontext()
+            with slot:
+                if job.kind == PDF2EPUB:
+                    from lectern.pdf2epub import jobs as pdf2epub
 
-                pdf2epub.run(db, settings, claimed[0])
-            elif claimed[0].kind == CLEANUP:
-                from lectern import storage
+                    pdf2epub.run(db, settings, job)
+                elif job.kind == CLEANUP:
+                    from lectern import storage
 
-                storage.run(db, settings, claimed[0], busy)
-            elif claimed[0].kind == ARTICLE:
-                from lectern.article import jobs as article
+                    storage.run(db, settings, job, busy)
+                elif job.kind == ARTICLE:
+                    from lectern.article import jobs as article
 
-                article.run(db, settings, claimed[0])
-            else:
-                run_transcode(db, settings, claimed[0])
+                    article.run(db, settings, job)
+                else:
+                    run_transcode(db, settings, job)
             n += 1
 
 
@@ -704,16 +721,35 @@ class JobRunner:
         self.wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._helpers: list[threading.Thread] = []
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="lectern-jobs", daemon=True)
         self._thread.start()
+        # More conversions or transcodes at once only when their limits allow it
+        # (LECTERN_CONVERT_CONCURRENCY, LECTERN_TRANSCODE_CONCURRENCY): helper threads that
+        # only run jobs. This thread keeps the metadata pass and the sweeps.
+        self._helpers = [
+            threading.Thread(target=self._run_jobs, name=f"lectern-jobs-{i}", daemon=True)
+            for i in range(1, limits.pool_size(limits.CONVERT, limits.TRANSCODE))
+        ]
+        for t in self._helpers:
+            t.start()
 
     def stop(self) -> None:
         self._stop.set()
         self.wake.set()
-        if self._thread:
-            self._thread.join(timeout=5)
+        for t in [self._thread, *self._helpers]:
+            if t:
+                t.join(timeout=5)
+
+    def _run_jobs(self) -> None:
+        while not self._stop.is_set():
+            try:
+                run_pending(self.session_factory, self.settings, self.busy)
+            except Exception:  # noqa: BLE001
+                log.exception("job runner iteration failed")
+            self._stop.wait(self.poll)
 
     def _run(self) -> None:
         from lectern import autometa, editing

@@ -321,3 +321,20 @@ def test_the_account_default_round_trips(client, owner):
     r = api_post(client, "/api/me/preferences", owner["csrf"], {"data_saver": True})
     assert r.json()["preferences"]["data_saver"] is True
     assert client.get("/api/me").json()["preferences"]["data_saver"] is True
+
+
+def test_a_transcode_waits_for_a_free_heavy_job_slot(client, owner, settings, book, monkeypatch):
+    from lectern import limits
+
+    base = limits.Limits.from_settings(settings)
+    gov = limits.Governor(limits.Limits(1, base.features))
+    monkeypatch.setattr(limits, "GOVERNOR", gov)
+    make(client, owner, book["id"])
+    with gov.gate(limits.KOKORO) as gate:
+        narration = gate.admit(limits.KOKORO, 1)  # one heavy job (the default cap) is running
+    assert transcode.run_pending(session_factory(), settings) == 0
+    assert the_job().status == JobStatus.QUEUED
+    narration.release()
+    assert transcode.run_pending(session_factory(), settings) == 1
+    assert the_job().status == JobStatus.SUCCEEDED
+    assert gov.snapshot()["heavy_jobs"]["active"] == 0  # the slot was given back

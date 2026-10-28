@@ -211,7 +211,11 @@ def audiobook_preview(
         synth = runner.default_synth(
             body.engine, {"voice": body.voice, "speed": body.speed}, settings
         )
-        pcm = synth.sentence(text)
+        try:
+            pcm = synth.sentence(text)
+        finally:
+            if hasattr(synth, "close"):
+                synth.close()  # the engine's child process (lectern.tts.child)
     except Exception as exc:  # noqa: BLE001 - a voice that does not load is the caller's 422
         raise HTTPException(422, {"detail": "preview_failed", "message": str(exc)[:200]}) from exc
     return _wav(pcm, synth.sample_rate, text)

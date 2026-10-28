@@ -141,10 +141,14 @@ def _find_isbn(text: str) -> str | None:
 
 
 def _limit() -> None:
+    """In the child. A PDF → EPUB job's parent passes its ``convert`` memory cap and nice
+    level down (lectern.limits); an import's probe uses the constants here."""
     import resource
 
+    from lectern.limits import child_memory_bytes, lower_priority
+
     for which, value in (
-        (resource.RLIMIT_AS, MEMORY_LIMIT_BYTES),
+        (resource.RLIMIT_AS, child_memory_bytes(MEMORY_LIMIT_BYTES)),
         (resource.RLIMIT_CPU, CPU_LIMIT_S),
         (resource.RLIMIT_FSIZE, OUTPUT_LIMIT_BYTES),
         (resource.RLIMIT_CORE, 0),
@@ -153,10 +157,7 @@ def _limit() -> None:
             resource.setrlimit(which, (value, value))
         except (ValueError, OSError):
             pass  # best effort where the platform refuses a limit
-    try:
-        os.nice(10)
-    except OSError:
-        pass
+    lower_priority(10)
 
 
 def _s(v) -> str:

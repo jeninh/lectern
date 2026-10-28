@@ -78,7 +78,10 @@ class Scan:
 
 
 def _env(extra: dict | None = None) -> dict:
-    env = {"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"}
+    from lectern import limits
+
+    env = {"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8",
+           limits.CHILD_NICE: str(limits.GOVERNOR.limit(limits.OCR).nice)}  # fmt: skip
     if prefix := os.environ.get("TESSDATA_PREFIX"):
         env["TESSDATA_PREFIX"] = prefix
     env.update(extra or {})
@@ -210,8 +213,9 @@ def _limit(memory_mb: int, cpu_s: int, output_bytes: int) -> None:
             resource.setrlimit(which, (value, value))
         except (ValueError, OSError):
             pass  # best effort where the platform refuses a limit
-    with contextlib.suppress(OSError):
-        os.nice(10)
+    from lectern.limits import lower_priority
+
+    lower_priority(10)  # LECTERN_OCR_NICE, passed down by the parent
 
 
 def _open(path: Path):
