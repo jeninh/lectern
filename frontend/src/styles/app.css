@@ -6568,3 +6568,55 @@ table.compare td:first-child {
 .storage-items li + li {
   border-top: 1px solid var(--line);
 }
+
+/* ---------- health page (docs/health.md) ---------- */
+.health-badge[data-level="warning"] {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--line));
+  text-decoration: none;
+}
+.health-badge[data-level="critical"] {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+  text-decoration: none;
+}
+.health-badge[data-level="critical"] .dot {
+  background: var(--danger);
+}
+.health-overall {
+  border-left: 4px solid var(--ok);
+}
+.health-overall[data-level="warning"] {
+  border-left-color: var(--warn);
+}
+.health-overall[data-level="critical"] {
+  border-left-color: var(--danger);
+}
+.health-list,
+.health-jobs {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.health-check {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border-left: 3px solid transparent;
+}
+.health-check[data-level="warning"] {
+  border-left-color: var(--warn);
+}
+.health-check[data-level="critical"] {
+  border-left-color: var(--danger);
+}
+.health-jobs li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}

@@ -38,6 +38,8 @@ const LINK: Record<string, { to: string; label: string }> = {
   "download.burst": { to: "/app/security#downloads", label: "Download limits" },
   "download.cap": { to: "/app/security#downloads", label: "Download limits" },
   "invite.accepted": { to: "/app/admin#invites", label: "Household" },
+  "health.alert": { to: "/app/health", label: "Health" },
+  "backup.failed": { to: "/app/health", label: "Health" },
 };
 
 export function NotificationList({ onNavigate }: { onNavigate?: () => void }) {
