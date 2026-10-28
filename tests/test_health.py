@@ -184,6 +184,94 @@ def test_backup_overdue_and_failed_job_and_kokoro_worker(client, owner, settings
     db.close()
 
 
+def _pause(client, owner, paused, db):
+    db.commit()  # release SQLite's write lock before the API writes
+    r = api_post(client, "/api/job-queue/pause", owner["csrf"], {"paused": paused})
+    assert r.status_code == 200, r.text
+
+
+def _stuck_pushes(db):
+    return [n for n in _notes(db) if n.data["check"] == "jobs.stuck"]
+
+
+def test_paused_queue_is_not_stuck_but_a_silent_lease_is(client, owner, settings):
+    db = session_factory()()
+    now = utcnow()
+    w = _work(db)
+    queued = Job(
+        kind="tts",
+        work_id=w.id,
+        status=JobStatus.QUEUED,
+        run_after=now - timedelta(hours=25),
+    )
+    db.add(queued)
+    db.commit()
+
+    _pause(client, owner, True, db)
+    v = health.refresh(db, settings, now + timedelta(minutes=1))
+    assert _check(v, "jobs.stuck")["level"] == "ok"
+    assert _stuck_pushes(db) == []
+
+    # A leased job with no heartbeat is stuck even while paused.
+    db.add(
+        Job(
+            kind="ocr",
+            work_id=w.id,
+            status=JobStatus.LEASED,
+            lease_token_hash="h" * 64,
+            started_at=now - timedelta(hours=2),
+        )
+    )
+    db.commit()
+    v = health.refresh(db, settings, now + timedelta(minutes=2))
+    assert _check(v, "jobs.stuck")["level"] == "warning"
+    assert _check(v, "jobs.stuck")["detail"]["total"] == 1
+    db.close()
+
+
+def test_running_queue_warns_on_a_day_old_waiting_job(client, owner, settings):
+    db = session_factory()()
+    now = utcnow()
+    w = _work(db)
+    db.add(
+        Job(
+            kind="tts",
+            work_id=w.id,
+            status=JobStatus.QUEUED,
+            run_after=now - timedelta(hours=25),
+        )
+    )
+    db.commit()
+    v = health.refresh(db, settings, now)
+    assert _check(v, "jobs.stuck")["level"] == "warning"
+    assert len(_stuck_pushes(db)) == 1
+    db.close()
+
+
+def test_resume_restarts_the_queued_clock(client, owner, settings):
+    db = session_factory()()
+    w = _work(db)
+    _pause(client, owner, True, db)
+    db.add(
+        Job(
+            kind="tts",
+            work_id=w.id,
+            status=JobStatus.QUEUED,
+            run_after=utcnow() - timedelta(days=3),
+        )
+    )
+    db.commit()
+    _pause(client, owner, False, db)
+    resumed = utcnow()
+
+    v = health.refresh(db, settings, resumed + timedelta(minutes=5))
+    assert _check(v, "jobs.stuck")["level"] == "ok"
+    assert _stuck_pushes(db) == []
+    v = health.refresh(db, settings, resumed + timedelta(hours=25))
+    assert _check(v, "jobs.stuck")["level"] == "warning"
+    db.close()
+
+
 def queue_presence(cred, at):
     from lectern import queue
 

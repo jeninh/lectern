@@ -12,7 +12,7 @@ wrong on the server in one page, with one overall status: OK, warning (amber), o
 | Backups | [Restore drill](backups.md#restore-drill) (off unless `LECTERN_RESTORE_DRILL_DAYS` is set) | no drill passed for twice its interval | the last drill failed |
 | Disk space | Each volume (data, library, backups; a volume they share is shown once) | less than 10 % free | less than 5 % free |
 | Jobs | Failed jobs (alignment, narration, text recognition, PDF conversion, data-saver copies) in the last 7 days that were not retried successfully since | any | |
-| Jobs | Stuck jobs: queued for a day with nobody taking them, or running without a heartbeat for an hour | any | |
+| Jobs | Stuck jobs: queued for a day with nobody taking them (not while the queue is paused, and counted from when it was resumed), or running without a heartbeat for an hour | any | |
 | Workers | Kokoro narration, Piper narration, alignment | a worker that offered it has not been seen for 12 hours, or its self-test failed | |
 | Other | Database integrity (checked by every backup) | | the last backup's copy failed the check |
 | Other | Database schema at the latest revision | | not at head |
