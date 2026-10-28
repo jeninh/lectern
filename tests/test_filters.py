@@ -289,6 +289,25 @@ CASES = [
     ("-length:>10h", {"anna", "moby2", "scan", "comic", "night"}),
     ("narrator:dale", {"night"}),
     ("narrator:davidson,dale", {"war", "night"}),
+    # "=" is exactly, folded: no substrings. Anna has no ``authors``, so her ``author`` counts.
+    ('author:="LEO tolstoy"', {"war"}),
+    ('author:="lev tolstoi"', {"anna"}),
+    ("author:=Ann", set()),
+    ('author:="Ann Artist"', {"comic", "night"}),
+    ("author:=tolstoy", set()),
+    ('author:=Tolstoy,="Herman Melville"', {"moby"}),
+    ('-author:="Ann Artist"', {"war", "anna", "moby", "moby2", "scan"}),
+    ("series:=EPICS", {"war"}),
+    ("series:=Epic", set()),
+    ('title:="moby-dick"', {"moby", "moby2"}),
+    ("title:=Moby", set()),
+    ('publisher:="russkii vestnik"', {"war"}),
+    ("publisher:=Russkii", set()),
+    ('narrator:="JIM dale"', {"night"}),
+    ("narrator:=dale", set()),
+    ("tag:=classic", {"war", "anna"}),
+    # Quoted, a leading "=" is just a character.
+    ('author:"=Ann Artist"', set()),
     # Reading (the owner's own)
     ("status:reading", {"anna", "night"}),
     ("status:finished", {"moby"}),
@@ -357,6 +376,22 @@ CASES = [
 def test_every_field(client, ids):
     for f, want in CASES:
         assert found(client, f) == want, f
+
+
+@pytest.mark.parametrize("text", ["author:=X", 'author:="a b",=c', "-title:=Emma", "series:==x"])
+def test_exact_values_round_trip(text):
+    """``=`` survives formatting (smart-shelf rules are stored as formatted text)."""
+    q = filters.parse(text)
+    assert all(v.op == "==" for c in q.clauses for v in c.values)
+    assert filters.format_query(q) == text
+    assert filters.parse(filters.format_query(q)) == q
+    assert filters.make_rule(text)["filter"] == text
+
+
+def test_exact_is_not_the_literal_equals():
+    assert filters.parse("tag:=x") == filters.parse("tag:x")
+    assert filters.parse('author:"=X"').clauses[0].values[0] == filters.Value("=", "=X")
+    assert filters.parse("year:=1869") == filters.parse("year:1869")
 
 
 def test_offline_ids_come_from_the_device(client, ids):

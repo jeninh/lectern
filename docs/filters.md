@@ -45,6 +45,13 @@ format:epub,pdf -has:audio author:"Tolstoy" year:1850..1900 progress:<50% war
   (either end may be left open: `year:..1900`).
 - Dates are `2026`, `2026-03`, or `2026-03-15` (UTC), or ages: `30d`, `2w`, `6m`, `1y`
   (`added:<30d` means added in the last 30 days).
+- `title`, `author`, `series`, `narrator`, and `publisher` match part of a value. Start the value
+  with `=` to match the whole of it instead (`author:="Leo Tolstoy"`; with quotes if it has
+  spaces): `author:=Ann` finds Ann but not Joanne Harris. Accents and case are still ignored,
+  so `author:=bronte` finds Brontë. `author:=` checks each name in the book's author list, or
+  the single author when it has no list. `tag:` is always exact, so `tag:=sf` is `tag:sf`.
+  *Changed:* a leading `=` used to be an ordinary character; to search for one, quote the
+  value (`title:"=Equals"`).
 - Anything else is a free word, matched against title, author, series, and ISBN. `-word`
   excludes it. A `key:` Lectern does not know is a free word too, so `Re:Zero` still finds
   itself.
