@@ -36,6 +36,8 @@ export interface PdfEpubJob {
   error: string | null;
   mode?: "analyse" | "convert";
   sections: number | null;
+  /** On GET …/pdf-epub: false when only the owner or whoever started it may cancel. */
+  can_cancel?: boolean;
 }
 
 export interface PdfEpubState {

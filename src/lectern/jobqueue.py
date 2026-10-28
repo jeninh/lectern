@@ -69,8 +69,14 @@ def scope(stmt, user: User):
 
 
 def may_see(job: Job, user: User) -> bool:
-    """:func:`scope` for one job."""
+    """:func:`scope` for one job; also who may cancel it, here and on a book's page."""
     return user.role == Role.OWNER or (job.created_by == user.id and job.kind != CLEANUP)
+
+
+def shows_error(user: User, sees_book: bool) -> bool:
+    """Whether a job's error text is shown: it can hold library paths (Author/Title) and engine
+    logs, so never to readers, and to members only on a job whose book they can see."""
+    return user.role == Role.OWNER or (user.role != Role.READER and sees_book)
 
 
 def batch_of(job: Job) -> str | None:
@@ -149,9 +155,7 @@ def listing(db: Session, user: User, server_caps: set[str] | None) -> dict:
         feature = limits.feature_of(j.kind, payload)
         limit = blocked.get(feature) if group == "waiting" and feature else None
         title = titles.get(j.work_id)
-        # Error texts can hold library paths (Author/Title) and engine logs: never for readers,
-        # and for members not on a job whose book they cannot see.
-        show_error = owner or (user.role != Role.READER and title is not None)
+        show_error = shows_error(user, title is not None)
         summary = None
         if group == "running":
             holder = workers.get(j.leased_by_id) if j.leased_by_id is not None else None

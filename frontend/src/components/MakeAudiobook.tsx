@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, csrf } from "../lib/api";
 import { helpPath } from "../lib/help";
+import { CANCEL_NOT_YOURS } from "../lib/jobqueue";
 import {
   REASONS,
   audiobookState,
@@ -92,7 +93,9 @@ export function MakeAudiobookRow({ work }: { work: Work }) {
               : "Queued"
         : `Narrating${pct != null ? ` · ${pct}%` : ""}${job.eta ? ` · about ${duration(job.eta.seconds)} left` : ""}${job.lease && job.lease.worker !== "local" ? ` on ${job.lease.worker}` : ""}`;
     if (job.engine === "elevenlabs" && job.spent_credits != null) hint += ` · ${Math.round(job.spent_credits)} of ${Math.round(job.cap_credits ?? 0)} credits`;
-    action = <button className="btn sm ghost" onClick={() => act(() => cancelJob(job.id), "Could not cancel")}>Cancel</button>;
+    action = job.can_cancel === false
+      ? <span className="hint">{CANCEL_NOT_YOURS}</span>
+      : <button className="btn sm ghost" onClick={() => act(() => cancelJob(job.id), "Could not cancel")}>Cancel</button>;
   } else if (job && (job.status === "failed" || job.status === "cancelled")) {
     hint = job.status === "cancelled" ? "Narration cancelled" : `Narration failed: ${job.error ?? "unknown error"}`;
     action = (

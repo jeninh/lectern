@@ -268,15 +268,7 @@ def enqueue(
 
 def cancel(db: Session, job: Job) -> bool:
     """Cancel a live job (caller commits)."""
-    if job.status not in JOB_ACTIVE_STATUSES:
-        return False
-    job.status = JobStatus.CANCELLED
-    job.lease_token_hash = None
-    job.lease_expires_at = None
-    job.heartbeat_at = None
-    job.finished_at = utcnow()
-    db.flush()
-    return True
+    return queue.cancel_row(db, job)  # conditional: a job that finished meanwhile stays so
 
 
 def delete_output(library: Path, work: Work, sha256: str) -> bool:

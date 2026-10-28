@@ -243,22 +243,18 @@ def enqueue_align(
 
 
 def cancel_job(db: Session, job: Job) -> bool:
-    """Move an active job to ``cancelled`` and drop its lease. Caller commits."""
-    if job.status not in JOB_ACTIVE_STATUSES:
+    """Move an active job to ``cancelled`` and drop its lease (``lectern.queue.cancel_row``:
+    one that finished meanwhile stays finished, and so does its alignment). Caller commits."""
+    if not queue.cancel_row(db, job):
         return False
-    job.status = JobStatus.CANCELLED
-    job.lease_token_hash = None
-    job.lease_expires_at = None
-    job.heartbeat_at = None
-    job.finished_at = utcnow()
     alignment = _alignment_of(db, job)
-    if alignment is not None and alignment.status in (
-        AlignmentStatus.PENDING,
-        AlignmentStatus.RUNNING,
-    ):
+    if alignment is None:
+        return True
+    db.refresh(alignment)  # this session's copy may be older than the row
+    if alignment.status in (AlignmentStatus.PENDING, AlignmentStatus.RUNNING):
         alignment.status = AlignmentStatus.FAILED
         alignment.error = "cancelled"
-    db.flush()
+        db.flush()
     return True
 
 
@@ -1006,7 +1002,9 @@ def job_json(
     *,
     server_caps: set[str] | None = None,
     for_owner: bool = False,
+    show_error: bool = True,
 ) -> dict:
+    """``show_error=False`` leaves the error text out (``lectern.jobqueue.shows_error``)."""
     result = job.result or {}
     lease = None
     if job.status == JobStatus.LEASED:
@@ -1045,10 +1043,12 @@ def job_json(
         "started_at": _iso(job.started_at),
         "finished_at": _iso(job.finished_at),
         "lease": lease,
-        "error": job.error,
+        "error": job.error if show_error else None,
         "result": done,
         "eta": eta(db, job),
-        "waiting": queue.explain_wait(db, job, server_caps=server_caps, for_owner=for_owner),
+        "waiting": queue.explain_wait(
+            db, job, server_caps=server_caps, for_owner=for_owner, show_error=show_error
+        ),
     }
 
 
