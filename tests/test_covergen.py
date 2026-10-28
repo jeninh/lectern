@@ -12,7 +12,7 @@ from io import BytesIO
 
 import pytest
 from lxml import etree
-from tests.conftest import ORIGIN, api_post, make_app_password
+from tests.conftest import ORIGIN, api_post, login, make_app_password, make_user
 from tests.test_editing import editor, one_book, patch, png
 
 from lectern import covergen as cg
@@ -386,3 +386,62 @@ def test_every_font_renders_in_every_style(font, style):
         if f != font
     ]
     assert img not in others  # the face actually changes the drawing
+
+
+# --- candidates, preview parameters, and the preview cache ---------------------------------------
+
+
+def _candidates(client, wid, **params):
+    return client.get(f"/api/works/{wid}/cover/candidates", params=params)
+
+
+def test_candidates_are_deterministic_and_paging_walks_every_palette(client, owner, settings):
+    wid = one_book(settings, title="Persuasion", authors=["Jane Austen"])
+    first = _candidates(client, wid)
+    assert first.status_code == 200
+    body = first.json()
+    assert body["fonts"] == list(cg.FONTS) and body["styles"] == list(cg.STYLES)
+    assert len(body["candidates"]) == 6
+    assert _candidates(client, wid).json() == body
+    palettes, offset = set(), 0
+    while offset < 12:
+        page = _candidates(client, wid, offset=offset, count=6).json()["candidates"]
+        assert [c["seed"] for c in page] == list(range(offset, offset + 6))
+        palettes |= {c["palette"] for c in page}
+        offset += 6
+    assert palettes == {p.name for p in cg.PALETTES}
+    c = _candidates(client, wid, font="noto", count=1).json()["candidates"][0]
+    assert c["font"] == "noto" and "font=noto" in c["url"] and "w=240" in c["url"]
+    r = client.get(c["url"])
+    d = cg.design_for("Persuasion", "Jane Austen", style=c["style"], seed=c["seed"], font="noto")
+    assert r.status_code == 200 and r.headers["x-cover-palette"] == c["palette"] == d.palette.name
+
+
+def test_candidates_validate_and_refuse_readers(client, owner, settings):
+    wid = one_book(settings, title="Persuasion", authors=["Jane Austen"])
+    assert _candidates(client, wid, count=7).status_code == 422
+    assert _candidates(client, wid, font="comic").status_code == 422
+    assert _candidates(client, wid + 99).status_code == 404
+    reader = make_user(client, owner["csrf"], "kid", "reader")
+    login(client, "kid", reader["password"])
+    assert _candidates(client, wid).status_code in (403, 404)
+
+
+def test_generated_jpg_takes_font_and_width_and_is_cached(client, owner, settings, monkeypatch):
+    wid = one_book(settings, title="Persuasion", authors=["Jane Austen"])
+    url = f"/api/works/{wid}/cover/generated.jpg"
+    params = {"title": "Cache Probe", "author": "A", "style": "classic", "seed": 3, "font": "text"}
+    d = cg.design_for("Cache Probe", "A", style="classic", seed=3, font="text", lang="en")
+    for w in (240, 480):
+        r = client.get(url, params={**params, "w": w})
+        assert r.content == cg.render_jpeg(d, width=w, quality=86)
+        assert "private" in r.headers["cache-control"] and "max-age" in r.headers["cache-control"]
+    for bad in ({"w": 300}, {"w": 0}, {"font": "comic"}):
+        assert client.get(url, params={**params, **bad}).status_code == 422
+
+    real, calls = cg.render_jpeg, []
+    monkeypatch.setattr(cg, "render_jpeg", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    fresh = {**params, "title": "Another Probe", "w": 240}
+    first = client.get(url, params=fresh).content
+    assert client.get(url, params=fresh).content == first
+    assert len(calls) == 1  # the second identical request came from the LRU

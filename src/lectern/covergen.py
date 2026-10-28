@@ -31,7 +31,9 @@ import json
 import logging
 import os
 import secrets
+import threading
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -902,18 +904,23 @@ def _font_files(design: Design) -> list[str]:
     return files
 
 
+# At most two renders at once, so a grid of previews cannot saturate a small host.
+_RENDERS = threading.BoundedSemaphore(2)
+
+
 def render_png(design: Design, *, width: int = WIDTH) -> bytes:
     import resvg_py
 
-    return bytes(
-        resvg_py.svg_to_bytes(
-            svg_string=svg(design),
-            skip_system_fonts=True,
-            font_files=_font_files(design),
-            width=width,
-            height=round(width * HEIGHT / WIDTH),
+    with _RENDERS:
+        return bytes(
+            resvg_py.svg_to_bytes(
+                svg_string=svg(design),
+                skip_system_fonts=True,
+                font_files=_font_files(design),
+                width=width,
+                height=round(width * HEIGHT / WIDTH),
+            )
         )
-    )
 
 
 def render_jpeg(design: Design, *, width: int = WIDTH, quality: int = 88) -> bytes:
@@ -923,6 +930,36 @@ def render_jpeg(design: Design, *, width: int = WIDTH, quality: int = 88) -> byt
         out = BytesIO()
         img.convert("RGB").save(out, "JPEG", quality=quality, optimize=True, progressive=True)
         return out.getvalue()
+
+
+# --- in-memory previews -----------------------------------------------------------------------
+
+PREVIEW_WIDTHS = (240, 480)
+PREVIEW_QUALITY = 86
+PREVIEW_CACHE_BYTES = 8 * 1024 * 1024
+_previews: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+_previews_size = 0
+_previews_lock = threading.Lock()
+
+
+def preview_jpeg(design: Design, width: int) -> bytes:
+    """A preview JPEG from a small LRU (about 8 MB) keyed by ``(design.key, width)``; drawn
+    (at most two at a time) on a miss. The key covers everything drawn, so entries never go stale."""
+    global _previews_size
+    k = (design.key, width)
+    with _previews_lock:
+        if k in _previews:
+            _previews.move_to_end(k)
+            return _previews[k]
+    data = render_jpeg(design, width=width, quality=PREVIEW_QUALITY)
+    with _previews_lock:
+        if k not in _previews:
+            _previews[k] = data
+            _previews_size += len(data)
+        while _previews_size > PREVIEW_CACHE_BYTES and len(_previews) > 1:
+            _, old = _previews.popitem(last=False)
+            _previews_size -= len(old)
+    return data
 
 
 # --- the cache in derived/ ---------------------------------------------------------------------

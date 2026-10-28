@@ -12,6 +12,7 @@ from lectern.routes.api import (
     audio_bookmarks,
     books,
     core,
+    covers,
     devices,
     dictionary,
     editor,
@@ -76,3 +77,4 @@ router.include_router(ocr.router)
 router.include_router(jobqueue.router)
 router.include_router(vocabulary.router)
 router.include_router(audio_bookmarks.router)
+router.include_router(covers.router)
