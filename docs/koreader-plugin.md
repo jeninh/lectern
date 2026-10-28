@@ -250,6 +250,35 @@ history). Free space is that of the folder books download to. `plugin_version` i
 in the plugin's `_meta.lua`, which is raised with every change to the plugin; a plugin older
 than this release sends no report, and a report without a version never claims an update. After
 updating Lectern, reinstall the plugin on each device to get the new version.
+### Audiobook bookmarks and clips
+
+While you listen, mark a moment and come back to it, next to your highlights:
+
+- **Bookmark:** one tap on the bookmark button in the mini player, on the Listening page (or
+  press **B** there), or in the read-along bar marks the moment being heard, in its chapter.
+  **Add note** under it (or *Add a note* in the Listening page's toast) adds a note afterwards. Phone lock screens
+  and headphone buttons have no bookmark action, so there is none there.
+- **Clip:** **Clip last 30 s** on the Listening page starts a clip of what you just heard; move
+  its start and end handles, **Play clip** to check it, add a note, and save. A clip is at most
+  30 minutes and is kept as two times only: it plays from the audiobook's own files, nothing is
+  cut, encoded, or queued.
+- **On the right passage:** when the audiobook is aligned with the text (read-along), a bookmark
+  or clip is placed on the sentences spoken in it, the same sentences a KOReader highlight of
+  those words is placed on; *Open in reader* opens that passage, *Read along* opens the
+  read-along there, and the read-along text underlines it. Without alignment it keeps its time
+  and chapter only, and is placed as soon as an alignment finishes. *Play from here* (or *Play
+  clip*) plays it in the player.
+
+They show under **Audio bookmarks** on the book's page and in the reader's **Highlights** panel,
+marked *Audio*; on the **Highlights** page, where search matches their notes (`note:` works,
+`highlight:` leaves them out; the Cmd/Ctrl+K palette does not list them yet) and the filters
+apply (the date is the day you made them); and in both Markdown exports, after each book's
+highlights. Merging two books keeps them on the audio they were made in.
+
+They are private like highlights: only you see yours, only while you can see the book, never in
+OPDS or MCP, and never logged. They are stored in `lectern.db` (`audio_bookmarks`, migration
+`0033`), so [backups](backups.md) and restore include them. Making one needs a connection to
+Lectern; nothing outside your tailnet is involved.
 
 ## Security
 

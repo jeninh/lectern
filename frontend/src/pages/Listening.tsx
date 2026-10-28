@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Cover, tintStyle } from "../components/Cover";
+import { PlayerMarks } from "../components/AudioBookmarks";
 import { EmptyState } from "../components/EmptyState";
 import { Download, Headphones, NextChapter, Play, PrevChapter, Reader, Upload } from "../components/Icons";
 import { HandoffPrompt, PlayButton, RateMenu, Scrubber, SkipButtons, SleepMenu } from "../components/Player";
@@ -181,6 +182,7 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
             {p.dataSaver && !lowReady && !busy && canMake && <> <button className="linklike" onClick={transcode}>Make one now</button>.</>}
             {p.dataSaver && !lowReady && !busy && canUpload && info?.data_saver?.unavailable && <> {info.data_saver.unavailable.message}</>}
           </p>
+          <PlayerMarks />
         </div>
       </div>
 

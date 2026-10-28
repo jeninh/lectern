@@ -1,6 +1,8 @@
 """Your KOReader highlights and notes (lectern.annotations): per book, all books, searched and
 filtered (issue #72), as Markdown, and as the quotes feed and Home's highlight of the day
-(issue #83). Session only, and only the caller's own highlights on works they can see."""
+(issue #83), with your audiobook bookmarks and clips next to them (issue #81,
+:mod:`lectern.audio_bookmarks`). Session only, and only the caller's own highlights and marks
+on works they can see."""
 
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-from lectern import annotations, search
+from lectern import annotations, audio_bookmarks, search
 from lectern.access import can_see_work, shelf_permission
 from lectern.models import Shelf, Work
 from lectern.routes.api.shelves import shelf_works
@@ -60,6 +62,19 @@ def _find(request: Request, auth, db, settings, q: str, filters, partial: bool =
     return found
 
 
+def _audio(db, settings, user, q: str, filters, partial: bool = True) -> list:
+    """Your audiobook marks matching ``q`` and ``filters``, placed on the text:
+    ``[(work, marks, placements), ...]``."""
+    try:
+        groups = audio_bookmarks.find(db, user, q, filters, prefix=partial)
+    except search.QueryError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, {"detail": exc.code, "message": str(exc)}
+        ) from None
+    lib = settings.library_dir
+    return [(w, marks, audio_bookmarks.place(db, lib, w, marks)) for w, marks in groups]
+
+
 def _visible(db, user, work_id: int) -> None:
     if not can_see_work(db, user, work_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
@@ -95,29 +110,31 @@ def work_annotations_md(auth: Auth, db: DbDep, settings: SettingsDep, work_id: i
     groups = annotations.visible(db, settings.library_dir, auth.user, work_id)
     db.commit()
     title = db.get(Work, work_id).title
-    if not groups:
+    audio = _audio(db, settings, auth.user, "", annotations.Filters(work_id))
+    if not groups and not audio:
         return _download(f"# {title}\n\nNo highlights yet.\n", f"{title} highlights")
-    return _download(annotations.markdown(groups), f"{title} highlights")
+    return _download(annotations.markdown(groups, audio=audio), f"{title} highlights")
 
 
 @router.get("/annotations")
 def all_annotations(auth: Auth, db: DbDep, settings: SettingsDep) -> JSONResponse:
-    """Which of your books have highlights, and how many."""
+    """Which of your books have highlights or audiobook marks, and how many of each."""
     groups = annotations.visible(db, settings.library_dir, auth.user)
     db.commit()
-    works = [
-        {
-            "work_id": w.id,
-            "title": w.title,
-            "author": w.author,
-            "tags": w.tags or [],
-            "count": len(pairs),
-        }
-        for w, pairs in groups
-    ]
+    marks = {w.id: (w, len(m)) for w, m in audio_bookmarks.visible(db, auth.user)}
+    counts = {w.id: (w, len(pairs)) for w, pairs in groups}
+    ids = sorted(counts.keys() | marks.keys(),
+                 key=lambda i: ((counts.get(i) or marks[i])[0].title.casefold(), i))  # fmt: skip
+    works = []
+    for i in ids:
+        w = (counts.get(i) or marks[i])[0]
+        works.append({"work_id": w.id, "title": w.title, "author": w.author,
+                      "tags": w.tags or [], "count": counts.get(i, (w, 0))[1],
+                      "audio_count": marks.get(i, (w, 0))[1]})  # fmt: skip
     body = {
         "works": works,
         "total": sum(w["count"] for w in works),
+        "audio_total": sum(w["audio_count"] for w in works),
         "export_url": "/api/annotations.md",
     }
     return JSONResponse(body, headers=PRIVATE)
@@ -165,7 +182,23 @@ def search_annotations(
                 "snippet": snip and {k: snip[k] for k in ("parts", "before", "after")},
             }
         )
-    body = {"results": results, "total": len(hits), "truncated": len(hits) > limit}
+    audio = [
+        {
+            "work_id": w.id,
+            "title": w.title,
+            "author": w.author,
+            "bookmark": audio_bookmarks.as_json(m, placed.get(m.id)),
+        }  # fmt: skip
+        for w, marks, placed in _audio(db, settings, auth.user, q, filters, partial)
+        for m in marks
+    ]
+    body = {
+        "results": results,
+        "total": len(hits),
+        "truncated": len(hits) > limit,
+        "audio": audio[:limit],
+        "audio_total": len(audio),
+    }
     return JSONResponse(body, headers=PRIVATE)
 
 
@@ -181,8 +214,9 @@ def all_annotations_md(
     """All your highlights as Markdown, or those the highlights page shows (``q`` and the
     same filters as ``/api/annotations/search``)."""
     groups = _find(request, auth, db, settings, q, filters, partial=False).groups
-    text = annotations.markdown(groups, title="Highlights")
-    if not groups:
+    audio = _audio(db, settings, auth.user, q, filters, partial=False)
+    text = annotations.markdown(groups, title="Highlights", audio=audio)
+    if not groups and not audio:
         text = "# Highlights\n\nNo highlights yet.\n"
     return _download(text, "Lectern highlights")
 

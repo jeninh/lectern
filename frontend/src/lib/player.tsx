@@ -48,6 +48,11 @@ interface Player {
   play: () => void;
   pause: () => void;
   seek: (t: number) => void;
+  /** Play an audiobook clip (issue #81) from its start and pause at its end; opens the book
+   * first when another one is loaded. */
+  playClip: (work: Work, start: number, end: number | null) => Promise<void>;
+  /** The clip being played, until it ends or the listener goes elsewhere. */
+  clip: { workId: number; start: number; end: number } | null;
   skip: (delta: number) => void;
   setRate: (r: number) => void;
   /** Make the current speed the default for books not played yet. */
@@ -132,6 +137,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [sleep, setSleepState] = useState<Sleep>(null);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [usingLow, setUsingLow] = useState(false);
+  const [clip, setClip] = useState<{ workId: number; start: number; end: number } | null>(null);
+  const clipRef = useRef(clip);
+  clipRef.current = clip;
   const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate });
 
   const duration = useMemo(() => tracks.reduce((s, tr) => s + tr.duration_s, 0), [tracks]);
@@ -193,6 +201,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       gt = Math.max(0, Math.min(gt, total - 0.05));
       const i = trackAt(trs, gt);
       const el = audio.current;
+      const c = clipRef.current;
+      if (c && (gt < c.start - 0.5 || gt > c.end)) setClip(null);
       load(i, gt - trs[i].offset_s, !!el && !el.paused);
       setT(gt);
     },
@@ -237,6 +247,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
     },
     [deviceName, load, save, toast, defaultRate],
+  );
+
+  const playClip = useCallback(
+    async (w: Work, start: number, end: number | null) => {
+      if (state.current.work?.id !== w.id) await open(w, { at: start });
+      if (state.current.work?.id !== w.id) return; // could not open it (toasted)
+      setClip(end != null ? { workId: w.id, start, end } : null);
+      clipRef.current = end != null ? { workId: w.id, start, end } : null;
+      seek(start);
+      audio.current?.play().catch((e) => toast(`Could not play: ${(e as Error).message}`, "error"));
+    },
+    [open, seek, toast],
   );
 
   const play = useCallback(() => {
@@ -333,6 +355,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     audio.current?.removeAttribute("src");
     state.current.work = null;
     state.current.tracks = [];
+    setClip(null);
     setWork(null);
     setTracks([]);
     setSleepState(null);
@@ -371,6 +394,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const onTime = () => {
       const tr = state.current.tracks[state.current.index];
       if (tr) setT(tr.offset_s + el.currentTime);
+      const c = clipRef.current;
+      if (tr && c && c.workId === state.current.work?.id && tr.offset_s + el.currentTime >= c.end) {
+        el.pause();
+        setClip(null);
+      }
       if (!el.paused && Date.now() - state.current.lastSave > SAVE_EVERY_MS) save().catch(() => {});
     };
     const onMeta = () => {
@@ -500,8 +528,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [handoff, work, t]);
 
   const value = useMemo<Player>(
-    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
-    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
+    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
+    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
   );
   void index;
   return (
