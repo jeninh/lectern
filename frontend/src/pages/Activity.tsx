@@ -98,6 +98,10 @@ function describe(e: ActivityEvent, self: string | undefined): { icon: JSX.Eleme
       return { icon: <Devices />, cls: "warn", text: <>{who} revoked the plugin setup link for <strong>{e.target}</strong></> };
     case "device.forget":
       return { icon: <Devices />, cls: "", text: <>{who} forgot browser <strong>{e.target}</strong></> };
+    case "device.shelf_sync":
+      return { icon: <Devices />, cls: "", text: <>{who} set shelf sync for <strong>{e.target}</strong> <span>({e.detail})</span></> };
+    case "queue.follow":
+      return { icon: <Devices />, cls: "", text: <>Shelf sync for {e.detail}</> };
     case "device.download_cap":
     case "user.download_cap":
       return { icon: <Download />, cls: "", text: <>{who} set the hourly download limit for <strong>{e.target}</strong> to {e.detail}</> };

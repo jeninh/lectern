@@ -672,3 +672,202 @@ def test_queue_and_root_feeds_parse_with_legacy_control_characters(home, monkeyp
     assert int(got.findtext(f"{OS}totalResults")) >= 2
     links = {e.get("rel"): e.get("href") for e in got.iter(f"{ATOM}link")}
     assert links["next"] == "/opds/search?page=2&q=author"
+
+
+# --- following a shelf (issue #68) ---------------------------------------------------------------
+
+
+def follow(person: Person, device_id: int, shelf_id: int | None, **opts):
+    r = api_post(
+        person.http,
+        f"/api/devices/app-passwords/{device_id}/shelf-sync",
+        person.csrf,
+        {"shelf_id": shelf_id, **opts},
+    )
+    return r
+
+
+def pending_titles(person: Person, device_id: int) -> list[str]:
+    r = person.http.get(f"/api/device-queues/{device_id}")
+    assert r.status_code == 200, r.text
+    return [i["work"]["title"] for i in r.json()["pending"]]
+
+
+def plugin_status(person: Person, dev: dict) -> dict:
+    r = person.http.get("/koplugin/status", headers=dev["headers"])
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_a_followed_shelf_keeps_the_device_stocked_and_cleans_up(home):
+    owner, ids = home["owner"], home["ids"]
+    kobo, phone = owner.devices["Kobo"], owner.devices["Phone"]
+    top = api_post(owner.http, "/api/shelves", owner.csrf, {"name": "Kobo books"}).json()
+    sub = api_post(
+        owner.http, "/api/shelves", owner.csrf, {"name": "Later", "parent_id": top["id"]}
+    ).json()
+    for shelf, title in ((top, "Alpha"), (sub, "Charlie"), (top, "Echo")):
+        api_post(
+            owner.http, f"/api/shelves/{shelf['id']}/items", owner.csrf, {"work_id": ids[title]}
+        )
+
+    r = follow(owner, kobo["id"], top["id"], cleanup=True, auto_download=True)
+    assert r.status_code == 200, r.text
+    ap = r.json()["app_password"]
+    assert (ap["follow_shelf_id"], ap["follow_cleanup"], ap["auto_download"]) == (
+        top["id"],
+        True,
+        True,
+    )
+    # The shelf and the one nested in it, books with a file only (Echo is audio only), queued
+    # at once; the same person's other device follows nothing.
+    assert sorted(pending_titles(owner, kobo["id"])) == ["Alpha", "Charlie"]
+    assert pending_titles(owner, phone["id"]) == []
+    # A book sent by hand sits next to them and is never cleaned up.
+    assert statuses(owner.queue(kobo["id"], ids["Delta"])) == {ids["Delta"]: "queued"}
+
+    # A book put on the shelf reaches the device's next read of its queue (OPDS here).
+    api_post(owner.http, f"/api/shelves/{top['id']}/items", owner.csrf, {"work_id": ids["Bravo"]})
+    assert sorted(titles(feed(owner.http, "/opds/queue", kobo["headers"]))) == [
+        "Alpha",
+        "Bravo",
+        "Charlie",
+        "Delta",
+    ]
+    # Alpha reaches the device; a person takes Bravo off the queue.
+    file_id = home["files"]["Alpha"][0]
+    assert (
+        owner.http.get(f"/opds/files/{file_id}/download", headers=kobo["headers"]).status_code
+        == 200
+    )
+    assert item_status(kobo["id"], ids["Alpha"]) == QueueStatus.DELIVERED
+    bravo = next(
+        i["id"]
+        for i in owner.http.get(f"/api/device-queues/{kobo['id']}").json()["pending"]
+        if i["work"]["title"] == "Bravo"
+    )
+    api_delete(owner.http, f"/api/device-queues/{kobo['id']}/items/{bravo}", owner.csrf)
+
+    # Alpha (delivered) and Charlie (still waiting) leave the shelf: both are dequeued and the
+    # plugin is told to delete its copies; Delta, sent by hand, stays; Bravo, removed by a
+    # person, is not queued again by the shelf.
+    for shelf, title in ((top, "Alpha"), (sub, "Charlie")):
+        r = api_delete(owner.http, f"/api/shelves/{shelf['id']}/items/{ids[title]}", owner.csrf)
+        assert r.status_code == 204
+    st = plugin_status(owner, kobo)
+    assert sorted(st["remove"]) == sorted([ids["Alpha"], ids["Charlie"]])
+    assert [i["title"] for i in st["queue"]["items"]] == ["Delta"]
+    assert st["auto_download"] is True
+    assert st["follow"] == {"shelf": "Kobo books", "cleanup": True}
+    assert item_status(kobo["id"], ids["Bravo"]) == QueueStatus.REMOVED
+
+    # Alpha comes back: queued again, and no longer to be deleted.
+    api_post(owner.http, f"/api/shelves/{top['id']}/items", owner.csrf, {"work_id": ids["Alpha"]})
+    st = plugin_status(owner, kobo)
+    assert st["remove"] == [ids["Charlie"]]
+    assert sorted(i["title"] for i in st["queue"]["items"]) == ["Alpha", "Delta"]
+
+    # Clean-up off: a book leaving the shelf stays queued, and nothing is to be deleted.
+    assert follow(owner, kobo["id"], top["id"], cleanup=False).status_code == 200
+    api_delete(owner.http, f"/api/shelves/{top['id']}/items/{ids['Alpha']}", owner.csrf)
+    st = plugin_status(owner, kobo)
+    assert st["remove"] == [] and st["auto_download"] is False
+    assert sorted(i["title"] for i in st["queue"]["items"]) == ["Alpha", "Delta"]
+
+    # Deleting the shelf ends the follow; unfollowing leaves the queue as it is.
+    api_delete(owner.http, f"/api/shelves/{sub['id']}", owner.csrf)
+    assert follow(owner, kobo["id"], None).json()["app_password"]["follow_shelf_id"] is None
+    assert plugin_status(owner, kobo)["follow"] is None
+    with session_factory()() as db:
+        actions = db.scalars(select(AuditLog.action)).all()
+    assert "device.shelf_sync" in actions and "queue.follow" in actions
+
+
+def test_a_smart_shelf_rule_change_takes_effect_at_the_next_sync(home):
+    owner, ids = home["owner"], home["ids"]
+    kobo = owner.devices["Kobo"]
+    smart = api_post(
+        owner.http, "/api/shelves", owner.csrf, {"name": "Smart", "filter": 'author:"Author Bravo"'}
+    ).json()
+    follow(owner, kobo["id"], smart["id"], cleanup=True)
+    assert pending_titles(owner, kobo["id"]) == ["Bravo"]
+    r = owner.http.patch(
+        f"/api/shelves/{smart['id']}",
+        json={"filter": 'author:"Author Delta"'},
+        headers={"origin": ORIGIN, "x-csrf-token": owner.csrf},
+    )
+    assert r.status_code == 200, r.text
+    assert titles(feed(owner.http, "/opds/queue", kobo["headers"])) == ["Delta"]
+    assert plugin_status(owner, kobo)["remove"] == [ids["Bravo"]]
+
+
+def test_shelf_sync_respects_visibility_and_ownership(home):
+    owner, mia, rex, ids = home["owner"], home["mia"], home["rex"], home["ids"]
+    boox, kobo = rex.devices["Boox"], owner.devices["Kobo"]
+    private = api_post(owner.http, "/api/shelves", owner.csrf, {"name": "Private"}).json()
+    # A shelf the device's user cannot see does not exist for them; another person's device
+    # is not theirs to set, owner included (as with the download cap).
+    assert follow(rex, boox["id"], private["id"]).status_code == 404
+    assert follow(mia, boox["id"], home["shelf"]).status_code == 404
+    assert follow(owner, boox["id"], home["shelf"]).status_code == 404
+    # A smart shelf rex sees matches only what rex may see: the shared books.
+    smart = api_post(
+        owner.http, "/api/shelves", owner.csrf, {"name": "All", "filter": "format:epub"}
+    ).json()
+    put_json(
+        owner.http,
+        f"/api/shelves/{smart['id']}/grants/{home['users']['rex']['id']}",
+        owner.csrf,
+        {"permission": "view"},
+    )
+    assert follow(rex, boox["id"], smart["id"], cleanup=True).status_code == 200
+    assert sorted(pending_titles(rex, boox["id"])) == ["Alpha", "Bravo"]
+    # Unshared: the books leave rex's view, so the follow dequeues them and the plugin is told.
+    api_delete(
+        owner.http, f"/api/shelves/{home['shelf']}/grants/{home['users']['rex']['id']}", owner.csrf
+    )
+    st = plugin_status(rex, boox)
+    assert st["queue"]["items"] == [] and sorted(st["remove"]) == sorted(
+        [ids["Alpha"], ids["Bravo"]]
+    )
+    # The followed shelf is hidden from rex now: its other settings can still be changed
+    # (keeping it), but no other hidden shelf can be picked.
+    api_delete(
+        owner.http, f"/api/shelves/{smart['id']}/grants/{home['users']['rex']['id']}", owner.csrf
+    )
+    r = follow(rex, boox["id"], smart["id"], cleanup=True, auto_download=True)
+    assert r.status_code == 200 and r.json()["app_password"]["auto_download"] is True
+    assert follow(rex, boox["id"], private["id"]).status_code == 404
+    # The owner's own device is unaffected by rex's follow.
+    assert pending_titles(owner, kobo["id"]) == []
+    # A revoked device can no longer be set.
+    device_id = rex.http.get("/api/devices").json()["devices"][0]["id"]
+    api_post(rex.http, f"/api/devices/{device_id}/revoke", rex.csrf)
+    assert follow(rex, boox["id"], None).status_code == 409
+
+
+def test_a_large_shelf_is_queued_a_batch_at_a_time(home, monkeypatch):
+    owner, ids = home["owner"], home["ids"]
+    kobo = owner.devices["Kobo"]
+    monkeypatch.setattr(device_queue, "FOLLOW_WINDOW", 2)
+    shelf = api_post(owner.http, "/api/shelves", owner.csrf, {"name": "Big"}).json()
+    for t in ("Delta", "Alpha", "Charlie"):
+        api_post(owner.http, f"/api/shelves/{shelf['id']}/items", owner.csrf, {"work_id": ids[t]})
+    follow(owner, kobo["id"], shelf["id"])
+    # The first two in title order wait; the third follows once one of them is delivered.
+    assert pending_titles(owner, kobo["id"]) == ["Alpha", "Charlie"]
+    file_id = home["files"]["Alpha"][0]
+    owner.http.get(f"/opds/files/{file_id}/download", headers=kobo["headers"])
+    assert titles(feed(owner.http, "/opds/queue", kobo["headers"])) == ["Charlie", "Delta"]
+
+
+def test_sending_a_followed_book_by_hand_keeps_it_through_clean_up(home):
+    owner, ids = home["owner"], home["ids"]
+    kobo = owner.devices["Kobo"]
+    shelf = api_post(owner.http, "/api/shelves", owner.csrf, {"name": "Follow"}).json()
+    api_post(owner.http, f"/api/shelves/{shelf['id']}/items", owner.csrf, {"work_id": ids["Alpha"]})
+    follow(owner, kobo["id"], shelf["id"], cleanup=True)
+    assert statuses(owner.queue(kobo["id"], ids["Alpha"])) == {ids["Alpha"]: "already_queued"}
+    api_delete(owner.http, f"/api/shelves/{shelf['id']}/items/{ids['Alpha']}", owner.csrf)
+    st = plugin_status(owner, kobo)
+    assert st["remove"] == [] and [i["title"] for i in st["queue"]["items"]] == ["Alpha"]

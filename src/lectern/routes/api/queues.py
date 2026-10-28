@@ -92,6 +92,7 @@ def show(auth: Auth, db: DbDep, pw_id: int) -> dict:
     t = device_queue.target(db, auth.user, pw_id, active=False)
     if t is None:
         raise _not_found()
+    device_queue.sync_follow(db, pw_id)
     pending = db.execute(device_queue.pending_query(pw_id, t.owner)).all()
     past = device_queue.history(db, pw_id, t.owner)
     people = {i.queued_by for i, _ in pending + past if i.queued_by} | {
