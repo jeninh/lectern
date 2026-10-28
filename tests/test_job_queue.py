@@ -313,3 +313,84 @@ def test_batch_pause_resume_and_cancel_act_on_the_rest_of_the_batch(client, owne
     ] * 2
     assert api_post(client, "/api/job-queue/batches/ffffffffffffffff/cancel",
                     owner["csrf"]).status_code == 404  # fmt: skip
+
+
+@pytest.mark.parametrize("kind", ["align", "tts", "ocr"])
+def test_a_cancel_loses_cleanly_to_a_finish_that_got_there_first(client, owner, kind):
+    """Issue #109 (b): a cancel that read the job as leased must not overwrite a success
+    committed meanwhile (its output is published), nor fail the alignment it produced."""
+    from lectern.models import Alignment, AlignmentStatus
+    from lectern.ocr import jobs as ocr_jobs
+
+    cancel = {"align": align_jobs.cancel_job, "tts": tts_jobs.cancel, "ocr": ocr_jobs.cancel}[kind]
+    w = add_work("Raced")
+    leased = add_job(kind, w, status=JobStatus.LEASED, lease_token_hash="0" * 64)
+    with session_factory()() as db:
+        db.add(Alignment(work_id=w, model="m", status=AlignmentStatus.RUNNING,
+                         epub_sha256="e", audio_fingerprint="a"))  # fmt: skip
+        db.commit()
+    with session_factory()() as db:
+        stale = db.get(Job, leased)
+        alignment = align_jobs.work_alignment(db, w)  # both loaded before the race
+        assert (stale.status, alignment.status) == (JobStatus.LEASED, AlignmentStatus.RUNNING)
+        with session_factory()() as other:
+            other.get(Job, leased).status = JobStatus.SUCCEEDED
+            align_jobs.work_alignment(other, w).status = AlignmentStatus.SUCCEEDED
+            other.commit()
+        assert cancel(db, stale) is False
+        db.commit()
+    assert job(leased).status == JobStatus.SUCCEEDED
+    with session_factory()() as db:
+        assert align_jobs.work_alignment(db, w).status == AlignmentStatus.SUCCEEDED
+
+    # still live: cancelled, and an alignment job fails its alignment
+    w2 = add_work("Live")
+    live = add_job(kind, w2, status=JobStatus.LEASED, lease_token_hash="0" * 64)
+    with session_factory()() as db:
+        db.add(Alignment(work_id=w2, model="m", status=AlignmentStatus.RUNNING,
+                         epub_sha256="e", audio_fingerprint="a"))  # fmt: skip
+        db.commit()
+        assert cancel(db, db.get(Job, live)) is True
+        db.commit()
+        after = align_jobs.work_alignment(db, w2).status
+    assert job(live).status == JobStatus.CANCELLED
+    assert after == (AlignmentStatus.FAILED if kind == "align" else AlignmentStatus.RUNNING)
+
+
+def test_the_book_pages_cancel_and_job_json_follow_the_jobs_page_rules(client, owner):
+    """Issue #109 (a) and (d): POST /api/jobs/{id}/cancel lets the owner or whoever started a
+    job cancel it, and the legacy job JSON shows error text only where the Jobs page does."""
+    member = make_user(client, owner["csrf"], "mia", "member")
+    shown, gone = add_work("Shared"), add_work("Trashed later")
+    leak = "/srv/library/A/Trashed later/book.m4b: boom"
+    backoff = dict(attempts=1, error=leak, run_after=utcnow() + timedelta(minutes=5))
+    mine = add_job("tts", shown, {"engine": "kokoro"}, created_by=member["id"], **backoff)
+    auto = add_job("align", shown, {"model": "small"}, **backoff)  # auto-queued: no starter
+    hidden = add_job("transcode", gone, created_by=member["id"], **backoff)
+    with session_factory()() as db:
+        db.get(Work, gone).trashed_at = utcnow()
+        db.commit()
+    m = TestClient(client.app)
+    m_csrf = login(m, "mia", member["password"])
+
+    rows = {j["id"]: j for j in m.get("/api/jobs").json()["jobs"]}
+    assert {i: rows[i]["can_cancel"] for i in (mine, auto, hidden)} == {
+        mine: True, auto: False, hidden: True,
+    }  # fmt: skip
+    # a book the member can see: the error as before; one they cannot: none, anywhere
+    assert rows[auto]["error"] == leak and leak in rows[auto]["waiting"]["summary"]
+    h = rows[hidden]
+    assert (h["error"], h["waiting"]["last_error"]) == (None, None)
+    assert "boom" not in h["waiting"]["summary"]
+    assert m.get(f"/api/jobs/{hidden}").json()["error"] is None
+    assert client.get(f"/api/jobs/{hidden}").json()["error"] == leak  # the owner sees it
+    st = m.get(f"/api/works/{shown}/audiobook").json()
+    assert (st["job"]["id"], st["job"]["can_cancel"]) == (mine, True)
+
+    r = api_post(m, f"/api/jobs/{auto}/cancel", m_csrf)
+    assert (r.status_code, r.json()["detail"]) == (403, "not_your_job")
+    assert job(auto).status == JobStatus.QUEUED
+    assert api_post(m, f"/api/jobs/{mine}/cancel", m_csrf).json()["status"] == "cancelled"
+    assert api_post(client, f"/api/jobs/{auto}/cancel", owner["csrf"]).json()["status"] == (
+        "cancelled"
+    )

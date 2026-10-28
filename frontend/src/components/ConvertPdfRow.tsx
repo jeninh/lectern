@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
+import { CANCEL_NOT_YOURS } from "../lib/jobqueue";
 import {
   analysePdf,
   cancelPdfJob,
@@ -108,7 +109,9 @@ export function ConvertPdfRow({ work }: { work: Work }) {
   if (running) {
     const analysing = job!.mode === "analyse";
     hint = job!.status === "queued" ? (analysing ? "Queued: analysing the PDF" : "Queued: converting") : analysing ? "Analysing the PDF…" : "Converting…";
-    action = <button className="btn sm ghost" onClick={() => act(() => cancelPdfJob(job!.id), "Could not cancel")}>Cancel</button>;
+    action = job!.can_cancel === false
+      ? <span className="hint">{CANCEL_NOT_YOURS}</span>
+      : <button className="btn sm ghost" onClick={() => act(() => cancelPdfJob(job!.id), "Could not cancel")}>Cancel</button>;
   } else if (job && (job.status === "failed" || job.status === "cancelled")) {
     const what = job.mode === "analyse" ? "Analysis" : "Conversion";
     hint = job.status === "cancelled" ? `${what} cancelled` : `${what} failed: ${job.error ?? "unknown error"}`;

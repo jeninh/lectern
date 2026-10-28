@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lectern import queue
+from lectern import jobqueue, queue
+from lectern.access import visible_works
 from lectern.align import jobs
 from lectern.align.transcribe import MODELS
 from lectern.jobs import CLEANUP
@@ -25,6 +26,8 @@ from lectern.models import (
     Job,
     JobStatus,
     Role,
+    User,
+    Work,
     WorkerCredential,
     WorkerEnrollment,
     utcnow,
@@ -90,9 +93,9 @@ def list_jobs(
     workers = _worker_names(db)
     speed = jobs.measured_speed(db, None)
     caps = server_capabilities(db, settings)
-    owner = auth.user.role == Role.OWNER
+    books = _visible_books(db, auth.user, rows)
     return {
-        "jobs": [_job_json(db, j, workers, caps, owner) for j in rows],
+        "jobs": [_job_json(db, j, workers, auth.user, caps, books) for j in rows],
         "measured_speed": ({"speed": round(speed[0], 3), "samples": speed[1]} if speed else None),
     }
 
@@ -102,8 +105,7 @@ def job_detail(auth: JobViewer, db: DbDep, settings: SettingsDep, job_id: int) -
     job = db.get(Job, job_id)
     if job is None or (job.kind == CLEANUP and auth.user.role != Role.OWNER):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    return _job_json(db, job, _worker_names(db), server_capabilities(db, settings),
-                     auth.user.role == Role.OWNER)  # fmt: skip
+    return _job_json(db, job, _worker_names(db), auth.user, server_capabilities(db, settings))
 
 
 def server_capabilities(db: Session, settings) -> set[str]:
@@ -121,14 +123,26 @@ def server_capabilities(db: Session, settings) -> set[str]:
     return caps
 
 
-def _job_json(db: Session, job: Job, workers: dict[int, str], caps: set[str] | None = None,
-              owner: bool = False) -> dict:  # fmt: skip
-    """``waiting`` names workers and their reasons only for the owner (as Admin → Workers)."""
+def _visible_books(db: Session, user: User, rows) -> set[int]:
+    ids = {j.work_id for j in rows if j.work_id is not None}
+    if not ids:
+        return set()
+    return set(db.scalars(select(Work.id).where(Work.id.in_(ids), visible_works(user))))
+
+
+def _job_json(db: Session, job: Job, workers: dict[int, str], user: User,
+              caps: set[str] | None = None, books: set[int] | None = None) -> dict:  # fmt: skip
+    """``waiting`` names workers and their reasons only for the owner (as Admin → Workers);
+    error text and ``can_cancel`` follow the Jobs page (``lectern.jobqueue``). ``books``: the
+    works among the jobs listed that ``user`` can see."""
     from lectern.tts import jobs as tts_jobs
 
-    if job.kind == tts_jobs.KIND:
-        return tts_jobs.job_json(db, job, workers, server_caps=caps, for_owner=owner)
-    return jobs.job_json(db, job, workers, server_caps=caps, for_owner=owner)
+    if books is None:
+        books = _visible_books(db, user, [job])
+    kw = dict(server_caps=caps, for_owner=user.role == Role.OWNER,
+              show_error=jobqueue.shows_error(user, job.work_id in books))  # fmt: skip
+    fn = tts_jobs.job_json if job.kind == tts_jobs.KIND else jobs.job_json
+    return {**fn(db, job, workers, **kw), "can_cancel": jobqueue.may_see(job, user)}
 
 
 @router.post("/works/{work_id}/align")
@@ -281,10 +295,9 @@ def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
     job = db.get(Job, job_id)
     if job is None or (job.kind == CLEANUP and auth.user.role != Role.OWNER):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    from lectern.tts import jobs as tts_jobs
-
-    cancelled = tts_jobs.cancel(db, job) if job.kind == tts_jobs.KIND else jobs.cancel_job(db, job)
-    if cancelled:
+    if not jobqueue.may_see(job, auth.user):  # the Jobs page's rule: the owner or who started it
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_job")
+    if jobqueue.cancel(db, job):
         audit.record(
             db,
             "job.cancel",
@@ -293,7 +306,7 @@ def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
             ip=client_ip(request),
         )
         db.commit()
-    return _job_json(db, job, _worker_names(db))
+    return _job_json(db, job, _worker_names(db), auth.user)
 
 
 def _retry_model(db: Session, work_id: int) -> str | None:

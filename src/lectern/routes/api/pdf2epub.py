@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from lectern import jobqueue
 from lectern.access import visible_works
 from lectern.ingest import formats
 from lectern.models import BookFile, Job, JobStatus, Role, Work
@@ -98,7 +99,7 @@ def state(auth: Viewer, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
         # where the text to convert comes from: the PDF's text layer, or OCR of a scan
         "source": ("ocr" if row.ocr_sha256 else "text_layer") if row else None,
         "outdated": edition is not None and pj.outdated(db, work.id, edition),
-        "job": _job_json(job),
+        "job": {**_job_json(job), "can_cancel": jobqueue.may_see(job, auth.user)} if job else None,
         "edition": (
             {
                 "file": edition.rel_path,
