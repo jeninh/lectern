@@ -106,12 +106,14 @@ def test_paths_resolve_against_the_repository_root(compose_config):
     assert Path(mounts["/library"]["source"]) == ROOT / "library"
     assert Path(mounts["/backups"]["source"]) == ROOT / "backups"
     # Created if missing so `git pull && up` works without it; backups are off by default.
-    assert mounts["/backups"]["bind"]["create_host_path"] is True
+    # Older Compose prints create_host_path only when true; newer Compose defaults it to true,
+    # omits it then, and prints false explicitly. Accept either rendering of "true".
+    assert mounts["/backups"].get("bind", {}).get("create_host_path", True) is True
     assert Path(mounts["/var/lib/tailscale"]["source"]) == ROOT / "data" / "tailscale"
     assert Path(mounts["/config/serve.json"]["source"]) == SERVE
     assert mounts["/config/serve.json"]["read_only"] is True
     # Missing data/library must fail instead of appearing as root-owned, unwritable dirs.
-    # (Compose omits create_host_path when false; short syntax sets it true.)
+    # (Older Compose omits create_host_path when false; newer Compose prints false.)
     for target in ("/data", "/library"):
         assert not mounts[target].get("bind", {}).get("create_host_path", False), target
     assert lectern["environment"]["LECTERN_BASE_URL"] == "https://lectern.tail1234.ts.net"
