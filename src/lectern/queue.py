@@ -25,7 +25,7 @@ import shutil
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -169,6 +169,32 @@ def claimable(advertised: Iterable[str], cred: WorkerCredential | None) -> list[
     if allowed is not None and ALIGN in allowed:
         allowed = [*allowed, ALIGN_PDF]
     return [c for c in caps if c not in SERVER_ONLY and (allowed is None or c in allowed)]
+
+
+# --- pausing (the job queue page, lectern.jobqueue) --------------------------------------------
+
+# A paused job stays ``queued`` with its ``run_after`` this far ahead: every claim takes only
+# jobs whose ``run_after`` has passed, so none starts it, and it still holds its work's one
+# live job of its kind. Resuming sets ``run_after`` back to now.
+PAUSED_UNTIL = datetime(9000, 1, 1, tzinfo=UTC)
+
+
+def is_paused(job: Job) -> bool:
+    from lectern.models import JobStatus
+
+    return (
+        job.status == JobStatus.QUEUED
+        and job.run_after is not None
+        and job.run_after >= PAUSED_UNTIL
+    )
+
+
+def queue_paused(db: Session) -> bool:
+    """The owner paused the whole queue: no runner or worker claims a new job (running ones
+    finish). Every claim checks it."""
+    from lectern import instance
+
+    return instance.get(db, "queue_paused")
 
 
 # --- presence ---------------------------------------------------------------------------------
@@ -423,6 +449,7 @@ def explain_wait(
     *,
     server_caps: set[str] | None = None,
     for_owner: bool = True,
+    show_error: bool = True,
     now: datetime | None = None,
 ) -> dict | None:
     """Why an active job is where it is, for the owner (Admin → Workers, the job detail):
@@ -430,7 +457,9 @@ def explain_wait(
     paused, not offering it and why, not allowed by its allowlist, busy), the lease holder and
     expiry, and ``run_after`` (backoff). ``server_caps``: capabilities this server runs
     itself, when known. ``None`` for a finished job. Without ``for_owner`` (a member) the
-    workers, their labels, and their reasons are left out, as on Admin → Workers."""
+    workers, their labels, and their reasons are left out, as on Admin → Workers. Without
+    ``show_error`` the job's error (it can hold library paths) is left out of the summary and
+    ``last_error``. A paused job (:func:`is_paused`) says so, with no ``run_after``."""
     from lectern.models import JOB_ACTIVE_STATUSES, Job, JobStatus, WorkerCredential, utcnow
 
     if job.status not in JOB_ACTIVE_STATUSES:
@@ -501,12 +530,15 @@ def explain_wait(
             "heartbeat_at": _iso(job.heartbeat_at),
         }
     server = None if server_caps is None else cap in server_caps
-    run_after = job.run_after
+    paused = is_paused(job)
+    run_after = None if paused else job.run_after
     if lease is not None:
         summary = f"Running on {lease['holder']}"
+    elif paused:
+        summary = "Paused by the owner"
     elif run_after is not None and run_after > now:
         summary = f"Waiting {_human_time(run_after, now)} before retrying"
-        if job.error:
+        if job.error and show_error:
             summary += f" after: {job.error[:200]}"
     elif ready:
         who = ", ".join(ready[:3]) if for_owner else "a worker"
@@ -527,10 +559,11 @@ def explain_wait(
         "ahead": ahead,
         "lease": lease,
         "run_after": _iso(run_after),
+        "paused": paused,
         "attempts": job.attempts,
         "max_attempts": job.max_attempts,
         "crashes": job.crashes or 0,
-        "last_error": job.error,
+        "last_error": job.error if show_error else None,
     }
 
 

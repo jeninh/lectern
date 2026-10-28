@@ -166,6 +166,9 @@ export function WorkersCard() {
         </table>
       )}
       {queue && <JobQueue active={queue.active} failed={queue.failed} />}
+      <p className="hint" style={{ marginTop: 12 }}>
+        <Link to="/app/jobs">Open the job queue</Link> to pause, reorder, retry, or cancel jobs.
+      </p>
       <Sheet open={adding} onClose={() => setAdding(false)} title="Add a worker" variant="dialog" labelledBy="addw-title">
         {adding && <AddWorker onDone={() => { setAdding(false); load(); }} />}
       </Sheet>

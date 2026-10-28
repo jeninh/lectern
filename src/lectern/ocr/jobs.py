@@ -935,7 +935,8 @@ def status_json(db: Session, settings: Settings, book: BookFile, work: Work) -> 
             "max_attempts": latest.max_attempts,
             "created_at": _iso(latest.created_at),
             "finished_at": _iso(latest.finished_at),
-            "run_after": _iso(latest.run_after),
+            "run_after": None if queue.is_paused(latest) else _iso(latest.run_after),
+            "paused": queue.is_paused(latest),
         }
     if latest is not None and latest.status in JOB_ACTIVE_STATUSES:
         res = latest.result or {}

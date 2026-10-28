@@ -311,6 +311,8 @@ def claim(
 ) -> tuple[Job, str] | None:
     """Atomically lease the next runnable job of ``kinds`` to the in-process runner. While an
     external worker that can transcode is online, only jobs queued at least ``defer_s`` ago."""
+    if queue.queue_paused(db):
+        return None
     now = utcnow()
     waiting = Job.status == JobStatus.QUEUED
     if defer_s > 0 and queue.capability_online(db, queue.TRANSCODE, now):

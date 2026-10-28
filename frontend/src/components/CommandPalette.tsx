@@ -15,7 +15,7 @@ import { usePlayer } from "../lib/player";
 import { bookFiles, hitPath, readerPath } from "../lib/formats";
 import { clauseLabel, extractChips, formatQuery } from "../lib/filters";
 import { pathLabel } from "../lib/shelves";
-import { Book, Devices, Download, Filter, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Trash, Upload } from "./Icons";
+import { Book, Devices, Download, Filter, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Sync, Trash, Upload } from "./Icons";
 
 type Group = "Filter" | "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books" | "Highlights";
 const ORDER: Group[] = ["Filter", "Actions", "Books", "Shelves", "Authors", "Devices", "Pages", "Settings", "Docs"];
@@ -139,6 +139,7 @@ export function CommandPalette() {
       { id: "p-dl", group: "Pages", label: "Downloads", keywords: "offline phone saved storage", hint: "G O", icon: <Download />, run: () => go("/app/downloads") },
       { id: "a-signout", group: "Actions", label: "Sign out", keywords: "log out logout leave", icon: <Logout />, run: () => { close(); logout(clearDevice); } },
       { id: "p-act", group: "Pages", label: "Activity", keywords: "audit log", hint: "G A", icon: <Pulse />, run: () => go("/app/activity") },
+      { id: "p-jobs", group: "Pages", label: "Jobs", keywords: "job queue background conversions ocr audiobooks transcode pause cancel retry", icon: <Sync />, run: () => go("/app/jobs") },
       { id: "p-docs", group: "Pages", label: "Docs", keywords: "help documentation guide manual how to", hint: "G I", icon: <Book />, run: () => go("/app/docs") },
       ...(isOwner ? [{ id: "p-admin", group: "Pages" as Group, label: "Admin", keywords: "users members", hint: "G U", icon: <Gear />, run: () => go("/app/admin") }] : []),
 

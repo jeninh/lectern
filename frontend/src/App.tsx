@@ -13,6 +13,7 @@ import { HighlightsPage } from "./pages/Highlights";
 import { HealthPage } from "./pages/Health";
 import { ListeningPage } from "./pages/Listening";
 import { TrashPage } from "./pages/Trash";
+import { JobsPage } from "./pages/Jobs";
 import { DownloadsPage } from "./pages/Downloads";
 import { ReaderPage } from "./pages/Reader";
 import { PlayerProvider } from "./lib/player";
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/app/highlights" element={<HighlightsPage />} />
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
+          <Route path="/app/jobs" element={<JobsPage />} />
           <Route path="/app/trash" element={<EditorsOnly><TrashPage /></EditorsOnly>} />
           <Route path="/app/save-article" element={<EditorsOnly><ShareTarget /></EditorsOnly>} />
           <Route path="/app/docs" element={docs} />

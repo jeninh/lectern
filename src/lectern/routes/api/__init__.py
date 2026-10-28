@@ -17,6 +17,7 @@ from lectern.routes.api import (
     health,
     highlights,
     imports,
+    jobqueue,
     notifications,
     ocr,
     offline,
@@ -64,3 +65,4 @@ router.include_router(worker.router)
 router.include_router(tts.router)
 router.include_router(pdf2epub.router)
 router.include_router(ocr.router)
+router.include_router(jobqueue.router)
