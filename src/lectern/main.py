@@ -256,6 +256,8 @@ def create_app(
         "highlights": SlidingWindowLimiter(
             limit=settings.search_requests_per_minute, window_seconds=60
         ),
+        # Word lookups in the reader (offline dictionaries, lectern.dictionary), per user.
+        "dictionary": SlidingWindowLimiter(limit=120, window_seconds=60),
         # Sleep-timer rewind points that need ffmpeg (cache misses), per user.
         "rewind": SlidingWindowLimiter(limit=20, window_seconds=60),
         # failed worker-credential checks per address, and requests per valid worker key
