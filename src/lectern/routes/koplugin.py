@@ -8,6 +8,8 @@
                               plugin can trust the home Wi-Fi address (lectern.lan)
 ``PUT  /koplugin/annotations`` kosync headers (the device's sync key): one book's highlights and
                               notes on the device (lectern.annotations)
+``PUT  /koplugin/report``     HTTP Basic with the device's app password: battery, versions, free
+                              space, and the Lectern books on the device (lectern.device_report)
 
 Failures say as little as possible (one error code each), and the audit log records why.
 Secrets, codes, and issued credentials never reach the log stream or the audit log.
@@ -20,7 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import access, annotations, device_queue, koplugin, lan
+from lectern import access, annotations, device_queue, device_report, koplugin, lan
 from lectern.models import BookFile, DeviceFollow, FileKind, Shelf, SyncKey, User, Work, utcnow
 from lectern.routes.api.serializers import iso
 from lectern.security.deps import DbDep, KoSync, OpdsUser, SettingsDep
@@ -212,6 +214,53 @@ def _follow_json(db, pw, user: User) -> dict | None:
     # The name only if the device's user may still see the shelf.
     name = shelf.name if shelf and access.shelf_permission(db, user, shelf) else None
     return {"shelf": name, "cleanup": follow.cleanup}
+
+
+class ReportBookIn(BaseModel):
+    """One Lectern book on the device: the work id of a file the plugin downloaded from
+    Lectern, or the KOReader document digest of a book with a sidecar; its position 0..1."""
+
+    work_id: int | None = Field(default=None, ge=1)
+    document: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,128}$")
+    percentage: float | None = Field(default=None, ge=0, le=1)
+
+
+class ReportIn(BaseModel):
+    # Seconds since the plugin read these values (a report may wait in its outbox): the
+    # server dates it, so the device's clock does not matter.
+    age: int = Field(default=0, ge=0, le=10**9)
+    battery: int | None = Field(default=None, ge=0, le=100)
+    charging: bool | None = None
+    free_bytes: int | None = Field(default=None, ge=0, le=2**53)
+    plugin_version: str | None = Field(default=None, max_length=32)
+    koreader_version: str | None = Field(default=None, max_length=64)
+    # Missing means none (a Lua JSON encoder writes an empty list as an object).
+    books: list[ReportBookIn] = Field(default_factory=list, max_length=device_report.MAX_BOOKS)
+
+
+@router.put("/report", include_in_schema=False)
+def put_report(request: Request, user: OpdsUser, db: DbDep, body: ReportIn) -> dict:
+    """The device's state for the Devices dashboard (lectern.device_report): sent with the
+    plugin's quiet sync. The answer says only whether it was kept (an older report than the
+    stored one is not), never which books Lectern recognised."""
+    pw = request.state.app_password
+    kept = device_report.store(
+        db,
+        pw,
+        age=body.age,
+        battery=body.battery,
+        charging=body.charging,
+        free_bytes=body.free_bytes,
+        plugin_version=body.plugin_version or None,
+        koreader_version=body.koreader_version or None,
+        books=[
+            {"w": b.work_id, "d": b.document, "p": b.percentage}
+            for b in body.books
+            if b.work_id is not None or b.document
+        ],
+    )
+    db.commit()
+    return {"stored": kept}
 
 
 class AnnotationIn(BaseModel):
