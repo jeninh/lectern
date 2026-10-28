@@ -6498,3 +6498,34 @@ table.compare td:first-child {
 .highlight-meta .btn {
   margin-left: auto;
 }
+
+/* The highlights page: search and filters over all of them (pages/Highlights.tsx) */
+.highlights-filters {
+  margin-bottom: 0;
+}
+.highlights-filters .filter-input {
+  flex-basis: 220px;
+}
+.highlights-date {
+  gap: 6px;
+}
+.highlights-help {
+  margin: -6px 0 0;
+}
+.highlight-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 18px;
+}
+.highlight-book {
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+.highlight-results mark {
+  background: var(--accent-soft);
+  color: var(--ink);
+  border-radius: 2px;
+  padding: 0 1px;
+}

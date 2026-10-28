@@ -6,6 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from lectern.config import get_settings
+from lectern.migrate import include_name
 from lectern.models import Base
 
 config = context.config
@@ -27,6 +28,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         render_as_batch=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -45,7 +47,12 @@ def run_migrations_online() -> None:
 
 
 def _run(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, render_as_batch=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=True,
+        include_name=include_name,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

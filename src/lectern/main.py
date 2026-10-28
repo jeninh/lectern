@@ -236,6 +236,10 @@ def create_app(
         "search": SlidingWindowLimiter(
             limit=settings.search_requests_per_minute, window_seconds=60
         ),
+        # Searches of your own highlights (Cmd/Ctrl+K "Highlights", the highlights page).
+        "highlights": SlidingWindowLimiter(
+            limit=settings.search_requests_per_minute, window_seconds=60
+        ),
         # Sleep-timer rewind points that need ffmpeg (cache misses), per user.
         "rewind": SlidingWindowLimiter(limit=20, window_seconds=60),
         # failed worker-credential checks per address, and requests per valid worker key

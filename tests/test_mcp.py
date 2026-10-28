@@ -1109,12 +1109,10 @@ def test_file_is_rechecked_right_before_auto_filing(app, home, settings, monkeyp
 def test_migration_0013_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
     import sqlalchemy as sa
     from alembic import command
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
+    from tests.conftest import schema_diff
 
     from lectern.db import make_engine
     from lectern.migrate import alembic_config, upgrade_to_head
-    from lectern.models import Base
 
     engine = make_engine(f"sqlite:///{tmp_path / 'm13.db'}")
     cfg = alembic_config(str(engine.url))
@@ -1154,7 +1152,7 @@ def test_migration_0013_file_scope_upgrade_and_narrowing_downgrade(tmp_path):
         "organizer": (["read", "organize"], False),
     }
     with engine.connect() as conn:
-        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+        assert schema_diff(conn) == []
     # Keys edited after 0013: filing turned off, or file without upload.
     insert({"no-filing": ["upload", "read"], "upload-only": ["upload"],
             "file-only": ["file"], "file-read": ["file", "read"]})  # fmt: skip

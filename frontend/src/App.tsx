@@ -9,7 +9,7 @@ import { LibraryPage } from "./pages/Library";
 import { ReadAlongPage } from "./pages/ReadAlong";
 import { SecurityPage } from "./pages/Security";
 import { AdminPage } from "./pages/Admin";
-import { HighlightsPage } from "./pages/Placeholder";
+import { HighlightsPage } from "./pages/Highlights";
 import { ListeningPage } from "./pages/Listening";
 import { TrashPage } from "./pages/Trash";
 import { DownloadsPage } from "./pages/Downloads";

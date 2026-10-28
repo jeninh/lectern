@@ -19,6 +19,13 @@ Place
     PDF). So a highlight from the EPUB or the PDF of a book lands on the same passage. When the work has a sentence list, the sentence is stored too. A placement is
     redone when the primary EPUB changes.
 
+Search
+    ``annotations_fts`` (migration 0026) is an SQLite FTS5 index over each highlight's text and
+    note, folded for case and accents like the search inside books (:mod:`lectern.search`).
+    Triggers keep it in step with every create, edit, and delete in the same transaction;
+    :func:`reindex` rebuilds it. :func:`find` matches the caller's own rows only, then keeps
+    those :func:`visible` still shows them.
+
 Privacy
     Highlights are private-source data: only their owner sees them, only for works they can
     still see (:func:`lectern.access.visible_works`), never other household members, OPDS, or
@@ -28,6 +35,7 @@ Privacy
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from array import array
@@ -36,9 +44,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import column, func, select
+from sqlalchemy import text as sql
 from sqlalchemy.orm import Session
 
+from lectern import search
 from lectern.access import visible_works
 from lectern.models import Annotation, BookFile, FileKind, SyncKey, User, Work, utcnow
 from lectern.positions import TextPos, xpointer_spine_index, xpointer_to_text
@@ -324,11 +334,13 @@ def sync_document(
 # --- reading them back ---------------------------------------------------------------------------
 
 
-def visible(db: Session, library: Path, user: User, work_id: int | None = None):
+def visible(
+    db: Session, library: Path, user: User, work_id: int | None = None, ids: list[int] | None = None
+):
     """``[(work, [(annotation, file), ...]), ...]``: the user's own highlights on works they can
-    see, with the file each was made in, each work's in reading order, works by title.
-    Placements made against another primary EPUB than the work's current one are redone (and
-    flushed)."""
+    see, with the file each was made in, each work's in reading order, works by title; only
+    those in ``ids`` when given. Placements made against another primary EPUB than the work's
+    current one are redone (and flushed)."""
     q = (
         select(Annotation, Work, BookFile)
         .join(
@@ -341,6 +353,9 @@ def visible(db: Session, library: Path, user: User, work_id: int | None = None):
     )
     if work_id is not None:
         q = q.where(Work.id == work_id)
+    if ids is not None:
+        listed = select(column("value")).select_from(func.json_each(json.dumps(ids)))
+        q = q.where(Annotation.id.in_(listed))
     by_work: dict[int, tuple[Work, dict[int, tuple[Annotation, BookFile]]]] = {}
     for a, w, f in db.execute(q):
         by_work.setdefault(w.id, (w, {}))[1].setdefault(a.id, (a, f))
@@ -397,6 +412,129 @@ def as_json(a: Annotation, f: BookFile) -> dict:
         ),
         "sentence_n": a.sentence_n,
     }
+
+
+# --- searching (issue #72) ----------------------------------------------------------------------
+
+# "note: word" searches notes only, "highlight: word" the highlighted text only.
+_FIELD = re.compile(r"^\s*(highlight|note)\s*:\s*", re.IGNORECASE)
+_COLUMN = {"highlight": "text", "note": "note"}
+_OWN_MATCHES = (
+    "SELECT rowid FROM annotations_fts WHERE annotations_fts MATCH :q "
+    "AND rowid IN (SELECT id FROM annotations WHERE user_id = :user) ORDER BY rank"
+)
+
+
+@dataclass(frozen=True)
+class Filters:
+    """The highlights page's filters. ``since``/``until``: ``YYYY-MM-DD``, inclusive, on
+    KOReader's creation date."""
+
+    work_id: int | None = None
+    author: str | None = None
+    tag: str | None = None
+    since: str | None = None
+    until: str | None = None
+
+    def keep(self, work: Work, a: Annotation) -> bool:
+        day = a.created[:10]
+        return (
+            (self.author is None or work.author == self.author)
+            and (self.tag is None or self.tag in (work.tags or []))
+            and (self.since is None or day >= self.since)
+            and (self.until is None or day <= self.until)
+        )
+
+
+@dataclass
+class Found:
+    groups: list  # as visible(): [(work, [(annotation, file), ...])], filtered
+    rank: dict[int, int] | None  # annotation id -> relevance order, when there was a query
+    mark: str | None  # the FTS query every hit matches, to mark the words with
+
+    def hits(self) -> list[tuple[Work, Annotation, BookFile]]:
+        """Best first when there was a query, else in :func:`visible`'s order."""
+        out = [(w, a, f) for w, pairs in self.groups for a, f in pairs]
+        if self.rank is not None:
+            out.sort(key=lambda h: self.rank[h[1].id])
+        return out
+
+
+def _match_queries(q: str, prefix: bool) -> list[str]:
+    """The FTS queries for ``q``, as the search inside books builds them (phrase, then every
+    word, the last word a prefix while typed), limited to one field after ``note:`` /
+    ``highlight:``. Raises :class:`lectern.search.QueryError`."""
+    m = _FIELD.match(q)
+    terms = search.query_terms(q[m.end() :] if m else q)
+    if not terms or max(len(t) for t in terms) < 2:
+        return []
+    out = search.fts_queries(terms, prefix=prefix)
+    return [f"{{{_COLUMN[m.group(1).lower()]}}} : ({fq})" for fq in out] if m else out
+
+
+def find(
+    db: Session, library: Path, user: User, q: str, filters: Filters, *, prefix: bool = True
+) -> Found:
+    """The user's own highlights matching ``q`` (every one when blank) and ``filters``, on works
+    they can see: the full-text match reads only their own rows, then :func:`visible` keeps
+    what they may still see. Raises :class:`lectern.search.QueryError`."""
+    q = q.strip()
+    if not q:
+        return Found(_filtered(db, library, user, filters, None), None, None)
+    queries = _match_queries(q, prefix)
+    rank: dict[int, int] = {}
+    for fq in queries:
+        for rowid in db.scalars(sql(_OWN_MATCHES), {"q": fq, "user": user.id}):
+            rank.setdefault(rowid, len(rank))
+    if not rank:
+        return Found([], {}, None)
+    # Every phrase hit also has every word, so the last (every-word) query marks them all.
+    return Found(_filtered(db, library, user, filters, list(rank)), rank, queries[-1])
+
+
+def _filtered(db, library, user, filters: Filters, ids: list[int] | None) -> list:
+    out = []
+    for w, pairs in visible(db, library, user, filters.work_id, ids):
+        kept = [(a, f) for a, f in pairs if filters.keep(w, a)]
+        if kept:
+            out.append((w, kept))
+    return out
+
+
+def marks(db: Session, mark: str | None, ids: list[int]) -> dict[int, tuple[str, str | None]]:
+    """``{id: (text, note)}`` with the words ``mark`` matches between ``\\x02`` and ``\\x03``
+    (as :func:`lectern.search.snippet` reads them). Only ``ids``, which the caller found."""
+    if not mark or not ids:
+        return {}
+    rows = db.execute(
+        sql(
+            "SELECT rowid, highlight(annotations_fts, 0, char(2), char(3)), "
+            "highlight(annotations_fts, 1, char(2), char(3)) FROM annotations_fts "
+            "WHERE annotations_fts MATCH :q AND rowid IN (SELECT value FROM json_each(:ids))"
+        ),
+        {"q": mark, "ids": json.dumps(ids)},
+    )
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def parts(marked: str | None) -> list[list] | None:
+    """``marked`` (from :func:`marks`) as ``[[text, is_match], …]``."""
+    if marked is None:
+        return None
+    out, inside = [], False
+    for piece in re.split("([\x02\x03])", marked):
+        if piece in ("\x02", "\x03"):
+            inside = piece == "\x02"
+        elif piece:
+            out.append([piece, inside])
+    return out
+
+
+def reindex(db: Session) -> int:
+    """Rebuild ``annotations_fts`` from ``annotations`` (``lectern highlights-reindex``), and
+    return how many highlights it holds. Caller commits."""
+    db.execute(sql("INSERT INTO annotations_fts (annotations_fts) VALUES ('rebuild')"))
+    return db.scalar(select(func.count()).select_from(Annotation))
 
 
 # --- Markdown export -----------------------------------------------------------------------------
