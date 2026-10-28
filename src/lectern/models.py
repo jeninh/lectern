@@ -81,6 +81,9 @@ class User(Base):
     auto_file_imports: Mapped[bool] = mapped_column(Boolean, default=False)
     # Migration 0017: play and download the data-saver copy on devices that have not chosen.
     data_saver: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Migration 0027: the web reader's default typography and theme, only the fields the
+    # person changed (routes/api/reader.py); NULL = never saved, the app's defaults apply.
+    reader_settings: Mapped[dict | None] = mapped_column(JSON, default=None)
 
     passkeys: Mapped[list[Passkey]] = relationship(back_populates="user", cascade="all, delete")
     sync_keys: Mapped[list[SyncKey]] = relationship(back_populates="user", cascade="all, delete")
@@ -493,6 +496,23 @@ class ReadingState(Base):
     last_read_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+
+
+class ReaderOverride(Base):
+    """One person's web-reader settings for one work, over their default
+    (``users.reader_settings``): only the fields that differ, e.g. a smaller size for a dense
+    edition (migration 0027). No row: the work follows the default."""
+
+    __tablename__ = "reader_overrides"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    settings: Mapped[dict] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
 # --- Invites ---------------------------------------------------------------------------

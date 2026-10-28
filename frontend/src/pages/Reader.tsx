@@ -14,59 +14,15 @@ import { getBook, orOffline } from "../lib/offline/store";
 import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
 import { pickHandoff } from "../lib/handoff";
-import { useLocalStorage } from "../lib/hooks";
 import { useStore } from "../lib/store";
 import { hitTarget } from "../lib/formats";
+import { bookCss, FONT_LABELS, FONTS, fontFaces, PALETTE, resolveTheme, THEMES, useReaderSettings } from "../lib/reader";
 import { offsetOf, rangeAt, rangeBetween } from "../lib/textpos";
 import type { HandoffCandidate, Work, WorkProgressResponse } from "../lib/types";
 import { PageReader } from "./PageReader";
 
-type ReaderTheme = "auto" | "light" | "sepia" | "dark";
-type Font = "publisher" | "serif" | "sans";
-export interface ReaderSettings {
-  flow: "paginated" | "scrolled";
-  size: number; // percent
-  lineHeight: number;
-  font: Font;
-  width: "narrow" | "normal" | "wide";
-  margin: "small" | "normal" | "large";
-  theme: ReaderTheme;
-  justify: boolean;
-}
-const DEFAULTS: ReaderSettings = { flow: "paginated", size: 100, lineHeight: 1.5, font: "publisher", width: "normal", margin: "normal", theme: "auto", justify: true };
-
-const PALETTE: Record<Exclude<ReaderTheme, "auto">, { bg: string; ink: string; link: string; scheme: "light" | "dark" }> = {
-  light: { bg: "#fffcf6", ink: "#221d17", link: "#1f3a93", scheme: "light" },
-  sepia: { bg: "#f1e5cc", ink: "#3a2e1f", link: "#6b3d12", scheme: "light" },
-  dark: { bg: "#1b1712", ink: "#e6dccb", link: "#a9b8ff", scheme: "dark" },
-};
-const FONTS: Record<Exclude<Font, "publisher">, string> = {
-  serif: `"Iowan Old Style", "Palatino Linotype", Palatino, "Newsreader", Georgia, serif`,
-  sans: `"Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`,
-};
 const WIDTH = { narrow: 560, normal: 680, wide: 860 };
 const GAP = { small: "4%", normal: "7%", large: "11%" };
-
-/** Book CSS for the settings (exported for tests). */
-export function bookCss(s: ReaderSettings, resolved: Exclude<ReaderTheme, "auto">): string {
-  const p = PALETTE[resolved];
-  const font = s.font === "publisher" ? "" : `
-    body { font-family: ${FONTS[s.font]} !important; }
-    p, li, blockquote, dd, dt, div, span, h1, h2, h3, h4, h5, h6, td, th { font-family: inherit !important; }`;
-  return `
-    @namespace epub "http://www.idpf.org/2007/ops";
-    html { color-scheme: ${p.scheme}; font-size: ${s.size}% !important; --theme-bg-color: ${p.bg}; background: ${p.bg} !important; color: ${p.ink} !important; }
-    body { background: transparent !important; color: ${p.ink} !important; }
-    p, li, blockquote, dd, dt, span, div, h1, h2, h3, h4, h5, h6, td, th, em, i, b, strong, small, sup, sub { color: inherit !important; background-color: transparent !important; }
-    a:link, a:visited { color: ${p.link} !important; }
-    p, li, blockquote, dd { line-height: ${s.lineHeight} !important; text-align: ${s.justify ? "justify" : "start"}; hyphens: ${s.justify ? "auto" : "manual"}; widows: 2; orphans: 2; }
-    [align="left"] { text-align: left; } [align="right"] { text-align: right; } [align="center"] { text-align: center; }
-    pre { white-space: pre-wrap !important; }
-    img, svg { max-width: 100%; height: auto; }
-    ${resolved === "dark" ? "img { filter: brightness(.9); }" : ""}
-    ${font}
-  `;
-}
 
 const FOUND = "lectern-found";
 
@@ -159,10 +115,9 @@ function EpubReader() {
   const lastAt = useRef(atKey);
   const nav = useNavigate();
   const { works, resolvedTheme, deviceName, toast, now } = useStore();
-  const [settings, setSettings] = useLocalStorage<ReaderSettings>("lectern.reader", DEFAULTS);
-  const s = { ...DEFAULTS, ...settings };
-  const set = <K extends keyof ReaderSettings>(k: K, v: ReaderSettings[K]) => setSettings({ ...s, [k]: v });
-  const theme: Exclude<ReaderTheme, "auto"> = s.theme === "auto" ? (resolvedTheme === "dark" ? "dark" : "light") : s.theme;
+  const prefs = useReaderSettings(id);
+  const s = prefs.settings;
+  const theme = resolveTheme(s.theme, resolvedTheme);
 
   const [work, setWork] = useState<Work | null>(() => works.find((w) => w.id === id) ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -316,7 +271,7 @@ function EpubReader() {
     r.setAttribute("max-inline-size", `${WIDTH[s.width]}px`);
     r.setAttribute("max-column-count", s.flow === "paginated" ? "2" : "1");
     r.setAttribute("margin", s.flow === "paginated" ? "44px" : "24px");
-    r.setStyles(bookCss(s, theme));
+    r.setStyles(bookCss(s, theme, location.origin));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(s), theme]);
   useEffect(applySettings, [applySettings]);
@@ -481,7 +436,13 @@ function EpubReader() {
         )}
       </Sheet>
       <Sheet open={panel === "type"} onClose={() => setPanel(null)} title="Text and layout" labelledBy="type-title">
-        <TypePanel s={s} set={set} reset={() => { setSettings(DEFAULTS); toast("Reader settings reset"); }} />
+        <TypePanel
+          prefs={prefs}
+          reset={() => {
+            prefs.reset();
+            toast(prefs.justThisBook ? "This book now looks like your default" : "Reader settings reset");
+          }}
+        />
       </Sheet>
     </div>
   );
@@ -513,22 +474,51 @@ function Seg<T extends string>({ label, value, options, onChange }: { label: str
   );
 }
 
-function TypePanel({ s, set, reset }: { s: ReaderSettings; set: <K extends keyof ReaderSettings>(k: K, v: ReaderSettings[K]) => void; reset: () => void }) {
+function Slider({ id, label, value, min, max, step, show, onChange }: { id: string; label: string; value: number; min: number; max: number; step: number; show: string; onChange: (v: number) => void }) {
+  return (
+    <div className="type-row">
+      <label htmlFor={id}>{label} <span className="hint tabular">{show}</span></label>
+      <input id={id} type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+    </div>
+  );
+}
+
+const em = (v: number) => (v > 0 ? `+${Number(v.toFixed(2))} em` : "Book’s own");
+
+function TypePanel({ prefs, reset }: { prefs: ReturnType<typeof useReaderSettings>; reset: () => void }) {
+  const { settings: s, set } = prefs;
+  // The bundled fonts, so each choice below shows itself (the book gets its own copy).
+  const faces = useMemo(() => fontFaces(location.origin), []);
   return (
     <div className="type-panel">
+      <style>{faces}</style>
+      <div className="type-row">
+        <span id="book-l">Just this book</span>
+        <button className="switch" role="switch" aria-checked={prefs.justThisBook} aria-labelledby="book-l" aria-describedby="book-h" onClick={() => prefs.setJustThisBook(!prefs.justThisBook)}><span /></button>
+        <p className="hint" id="book-h">
+          {prefs.justThisBook ? "Changes apply to this book only. Turn off to give it your default again." : "Changes apply to every book. Turn on to change this book only."}
+        </p>
+      </div>
       <div className="type-row">
         <span id="theme-l">Theme</span>
         <div className="swatches" role="radiogroup" aria-labelledby="theme-l">
-          {(["auto", "light", "sepia", "dark"] as ReaderTheme[]).map((t) => (
+          {THEMES.map(([t, label]) => (
             <button key={t} role="radio" aria-checked={s.theme === t} className={`swatch ${t}`} onClick={() => set("theme", t)}>
               <span aria-hidden="true">Aa</span>
-              {t === "auto" ? "Match app" : t === "dark" ? "Warm dark" : t === "sepia" ? "Warm" : "Light"}
+              {label}
             </button>
           ))}
         </div>
       </div>
       <Seg label="Layout" value={s.flow} options={[["paginated", "Pages"], ["scrolled", "Scroll"]]} onChange={(v) => set("flow", v)} />
-      <Seg label="Font" value={s.font} options={[["publisher", "Book’s own"], ["serif", "Serif"], ["sans", "Sans"]]} onChange={(v) => set("font", v)} />
+      <div className="type-row">
+        <span id="font-l">Font</span>
+        <div className="font-choices" role="radiogroup" aria-labelledby="font-l">
+          {FONT_LABELS.map(([f, label]) => (
+            <button key={f} role="radio" aria-checked={s.font === f} onClick={() => set("font", f)} style={f === "publisher" ? undefined : { fontFamily: FONTS[f] }}>{label}</button>
+          ))}
+        </div>
+      </div>
       <div className="type-row">
         <label htmlFor="size">Size <span className="hint tabular">{s.size}%</span></label>
         <div className="row">
@@ -537,20 +527,24 @@ function TypePanel({ s, set, reset }: { s: ReaderSettings; set: <K extends keyof
           <button className="btn sm" aria-label="Larger text" onClick={() => set("size", Math.min(200, s.size + 10))}>A+</button>
         </div>
       </div>
-      <div className="type-row">
-        <label htmlFor="lh">Line spacing <span className="hint tabular">{s.lineHeight.toFixed(1)}</span></label>
-        <input id="lh" type="range" min={1.1} max={2.2} step={0.1} value={s.lineHeight} onChange={(e) => set("lineHeight", Number(e.target.value))} />
-      </div>
+      <Slider id="lh" label="Line spacing" value={s.lineHeight} min={1.1} max={2.2} step={0.1} show={s.lineHeight.toFixed(1)} onChange={(v) => set("lineHeight", v)} />
+      <Slider id="ls" label="Letter spacing" value={s.letterSpacing} min={0} max={0.15} step={0.01} show={em(s.letterSpacing)} onChange={(v) => set("letterSpacing", v)} />
+      <Slider id="ws" label="Word spacing" value={s.wordSpacing} min={0} max={0.5} step={0.05} show={em(s.wordSpacing)} onChange={(v) => set("wordSpacing", v)} />
+      <Slider id="ps" label="Paragraph spacing" value={s.paragraphSpacing} min={0} max={2} step={0.25} show={s.paragraphSpacing > 0 ? `${s.paragraphSpacing} em` : "Book’s own"} onChange={(v) => set("paragraphSpacing", v)} />
       <Seg label="Margins" value={s.margin} options={[["small", "Small"], ["normal", "Normal"], ["large", "Large"]]} onChange={(v) => set("margin", v)} />
       <Seg label="Line length" value={s.width} options={[["narrow", "Narrow"], ["normal", "Normal"], ["wide", "Wide"]]} onChange={(v) => set("width", v)} />
       <div className="type-row">
         <span id="just-l">Justify text</span>
         <button className="switch" role="switch" aria-checked={s.justify} aria-labelledby="just-l" onClick={() => set("justify", !s.justify)}><span /></button>
       </div>
-      <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button className="btn sm ghost" onClick={reset}>Reset</button>
+      <div className="type-row">
+        <span id="heavy-l">Heavier text <span className="hint">for e-ink-like contrast</span></span>
+        <button className="switch" role="switch" aria-checked={s.heavier} aria-labelledby="heavy-l" onClick={() => set("heavier", !s.heavier)}><span /></button>
       </div>
-      <p className="hint">Settings stay on this browser. Use ← and → (or the page edges) to turn pages.</p>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn sm ghost" onClick={reset}>{prefs.justThisBook ? "Reset this book" : "Reset"}</button>
+      </div>
+      <p className="hint">Saved to your account, so they follow you to every browser you read on. Use ← and → (or the page edges) to turn pages.</p>
     </div>
   );
 }
