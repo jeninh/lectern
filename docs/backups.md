@@ -26,6 +26,8 @@ night only changes are stored, which suits a large audiobook library.
 Not included: uploads in progress, scratch space, logs, downloaded models, the Tailscale node
 state (back that up as root; see [the Tailscale guide](deploy-tailscale.md#backups-and-restore)),
 and your host `.env` (keep it in your password manager; `config/lectern.env` helps rebuild it).
+`config/lectern.env` holds every `LECTERN_*` value, secrets included (the e-mail-in password,
+the push alert URL and token of [Health and alerts](health.md)); the JSON summary masks them.
 
 **Symlinks are never followed or backed up**, in the library or the data folder. Each one is
 logged and skipped; one that points outside the backed-up folders is logged as a warning and

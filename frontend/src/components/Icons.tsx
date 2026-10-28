@@ -18,6 +18,9 @@ export const Shield = (p: P) => (
 export const Pulse = (p: P) => (
   <svg {...base} {...p}><path d="M3 12h4l2-6 4 12 2-6h6" /></svg>
 );
+export const Heart = (p: P) => (
+  <svg {...base} {...p}><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10z" /></svg>
+);
 export const Users = (p: P) => (
   <svg {...base} {...p}><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0" /><path d="M16 4a3.5 3.5 0 0 1 0 7M18 13.5a6 6 0 0 1 3.5 6.5" /></svg>
 );

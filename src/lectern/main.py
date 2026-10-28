@@ -13,7 +13,16 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 
-from lectern import __version__, backups, egress, limits, mcp_server, offline_mode, search
+from lectern import (
+    __version__,
+    backups,
+    egress,
+    limits,
+    mcp_server,
+    offline_mode,
+    push_alerts,
+    search,
+)
 from lectern.config import Settings, get_settings
 from lectern.db import init_engine, session_factory
 from lectern.ingest.watcher import InboxWatcher
@@ -149,6 +158,8 @@ def create_app(
                     " (LECTERN_OFFLINE=1)" if settings.offline else " (Admin → Offline mode)",
                 )
             token = ensure_setup_token(db, settings)
+        # Optional push alerts (docs/health.md): outbound only, off unless set in .env.
+        push = push_alerts.install(settings)
         if token:
             print_setup_banner(token, settings)
         if not settings.is_https and not settings.insecure_http:
@@ -213,6 +224,7 @@ def create_app(
             if runner:
                 runner.stop()
             app.state.readaloud.shutdown()
+            push_alerts.uninstall(push)
             engine.dispose()
 
     app = FastAPI(

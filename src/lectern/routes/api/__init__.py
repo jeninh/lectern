@@ -14,6 +14,7 @@ from lectern.routes.api import (
     devices,
     editor,
     email_in,
+    health,
     highlights,
     imports,
     notifications,
@@ -41,6 +42,7 @@ router.include_router(devices.router)
 router.include_router(ai_keys.router)
 router.include_router(queues.router)
 router.include_router(security.router)
+router.include_router(health.router)
 router.include_router(admin.router)
 router.include_router(books.router)
 router.include_router(uploads.router)

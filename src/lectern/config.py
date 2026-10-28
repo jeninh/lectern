@@ -277,6 +277,23 @@ class Settings(BaseSettings):
     email_in_sender_mode: str = ""
     email_in_senders: str = ""
 
+    # Health page and alerts (docs/health.md). A volume with less free space than these
+    # percentages turns the Health page amber / red and alerts the owners.
+    health_disk_warn_percent: float = Field(default=10.0, ge=0.0, le=100.0)
+    health_disk_critical_percent: float = Field(default=5.0, ge=0.0, le=100.0)
+    # A worker that offered a capability (Kokoro on a Mac) and has not been seen for this long
+    # turns that capability amber. 12 hours, so a Mac that sleeps overnight does not alert.
+    health_worker_grace_minutes: int = Field(default=720, ge=1, le=7 * 24 * 60)
+    # Optional push alerts, outbound only (Lectern opens nothing inbound). Off unless one URL
+    # is set; never configurable from the web, never logged or shown in full. ntfy: the topic
+    # URL (e.g. https://ntfy.your-tailnet.ts.net/lectern) and an optional access token. Generic
+    # webhook (Gotify and similar): a URL that takes a JSON POST and an optional bearer token.
+    # Paused while offline mode is on.
+    alert_ntfy_url: SecretStr = SecretStr("")
+    alert_ntfy_token: SecretStr = SecretStr("")
+    alert_webhook_url: SecretStr = SecretStr("")
+    alert_webhook_token: SecretStr = SecretStr("")
+
     log_level: str = "INFO"
 
     @field_validator(*LIMIT_FIELDS, mode="wrap")
@@ -336,6 +353,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LECTERN_DEVICE_URL must be the Tailscale address while home Wi-Fi access is on; "
                 "the home address goes in LECTERN_LAN_URL"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _disk_thresholds_ordered(self) -> Settings:
+        if self.health_disk_critical_percent > self.health_disk_warn_percent:
+            raise ValueError(
+                "LECTERN_HEALTH_DISK_CRITICAL_PERCENT must be at most "
+                "LECTERN_HEALTH_DISK_WARN_PERCENT"
             )
         return self
 

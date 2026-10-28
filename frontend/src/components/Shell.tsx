@@ -9,11 +9,12 @@ import { usePlayer } from "../lib/player";
 import { CommandPalette } from "./CommandPalette";
 import { NotificationBell, UploadTray } from "./Notifications";
 import { MiniPlayer } from "./Player";
-import { Book, Devices, Download, Gear, Headphones, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
+import { Book, Devices, Download, Gear, Headphones, Heart, Help, Highlighter, Home, Library, Logout, Moon, Pulse, Search, Shield, Sidebar, Sun, Trash, Upload } from "./Icons";
 import { clearDevice } from "../lib/offline/store";
 import { ConflictPrompt, OfflineBanner, OfflineStatus, UpdateReady } from "./Offline";
 import { Sheet } from "./Sheet";
 import { ShelfTree } from "./Folders";
+import { HealthBadge } from "../pages/Health";
 import { ReviewSheet } from "./ReviewSheet";
 import { WorkEditor } from "./WorkEditor";
 
@@ -38,6 +39,7 @@ const MANAGE: NavEntry[] = [
   { to: "/app/activity", label: "Activity", icon: <Pulse />, keys: "g a" },
 ];
 const ADMIN: NavEntry = { to: "/app/admin", label: "Admin", icon: <Gear />, keys: "g u" };
+const HEALTH: NavEntry = { to: "/app/health", label: "Health", icon: <Heart /> };
 const DOCS: NavEntry = { to: "/app/docs", label: "Docs", icon: <Book />, keys: "g i" };
 const TRASH: NavEntry = { to: "/app/trash", label: "Trash", icon: <Trash /> };
 
@@ -127,7 +129,7 @@ export function Shell({ children }: { children: ReactNode }) {
     { keys: "g i", handler: () => nav("/app/docs") },
   ]);
 
-  const manage = [...MANAGE, ...(canEdit ? [TRASH] : []), ...(isOwner ? [ADMIN] : [])];
+  const manage = [...MANAGE, ...(canEdit ? [TRASH] : []), ...(isOwner ? [ADMIN, HEALTH] : [])];
   const name = me?.user.display_name || me?.user.username || "";
 
   return (
@@ -198,6 +200,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <header className="topbar">
           <div className="title-slot" ref={setSlot} />
           <OfflineStatus />
+          <HealthBadge />
           <NotificationBell />
           {/* Phones have no sidebar and a full tab bar, so Docs sits beside search. */}
           <NavLink to="/app/docs" className="icon-btn mobile-only" aria-label="Docs">
