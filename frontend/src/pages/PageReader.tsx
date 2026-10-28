@@ -22,6 +22,7 @@ import { getPdfInfo, orOffline } from "../lib/offline/store";
 import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
 import { useLocalStorage } from "../lib/hooks";
+import { PALETTE, resolveTheme, useReaderSettings } from "../lib/reader";
 import {
   type Affine,
   boxesFor,
@@ -118,6 +119,8 @@ const SOURCES = { web: "Lectern", audio: "the audiobook", koreader: "KOReader" }
 export function PageReader({ workId, fileId }: { workId: number; fileId: number }) {
   const nav = useNavigate();
   const { deviceName, now, resolvedTheme } = useStore();
+  // The reader's theme for this book (lib/reader.ts) colours the chrome around the pages.
+  const readerTheme = resolveTheme(useReaderSettings(workId).settings.theme, resolvedTheme);
   // Opened from a search hit ("In books" in Cmd/Ctrl+K): that page, with the match marked.
   const [search] = useSearchParams();
   const findPage = Number(search.get("page")) || 0;
@@ -464,8 +467,10 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
   }, [page]);
 
   const pct = total > 1 ? Math.round(((page - 1) / (total - 1)) * 100) : 0; // where the slider thumb sits
-  const theme = resolvedTheme === "dark" ? "dark" : "light";
-  const style = { "--reader-bg": theme === "dark" ? "#1b1712" : "#f3efe7", "--reader-ink": theme === "dark" ? "#e6dccb" : "#221d17" } as React.CSSProperties;
+  const theme = readerTheme;
+  // Light themes get a slightly darker stage than their paper, so white pages stand out on it.
+  const stageBg = { light: "#f3efe7", contrast: "#e4e4e4" } as Partial<Record<typeof theme, string>>;
+  const style = { "--reader-bg": stageBg[theme] ?? PALETTE[theme].bg, "--reader-ink": PALETTE[theme].ink } as React.CSSProperties;
 
   return (
     <div className="reader pages-reader" data-reader-theme={theme} data-chrome={chrome || undefined} data-fit={view.fit} style={style}>
