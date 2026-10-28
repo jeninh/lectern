@@ -76,6 +76,7 @@ class ChildSynth:
         self.peak_mb = 0.0
         self._over = False
         self._timed_out = False
+        self._killed = False  # we signalled it: its SIGKILL is ours, not the OOM killer's
         self._done = threading.Event()
         self._watch = threading.Thread(target=self._watch_memory, name="lectern-tts-child",
                                        daemon=True)  # fmt: skip
@@ -101,10 +102,10 @@ class ChildSynth:
                 raise RuntimeError(str(reply.get("error") or f"{self.engine} failed"))
             size = int(reply.get("bytes") or 0)
             if not 0 <= size <= MAX_PCM:
-                raise self._died()
+                raise self._died(f"a sentence of {size} bytes")
             pcm = self._proc.stdout.read(size) if size else b""
             if len(pcm) != size:
-                raise self._died()
+                raise self._died(f"{len(pcm)} of {size} bytes of audio")
             return pcm
 
     def close(self) -> None:
@@ -153,9 +154,9 @@ class ChildSynth:
         try:
             reply = json.loads(line)
         except ValueError:
-            raise self._died() from None
+            raise self._died("a reply that is not JSON") from None
         if not isinstance(reply, dict):
-            raise self._died()
+            raise self._died("a reply that is not a JSON object")
         return reply
 
     def _watch_memory(self) -> None:
@@ -174,11 +175,13 @@ class ChildSynth:
 
     def _kill(self) -> None:
         if self._proc.poll() is None:  # never signal a group id that may be reused
+            self._killed = True
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self._proc.pid, signal.SIGKILL)
 
-    def _died(self) -> Exception:
-        """The child is gone (or talking nonsense): why, as the job's error."""
+    def _died(self, invalid: str | None = None) -> Exception:
+        """The child is gone (or talking nonsense, ``invalid`` says how): why, as the job's
+        error."""
         self._done.set()
         with contextlib.suppress(subprocess.TimeoutExpired):
             self._proc.wait(timeout=CLOSE_GRACE_S)
@@ -192,14 +195,18 @@ class ChildSynth:
             )
         if self._timed_out:
             return RuntimeError(f"{self.engine.capitalize()} stopped answering and was stopped")
-        if rc == -signal.SIGKILL:
+        tail = _tail(self._stderr)
+        if invalid and self._killed:
+            # it outlived the grace and we stopped it: a protocol failure, worth a retry
+            return RuntimeError(f"the {self.engine} process sent an invalid reply ({invalid}) and "
+                                "was stopped" + (f": {tail}" if tail else ""))  # fmt: skip
+        if rc == -signal.SIGKILL and not self._killed:
             # a SIGKILL nobody here sent: on Linux, the kernel's out-of-memory killer (the
             # child volunteers for it), so retrying the same voice would fail the same way
             return OverMemoryLimit(
                 f"{self.engine.capitalize()} was stopped by the system for using too much memory. "
                 f"Lower {key}, or let a worker (the Mac) narrate this book."
             )
-        tail = _tail(self._stderr)
         if "MemoryError" in tail:
             return OverMemoryLimit(f"{self.engine.capitalize()} ran out of memory ({key}).")
         how = f"signal {-rc}" if rc < 0 else f"exit {rc}"
