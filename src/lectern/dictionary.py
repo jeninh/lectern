@@ -65,6 +65,7 @@ MAX_ARCHIVE_MEMBERS = 2000
 MAX_INDEX_BYTES = 128 * 2**20  # an .idx or .syn, decompressed (read into memory)
 STALE_STAGING_S = 24 * 3600  # scratch left by an import that was killed
 MAX_BODY_CHARS = 20_000  # one entry's text, stored
+MAX_ENTRY_BYTES = 2**20  # what is read of one entry's data (it is cut to MAX_BODY_CHARS anyway)
 MAX_QUERY_CHARS = 100
 MAX_WORDS = 6
 MAX_DEFINITIONS = 12  # lines shown per entry
@@ -284,6 +285,13 @@ def _copy_capped(src: Path, dest: Path, cap: int) -> int:
 
 
 def _unpack(source: Path, dest: Path) -> Path:
+    try:
+        return _extract(source, dest)
+    except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError, zlib.error):
+        raise DictionaryError("corrupt", f"{source.name} could not be unpacked.") from None
+
+
+def _extract(source: Path, dest: Path) -> Path:
     if source.is_dir():
         return source
     if source.suffix.lower() == ".ifo" and source.is_file():
@@ -402,7 +410,8 @@ def _build(folder: Path, out: Path, *, lang: str, to: str, name: str | None) -> 
                         "corrupt", f"{idx_path.name} points past the end of {dict_path.name}."
                     )
                 data.seek(offset)
-                body = _render(data.read(size), types)[:MAX_BODY_CHARS]
+                # Bounded whatever .idx claims: one entry never pulls the whole .dict in.
+                body = _render(data.read(min(size, MAX_ENTRY_BYTES)), types)[:MAX_BODY_CHARS]
                 batch_e.append((n, word, body))
                 batch_k.append((fold(word), n))
                 count += 1
@@ -510,7 +519,7 @@ def _render(data: bytes, types: str) -> str:
             i += 1
             last = False
         if t.isupper():  # binary: a size, then the data (or the rest)
-            if last:
+            if last or i + 4 > len(data):  # the rest, or an entry cut at MAX_ENTRY_BYTES
                 break
             (size,) = struct.unpack_from(">I", data, i)
             i += 4 + size

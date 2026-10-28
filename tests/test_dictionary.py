@@ -322,6 +322,59 @@ def test_decompressed_size_is_capped(client, owner, settings, monkeypatch):
     assert dictionary.installed(settings) == []
 
 
+def test_one_entry_reads_at_most_the_entry_cap(client, owner, settings, monkeypatch):
+    """An .idx entry claiming most of a large .dict reads only MAX_ENTRY_BYTES of it."""
+    monkeypatch.setattr(dictionary, "MAX_ENTRY_BYTES", 4096)
+    reads: list[int] = []
+    real = dictionary._render
+    monkeypatch.setattr(
+        dictionary, "_render", lambda data, types: reads.append(len(data)) or real(data, types)
+    )
+    body = b"a" * (1 << 20)
+    files = stardict([("big", "x")])
+    files["t.idx"] = b"big\0" + struct.pack(">II", 0, len(body))
+    files["t.dict.dz"] = gzip.compress(body)
+    r = install(client, owner["csrf"], files)
+    assert r.status_code == 201, r.text
+    assert reads == [4096]
+    [e] = look(client, "big")["entries"]
+    assert e["definitions"] == ["a" * 600]  # one line, shown cut short
+
+
+def test_a_typed_entry_cut_at_the_cap_still_renders(client, owner, monkeypatch):
+    monkeypatch.setattr(dictionary, "MAX_ENTRY_BYTES", 10)
+    # "m" text then a binary field whose size word is cut off by the cap
+    assert dictionary._render(b"hello\0\0\0", "mW") == "hello"
+
+
+@pytest.mark.parametrize("kind", ["zip", "tar.gz"])
+def test_a_corrupt_archive_is_refused_not_crashed(client, owner, settings, kind):
+    files = stardict(ENGLISH, dz=False, extra={"pad.txt": "".join(str(i) for i in range(200_000))})
+    buf = io.BytesIO()
+    if kind == "zip":
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for n, b in files.items():
+                z.writestr(f"d/{n}", b)
+        raw = bytearray(buf.getvalue())
+        mid = len(raw) // 3
+        raw[mid : mid + 64] = b"\xff" * 64  # corrupt compressed data, directory intact
+        body = bytes(raw)
+    else:
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            for n, b in files.items():
+                info = tarfile.TarInfo(f"d/{n}")
+                info.size = len(b)
+                t.addfile(info, io.BytesIO(b))
+        body = buf.getvalue()[: len(buf.getvalue()) // 2]  # truncated
+    r = client.post(
+        "/api/admin/dictionaries?lang=en",
+        content=body,
+        headers={"origin": ORIGIN, "x-csrf-token": owner["csrf"]},
+    )
+    assert r.status_code == 422 and r.json()["detail"] == "corrupt", r.text
+    assert list((settings.data_dir / "dictionaries" / ".staging").iterdir()) == []
+
+
 def test_archive_paths_cannot_escape(client, owner, settings):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
