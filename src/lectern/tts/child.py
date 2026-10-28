@@ -40,6 +40,10 @@ from lectern.limits import Limit, confine_cpus, lower_priority
 MAX_LINE = 64 * 1024
 MAX_PCM = 256 * 1024 * 1024  # one sentence of 16-bit PCM; far above any real one
 POLL_S = 0.2
+# A wedged engine must not hold its slot forever: loading a voice (Kokoro on a Pi is slow)
+# and each sentence get this long before the child is killed and the job fails.
+START_TIMEOUT_S = 900
+SENTENCE_TIMEOUT_S = 300
 CLOSE_GRACE_S = 3.0
 
 
@@ -71,12 +75,13 @@ class ChildSynth:
         )
         self.peak_mb = 0.0
         self._over = False
+        self._timed_out = False
         self._done = threading.Event()
         self._watch = threading.Thread(target=self._watch_memory, name="lectern-tts-child",
                                        daemon=True)  # fmt: skip
         self._watch.start()
         try:
-            reply = self._ask({"engine": engine, **spec})
+            reply = self._ask({"engine": engine, **spec}, START_TIMEOUT_S)
         except BaseException:
             self.close()
             raise
@@ -89,17 +94,18 @@ class ChildSynth:
 
     # -- the Synth protocol ---------------------------------------------------------------------
 
-    def sentence(self, text: str) -> bytes:
-        reply = self._ask({"text": text})
-        if not reply.get("ok"):
-            raise RuntimeError(str(reply.get("error") or f"{self.engine} failed"))
-        size = int(reply.get("bytes") or 0)
-        if not 0 <= size <= MAX_PCM:
-            raise self._died()
-        pcm = self._proc.stdout.read(size) if size else b""
-        if len(pcm) != size:
-            raise self._died()
-        return pcm
+    def sentence(self, text: str, timeout_s: float = SENTENCE_TIMEOUT_S) -> bytes:
+        with self._deadline(timeout_s):
+            reply = self._ask({"text": text})
+            if not reply.get("ok"):
+                raise RuntimeError(str(reply.get("error") or f"{self.engine} failed"))
+            size = int(reply.get("bytes") or 0)
+            if not 0 <= size <= MAX_PCM:
+                raise self._died()
+            pcm = self._proc.stdout.read(size) if size else b""
+            if len(pcm) != size:
+                raise self._died()
+            return pcm
 
     def close(self) -> None:
         self._done.set()
@@ -117,7 +123,27 @@ class ChildSynth:
 
     # -- internals ------------------------------------------------------------------------------
 
-    def _ask(self, msg: dict) -> dict:
+    @contextlib.contextmanager
+    def _deadline(self, seconds: float):
+        """Kill the child if the block has not finished within ``seconds``: the blocked read
+        then ends and :meth:`_died` reports the timeout."""
+
+        def expire() -> None:
+            self._timed_out = True
+            self._kill()
+
+        timer = threading.Timer(seconds, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            yield
+        finally:
+            timer.cancel()
+
+    def _ask(self, msg: dict, timeout_s: float | None = None) -> dict:
+        if timeout_s is not None:
+            with self._deadline(timeout_s):
+                return self._ask(msg)
         try:
             self._proc.stdin.write(json.dumps(msg).encode() + b"\n")
             self._proc.stdin.flush()
@@ -163,6 +189,15 @@ class ChildSynth:
             return OverMemoryLimit(
                 f"{self.engine.capitalize()} needed more memory than {key} allows and was "
                 f"stopped. Raise {key}, or let a worker (the Mac) narrate this book."
+            )
+        if self._timed_out:
+            return RuntimeError(f"{self.engine.capitalize()} stopped answering and was stopped")
+        if rc == -signal.SIGKILL:
+            # a SIGKILL nobody here sent: on Linux, the kernel's out-of-memory killer (the
+            # child volunteers for it), so retrying the same voice would fail the same way
+            return OverMemoryLimit(
+                f"{self.engine.capitalize()} was stopped by the system for using too much memory. "
+                f"Lower {key}, or let a worker (the Mac) narrate this book."
             )
         tail = _tail(self._stderr)
         if "MemoryError" in tail:

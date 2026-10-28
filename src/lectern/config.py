@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from functools import cached_property, lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from lectern.security.proxy import Network, parse_networks
+
+log = logging.getLogger("lectern.config")
+
+# Resource limits (lectern.limits) that fall back to their default when invalid.
+LIMIT_FIELDS = tuple(
+    f"{feature}_{knob}"
+    for feature in ("kokoro", "piper", "ocr", "convert", "align", "transcode")
+    for knob in ("concurrency", "threads", "memory_limit_mb", "nice")
+    if (feature, knob) != ("convert", "threads")
+) + ("heavy_jobs_max",)
 
 
 class Settings(BaseSettings):
@@ -128,8 +139,10 @@ class Settings(BaseSettings):
     # Resource limits of the server's own heavy jobs (lectern.limits, docs/resource-limits.md).
     # Defaults suit a Raspberry Pi 4B with 8 GB that also serves the reader and KOReader sync:
     # one heavy job at a time, each feature's child capped and at a low CPU priority. Jobs that
-    # external workers run never count. *_CONCURRENCY = 0 leaves that feature to workers.
-    heavy_jobs_max: int = Field(default=1, ge=0, le=64)
+    # external workers run never count. *_CONCURRENCY = 0 leaves that feature to workers
+    # (LECTERN_HEAVY_JOBS_MAX is at least 1). An invalid value is logged by name (never the
+    # value) and replaced by the default: a typo must not stop the server.
+    heavy_jobs_max: int = Field(default=1, ge=1, le=64)
     transcode_concurrency: int = Field(default=1, ge=0, le=16)
     # Kokoro (PyTorch) and Piper (ONNX) run in a supervised child: its resident memory is
     # capped (0 = no cap of our own), it uses at most *_THREADS CPUs, at this nice level.
@@ -157,7 +170,7 @@ class Settings(BaseSettings):
     align_model: str = "small"
     align_device: str = "cpu"
     align_compute_type: str = "int8"
-    align_threads: int = 0  # 0 = CTranslate2 default
+    align_threads: int = Field(default=0, ge=0, le=64)  # 0 = CTranslate2 default
     # Audio is decoded as a stream and transcribed in windows of this many seconds that
     # overlap by align_overlap_seconds, so memory does not grow with the length of a track.
     align_window_seconds: float = Field(default=300.0, ge=10.0, le=4 * 3600)
@@ -265,6 +278,21 @@ class Settings(BaseSettings):
     email_in_senders: str = ""
 
     log_level: str = "INFO"
+
+    @field_validator(*LIMIT_FIELDS, mode="wrap")
+    @classmethod
+    def _limit_or_default(cls, v, handler, info):
+        try:
+            return handler(v)
+        except ValidationError:
+            default = cls.model_fields[info.field_name].default
+            # the key only: the value may be anything someone pasted into .env
+            log.warning(
+                "LECTERN_%s is invalid, using default %s",
+                info.field_name.upper(),
+                "(automatic)" if default is None else default,
+            )
+            return default
 
     @field_validator("base_url")
     @classmethod

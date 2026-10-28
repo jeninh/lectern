@@ -57,9 +57,29 @@ def test_env_overrides_keep_old_names_and_empty_means_default(monkeypatch):
     assert lim.features[limits.KOKORO].concurrency == 0
     assert lim.features[limits.PIPER].memory_mb is None
     assert lim.features[limits.CONVERT].nice == 10
-    monkeypatch.setenv("LECTERN_KOKORO_NICE", "25")
-    with pytest.raises(ValueError):
-        Settings()
+
+
+def test_an_invalid_limit_falls_back_to_its_default_and_names_only_the_key(monkeypatch, caplog):
+    _clean_env(monkeypatch)
+    bad = {
+        "LECTERN_KOKORO_NICE": "abc-secretish",  # not a number
+        "LECTERN_PIPER_NICE": "25",  # out of range
+        "LECTERN_HEAVY_JOBS_MAX": "0",  # at least one
+        "LECTERN_OCR_MEMORY_LIMIT_MB": "12",  # an existing key, below its minimum
+        "LECTERN_ALIGN_MEMORY_LIMIT_MB": "-1",  # default: automatic
+    }
+    for k, v in bad.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("LECTERN_PIPER_THREADS", "3")  # a valid neighbour is kept
+    with caplog.at_level("WARNING", logger="lectern.config"):
+        s = Settings()
+    assert (s.kokoro_nice, s.piper_nice, s.heavy_jobs_max) == (10, 10, 1)
+    assert s.ocr_memory_limit_mb == 1536 and s.align_memory_limit_mb is None
+    assert s.piper_threads == 3
+    text = caplog.text
+    for key in bad:
+        assert f"{key} is invalid, using default" in text
+    assert "abc-secretish" not in text  # never the value
 
 
 def _governor(heavy: int, **concurrency: int) -> limits.Governor:
@@ -165,6 +185,10 @@ class Engine:
             for b in hoard:
                 b[::4096] = b"x" * len(b[::4096])
             import time; time.sleep(30)
+        if text == "hang":
+            import time; time.sleep(60)
+        if text == "oom-killed":  # what the kernel's out-of-memory killer does
+            import signal; os.kill(os.getpid(), signal.SIGKILL)
         return int(os.nice(0)).to_bytes(2, "little") * len(text)
 
 sys.exit(serve(lambda spec: Engine()))
@@ -193,5 +217,21 @@ def test_an_engine_over_its_memory_cap_fails_the_job_not_the_server():
         with pytest.raises(OverMemoryLimit, match="LECTERN_PIPER_MEMORY_LIMIT_MB"):
             synth.sentence("hog")
         assert synth.peak_mb > 128
+    finally:
+        synth.close()
+
+
+def test_a_wedged_engine_is_stopped_and_a_kernel_oom_kill_is_not_retried():
+    synth = _child(limits.Limit(1, 1, None, 10))
+    try:
+        with pytest.raises(RuntimeError, match="stopped answering") as exc:
+            synth.sentence("hang", timeout_s=1)
+        assert not isinstance(exc.value, OverMemoryLimit)  # retryable: it may just be stuck
+    finally:
+        synth.close()
+    synth = _child(limits.Limit(1, 1, None, 10))
+    try:
+        with pytest.raises(OverMemoryLimit, match="too much memory"):
+            synth.sentence("oom-killed")
     finally:
         synth.close()

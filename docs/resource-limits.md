@@ -19,11 +19,11 @@ On top of that, `LECTERN_HEAVY_JOBS_MAX` caps the heavy jobs of every feature to
 
 ## Settings
 
-Set these in `.env` and restart Lectern (`docker compose … up -d`). An empty value means the default.
+Set these in `.env` and restart Lectern (`docker compose … up -d`). An empty value means the default. An invalid value (not a number, or out of range) does not stop Lectern: it logs `LECTERN_… is invalid, using default …` and uses the default.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `LECTERN_HEAVY_JOBS_MAX` | 1 | Heavy jobs of all features together |
+| `LECTERN_HEAVY_JOBS_MAX` | 1 | Heavy jobs of all features together (at least 1; to leave a feature to workers, set its `_CONCURRENCY` to 0) |
 | `LECTERN_KOKORO_CONCURRENCY` | 1 | Kokoro narrations at once (only with `LECTERN_TTS_KOKORO_LOCAL=1`) |
 | `LECTERN_KOKORO_THREADS` | 2 | CPU cores for Kokoro |
 | `LECTERN_KOKORO_MEMORY_LIMIT_MB` | 3072 | Memory cap for Kokoro |
