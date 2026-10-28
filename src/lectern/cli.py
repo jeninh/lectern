@@ -392,7 +392,7 @@ def backup(args: argparse.Namespace) -> None:
     init_engine(settings)
     status = backups.run_and_record(session_factory(), settings, reason="cli")
     if status.get("skipped"):
-        sys.exit("another backup is already running; nothing to do")
+        sys.exit("another backup or a restore drill is running; nothing to do")
     if status.get("last_result") != "ok":
         sys.exit(f"backup failed: {status.get('last_error')}")
     print(f"backup written: {status['last_location']} ({status.get('last_size_bytes')} bytes)")

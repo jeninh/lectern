@@ -81,6 +81,15 @@ export interface BackupView {
     restic_available: boolean;
     restic_password_file: string;
   };
+  /** The restore drill (docs/backups.md#restore-drill): scheduled in .env, 0 days = off. */
+  drill: {
+    every_days: number;
+    running: boolean;
+    last_result?: "ok" | "failed";
+    last_success_at?: string;
+    last_error?: string | null;
+    last_error_at?: string;
+  };
 }
 
 export interface Preferences {

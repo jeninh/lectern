@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 
-from lectern import backups, egress, instance, offline_mode, queue
+from lectern import backups, drill, egress, instance, offline_mode, queue
 from lectern.db import session_factory
 from lectern.models import AuditLog, Role, User, utcnow
 from lectern.routes.api.serializers import iso, user_json
@@ -249,6 +249,16 @@ def _backup_view(db, settings) -> dict:
         "status": backups.load_status(db),
         "running": backups.is_running(),
         "target": backups.target_info(settings),
+        # The restore drill (lectern.drill): scheduled in .env, reported here and on Health.
+        "drill": {
+            "every_days": settings.restore_drill_days,
+            "running": drill.is_running(),
+            **{
+                k: v
+                for k, v in drill.load_status(db).items()
+                if k in ("last_result", "last_success_at", "last_error", "last_error_at")
+            },
+        },
     }
 
 

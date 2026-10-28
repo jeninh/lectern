@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { PageTitle } from "../components/Shell";
 import { get, post } from "../lib/api";
 import { absoluteTime, bytes, relativeTime } from "../lib/format";
-import { GROUPS, groupChecks, LEVEL_BADGE, LEVEL_LABEL, pushLine, retryRequest, type HealthCheck, type HealthJob, type HealthLevel, type HealthView, type PushInfo } from "../lib/health";
+import { drillSteps, GROUPS, groupChecks, LEVEL_BADGE, LEVEL_LABEL, pushLine, retryRequest, type HealthCheck, type HealthJob, type HealthLevel, type HealthView, type PushInfo } from "../lib/health";
 import { useVisiblePolling } from "../lib/hooks";
 import { useStore } from "../lib/store";
 
@@ -31,6 +31,33 @@ function JobList({ items, total, onRetry }: { items: HealthJob[]; total: number;
   );
 }
 
+/** The restore drill's last run (docs/backups.md#restore-drill): the snapshot and each check. */
+function DrillSteps({ d }: { d: HealthCheck["detail"] }) {
+  const steps = drillSteps(d);
+  if (!steps.length) return null;
+  return (
+    <>
+      {typeof d.snapshot_id === "string" && (
+        <div className="hint">
+          Backup <code>{d.snapshot_id}</code>
+          {typeof d.snapshot_time === "string" && <> from <time title={absoluteTime(d.snapshot_time)}>{relativeTime(d.snapshot_time)}</time></>}
+          {typeof d.duration_s === "number" && <> · took {Math.round(d.duration_s)} s</>}
+        </div>
+      )}
+      <ul className="health-jobs">
+        {steps.map((s) => (
+          <li key={s.id}>
+            <div>
+              <strong>{s.ok ? "✓" : "✗"} {s.title}</strong>
+              {s.ok && s.note && <span className="hint"> · {s.note}</span>}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
 function CheckRow({ c, since, onRetry, onTestPush, testing }: { c: HealthCheck; since?: string | null; onRetry: (j: HealthJob) => void; onTestPush: () => void; testing: boolean }) {
   const d = c.detail;
   const push = c.id === "alerts.push" ? (d as unknown as PushInfo) : null;
@@ -53,6 +80,7 @@ function CheckRow({ c, since, onRetry, onTestPush, testing }: { c: HealthCheck; 
         </div>
       )}
       {typeof d.reason === "string" && <div className="hint">{d.reason}</div>}
+      {c.id === "backups.restore_drill" && <DrillSteps d={d} />}
       {d.items && <JobList items={d.items} total={d.total ?? d.items.length} onRetry={onRetry} />}
       {push && (
         <div className="row" style={{ justifyContent: "space-between", marginTop: 6 }}>

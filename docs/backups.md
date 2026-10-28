@@ -194,3 +194,44 @@ snapshot, paths that escape the library, the free-space check, unreadable files,
 target, a restore that fails half-way, and one killed with `kill -9` half-way through the
 swap (with the library on the same and on another volume), then undone byte for byte or
 resumed.
+
+## Restore drill
+
+A backup is only known to be good once it has been restored. The optional restore drill
+does that on a schedule, without touching anything live: in the hours right after a nightly
+backup, every `LECTERN_RESTORE_DRILL_DAYS` days (off by default; `7` for weekly), it restores
+the latest snapshot into a scratch folder on the backup volume (`<backup folder>/.drill`, not
+the SD card), checks it, and deletes it.
+
+It checks, in order, and stops at the first failure:
+
+1. **Repository**: `restic check`, reading the next 1/N of the stored data on each run
+   (`LECTERN_RESTORE_DRILL_READ_DATA_PARTS`, default 20), so N drills read all of it.
+2. **Latest snapshot**: one Lectern backup, and nothing a backup never contains (symlinks,
+   paths outside the tree), as `lectern restore` requires.
+3. **Free space**: room on the backup volume for what it restores, plus a reserve.
+4. **Restore**: `restic restore --verify` of the manifest, database, signing key, settings,
+   and a sample (`LECTERN_RESTORE_DRILL_SAMPLE` per kind, default 20) of `book.json` and
+   covers, sentence maps and cover backups, and, when the backup includes them, library files
+   (at most 512 MiB of them: large files are sampled, never restored wholesale).
+5. **Manifest, secrets, and config**: the format is known, the secrets it lists and the
+   settings are there, and it records as many `book.json` and cover files as the snapshot has.
+6. **Database**: it opens read-only, `PRAGMA integrity_check` is `ok`, its schema revision is
+   the manifest's and known to this Lectern, it has users, and nearly every book has its
+   `book.json` in the snapshot.
+7. **Sampled files**: the sizes the snapshot records, `book.json` that parses, and library
+   files with the SHA-256 the database recorded when they were added.
+
+The result (passed or failed, the failing check and why, the snapshot and its age, how long
+it took) is on the [Health](health.md) page and in Admin → Nightly backups. A failed drill
+turns Health red and alerts the owners like any Health check, in the app and through push
+alerts if they are set up.
+
+What it never does: write to the data directory, the library, the live database (other than
+its own result), or the restic repository (it reads it with `--no-lock`); take
+`data/lectern.lock` the way a restore does (the server keeps running); or run during a
+backup or restore: then it is skipped, not failed, and tried again half an hour later. It
+runs restic at idle I/O and lowest CPU priority and stops after
+`LECTERN_RESTORE_DRILL_TIMEOUT_MINUTES` (default 120). The scratch folder holds a plaintext
+copy of the database and secrets, so it is removed after every drill, passed or failed; one
+left by a server killed mid-drill is removed within a minute of the next start.

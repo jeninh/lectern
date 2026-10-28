@@ -9,6 +9,7 @@ wrong on the server in one page, with one overall status: OK, warning (amber), o
 | Group | Check | Amber | Red |
 | --- | --- | --- | --- |
 | Backups | Nightly backups | the last backup failed, or none for 26 hours | the backup folder is missing or not writable, restic is missing, or none for 3 days |
+| Backups | [Restore drill](backups.md#restore-drill) (off unless `LECTERN_RESTORE_DRILL_DAYS` is set) | no drill passed for twice its interval | the last drill failed |
 | Disk space | Each volume (data, library, backups; a volume they share is shown once) | less than 10 % free | less than 5 % free |
 | Jobs | Failed jobs (alignment, narration, text recognition, PDF conversion, data-saver copies) in the last 7 days that were not retried successfully since | any | |
 | Jobs | Stuck jobs: queued for a day with nobody taking them, or running without a heartbeat for an hour | any | |
