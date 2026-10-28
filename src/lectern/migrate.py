@@ -18,6 +18,12 @@ def alembic_config(url: str) -> Config:
     return cfg
 
 
+def include_name(name: str | None, type_: str, _parents: dict) -> bool:
+    """What autogenerate compares: not the highlights' FTS5 index (migration 0026), a virtual
+    table and its shadow tables that the models do not describe."""
+    return not (type_ == "table" and (name or "").startswith("annotations_fts"))
+
+
 def upgrade_to_head(engine: Engine) -> None:
     cfg = alembic_config(str(engine.url))
     with engine.begin() as connection:

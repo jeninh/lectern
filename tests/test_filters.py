@@ -700,10 +700,7 @@ def test_reading_state_follows_every_position_written(client, ids, lib):
 
 
 def test_migration_0018_backfills_states_and_pages(tmp_path):
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    from lectern.models import Base
+    from tests.conftest import schema_diff
 
     engine = make_engine(f"sqlite:///{tmp_path / 'm18.db'}")
     cfg = alembic_config(str(engine.url))
@@ -773,7 +770,7 @@ def test_migration_0018_backfills_states_and_pages(tmp_path):
         assert rows[3] == (1.0, t, t, t)
         pages = dict(conn.execute(sa.text("SELECT id, pages FROM book_files")).all())
         assert pages == {1: None, 3: 42}
-        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+        assert schema_diff(conn) == []
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
         command.downgrade(cfg, "0017_data_saver")
@@ -813,7 +810,7 @@ def test_migration_0018_backfills_states_and_pages(tmp_path):
     with engine.connect() as conn:
         pages = dict(conn.execute(sa.text("SELECT id, pages FROM book_files")).all())
         assert pages == {1: None, 3: 42}
-        assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+        assert schema_diff(conn) == []
 
 
 def test_migration_0019_downgrades_keep_rows_on_any_sqlite(tmp_path):

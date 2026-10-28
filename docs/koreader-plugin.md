@@ -161,7 +161,31 @@ plugin, with the same credentials and the same Wi‑Fi-off outbox as positions:
 In Lectern: **Highlights** on the book's page (with *Open in reader*), the **Highlights** button
 in the reader (*Go to passage*), and the **Highlights** page listing your books with highlights.
 **Markdown** exports one book's highlights; **Export all as Markdown** all of them, in the same
-order with the same chapters, notes, pages, and times as shown. Searching them is issue #72.
+order with the same chapters, notes, pages, and times as shown.
+
+### Searching your highlights
+
+Words from a highlight or from its note find it:
+
+- **Cmd/Ctrl+K**: after three letters, the **Highlights** section (above *In books*) lists your
+  matching highlights with the words marked. Choose one and the book opens in the reader at that
+  passage, marked (a PDF highlight that could not be placed opens at its page).
+- **The Highlights page** lists all your highlights, best match first when you search. Filter
+  by book, author, tag, and date (KOReader's creation date). **Export these as Markdown**
+  downloads exactly the highlights shown.
+
+Search works like the search inside books ([search.md](search.md)): case and accents do not
+matter, the words are tried as a phrase first and then anywhere in the highlight, and the last
+word matches as a prefix while you type. Start with `note:` to search only notes, or
+`highlight:` for only the highlighted text. Same limits too: at most 200 characters and 12 words,
+and `LECTERN_SEARCH_REQUESTS_PER_MINUTE` searches a minute per person (counted apart from
+*In books*); the palette and the page say when a search is refused.
+
+The index is an SQLite FTS5 table in `lectern.db` (`annotations_fts`, migration `0026`), updated
+in the same transaction as every sync's creates, edits, and deletes, so an edit or a deletion on
+the device shows in search after the next sync. To rebuild it (it should never be needed), run
+`lectern highlights-reindex` beside the server. Search only ever reads your own highlights, and
+only for books you can still see, by the same rules as below.
 
 **Private.** Highlights belong to the person whose device sent them: nobody else sees them, not
 other household members nor the owner, and their owner sees them only while they can see the
@@ -261,7 +285,8 @@ do not enable *Force userspace mode*, for the same reason as above.
 | `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first), `lan_url`, `auto_download`, `follow` (`{shelf, cleanup}` or null), `remove` (work ids that left the followed shelf with clean-up on) |
 | `PUT /koplugin/annotations` `{document, device, annotations: [...]}` | kosync headers (the device's sync key) | the device's current highlights of one book: `{document, added, updated, deleted, total}` |
 | `GET /api/works/{id}/annotations`, `GET /api/works/{id}/annotations.md` | session, own highlights, visible work | one book's highlights; as Markdown |
-| `GET /api/annotations`, `GET /api/annotations.md` | session, own highlights | books with highlights and counts; all as Markdown |
+| `GET /api/annotations`, `GET /api/annotations.md?q=&work=&author=&tag=&since=&until=` | session, own highlights | books with highlights, counts, and tags; all (or the filtered ones) as Markdown |
+| `GET /api/annotations/search?q=&work=&author=&tag=&since=&until=&limit=&partial=` | session, own highlights | `{results: [{work_id, title, author, annotation, text_parts, note_parts, field, snippet}], total, truncated}`; `422` `query_too_long`/`too_many_words`, `429` `too_many_searches` |
 | `POST /koplugin/hello` `{device_id, nonce, setup?}` | none (answers with a proof) | `{proof}`: HMAC-SHA256 of `lectern-lan:<nonce>` keyed by the hex SHA-256 of the catalogue password (or with `setup` the setup secret), or `404` ([home-network.md](home-network.md)) |
 
 `GET /api/devices` adds `koplugin` (the device has both credentials) and `plugin` (state of the

@@ -2,7 +2,7 @@
 // them (lectern.annotations: the export uses the same order, headings, and "where" line).
 
 import { EPUB, PDF } from "./formats";
-import type { Annotation, Work } from "./types";
+import type { Annotation, HighlightHit, Work } from "./types";
 
 /** "Page 12 · 2026-10-01 09:30", the line under each highlight (as in the export). */
 export function annotationWhere(a: Pick<Annotation, "page" | "pageno" | "created">): string {
@@ -38,4 +38,32 @@ export function annotationPath(work: Pick<Work, "id" | "files">, a: Annotation):
     return `/app/reader/${work.id}?file=${a.file.id}&page=${a.page}&find=${encodeURIComponent(find)}`;
   }
   return null;
+}
+
+/** The highlights page's search and filters (`/api/annotations/search`, and the Markdown export
+ * of the same results). */
+export interface HighlightFilters {
+  q?: string;
+  work?: string;
+  author?: string;
+  tag?: string;
+  since?: string;
+  until?: string;
+}
+
+const FILTER_KEYS = ["q", "work", "author", "tag", "since", "until"] as const;
+
+/** The query string for `filters`, blank ones left out ("" when there are none). */
+export function highlightsQuery(filters: HighlightFilters): string {
+  const p = new URLSearchParams();
+  for (const k of FILTER_KEYS) {
+    const v = filters[k]?.trim();
+    if (v) p.set(k, v);
+  }
+  return p.toString();
+}
+
+/** Where a search hit opens: the passage in the reader, else the book's page. */
+export function highlightHitPath(hit: HighlightHit, work: Pick<Work, "id" | "files"> | undefined): string {
+  return (work && annotationPath(work, hit.annotation)) || `/app/library/${hit.work_id}`;
 }

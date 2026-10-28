@@ -400,6 +400,21 @@ def backup(args: argparse.Namespace) -> None:
         print(f"warning: {status['last_skipped_files']} unreadable file(s) were left out")
 
 
+def highlights_reindex(_args: argparse.Namespace) -> None:
+    from lectern import annotations
+    from lectern.config import get_settings
+    from lectern.db import init_engine, session_factory
+
+    settings = get_settings()
+    if not settings.db_path.is_file():
+        sys.exit(f"no database at {settings.db_path}")
+    init_engine(settings)
+    with session_factory()() as db:
+        n = annotations.reindex(db)
+        db.commit()
+    print(f"highlights search index rebuilt: {n} highlights")
+
+
 def restore(args: argparse.Namespace) -> None:
     from lectern import backups
     from lectern.config import get_settings
@@ -559,6 +574,11 @@ def build_parser() -> argparse.ArgumentParser:
     k = sub.add_parser("backup", help="back up now with the settings saved in Admin")
     k.add_argument("--list", action="store_true", help="list the snapshots")
 
+    sub.add_parser(
+        "highlights-reindex",
+        help="rebuild the search index of highlights and notes (it is kept up to date by itself)",
+    )
+
     r = sub.add_parser(
         "restore",
         help="restore a backup (stop the server first)",
@@ -635,6 +655,7 @@ def main(argv: list[str] | None = None) -> None:
         "align-bench": align_bench,
         "backup": backup,
         "restore": restore,
+        "highlights-reindex": highlights_reindex,
         "prepare-models": prepare_models,
     }[args.command](args)
 

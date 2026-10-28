@@ -943,7 +943,26 @@ export interface WorkAnnotations {
 }
 
 export interface AnnotationsSummary {
-  works: { work_id: number; title: string; author: string; count: number }[];
+  works: { work_id: number; title: string; author: string; tags?: string[]; count: number }[];
   total: number;
   export_url: string;
+}
+
+/** One of your highlights found by `/api/annotations/search` (issue #72): the matched words
+ * marked in its text and note, and a short snippet around the first match. */
+export interface HighlightHit {
+  work_id: number;
+  title: string;
+  author: string;
+  annotation: Annotation;
+  text_parts: [string, boolean][] | null;
+  note_parts: [string, boolean][] | null;
+  field: "text" | "note" | null;
+  snippet: { parts: [string, boolean][]; before: boolean; after: boolean } | null;
+}
+
+export interface HighlightSearch {
+  results: HighlightHit[];
+  total: number;
+  truncated: boolean;
 }
