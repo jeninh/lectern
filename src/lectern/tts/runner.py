@@ -10,6 +10,7 @@ present) this runner leaves that engine's new jobs to it for ``LECTERN_LOCAL_DEF
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 import threading
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import sessionmaker
 
-from lectern import integrations, queue
+from lectern import integrations, limits, queue
 from lectern.align.jobs import LeaseLost, ResultError, verify_lease
 from lectern.align.worker import MAX_HEARTBEAT_S, JobAbandoned, WorkerStopping, _Heartbeat
 from lectern.config import Settings
@@ -28,6 +29,7 @@ from lectern.tts import elevenlabs as el
 from lectern.tts import engines as eng
 from lectern.tts import jobs as tj
 from lectern.tts import synth
+from lectern.tts.child import ChildSynth, OverMemoryLimit
 
 log = logging.getLogger("lectern.tts.runner")
 
@@ -35,15 +37,29 @@ SynthFactory = Callable[[str, dict, Settings], eng.Synth]
 
 
 def default_synth(engine: str, payload: dict, settings: Settings) -> eng.Synth:
+    """Piper or Kokoro in a supervised child under the feature's limits (lectern.tts.child);
+    the caller closes it."""
     speed = float(payload.get("speed") or 1.0)
     if engine == eng.PIPER:
+        if not eng.piper_installed():
+            raise eng.EngineUnavailable("Piper is not installed on this server (lectern[tts])")
         voice = next((v for v in eng.piper_voices(settings) if v.id == payload.get("voice")), None)
         if voice is None:
             raise eng.EngineUnavailable(f"Piper voice {payload.get('voice')!r} is not installed")
-        return eng.PiperSynth(voice, speed)
+        piper = {"id": voice.id, "path": str(voice.path), "language": voice.language,
+                 "sample_rate": voice.sample_rate, "quality": voice.quality}  # fmt: skip
+        return ChildSynth(engine, {"speed": speed, "piper": piper},
+                          limits.GOVERNOR.limit(limits.PIPER))  # fmt: skip
     if engine == eng.KOKORO:
-        return eng.KokoroSynth(str(payload.get("voice")), speed)
+        if not eng.kokoro_installed():
+            raise eng.EngineUnavailable("Kokoro is not installed on this server (lectern[kokoro])")
+        return ChildSynth(engine, {"speed": speed, "voice": str(payload.get("voice"))},
+                          limits.GOVERNOR.limit(limits.KOKORO))  # fmt: skip
     raise eng.EngineUnavailable(f"no local synthesiser for {engine}")
+
+
+# Local engines that are heavy jobs, by resource-limit feature; ElevenLabs runs remotely.
+FEATURE_OF_ENGINE = {eng.PIPER: limits.PIPER, eng.KOKORO: limits.KOKORO}
 
 
 def local_engines(db, settings: Settings) -> set[str]:
@@ -85,7 +101,7 @@ class TTSRunner:
         self.name = name
         self._stop = threading.Event()
         self._wake = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
 
     def wake(self) -> None:
         self._wake.set()
@@ -94,14 +110,19 @@ class TTSRunner:
         with self.session_factory() as db:
             if n := tj.reclaim(db, orphaned_local=True):
                 log.warning("requeued %d narration job(s) interrupted by a restart", n)
-        self._thread = threading.Thread(target=self._loop, name="lectern-tts", daemon=True)
-        self._thread.start()
+        # One thread per job the Kokoro and Piper limits allow at once (at least one).
+        self._threads = [
+            threading.Thread(target=self._loop, name=f"lectern-tts-{i}", daemon=True)
+            for i in range(limits.pool_size(limits.KOKORO, limits.PIPER))
+        ]
+        for t in self._threads:
+            t.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-        if self._thread:
-            self._thread.join(timeout=10)
+        for t in self._threads:
+            t.join(timeout=10)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -117,19 +138,35 @@ class TTSRunner:
     # -- one job -------------------------------------------------------------------------------
 
     def run_once(self) -> bool:
+        with contextlib.ExitStack() as held:
+            return self._run_once(held)
+
+    def _run_once(self, held: contextlib.ExitStack) -> bool:
         with self.session_factory() as db:
             engines = self._engines(db)
             if not engines:
                 tj.reclaim(db)
                 return False
-            defer = deferred(db, engines)
-            claimed = tj.claim_local(
-                db, engines, worker=self.name, defer=defer,
-                defer_s=float(getattr(self.settings, "local_defer_seconds", 600)),
-            )  # fmt: skip
-            if claimed is None:
-                return False
-            job, token = claimed
+            heavy = [FEATURE_OF_ENGINE[e] for e in engines if e in FEATURE_OF_ENGINE]
+            with limits.GOVERNOR.gate(*heavy) as gate:
+                # an engine whose limits are reached keeps its jobs queued
+                engines = {
+                    e
+                    for e in engines
+                    if e not in FEATURE_OF_ENGINE or FEATURE_OF_ENGINE[e] in gate.allowed
+                }
+                if not engines:
+                    return False
+                defer = deferred(db, engines)
+                claimed = tj.claim_local(
+                    db, engines, worker=self.name, defer=defer,
+                    defer_s=float(getattr(self.settings, "local_defer_seconds", 600)),
+                )  # fmt: skip
+                if claimed is None:
+                    return False
+                job, token = claimed
+                if feature := FEATURE_OF_ENGINE.get((job.payload or {}).get("engine")):
+                    held.enter_context(gate.admit(feature, job.id))
             job_id, payload, work_id = job.id, dict(job.payload or {}), job.work_id
             work = db.get(Work, work_id)
             tags = {"album": work.title if work else "", "artist": work.author if work else "",
@@ -158,6 +195,7 @@ class TTSRunner:
 
         artifacts = queue.artifacts_dir(self.settings.data_dir, job_id)
         scratch = self.settings.data_dir / "tmp" / f"tts-{job_id}"
+        voice = None
         try:
             with self.session_factory() as db:
                 script = tj.load_job_script(self.settings.data_dir, payload)
@@ -191,6 +229,7 @@ class TTSRunner:
             return True
         except (
             eng.EngineUnavailable,
+            OverMemoryLimit,
             synth.SpendingCapReached,
             synth.UncertainCharge,
             integrations.Undecryptable,
@@ -215,6 +254,8 @@ class TTSRunner:
             return True
         finally:
             hb.stop()
+            if voice is not None and hasattr(voice, "close"):
+                voice.close()  # ends the engine's child process
             shutil.rmtree(scratch, ignore_errors=True)
         self._submit(job_id, token, body, artifacts, dict(latest))
         return True

@@ -46,7 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from lectern import queue
+from lectern import limits, queue
 from lectern.config import Settings
 from lectern.ingest import formats
 from lectern.ingest.formats import FormatError, ProbeBusy
@@ -635,7 +635,8 @@ def failure_message(exc: child.OcrError, language: str) -> tuple[str, bool]:
 
 
 class OcrRunner:
-    """The server's own OCR runner: one page at a time, one job at a time, in one thread.
+    """The server's own OCR runner: one page at a time, one job per thread, as many threads
+    as ``LECTERN_OCR_CONCURRENCY`` (a job starts only while lectern.limits allows it).
     It leaves new jobs to an online ``ocr`` worker for ``LECTERN_LOCAL_DEFER_SECONDS``."""
 
     def __init__(self, session_factory: sessionmaker, settings: Settings, *,
@@ -645,19 +646,25 @@ class OcrRunner:
         self.poll_s = poll_s
         self._stop = threading.Event()
         self.wake = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="lectern-ocr", daemon=True)
+        self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
-        self._thread.start()
+        with self.session_factory() as db:
+            recover_local(db)
+        self._threads = [
+            threading.Thread(target=self._run, name=f"lectern-ocr-{i}", daemon=True)
+            for i in range(limits.pool_size(limits.OCR))
+        ]
+        for t in self._threads:
+            t.start()
 
     def stop(self) -> None:
         self._stop.set()
         self.wake.set()
-        self._thread.join(timeout=5)
+        for t in self._threads:
+            t.join(timeout=5)
 
     def _run(self) -> None:
-        with self.session_factory() as db:
-            recover_local(db)
         while not self._stop.is_set():
             try:
                 while not self._stop.is_set() and self.run_once():
@@ -668,27 +675,32 @@ class OcrRunner:
             self.wake.clear()
 
     def run_once(self) -> bool:
-        """Claim and run one job; ``False`` when there was none."""
+        """Claim and run one job; ``False`` when there was none or its limits are reached."""
         from lectern.align import jobs as align_jobs
 
         found = local_engine(self.settings)
         if found is None:
             return False
         with self.session_factory() as db:
-            claimed = align_jobs.claim(
-                db,
-                kinds=[KIND],
-                capabilities=[queue.OCR],
-                worker="local",
-                lease_s=LEASE_S,
-                credential_id=None,
-                defer_s=self.settings.local_defer_seconds,
-                stall_s=self.settings.align_stall_seconds,
-            )
-            if claimed is None:
-                return False
-            job, _token = claimed
-            self._run_job(db, job, found)
+            with limits.GOVERNOR.gate(limits.OCR) as gate:
+                if limits.OCR not in gate.allowed:
+                    return False
+                claimed = align_jobs.claim(
+                    db,
+                    kinds=[KIND],
+                    capabilities=[queue.OCR],
+                    worker="local",
+                    lease_s=LEASE_S,
+                    credential_id=None,
+                    defer_s=self.settings.local_defer_seconds,
+                    stall_s=self.settings.align_stall_seconds,
+                )
+                if claimed is None:
+                    return False
+                job, _token = claimed
+                slot = gate.admit(limits.OCR, job.id)
+            with slot:
+                self._run_job(db, job, found)
         return True
 
     def _run_job(self, db: Session, job: Job, found: tuple[str, tuple[str, ...]]) -> None:

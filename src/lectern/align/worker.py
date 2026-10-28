@@ -12,6 +12,7 @@ through :func:`lectern.align.jobs.apply_result`, so the validation path is ident
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ from pathlib import Path
 from pydantic import ValidationError
 from sqlalchemy.orm import sessionmaker
 
-from lectern import queue
+from lectern import limits, queue
 from lectern.align import isolate, jobs
 from lectern.align.pipeline import TrackInput, TranscribeFn, align_work
 from lectern.align.tracks import work_tracks
@@ -174,11 +175,18 @@ class LocalWorker:
         self.child_command = child_command
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._current: tuple[int, str] | None = None  # (job id, lease token) while running
+        self._threads: list[threading.Thread] = []
+        # (job id, lease token) per thread while it runs one; LECTERN_ALIGN_CONCURRENCY threads
+        self._current: dict[int, tuple[int, str]] = {}
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, name="lectern-worker", daemon=True)
-        self._thread.start()
+        self._threads = [
+            threading.Thread(target=self._run, name=f"lectern-worker-{i}", daemon=True)
+            for i in range(limits.pool_size(limits.ALIGN))
+        ]
+        self._thread = self._threads[0]
+        for t in self._threads:
+            t.start()
 
     def stop(self) -> None:
         """Stop and hand back a running job. The thread notices the stop at its next progress
@@ -186,10 +194,10 @@ class LocalWorker:
         from here, so a restart neither waits for the lease to expire nor spends an attempt.
         A late result from the old thread then fails the lease check."""
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=5)
-            current = self._current
-            if self._thread.is_alive() and current is not None:
+        for t in self._threads:
+            t.join(timeout=5)
+            current = self._current.get(t.ident)
+            if t.is_alive() and current is not None:
                 log.info("job %d: worker still busy at shutdown, releasing the job", current[0])
                 self._release(*current)
 
@@ -210,60 +218,67 @@ class LocalWorker:
         return transcriber_fn(tr), tr.label
 
     def run_once(self) -> bool:
-        """Claim and run one job. Returns False when the queue is empty."""
-        with self.session_factory() as db:
-            claimed = jobs.claim(
-                db,
-                kinds=[jobs.KIND_ALIGN],
-                capabilities=[queue.ALIGN, queue.ALIGN_PDF],
-                worker=self.name,
-                lease_s=self.lease_s,
-                credential_id=None,
-                stall_s=self.stall_s,
-                defer_s=self.defer_s,
-            )
-            if claimed is None:
-                return False
-            job, token = claimed
-            job_id, payload, work_id = job.id, dict(job.payload or {}), job.work_id
-            attempt = job.attempts
-            work = db.get(Work, work_id)
-            found = work_text(db, self.library, work) if work else None
-            tracks = [
-                TrackInput(
-                    t.position,
-                    self.library / work.dir_path / t.rel_path,
-                    t.sha256,
-                    t.duration_s,
-                    t.offset_s,
-                )
-                for t in (work_tracks(db, work_id) if work else [])
-            ]
-        if found is None or not tracks:
-            self._fail(job_id, token, "inputs missing from the library", retryable=False)
-            return True
-
-        def send(progress: float, message: str) -> bool:
+        """Claim and run one job. Returns False when the queue is empty or the ``align``
+        limits (lectern.limits) are reached."""
+        with contextlib.ExitStack() as held:
             with self.session_factory() as db:
-                try:
-                    row = jobs.verify_lease(db, job_id, token)
-                except jobs.LeaseLost:
-                    return False
-                jobs.heartbeat(db, row, progress=progress, message=message)
+                with limits.GOVERNOR.gate(limits.ALIGN) as gate:
+                    if limits.ALIGN not in gate.allowed:
+                        return False
+                    claimed = jobs.claim(
+                        db,
+                        kinds=[jobs.KIND_ALIGN],
+                        capabilities=[queue.ALIGN, queue.ALIGN_PDF],
+                        worker=self.name,
+                        lease_s=self.lease_s,
+                        credential_id=None,
+                        stall_s=self.stall_s,
+                        defer_s=self.defer_s,
+                    )
+                    if claimed is None:
+                        return False
+                    job, token = claimed
+                    held.enter_context(gate.admit(limits.ALIGN, job.id))
+                job_id, payload, work_id = job.id, dict(job.payload or {}), job.work_id
+                attempt = job.attempts
+                work = db.get(Work, work_id)
+                found = work_text(db, self.library, work) if work else None
+                tracks = [
+                    TrackInput(
+                        t.position,
+                        self.library / work.dir_path / t.rel_path,
+                        t.sha256,
+                        t.duration_s,
+                        t.offset_s,
+                    )
+                    for t in (work_tracks(db, work_id) if work else [])
+                ]
+            if found is None or not tracks:
+                self._fail(job_id, token, "inputs missing from the library", retryable=False)
                 return True
 
-        hb = _Heartbeat(send, min(self.lease_s / 3, MAX_HEARTBEAT_S), self._stop)
-        hb.start()
-        self._current = (job_id, token)
-        log.info("job %d: aligning work %s with %s", job_id, work_id, payload.get("model"))
-        try:
-            if self.isolated:
-                return self._align_isolated(
-                    job_id, token, attempt, payload, work_id, found, tracks, hb
-                )
-            return self._align(job_id, token, payload, work_id, found, tracks, hb)
-        finally:
-            self._current = None
+            def send(progress: float, message: str) -> bool:
+                with self.session_factory() as db:
+                    try:
+                        row = jobs.verify_lease(db, job_id, token)
+                    except jobs.LeaseLost:
+                        return False
+                    jobs.heartbeat(db, row, progress=progress, message=message)
+                    return True
+
+            hb = _Heartbeat(send, min(self.lease_s / 3, MAX_HEARTBEAT_S), self._stop)
+            hb.start()
+            me = threading.get_ident()
+            self._current[me] = (job_id, token)
+            log.info("job %d: aligning work %s with %s", job_id, work_id, payload.get("model"))
+            try:
+                if self.isolated:
+                    return self._align_isolated(
+                        job_id, token, attempt, payload, work_id, found, tracks, hb
+                    )
+                return self._align(job_id, token, payload, work_id, found, tracks, hb)
+            finally:
+                self._current.pop(me, None)
 
     def _align(self, job_id, token, payload, work_id, found, tracks, hb) -> bool:
         try:

@@ -19,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 
+from lectern.limits import lower_priority
+
 _out = sys.stdout  # the protocol stream; see _own_stdout
 
 
@@ -43,8 +45,7 @@ def _confine() -> None:
     to the server, no core files, and do not outlive the server."""
     with contextlib.suppress(OSError):
         Path("/proc/self/oom_score_adj").write_text("1000")
-    with contextlib.suppress(OSError, AttributeError):
-        os.nice(10)
+    lower_priority(10)  # LECTERN_ALIGN_NICE, passed down by the server
     with contextlib.suppress(ImportError, OSError, ValueError):
         import resource
 

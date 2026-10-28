@@ -171,6 +171,15 @@ def server_settings(auth: OwnerRead, settings: SettingsDep) -> dict:
     }
 
 
+@router.get("/resource-limits")
+def resource_limits(auth: OwnerRead, db: DbDep) -> dict:
+    """The effective limits of the server's own heavy jobs (lectern.limits, set in .env) and
+    what is running and waiting under them now. Values only, never the .env file itself."""
+    from lectern import limits
+
+    return limits.status(db)
+
+
 @router.get("/data-saver")
 def data_saver_status(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict:
     """Data-saver copies across the library: on or off, what can make them, what exists and
