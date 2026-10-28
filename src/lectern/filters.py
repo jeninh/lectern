@@ -611,13 +611,15 @@ class Context:
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
     # Inside a smart shelf's rule: a smart shelf named there matches nothing (no recursion).
     nested: bool = False
-    # The person's private ratings (``rating:``): off for an AI key without the reviews scope.
-    ratings: bool = True
+    # The person's private reviews (lectern.reviews): their ratings (``rating:``) and the read
+    # dates they entered by hand (``started:``/``finished:``). Off for an AI key without the
+    # reviews scope: no ``rating:``, and only the reading-state dates.
+    private_reviews: bool = True
 
     def lenient(self) -> Context:
         return Context(
             self.db, self.user, False, self.offline_ids, self.now, nested=True,
-            ratings=self.ratings,
+            private_reviews=self.private_reviews,
         )  # fmt: skip
 
 
@@ -925,7 +927,11 @@ def _text_pred(f: Field, t: str) -> ColumnElement[bool]:
     raise AssertionError(f.key)
 
 
-def _scalar(f: Field, u: User):
+def _scalar(f: Field, u: User, private_reviews: bool = True):
+    if f.key in ("started", "finished") and not private_reviews:
+        return _state(
+            u, ReadingState.started_at if f.key == "started" else ReadingState.finished_at
+        )
     return {
         "size": total_size,
         "length": audio_length,
@@ -952,12 +958,12 @@ def clause_pred(ctx: Context, c: Clause) -> ColumnElement[bool]:
         pred = or_(*(_enum_pred(ctx, f, v.a) for v in c.values))
     elif f.kind == TEXT:
         pred = or_(*(_text_pred(f, v.a) for v in c.values))
-    elif f.key in ("started", "finished"):
+    elif f.key in ("started", "finished") and ctx.private_reviews:
         # Any read-through's date; the reading state's for a work with none saved.
         pred = reviews.date_pred(
             ctx.user.id, f.key, lambda x: or_(*(_compare(x, f, v, ctx.now) for v in c.values))
         )
-    elif f.kind == RATING and not ctx.ratings:
+    elif f.kind == RATING and not ctx.private_reviews:
         if ctx.strict:
             raise FilterError(
                 "field_not_allowed",
@@ -966,7 +972,7 @@ def clause_pred(ctx: Context, c: Clause) -> ColumnElement[bool]:
             )
         pred = false()
     else:
-        x = _scalar(f, ctx.user)
+        x = _scalar(f, ctx.user, ctx.private_reviews)
         pred = or_(*(_compare(x, f, v, ctx.now) for v in c.values))
     if c.negate:
         # "Is not": everything else, works with no value for the field included.
@@ -1021,8 +1027,12 @@ SORTS: dict[str, tuple[str, bool]] = {
 SORT_PATTERN = "^(" + "|".join(SORTS) + ")$"
 
 
-def order_by(sort: str, user: User, descending: bool | None = None) -> list:
-    """ORDER BY for ``sort`` (a :data:`SORTS` key): works without a value last, then title."""
+def order_by(
+    sort: str, user: User, descending: bool | None = None, private_reviews: bool = True
+) -> list:
+    """ORDER BY for ``sort`` (a :data:`SORTS` key): works without a value last, then title.
+    ``private_reviews`` off (an AI key without the reviews scope): ``started``/``finished``
+    use only the reading-state dates; ``rating`` is refused by the caller."""
     desc = SORTS[sort][1] if descending is None else descending
     if sort == "title":
         cols = [Work.sort_title]
@@ -1037,7 +1047,7 @@ def order_by(sort: str, user: User, descending: bool | None = None) -> list:
     elif sort == "added":
         cols = [Work.created_at]
     else:
-        x = _scalar(FIELDS[sort], user)
+        x = _scalar(FIELDS[sort], user, private_reviews)
         cols = [_state(user, ReadingState.fraction) if sort == "progress" else x]
     out = [(c.desc() if desc else c.asc()).nulls_last() for c in cols]
     if sort == "added":

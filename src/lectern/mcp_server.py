@@ -707,19 +707,23 @@ def search_library(
 ) -> dict:
     """Find books this person can see, with the Library's filters (docs/filters.md): a
     leading - negates a filter, a,b matches either value, and numbers, sizes, lengths, and
-    dates take <, >, or a..b. Scope: read; rating: and sorting by rating also need reviews."""
+    dates take <, >, or a..b. Scope: read; rating: and sorting by rating also need reviews,
+    and without it started:/finished: use only the dates Lectern recorded, never hand-entered
+    ones."""
     with _call(ctx, "search_library", "read") as c:
-        ratings = c.has_scope("reviews")
-        if sort == "rating" and not ratings:
+        private = c.has_scope("reviews")
+        if sort == "rating" and not private:
             raise ToolError(_needs("reviews"))
         try:
             q = filters.parse(query)
-            where = filters.predicate(filters.Context(c.db, c.user, ratings=ratings), q)
+            where = filters.predicate(filters.Context(c.db, c.user, private_reviews=private), q)
         except filters.FilterError as exc:
             raise ToolError(f"invalid_filter: {exc.message}") from None
         stmt = select(Work).options(selectinload(Work.files)).where(where)
         total = c.db.scalar(select(func.count()).select_from(stmt.subquery()))
-        works = c.db.scalars(stmt.order_by(*filters.order_by(sort, c.user)).limit(limit)).all()
+        works = c.db.scalars(
+            stmt.order_by(*filters.order_by(sort, c.user, private_reviews=private)).limit(limit)
+        ).all()
         return {
             "total": total or 0,
             "filter": filters.format_query(q),

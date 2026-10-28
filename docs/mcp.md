@@ -143,7 +143,9 @@ under Devices → AI tools → Edit.`
   `format:epub -has:audio author:"Tolstoy" year:1850..1900 progress:<50%`, and a `sort`; it
   returns the filter it ran in canonical form as `filter`. A value it cannot take is an
   `invalid_filter` error with the reason. `rating:` and `sort: rating` also need the `reviews`
-  scope; without it a smart shelf whose rule uses `rating:` lists nothing.
+  scope; without it a smart shelf whose rule uses `rating:` lists nothing, and `started:`,
+  `finished:`, and sorting by them use only the dates Lectern recorded from your reading, never
+  read dates you entered by hand ([reviews.md](reviews.md)).
 - `get_review` (scope `reviews`): your own rating, Markdown notes, and read-throughs of a book.
   `list_finished` (scope `reviews`): the books you finished in a year, with your corrected dates
   and ratings.

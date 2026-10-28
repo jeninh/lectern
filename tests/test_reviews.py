@@ -303,6 +303,39 @@ def test_mcp_needs_the_reviews_scope(app, household):
     assert rex_mcp.ok("list_finished", year=2025)["books"] == []
 
 
+def test_a_key_without_the_reviews_scope_never_sees_hand_entered_dates(app, household):
+    owner, ids = household["owner"], household["ids"]
+    alpha, bravo = ids["Alpha"], ids["Bravo"]
+    # Lectern recorded both: Alpha finished 2026-03-10, Bravo 2026-01-20. The owner then says
+    # Alpha was really read in June 2019.
+    for w in (alpha, bravo):
+        read_to("owner", w, 1.0)
+    set_state("owner", alpha, "2026-03-01", "2026-03-10")
+    set_state("owner", bravo, "2026-01-02", "2026-01-20")
+    review(owner, alpha, read_throughs=[{"started_on": "2019-06-02", "finished_on": "2019-06-21"}])
+
+    def ids_of(mcp, **args) -> list[int]:
+        return [b["id"] for b in mcp.ok("search_library", **args)["books"]]
+
+    reader = MCP(app, owner.key("read", label="read only"))
+    assert ids_of(reader, query="finished:2019-06-21") == []
+    assert ids_of(reader, query="started:2019-06-02") == []
+    assert ids_of(reader, query="finished:2026-03") == [alpha]  # what Lectern recorded
+    assert ids_of(reader, query="finished:2026", sort="finished") == [alpha, bravo]
+    shelf = api_post(
+        owner.http, "/api/shelves", owner.csrf, {"name": "Old", "filter": "finished:2019"}
+    )
+    assert shelf.status_code == 201, shelf.text
+    assert ids_of(reader, query='shelf:"Old"') == []
+    # With the scope (a key may hold all five), the corrected dates.
+    full = MCP(app, owner.key("upload", "file", "read", "organize", "reviews", label="all"))
+    assert ids_of(full, query="finished:2019-06-21") == [alpha]
+    assert ids_of(full, query="started:2019-06-02") == [alpha]
+    assert ids_of(full, query="finished:2026-03") == []
+    assert ids_of(full, sort="finished")[:2] == [bravo, alpha]
+    assert ids_of(full, query='shelf:"Old"') == [alpha]
+
+
 def test_merging_keeps_reviews(household):
     owner, alpha, bravo = household["owner"], household["ids"]["Alpha"], household["ids"]["Bravo"]
     review(
@@ -346,20 +379,24 @@ def test_migration_0030_up_and_down(tmp_path):
             "INSERT INTO works (id, title, sort_title, author, sort_author, dir_path, has_cover,"
             " created_at, updated_at, version, readalong_enabled, data_saver_enabled,"
             " cover_seed) VALUES (1, 'T', 't', 'A', 'a', 'A/T', 0, '2026-01-01', '2026-01-01',"
-            " 1, 1, 1, 0)"
+            " 1, 1, 1, 0), (2, 'U', 'u', 'A', 'a', 'A/U', 0, '2026-01-01', '2026-01-01', 1, 1, 1,"
+            " 0)"
         ))  # fmt: skip
         conn.execute(sa.text(
             "INSERT INTO book_reviews (user_id, work_id, rating, notes, updated_at)"
             " VALUES (1, 1, 9, 'n', '2026-01-01')"
         ))  # fmt: skip
+        # Work 2 has no review yet, so only the CHECK can refuse these.
         for bad in (
             "INSERT INTO book_reviews (user_id, work_id, rating, notes, updated_at)"
-            " VALUES (1, 1, 11, '', '2026-01-01')",
+            " VALUES (1, 2, 11, '', '2026-01-01')",
+            "INSERT INTO book_reviews (user_id, work_id, rating, notes, updated_at)"
+            " VALUES (1, 2, 0, '', '2026-01-01')",
             "INSERT INTO read_throughs (user_id, work_id, created_at) VALUES (1, 1, '2026-01-01')",
             "INSERT INTO read_throughs (user_id, work_id, started_at, finished_at, created_at)"
             " VALUES (1, 1, '2026-02-01', '2026-01-01', '2026-01-01')",
         ):
-            with pytest.raises(sa.exc.IntegrityError):
+            with pytest.raises(sa.exc.IntegrityError, match="CHECK constraint failed"):
                 conn.execute(sa.text(bad))
         conn.commit()
     with engine.begin() as conn:

@@ -85,7 +85,7 @@ class CreateIn(stepup.StepUpIn):
     model_config = ConfigDict(extra="forbid")
 
     label: Annotated[str, NoControls] = Field(min_length=1, max_length=128)
-    scopes: list[Scope] | None = Field(default=None, min_length=1, max_length=4)
+    scopes: list[Scope] | None = Field(default=None, min_length=1, max_length=len(ai_keys.SCOPES))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -132,7 +132,7 @@ def _check_allowed(auth, scopes) -> None:
 class ScopesIn(stepup.StepUpIn):
     model_config = ConfigDict(extra="forbid")
 
-    scopes: list[Scope] = Field(min_length=1, max_length=4)
+    scopes: list[Scope] = Field(min_length=1, max_length=len(ai_keys.SCOPES))
 
 
 @router.post("/{key_id}/scopes")
