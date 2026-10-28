@@ -7,6 +7,7 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 from lxml import etree
 
@@ -47,7 +48,11 @@ def _read_xml(zf: zipfile.ZipFile, name: str) -> etree._Element:
     info = zf.getinfo(name)
     if info.file_size > MAX_XML_BYTES:
         raise EpubError(f"{name} is too large")
-    return etree.fromstring(zf.read(name), _PARSER)
+    with zf.open(info) as fh:  # the header's size may lie: never inflate more than the cap
+        data = fh.read(MAX_XML_BYTES + 1)
+    if len(data) > MAX_XML_BYTES:
+        raise EpubError(f"{name} is too large")
+    return etree.fromstring(data, _PARSER)
 
 
 def normalize_isbn(raw: str) -> str | None:
@@ -271,6 +276,69 @@ def _find_cover(opf, meta, opf_dir: str, zf: zipfile.ZipFile) -> tuple[str | Non
     if info.file_size > MAX_COVER_BYTES:
         return None, None
     return href, candidate.get("media-type")
+
+
+MAX_LISTED_IMAGES = 200
+LISTED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")  # never SVG
+
+
+@dataclass(frozen=True)
+class EpubImage:
+    index: int
+    href: str  # path inside the zip; server-side only, the API refers to ``index``
+    media_type: str
+    size: int
+
+
+def list_images(path: Path) -> list[EpubImage]:
+    """Raster images the OPF manifest declares, in manifest order, at most
+    :data:`MAX_LISTED_IMAGES`. An ``image/svg+xml`` item (or any type outside
+    :data:`LISTED_IMAGE_TYPES`), an entry missing from the zip, one over
+    :data:`MAX_COVER_BYTES`, or one whose name leaves the archive root is skipped. ``index``
+    counts the images listed, so it is stable for a given file."""
+    out: list[EpubImage] = []
+    with _open_zip(path) as zf:
+        opf, opf_path = _read_opf(zf)
+        manifest = opf.find("opf:manifest", NS)
+        if manifest is None:
+            return out
+        opf_dir = posixpath.dirname(opf_path)
+        seen: set[str] = set()
+        for it in manifest.findall("opf:item", NS):
+            media_type = (it.get("media-type") or "").strip().lower()
+            href = it.get("href") or ""
+            if media_type not in LISTED_IMAGE_TYPES or not href or "://" in href:
+                continue
+            name = posixpath.normpath(posixpath.join(opf_dir, unquote(href.split("#")[0])))
+            if name.startswith(("/", "..")) or name in seen:
+                continue
+            try:
+                info = zf.getinfo(name)
+            except KeyError:
+                continue
+            if info.is_dir() or info.file_size > MAX_COVER_BYTES:
+                continue
+            seen.add(name)
+            out.append(EpubImage(len(out), name, media_type, info.file_size))
+            if len(out) >= MAX_LISTED_IMAGES:
+                break
+    return out
+
+
+def read_image(path: Path, index: int) -> bytes | None:
+    """The raw bytes of listed image ``index`` (at most :data:`MAX_COVER_BYTES`), or None if
+    there is no such image or it turns out larger than its header said. The caller decodes
+    them with :func:`lectern.ingest.cover.save_cover_jpeg`."""
+    images = list_images(path)
+    if not 0 <= index < len(images):
+        return None
+    with zipfile.ZipFile(path) as zf:
+        try:
+            with zf.open(images[index].href) as fh:
+                data = fh.read(MAX_COVER_BYTES + 1)
+        except Exception:  # noqa: BLE001 - a corrupt entry (bad CRC, bad deflate) is no image
+            return None
+    return data if len(data) <= MAX_COVER_BYTES else None
 
 
 def extract_cover(path: Path, href: str, dest: Path) -> bool:

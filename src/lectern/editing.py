@@ -22,6 +22,7 @@ caller. HTTP-free on purpose: the web API and any later automation client share 
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import secrets
@@ -298,20 +299,77 @@ def staged_covers_dir(settings: Settings) -> Path:
     return d
 
 
-def stage_cover(settings: Settings, user_id: int, data: bytes) -> str:
-    """Validate an uploaded image and keep it as JPEG until a save uses it (or a day passes).
-    Returns a token bound to the uploader."""
+STAGED_PER_USER_MAX = 100
+
+
+def _sidecar(settings: Settings, token: str) -> Path:
+    return staged_covers_dir(settings) / f"{token}.json"
+
+
+def stage_cover(
+    settings: Settings,
+    user_id: int,
+    data: bytes,
+    *,
+    formats: tuple[str, ...] | None = None,
+    origin: dict | None = None,
+) -> str:
+    """Validate an image and keep it as JPEG until a save uses it (or a day passes). Returns a
+    token bound to the user. ``origin`` (``{"source": "page"|"image", "work_id", "file_id",
+    "page"|"index"}``) is written beside it as ``<token>.json`` so the save can record where
+    the cover came from; only the server passes it. Uploads accept JPEG, PNG, and WebP only; a
+    server-side source passes ``formats`` (EPUB images may be GIF)."""
     from lectern.ingest.cover import UPLOAD_FORMATS, CoverRejected, save_cover_jpeg
 
     if len(data) > COVER_MAX_BYTES:
         raise EditError(413, "cover_too_large")
+    _evict_oldest(settings, user_id)
     token = f"{user_id}.{secrets.token_hex(12)}"
+    sidecar = _sidecar(settings, token)
+    if origin is not None:
+        sidecar.write_text(json.dumps(origin, separators=(",", ":")), "utf-8")
     try:
-        # JPEG, PNG, and WebP decoders only: no exotic formats reach Pillow from an upload.
-        save_cover_jpeg(data, staged_covers_dir(settings) / f"{token}.jpg", formats=UPLOAD_FORMATS)
+        # Allowlisted Pillow decoders only: no exotic formats reach Pillow from untrusted bytes.
+        save_cover_jpeg(
+            data, staged_covers_dir(settings) / f"{token}.jpg", formats=formats or UPLOAD_FORMATS
+        )
     except CoverRejected as exc:
-        raise EditError(422, exc.code) from None
+        sidecar.unlink(missing_ok=True)
+        # A decompression bomb is "too large" (413); anything else Pillow refuses is not an image.
+        raise EditError(413 if exc.code == "cover_too_large" else 422, exc.code) from None
     return token
+
+
+def _evict_oldest(settings: Settings, user_id: int) -> None:
+    """Keep at most STAGED_PER_USER_MAX staged covers per user so staging cannot fill the disk."""
+    mine = []
+    for p in staged_covers_dir(settings).glob(f"{int(user_id)}.*.jpg"):
+        try:
+            mine.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    for _mtime, p in sorted(mine)[: max(0, len(mine) - STAGED_PER_USER_MAX + 1)]:
+        p.unlink(missing_ok=True)
+        p.with_suffix(".json").unlink(missing_ok=True)
+
+
+def staged_origin(settings: Settings, user_id: int, token: str, work_id: int) -> dict | None:
+    """Where a staged cover came from, or None (an upload, or a cover staged for another work).
+    Re-validated here: the sidecar is data on disk, not trusted structure."""
+    try:
+        raw = json.loads(_sidecar(settings, token).read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("work_id") != work_id:
+        return None
+    ints = {k: raw.get(k) for k in ("file_id", "page", "index")}
+    if any(v is not None and (type(v) is not int or v < 0) for v in ints.values()):
+        return None
+    if raw.get("source") == "page" and ints["page"] and ints["file_id"]:
+        return {"source": "page", "file_id": ints["file_id"], "page": ints["page"]}
+    if raw.get("source") == "image" and ints["index"] is not None and ints["file_id"]:
+        return {"source": "image", "file_id": ints["file_id"], "index": ints["index"]}
+    return None
 
 
 def staged_cover_path(settings: Settings, user_id: int, token: str) -> Path:
@@ -406,11 +464,14 @@ def apply_cover(
     else:
         journal.add(lambda: cover.unlink(missing_ok=True))
     new = work_dir / f".cover-{secrets.token_hex(4)}.jpg"
+    origin: dict | None = None
     try:
         if change.action == "upload":
             src = staged_cover_path(settings, user_id, change.token or "")
+            origin = staged_origin(settings, user_id, change.token or "", work.id)
             shutil.copyfile(src, new)
             src.unlink(missing_ok=True)
+            _sidecar(settings, change.token or "").unlink(missing_ok=True)
         elif change.action == "embedded":
             if not _embedded_cover(db, settings, work, new):
                 raise EditError(422, "no_embedded_cover")
@@ -424,10 +485,15 @@ def apply_cover(
         else:
             new.replace(cover)
             work.has_cover, work.cover_source = True, change.action
+            if origin is not None:  # staged from a page or an EPUB image of this work
+                work.cover_source = origin["source"]
             work.cover_tint = dominant_tint(cover)
     finally:
         new.unlink(missing_ok=True)
-    return before, _cover_state(work)
+    after = _cover_state(work)
+    if origin is not None:
+        after["origin"] = origin
+    return before, after
 
 
 def _restore_cover(settings: Settings, work: Work, state: dict) -> None:
@@ -763,12 +829,13 @@ def sweep(db: Session, settings: Settings, busy: Callable[[int], bool] = lambda 
     import time
 
     old = time.time() - STAGED_COVER_TTL_S
-    for p in staged_covers_dir(settings).glob("*.jpg"):
-        try:
-            if p.stat().st_mtime < old:
-                p.unlink(missing_ok=True)
-        except OSError:
-            continue
+    for pattern in ("*.jpg", "*.json"):  # a staged cover and its origin sidecar
+        for p in staged_covers_dir(settings).glob(pattern):
+            try:
+                if p.stat().st_mtime < old:
+                    p.unlink(missing_ok=True)
+            except OSError:
+                continue
     moved = 0
     for work_id in sorted(PENDING_FOLDERS):
         work = db.get(Work, work_id)

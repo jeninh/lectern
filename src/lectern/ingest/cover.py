@@ -10,6 +10,7 @@ file claiming a gigapixel canvas (a decompression bomb) is refused without alloc
 from __future__ import annotations
 
 import colorsys
+import math
 from io import BytesIO
 from pathlib import Path
 
@@ -18,6 +19,7 @@ COVER_MAX_PIXELS = 40_000_000
 COVER_MAX_SIDE = 16_000
 UPLOAD_FORMATS = ("JPEG", "PNG", "WEBP")
 EMBEDDED_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
+CROP_MIN_PX = 200
 
 
 class CoverRejected(ValueError):
@@ -53,6 +55,42 @@ def save_cover_jpeg(
             raise CoverRejected("not_an_image") from None
     dest.parent.mkdir(parents=True, exist_ok=True)
     rgb.save(dest, "JPEG", quality=quality)
+
+
+class CropRejected(ValueError):
+    """The crop rectangle is not finite, not inside the image, or too small."""
+
+
+def crop_jpeg(src: Path, x: float, y: float, w: float, h: float, *, quality: int = 88) -> bytes:
+    """Crop ``src`` (a staged JPEG this server wrote) to the normalised rectangle and return
+    the JPEG bytes. The rectangle must lie inside the image and cover at least
+    :data:`CROP_MIN_PX` pixels on each side. The caller re-validates the result with
+    :func:`save_cover_jpeg`."""
+    from PIL import Image
+
+    vals = (x, y, w, h)
+    if not all(isinstance(v, int | float) and math.isfinite(v) for v in vals):
+        raise CropRejected("not finite")
+    eps = 1e-6
+    if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > 1 + eps or y + h > 1 + eps:
+        raise CropRejected("outside the image")
+    try:
+        with Image.open(src, formats=["JPEG"]) as img:
+            width, height = img.size
+            if width * height > COVER_MAX_PIXELS:
+                raise CropRejected("image too large")
+            left, top = round(x * width), round(y * height)
+            right, bottom = min(width, round((x + w) * width)), min(height, round((y + h) * height))
+            if right - left < CROP_MIN_PX or bottom - top < CROP_MIN_PX:
+                raise CropRejected("too small")
+            piece = img.convert("RGB").crop((left, top, right, bottom))
+    except CropRejected:
+        raise
+    except Exception:  # noqa: BLE001 - an unreadable staged file cannot be cropped
+        raise CropRejected("unreadable") from None
+    buf = BytesIO()
+    piece.save(buf, "JPEG", quality=quality)
+    return buf.getvalue()
 
 
 def dominant_tint(path: Path) -> str | None:

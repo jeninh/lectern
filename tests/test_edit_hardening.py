@@ -512,7 +512,7 @@ def test_cover_upload_accepts_only_jpeg_png_webp_and_refuses_bombs(client, owner
         assert (r.status_code, r.json()["detail"]) == (422, "not_an_image"), fmt
     for w, h_ in ((50_000, 50_000), (7_000, 7_000), (20_000, 10)):
         r = send(png_claiming(w, h_))
-        assert (r.status_code, r.json()["detail"]) == (422, "cover_too_large"), (w, h_)
+        assert (r.status_code, r.json()["detail"]) == (413, "cover_too_large"), (w, h_)
 
 
 def test_embedded_covers_are_bounded_before_decoding(tmp_path, monkeypatch):

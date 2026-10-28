@@ -9,13 +9,15 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from lectern import covergen
+from lectern import covers as sources
 from lectern.access import can_see_work
+from lectern.editing import EditError
 from lectern.models import Work
-from lectern.routes.api.editor import EditorRead
-from lectern.security.deps import DbDep
+from lectern.routes.api.editor import Editor, EditorRead, _edit_error
+from lectern.security.deps import DbDep, SettingsDep
 
 router = APIRouter()
 
@@ -61,3 +63,37 @@ def cover_candidates(
         "styles": list(covergen.STYLES),
         "candidates": out,
     }
+
+
+def _visible_work(db, auth, work_id: int) -> Work:
+    work = db.get(Work, work_id)
+    if work is None or work.trashed_at is not None or not can_see_work(db, auth.user, work_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    return work
+
+
+@router.post("/works/{work_id}/cover/stage")
+def stage_cover_source(
+    auth: Editor, db: DbDep, settings: SettingsDep, work_id: int, body: sources.StageRequest
+) -> dict:
+    """Stage a cover from an earlier staged image, an EPUB image, or a PDF/comic page, with an
+    optional normalised crop. Returns a token to save through the ``upload`` cover action."""
+    work = _visible_work(db, auth, work_id)
+    try:
+        return sources.stage_source(db, settings, auth.user.id, work, body)
+    except EditError as exc:
+        raise _edit_error(exc) from None
+
+
+@router.get("/works/{work_id}/cover/sources/epub/{file_id}/{index}.jpg", include_in_schema=False)
+def epub_image_thumbnail(
+    auth: EditorRead, db: DbDep, settings: SettingsDep, work_id: int, file_id: int, index: int
+) -> Response:
+    work = _visible_work(db, auth, work_id)
+    try:
+        data = sources.thumbnail(db, settings, work, file_id, index)
+    except EditError as exc:
+        raise _edit_error(exc) from None
+    return Response(
+        data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"}
+    )
