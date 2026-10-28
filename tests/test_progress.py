@@ -211,3 +211,70 @@ def test_audio_and_text_positions_meet_on_one_work(client, owner, magi_work, set
     assert back["estimated"] is True and back["audio_s"] == pytest.approx(30.5, abs=0.5)
     r = put_json(client, f"/api/works/{wid}/progress", csrf, {"source": "audio", "audio_s": 9999})
     assert r.json()["audio_s"] == pytest.approx(total, abs=0.01)  # clamped to the timeline
+
+
+def test_listening_speed_is_kept_per_user_and_work(client, owner, magi_work, settings):
+    """Issue #71: each book keeps the speed last used for it, next to the canonical position,
+    for the person who set it and only on books they can see."""
+    magi = magi_work["id"]
+    csrf = owner["csrf"]
+    shutil.copy(MAGI / "excerpt.mp3", settings.inbox_path / "excerpt.mp3")
+    drain_inbox(settings)
+    audio = next(w["id"] for w in client.get("/api/library").json()["works"] if w["id"] != magi)
+
+    def speed(wid):
+        return client.get(f"/api/works/{wid}/progress").json()["speed"]
+
+    assert speed(audio) is None  # never played: the app uses the person's default
+    # Book A at 1.5x from the player, book B at 1x from read-along's listen mode.
+    r = put_json(client, f"/api/works/{audio}/progress", csrf,
+                 {"source": "audio", "device": "Phone", "audio_s": 12, "speed": 1.5})  # fmt: skip
+    assert r.status_code == 200 and r.json()["speed"] == 1.5
+    put_json(client, f"/api/works/{magi}/progress", csrf,
+             {"source": "audio", "device": "Laptop", "sentence_n": 4, "speed": 1})  # fmt: skip
+    assert (speed(audio), speed(magi)) == (1.5, 1)
+    # Positions saved without a speed (the web reader, an older app) leave it alone.
+    put_json(client, f"/api/works/{audio}/progress", csrf, {"source": "audio", "audio_s": 20})
+    put_json(client, f"/api/works/{magi}/progress", csrf, {"source": "web", "sentence_n": 9})
+    assert (speed(audio), speed(magi)) == (1.5, 1)
+    for bad in (0.2, 5, "fast"):
+        body = {"source": "audio", "audio_s": 20, "speed": bad}
+        assert put_json(client, f"/api/works/{audio}/progress", csrf, body).status_code == 422
+    assert speed(audio) == 1.5
+
+    # A replay from the offline queue carries its speed; one that loses to a newer position
+    # from another device changes neither.
+    def replay(recorded, value):
+        body = {"source": "audio", "audio_s": 30, "speed": value,
+                "offline": {"recorded_at": recorded, "sent_at": "2099-01-01T00:00:00Z"}}  # fmt: skip
+        return put_json(client, f"/api/works/{audio}/progress", csrf, body)
+
+    assert replay("2000-01-01T00:00:00Z", 3).status_code == 409
+    assert speed(audio) == 1.5
+    assert replay("2099-01-01T00:00:00Z", 1.75).status_code == 200
+    assert speed(audio) == 1.75
+
+    # Per user: another member starts with none and sets their own.
+    make_user(client, csrf, "mia", "member")
+    mia = login(client, "mia", "mia-correct horse")
+    assert speed(audio) is None
+    put_json(client, f"/api/works/{audio}/progress", mia,
+             {"source": "audio", "audio_s": 5, "speed": 2})  # fmt: skip
+    assert speed(audio) == 2
+    # A reader who cannot see the book can neither read nor set a speed for it.
+    owner_csrf = login(client, "owner", OWNER_PASSWORD)
+    assert speed(audio) == 1.75
+    make_user(client, owner_csrf, "rex", "reader")
+    rex = login(client, "rex", "rex-correct horse")
+    assert client.get(f"/api/works/{audio}/progress").status_code == 404
+    r = put_json(client, f"/api/works/{audio}/progress", rex,
+                 {"source": "audio", "audio_s": 5, "speed": 3})  # fmt: skip
+    assert r.status_code == 404
+    login(client, "owner", OWNER_PASSWORD)
+    assert speed(audio) == 1.75
+    with session_factory()() as db:
+        assert {(p.work_id, p.speed) for p in db.query(WorkProgress)} == {
+            (audio, 1.75),
+            (magi, 1.0),
+            (audio, 2.0),
+        }

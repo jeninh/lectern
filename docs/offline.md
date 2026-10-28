@@ -108,7 +108,9 @@ metered per book like streaming).
 
 The reader, player, PDF viewer, and read-along save positions as usual. When the server cannot
 be reached, the newest position per book waits in the phone's queue, in the same canonical form
-it would have been sent (sentence and offset, audio seconds, or page). The queue is sent when the
+it would have been sent (sentence and offset, audio seconds, or page). The player and
+read-along's listen mode send the book's listening speed with each position, so a speed changed
+offline waits in the queue with it, and is used on this device straight away. The queue is sent when the
 connection comes back, when the app returns to the foreground, and at start-up.
 
 Online, Lectern keeps whichever position arrived last. A queued position arrives late, so the

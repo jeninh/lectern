@@ -98,6 +98,8 @@ export interface Preferences {
   auto_file_imports: boolean;
   /** Play and download the data-saver copy on devices that have not chosen for themselves. */
   data_saver: boolean;
+  /** Listening speed for books not played yet; null until chosen (lib/playback.ts). */
+  playback_speed: number | null;
 }
 
 export interface LibrarySettings {
@@ -461,6 +463,9 @@ export interface WorkProgressResponse {
   audio_s: number | null;
   percent: number | null;
   estimated: boolean;
+  /** The listening speed last used for this work on any device; null: never set. Absent from
+   * progress saved for offline use before it existed. */
+  speed?: number | null;
   count: number;
   total_duration_s: number;
   koreader: HandoffCandidate | null;

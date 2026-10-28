@@ -10,6 +10,7 @@ import { getBook, orOffline } from "./offline/store";
 import { savePosition } from "./offline/sync";
 import { pickHandoff } from "./handoff";
 import { useLocalStorage } from "./hooks";
+import { legacyRate, pickRate, sleepRewind, sleepStep, type Sleep } from "./playback";
 import { useStore } from "./store";
 import type { HandoffCandidate, Track, TracksResponse, Work, WorkProgressResponse } from "./types";
 
@@ -19,7 +20,7 @@ export interface GlobalChapter {
   end: number;
 }
 
-export type Sleep = { kind: "time"; endsAt: number; minutes: number } | { kind: "chapter"; end: number } | null;
+export type { Sleep };
 
 interface Player {
   work: Work | null;
@@ -30,7 +31,10 @@ interface Player {
   t: number;
   playing: boolean;
   loading: boolean;
+  /** This book's speed (kept per book on the server; lib/playback.ts). */
   rate: number;
+  /** The person's speed for books not played yet. */
+  defaultRate: number;
   sleep: Sleep;
   /** Whether data saver is in effect here: this device's choice, else the account's default. */
   dataSaver: boolean;
@@ -46,6 +50,8 @@ interface Player {
   seek: (t: number) => void;
   skip: (delta: number) => void;
   setRate: (r: number) => void;
+  /** Make the current speed the default for books not played yet. */
+  setDefaultRate: () => void;
   setSleep: (s: "chapter" | number | null) => void;
   /** Choose for this device; null follows the account's default again. */
   setDataSaver: (v: boolean | null) => Promise<void>;
@@ -62,18 +68,22 @@ const SAVE_EVERY_MS = 15000;
 interface Mark {
   t: number;
   seenAt: string | null;
+  /** The speed this device last used for the book. */
+  rate?: number;
 }
 const markKey = (id: number) => `lectern.listen.${id}`;
-function readMark(id: number): Mark | null {
+/** This device's listening mark for a book: place, last server time seen, and speed. Shared
+ * with the read-along listen mode. */
+export function readMark(id: number): Mark | null {
   try {
     return JSON.parse(localStorage.getItem(markKey(id)) || "null");
   } catch {
     return null;
   }
 }
-function writeMark(id: number, m: Mark) {
+export function writeMark(id: number, m: Partial<Mark>) {
   try {
-    localStorage.setItem(markKey(id), JSON.stringify(m));
+    localStorage.setItem(markKey(id), JSON.stringify({ ...readMark(id), ...m }));
   } catch {
     /* quota */
   }
@@ -106,7 +116,7 @@ export function trackAt(tracks: Track[], t: number): number {
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
-  const { deviceName, toast, me } = useStore();
+  const { deviceName, toast, me, online, setPreference } = useStore();
   const audio = useRef<HTMLAudioElement | null>(null);
   const [work, setWork] = useState<Work | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -114,13 +124,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [t, setT] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [rate, setRateState] = useLocalStorage<number>("lectern.playbackRate", 1);
+  const savedDefault = me?.preferences.playback_speed ?? null;
+  const defaultRate = savedDefault ?? legacyRate() ?? 1;
+  const [rate, setRateState] = useState(defaultRate);
   const [dataSaverDevice, setDataSaverState] = useLocalStorage<boolean | null>(DATA_SAVER_KEY, null);
   const dataSaver = dataSaverDevice ?? !!me?.preferences.data_saver;
   const [sleep, setSleepState] = useState<Sleep>(null);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [usingLow, setUsingLow] = useState(false);
-  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false });
+  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate });
 
   const duration = useMemo(() => tracks.reduce((s, tr) => s + tr.duration_s, 0), [tracks]);
   const chapters = useMemo(() => chaptersOf(tracks), [tracks]);
@@ -142,7 +154,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const gt = at ?? (tr ? tr.offset_s + el.currentTime : 0);
       state.current.lastSave = Date.now();
       try {
-        const r = await savePosition<WorkProgressResponse>({ kind: "work", id: w.id, workId: w.id, title: w.title }, { source: "audio", device: deviceName, audio_s: Math.round(gt * 100) / 100 }, keepalive);
+        const r = await savePosition<WorkProgressResponse>({ kind: "work", id: w.id, workId: w.id, title: w.title }, { source: "audio", device: deviceName, audio_s: Math.round(gt * 100) / 100, speed: state.current.rate }, keepalive);
         writeMark(w.id, { t: gt, seenAt: r?.received_at ?? readMark(w.id)?.seenAt ?? null });
       } catch {
         writeMark(w.id, { t: gt, seenAt: readMark(w.id)?.seenAt ?? null });
@@ -167,10 +179,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else {
         el.currentTime = local;
       }
-      el.playbackRate = rate;
+      el.playbackRate = state.current.rate;
       if (autoplay) el.play().catch(() => {});
     },
-    [srcFor, rate],
+    [srcFor],
   );
 
   const seek = useCallback(
@@ -205,6 +217,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setWork(w);
         setTracks(tr.tracks);
         const mark = readMark(w.id);
+        const r = pickRate(prog, mark, defaultRate);
+        state.current.rate = r;
+        setRateState(r);
         let start = opts.at ?? mark?.t ?? null;
         if (start == null && prog.audio_s != null) {
           start = prog.audio_s; // a fresh device picks up the latest known place
@@ -221,7 +236,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setLoading(false);
       }
     },
-    [deviceName, load, save, toast],
+    [deviceName, load, save, toast, defaultRate],
   );
 
   const play = useCallback(() => {
@@ -248,10 +263,37 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     seek(chapters[Math.max(0, i - 1)].start);
   }, [chapters, t, seek]);
 
+  // Each book keeps its own speed: remembered here at once and saved with the position (the
+  // offline queue holds it until the server can be reached).
   const setRate = useCallback((r: number) => {
+    state.current.rate = r;
     setRateState(r);
     if (audio.current) audio.current.playbackRate = r;
-  }, [setRateState]);
+    const w = state.current.work;
+    if (w) {
+      writeMark(w.id, { rate: r });
+      save().catch(() => {});
+    }
+  }, [save]);
+  const setDefaultRate = useCallback(() => {
+    setPreference("playback_speed", state.current.rate).catch(() => {});
+  }, [setPreference]);
+  // Before speeds were kept per book, each browser kept one for every book: the first time the
+  // account has no default, that one becomes it.
+  const migrating = useRef(false);
+  useEffect(() => {
+    if (!me || !online || savedDefault != null || migrating.current) return;
+    const legacy = legacyRate();
+    if (legacy == null) return;
+    migrating.current = true;
+    setPreference("playback_speed", legacy).catch(() => {});
+  }, [me, online, savedDefault, setPreference]);
+  useEffect(() => {
+    if (!state.current.work) {
+      state.current.rate = defaultRate;
+      setRateState(defaultRate);
+    }
+  }, [defaultRate]);
 
   const setSleep = useCallback((s: "chapter" | number | null) => {
     if (s === null) setSleepState(null);
@@ -306,25 +348,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (!el) return;
       const tr = state.current.tracks[state.current.index];
       const gt = tr ? tr.offset_s + el.currentTime : 0;
-      const left = sleep.kind === "time" ? (sleep.endsAt - Date.now()) / 1000 : (sleep.end - gt) / rate;
-      if (left > 10) {
-        el.volume = 1;
-        return;
-      }
-      if (left > 0) {
-        el.volume = Math.max(0.05, left / 10);
+      const step = sleepStep(sleep, Date.now(), gt, rate);
+      if (!step.stop) {
+        el.volume = step.volume;
         return;
       }
       window.clearInterval(id);
       el.pause();
       el.volume = 1;
       setSleepState(null);
-      let back = gt;
-      try {
-        back = (await get<{ t: number; method: string }>(`/api/works/${work.id}/rewind-point?t=${gt.toFixed(2)}`)).t;
-      } catch {
-        back = Math.max(0, gt - 5);
-      }
+      const back = await sleepRewind(gt, (at) => get<{ t: number; method: string }>(`/api/works/${work.id}/rewind-point?t=${at.toFixed(2)}`));
       seek(back);
       await save(back);
       toast("Sleep timer: paused at the start of the last sentence you heard.");
@@ -345,7 +378,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         el.currentTime = state.current.pendingSeek;
         state.current.pendingSeek = null;
       }
-      el.playbackRate = rate;
+      el.playbackRate = state.current.rate;
     };
     const onPlay = () => {
       setPlaying(true);
@@ -397,7 +430,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       el.removeEventListener("canplay", onCan);
       document.removeEventListener("visibilitychange", onHide);
     };
-  }, [save, load, rate]);
+  }, [save, load]);
 
   // Media Session: lock screen, headphones, car controls.
   useEffect(() => {
@@ -440,8 +473,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const on = (e: Event) => {
-      const d = (e as CustomEvent<{ kind: string; id: number; server: { audio_s?: number | null } }>).detail;
-      if (d.kind === "work" && d.id === state.current.work?.id && d.server.audio_s != null) seek(d.server.audio_s);
+      const d = (e as CustomEvent<{ kind: string; id: number; server: { audio_s?: number | null; speed?: number | null } }>).detail;
+      if (d.kind !== "work" || d.id !== state.current.work?.id) return;
+      if (d.server.audio_s != null) seek(d.server.audio_s);
+      if (d.server.speed != null) {
+        // "Use the other device's" takes its speed with its position.
+        state.current.rate = d.server.speed;
+        setRateState(d.server.speed);
+        writeMark(d.id, { rate: d.server.speed });
+        if (audio.current) audio.current.playbackRate = d.server.speed;
+      }
     };
     window.addEventListener("lectern:position", on);
     return () => window.removeEventListener("lectern:position", on);
@@ -459,8 +500,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [handoff, work, t]);
 
   const value = useMemo<Player>(
-    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
-    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
+    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
+    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
   );
   void index;
   return (

@@ -110,7 +110,7 @@ export async function resolveConflict(e: QueuedPosition, choice: "mine" | "their
   if (choice === "theirs" && server) {
     const key = markKey(e.kind, e.id, e.body);
     if (e.kind === "page") patchMark(key, { page: server.page ?? 1 });
-    else if (e.body.source === "audio") patchMark(key, { t: server.audio_s ?? 0 });
+    else if (e.body.source === "audio") patchMark(key, { t: server.audio_s ?? 0, ...(server.speed != null ? { rate: server.speed } : {}) });
     else patchMark(key, { cfi: server.source === "web" ? server.raw ?? "" : "" });
     window.dispatchEvent(new CustomEvent("lectern:position", { detail: { kind: e.kind, id: e.id, server } }));
   }

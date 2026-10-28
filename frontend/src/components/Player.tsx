@@ -7,7 +7,7 @@ import { relativeTime } from "../lib/format";
 import { clock, RATES, usePlayer } from "../lib/player";
 import { useStore } from "../lib/store";
 import { Cover, tintStyle } from "./Cover";
-import { Back, Close, Expand, Forward, Pause, Play, Timer } from "./Icons";
+import { Back, Close, Expand, Forward, NextChapter, Pause, Play, PrevChapter, Timer } from "./Icons";
 import { OverflowMenu } from "./Menu";
 
 export function PlayButton({ big }: { big?: boolean }) {
@@ -75,7 +75,11 @@ export function RateMenu() {
       className="btn sm ghost"
       up
       trigger={<span className="tabular">{p.rate}×</span>}
-      actions={RATES.map((r) => ({ label: `${r}×`, checked: p.rate === r, onSelect: () => p.setRate(r) }))}
+      actions={[
+        ...RATES.map((r) => ({ label: `${r}×`, checked: p.rate === r, onSelect: () => p.setRate(r) })),
+        // Each book keeps its own speed; this one is for books not played yet.
+        ...(p.rate !== p.defaultRate ? [{ label: `Use ${p.rate}× for new books`, onSelect: p.setDefaultRate }] : []),
+      ]}
     />
   );
 }
@@ -142,7 +146,11 @@ export function MiniPlayer() {
           </span>
         </Link>
         <div className="mini-controls">
-          <span className="desktop-only"><SkipButtons><PlayButton /></SkipButtons></span>
+          <span className="desktop-only">
+            {p.chapters.length > 1 && <button className="icon-btn ghost" onClick={p.prevChapter} aria-label="Previous chapter" title="Previous chapter"><PrevChapter /></button>}
+            <SkipButtons><PlayButton /></SkipButtons>
+            {p.chapters.length > 1 && <button className="icon-btn ghost" onClick={p.nextChapter} aria-label="Next chapter" title="Next chapter"><NextChapter /></button>}
+          </span>
           <span className="mobile-inline"><PlayButton /></span>
           <Link className="icon-btn ghost desktop-only" to="/app/listening" aria-label="Open player" title="Open player"><Expand /></Link>
           <button className="icon-btn ghost sm" onClick={p.close} aria-label="Stop and close player" title="Close"><Close /></button>

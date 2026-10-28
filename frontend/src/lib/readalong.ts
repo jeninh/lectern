@@ -61,7 +61,8 @@ export type ProgressSource = "web" | "audio";
 export function saveProgress(
   workId: number,
   source: ProgressSource,
-  at: { sentence_n: number } | { audio_s: number },
+  // `speed`: the listening speed in use (listen mode), kept per book with the position.
+  at: ({ sentence_n: number } | { audio_s: number }) & { speed?: number },
   keepalive = false,
   title = "this book",
 ): Promise<WorkProgressResponse | null> {
