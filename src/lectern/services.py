@@ -178,7 +178,7 @@ class Maintenance:
             except Exception:  # noqa: BLE001
                 log.exception("backup tick failed")
             try:
-                storage.tick(self.session_factory, self.settings)
+                storage.tick(self.session_factory, self.settings, background=True)
             except Exception:  # noqa: BLE001
                 log.exception("storage scan failed")
 

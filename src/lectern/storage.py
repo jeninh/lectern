@@ -7,7 +7,8 @@ Sizing
     sizes (``st_size``); a file reachable twice through hard links counts once. The result,
     with the largest works and a short free-space history, is cached in ``instance_settings``
     (:data:`SCAN_KEY`): the page reads the cache, and a scan runs in the background, every
-    :data:`SCAN_INTERVAL` (the maintenance thread), when the owner asks, and after a cleanup.
+    :data:`SCAN_INTERVAL` (the maintenance thread), when the owner asks, and
+    when a cleanup finishes while the page is open (the page asks for it).
     Free space per volume (:func:`volumes`) is read live: it is one ``statvfs`` per volume.
 
 Cleanup
@@ -445,8 +446,16 @@ def start_scan(session_factory: sessionmaker, settings: Settings) -> bool:
     return True
 
 
-def tick(session_factory: sessionmaker, settings: Settings, now: datetime | None = None) -> bool:
-    """The maintenance thread's check: scan when the last scan is older than SCAN_INTERVAL."""
+def tick(
+    session_factory: sessionmaker,
+    settings: Settings,
+    now: datetime | None = None,
+    *,
+    background: bool = False,
+) -> bool:
+    """The maintenance thread's check: scan when the last scan is older than SCAN_INTERVAL.
+    ``background`` starts the scan in its own thread, so the walk never delays the backup
+    check that shares the maintenance thread."""
     now = now or utcnow()
     with session_factory() as db:
         at = (load(db).get("result") or {}).get("scanned_at")
@@ -454,6 +463,8 @@ def tick(session_factory: sessionmaker, settings: Settings, now: datetime | None
         last = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=now.tzinfo)
         if now - last < SCAN_INTERVAL:
             return False
+    if background:
+        return start_scan(session_factory, settings)
     return run_scan(session_factory, settings) is not None
 
 

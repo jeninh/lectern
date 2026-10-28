@@ -22,8 +22,8 @@ low. The health page (when it arrives) is meant to use the same setting.
 
 Measuring walks every file once, so it never happens on a page load. It runs in the
 background every six hours, when the page is first opened without a measurement, when you
-press **Measure now**, and after a cleanup; the page shows when it last ran. On a Pi with a
-few thousand books it takes seconds.
+press **Measure now**, and when a cleanup finishes while the page is open; the page shows when
+it last ran. On a Pi with a few thousand books it takes seconds.
 
 | Category | What it counts |
 |---|---|
