@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
@@ -93,6 +93,7 @@ def _preferences(user: User) -> dict:
         "show_technical_details": user.show_technical_details,
         "auto_file_imports": user.auto_file_imports,
         "data_saver": user.data_saver,
+        "playback_speed": user.playback_speed,
     }
 
 
@@ -101,6 +102,8 @@ class PreferencesIn(BaseModel):
     auto_file_imports: bool | None = None
     # The account's default; a device can choose otherwise in its player.
     data_saver: bool | None = None
+    # Listening speed for books not played yet (each book keeps its own once played).
+    playback_speed: float | None = Field(default=None, ge=0.5, le=4)
 
 
 @router.post("/me/preferences")
@@ -114,6 +117,8 @@ def update_preferences(auth: AuthCsrf, db: DbDep, body: PreferencesIn) -> dict:
         auth.user.auto_file_imports = body.auto_file_imports
     if body.data_saver is not None:
         auth.user.data_saver = body.data_saver
+    if body.playback_speed is not None:
+        auth.user.playback_speed = body.playback_speed
     db.commit()
     return {"preferences": _preferences(auth.user)}
 

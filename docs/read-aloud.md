@@ -36,8 +36,11 @@ unavailable).
   the following; a **Back to narration** button (with an arrow toward it) brings it back, and
   scrolling back to the narration resumes following on its own. Pressing play also returns to
   it.
-- **Read along** and **Listen** modes have separate speeds (0.75×–3×), remembered per browser:
-  following text usually wants a gentler pace than listening alone. Listen mode hides the text
+- **Read along** and **Listen** modes have separate speeds (0.75×–3×): following text usually
+  wants a gentler pace than listening alone. **Listen** uses the book's own speed, the one the
+  player uses, kept per book on the server and synced across devices (books not played yet
+  start at your default). The **Read along** speed stays one per browser for every book: the
+  pace you can follow text at depends on you and the screen more than on the book. Listen mode hides the text
   and shows the cover.
 - Keyboard: `Space` or `K` play/pause, `←`/`→` (or `J`/`L`) previous/next sentence, `<`/`>`
   slower/faster, `F` follow on/off. Lock-screen and headset controls work through the Media

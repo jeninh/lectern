@@ -84,6 +84,8 @@ class User(Base):
     # Migration 0027: the web reader's default typography and theme, only the fields the
     # person changed (routes/api/reader.py); NULL = never saved, the app's defaults apply.
     reader_settings: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # Migration 0029: listening speed for books not played yet; NULL until first chosen.
+    playback_speed: Mapped[float | None] = mapped_column(Float, default=None)
 
     passkeys: Mapped[list[Passkey]] = relationship(back_populates="user", cascade="all, delete")
     sync_keys: Mapped[list[SyncKey]] = relationship(back_populates="user", cascade="all, delete")
@@ -472,6 +474,9 @@ class WorkProgress(Base):
     device: Mapped[str] = mapped_column(String(128), default="")
     received_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    # Migration 0029: the listening speed last used for this work (player, read-along listen
+    # mode), written with an audio position; NULL until one is sent.
+    speed: Mapped[float | None] = mapped_column(Float, default=None)
 
 
 class ReadingState(Base):

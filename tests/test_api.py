@@ -260,6 +260,7 @@ def test_technical_details_preference(client, owner):
         "show_technical_details": False,
         "auto_file_imports": False,
         "data_saver": False,
+        "playback_speed": None,
     }
     # Writes need the CSRF token.
     r = client.post(
@@ -271,6 +272,14 @@ def test_technical_details_preference(client, owner):
     assert r.status_code == 200 and r.json()["preferences"]["show_technical_details"] is True
     assert api_post(client, "/api/me/preferences", owner["csrf"], {}).status_code == 200
     assert client.get("/api/me").json()["preferences"]["show_technical_details"] is True
+    # The listening speed for books not played yet (issue #71): set, kept, and bounded.
+    r = api_post(client, "/api/me/preferences", owner["csrf"], {"playback_speed": 1.25})
+    assert r.status_code == 200 and r.json()["preferences"]["playback_speed"] == 1.25
+    for bad in (0.1, 9):
+        body = {"playback_speed": bad}
+        assert api_post(client, "/api/me/preferences", owner["csrf"], body).status_code == 422
+    api_post(client, "/api/me/preferences", owner["csrf"], {"data_saver": True})
+    assert client.get("/api/me").json()["preferences"]["playback_speed"] == 1.25
     # Per user: a new member starts with it off.
     api_post(
         client,
@@ -281,6 +290,7 @@ def test_technical_details_preference(client, owner):
     post_form(client, "/logout", {"csrf_token": owner["csrf"]})
     login(client, "mem", "member password 123")
     assert client.get("/api/me").json()["preferences"]["show_technical_details"] is False
+    assert client.get("/api/me").json()["preferences"]["playback_speed"] is None
     post_form(client, "/logout", {"csrf_token": csrf_of(client)})
     assert (
         client.post("/api/me/preferences", json={}, headers={"origin": ORIGIN}).status_code == 401

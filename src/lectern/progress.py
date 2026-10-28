@@ -187,6 +187,9 @@ def progress_json(db: Session, user_id: int, work_id: int) -> dict:
         "audio_s": None,
         "percent": None,
         "estimated": False,
+        # The listening speed last used for this work, on any device; null: never set (the
+        # app then uses the person's default, ``preferences.playback_speed``).
+        "speed": None,
         "count": wt.count,
         "total_duration_s": tl.total_s,
         "koreader": koreader_candidate(db, user_id, work_id, wt, tl),
@@ -198,6 +201,7 @@ def progress_json(db: Session, user_id: int, work_id: int) -> dict:
         raw=row.raw,
         device=row.device,
         received_at=iso(row.received_at),
+        speed=row.speed,
     )
     audio_raw = _raw_seconds(row) if row.source == ProgressSource.AUDIO else None
     if wt.count and row.sentence_n < wt.count:
@@ -300,8 +304,10 @@ def put_progress(
     audio_s: float | None = None,
     text: tuple[int, int] | None = None,
     raw: str | None = None,
+    speed: float | None = None,
 ) -> None:
-    """Last write wins; ``received_at`` is the server clock. Caller commits."""
+    """Last write wins; ``received_at`` is the server clock. ``speed``, when given, replaces
+    the work's listening speed; otherwise the stored one stays. Caller commits."""
     wt = SentenceCache.get(db, work_id)
     tl = audio_timeline(db, work_id)
     if sentence is not None:
@@ -338,6 +344,8 @@ def put_progress(
     row.raw = (raw or stored_raw)[:1024]
     row.device = device[:128]
     row.received_at = utcnow()
+    if speed is not None:
+        row.speed = speed
 
 
 # --- KOReader xpointers <-> sentence positions (lectern.routes.kosync) -----------------------

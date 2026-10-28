@@ -333,7 +333,8 @@ through `/syncs/progress` exactly as today; milestone 4 projects those writes on
   "received_at": "2026-10-20T10:00:00Z",
   "text": {"spine_index": 3, "char": 1024},
   "audio_s": 133.7,
-  "percent": 2.3
+  "percent": 2.3,
+  "speed": 1.5
 }
 ```
 
@@ -347,7 +348,15 @@ the sentence is unmatched and no neighbour is either). `percent` is `sentence_n 
 - `{"audio_s": 133.7}` (converted with `SentenceIndex.at_time`)
 - `{"spine_index": 3, "char": 1024}` (converted with `SentenceIndex.at_text`)
 
+and optionally `"speed"` (0.5–4): the listening speed in use (player, read-along listen mode).
+
 Response is the same shape as `GET`. Rules:
+
+- **Speed per book** (issue #71, migration 0029, `work_progress.speed`): the speed last sent for
+  this user and work, on any device; `null` until one is sent. A position saved without
+  `speed` keeps the stored one. It rides with the position, so an offline replay that loses
+  (`409`) leaves it unchanged too. Books with no speed play at the user's default,
+  `preferences.playback_speed` (`GET /api/me`, `POST /api/me/preferences`; `null` until set).
 
 - Last write wins; `received_at` is the server clock. There is no client timestamp and no
   merge: the device that wrote most recently defines the position (this matches what the
