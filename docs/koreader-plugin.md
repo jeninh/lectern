@@ -212,15 +212,21 @@ position, and the books queued for the device that it has not downloaded yet.
 - The report is kept on the Pi (one row per device, replaced by each newer one). Nothing is
   looked up anywhere else, over the home Wi-Fi address and Tailscale alike, and in offline mode.
 
-**Plugin side (not in this release of the plugin).** The server accepts the report at
-`PUT /koplugin/report` (below). The bundled plugin does not send it yet; it needs to send it
-with its quiet sync and through its outbox, never waking the device for it:
-`{age, battery, charging, free_bytes, plugin_version, koreader_version, books: [{work_id |
-document, percentage}]}`, where `age` is how many seconds ago the values were read (the server
-dates the report, so the device's clock does not matter), `work_id` names a file the plugin
-downloaded from Lectern and `document` the KOReader digest of another book with a sidecar. For
-*update available*, `_meta.lua` must declare a `version`; until it does, no update is ever
-claimed.
+**Plugin side.** The plugin sends the report to `PUT /koplugin/report` (below) with its quiet
+check of the queue (on start, wake, Wi-Fi back, and every 15 minutes while KOReader runs, with
+*Sync automatically* on) and with **Sync now**, only after that check reached Lectern, and over
+whichever address it uses (home Wi-Fi or Tailscale). It adds no timer, retry, or Wi-Fi prompt of
+its own: a report that cannot go waits beside the outbox (only the newest is kept) and goes with
+the next push of a position or highlights, or the next check. It is never counted as *waiting
+to send*. The body is `{age, battery, charging, free_bytes, plugin_version, koreader_version,
+books: [{work_id | document, percentage}]}`, where `age` is how many seconds ago the values were
+read (the server dates the report, so the device's clock does not matter), `work_id` names a
+file the plugin downloaded from Lectern (still on the device, opened or not) and `document` the
+KOReader digest of another recently read book with a sidecar (the last 100 in KOReader's
+history). Free space is that of the folder books download to. `plugin_version` is the `version`
+in the plugin's `_meta.lua`, which is raised with every change to the plugin; a plugin older
+than this release sends no report, and a report without a version never claims an update. After
+updating Lectern, reinstall the plugin on each device to get the new version.
 
 ## Security
 
