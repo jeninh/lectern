@@ -207,6 +207,7 @@ export function bookCss(s: ReaderSettings, resolved: ResolvedTheme, origin: stri
 const DEFAULT_KEY = "lectern.reader"; // the default; before #79, the only (per-browser) setting
 const bookKey = (id: number) => `lectern.reader.book.${id}`;
 const PENDING_KEY = "lectern.reader.pending"; // scopes with a change the server has not taken
+const OWNER_KEY = "lectern.reader.user"; // whose settings these are
 type Scope = "default" | number;
 
 function readJson(key: string): unknown {
@@ -233,6 +234,24 @@ function markPending(scope: Scope, on: boolean) {
   writeJson(PENDING_KEY, on ? [...rest, scope] : rest.length ? rest : null);
 }
 
+/**
+ * Make this browser's reader settings `userId`'s. Someone else's (another person signed in
+ * here before; clearDevice may not have run yet) are deleted first, so they are never sent
+ * to this person's account. A copy with no owner, from before settings were synced, is kept:
+ * it becomes this person's default (see `reconcile`).
+ */
+export function claimReaderStorage(userId: number) {
+  const owner = readJson(OWNER_KEY);
+  if (owner !== null && owner !== userId) {
+    try {
+      for (const k of Object.keys(localStorage)) if (/^lectern\.reader(\.|$)/.test(k)) localStorage.removeItem(k);
+    } catch {
+      /* no storage */
+    }
+  }
+  writeJson(OWNER_KEY, userId);
+}
+
 function send(scope: Scope, value: SettingsPatch | null, keepalive = false): Promise<unknown> {
   if (scope === "default") return put("/api/me/reader-settings", { settings: value ?? {} }, keepalive);
   return value === null ? del(`/api/works/${scope}/reader-settings`) : put(`/api/works/${scope}/reader-settings`, { settings: value }, keepalive);
@@ -252,6 +271,7 @@ export function useReaderSettings(workId: number) {
   // and changes wait in this browser (`pending`) until it is back.
   const { me } = useStore();
   const online = !!me && !!csrf();
+  const userId = me?.user.id ?? null;
 
   const flush = useCallback((scope: Scope, keepalive = false) => {
     const t = timers.current.get(scope);
@@ -265,6 +285,7 @@ export function useReaderSettings(workId: number) {
 
   useEffect(() => {
     let gone = false;
+    if (userId !== null) claimReaderStorage(userId);
     const local: Stored = { default: clean(readJson(DEFAULT_KEY)), book: clean(readJson(bookKey(workId))) };
     setStored(local);
     if (!online) return;
@@ -285,7 +306,7 @@ export function useReaderSettings(workId: number) {
       gone = true;
       for (const scope of [...pendingTimers.keys()]) flush(scope, true);
     };
-  }, [workId, online, flush]);
+  }, [workId, online, userId, flush]);
 
   const write = useCallback((scope: Scope, value: SettingsPatch | null) => {
     const next = scope === "default" ? { ...latest.current, default: value } : { ...latest.current, book: value };

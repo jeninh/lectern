@@ -165,7 +165,9 @@ export async function clearDevice({ keepWorker = false } = {}): Promise<void> {
   }
   await dropDatabase();
   try {
-    for (const k of Object.keys(localStorage)) if (/^lectern\.(read|listen|page)\./.test(k)) localStorage.removeItem(k);
+    // lectern.reader*: the reader settings' offline copy and pending changes (lib/reader.ts),
+    // which would otherwise be sent to the next person's account.
+    for (const k of Object.keys(localStorage)) if (/^lectern\.(read|listen|page)\.|^lectern\.reader(\.|$)/.test(k)) localStorage.removeItem(k);
   } catch {
     /* no storage */
   }
