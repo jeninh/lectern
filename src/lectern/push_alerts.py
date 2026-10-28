@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
+from sqlalchemy import event
+from sqlalchemy.orm import Session as OrmSession
+
 from lectern import egress, notify
 from lectern.config import Settings
 
@@ -202,6 +205,20 @@ def send(target: Target, title: str, message: str, level: str) -> str | None:
     return error
 
 
+_PENDING = "lectern_push_pending"
+
+
+@event.listens_for(OrmSession, "after_commit")
+def _after_commit(session: OrmSession) -> None:
+    for sink, ev, push in session.info.pop(_PENDING, ()):
+        sink._enqueue(ev, push)
+
+
+@event.listens_for(OrmSession, "after_soft_rollback")
+def _after_rollback(session: OrmSession, _previous) -> None:  # noqa: ANN001
+    session.info.pop(_PENDING, None)
+
+
 class PushSink:
     """A :class:`lectern.notify.Sink`: alerts with a ``push`` payload go to a queue that one
     thread delivers from, so a slow push server never holds up the caller. The same event sent
@@ -218,10 +235,18 @@ class PushSink:
         return f"PushSink({self.target.kind})"
 
     def deliver(self, db, note, user) -> None:  # noqa: ANN001 - notify.Sink
+        """Hold the push on the session until it commits: an alert whose notification rows
+        (the dedupe record) roll back must not be pushed, or every retry would push again."""
         push = (note.data or {}).get("push")
         if not isinstance(push, dict):
             return
         event = str((note.data or {}).get("event") or note.id)
+        pending = db.info.setdefault(_PENDING, [])
+        if any(e == event for _s, e, _p in pending):
+            return  # the same event for another owner: one push
+        pending.append((self, event, push))
+
+    def _enqueue(self, event: str, push: dict) -> None:
         if event in self._seen:
             return
         self._seen.append(event)

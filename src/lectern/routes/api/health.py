@@ -37,8 +37,9 @@ def _view(db, settings, max_age_s: float) -> dict:
 
 @router.get("")
 def health_page(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict:
-    """Every check; a result younger than ``health.FRESH_S`` is reused, so polling is cheap."""
-    return _view(db, settings, health.FRESH_S)
+    """Every check, as the maintenance thread last stored them (evaluated here only when that
+    result is older than ``health.STALE_S``), so polling is cheap."""
+    return _view(db, settings, health.STALE_S)
 
 
 @router.post("/check")

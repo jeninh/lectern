@@ -77,7 +77,7 @@ export function HealthPage() {
   useEffect(() => {
     load();
   }, [load]);
-  // The server reuses a result for 15 s, so this costs a row read on a Raspberry Pi.
+  // The page shows what the server's 5-minute check stored, so this is a row read on a Pi.
   useVisiblePolling(load, 60000);
   const checkNow = async () => {
     try {

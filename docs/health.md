@@ -12,7 +12,7 @@ wrong on the server in one page, with one overall status: OK, warning (amber), o
 | Disk space | Each volume (data, library, backups; a volume they share is shown once) | less than 10 % free | less than 5 % free |
 | Jobs | Failed jobs (alignment, narration, text recognition, PDF conversion, data-saver copies) in the last 7 days that were not retried successfully since | any | |
 | Jobs | Stuck jobs: queued for a day with nobody taking them, or running without a heartbeat for an hour | any | |
-| Workers | Kokoro narration, Piper narration, alignment | a worker that offered it has not been seen for 30 minutes, or its self-test failed | |
+| Workers | Kokoro narration, Piper narration, alignment | a worker that offered it has not been seen for 12 hours, or its self-test failed | |
 | Other | Database integrity (checked by every backup) | | the last backup's copy failed the check |
 | Other | Database schema at the latest revision | | not at head |
 | Other | Offline mode, push alerts | push alerts set up wrongly, or the last push was not delivered | |
@@ -23,18 +23,19 @@ settings in `.env`:
 
 - `LECTERN_HEALTH_DISK_WARN_PERCENT` (default 10) and `LECTERN_HEALTH_DISK_CRITICAL_PERCENT`
   (default 5);
-- `LECTERN_HEALTH_WORKER_GRACE_MINUTES` (default 30): raise it if the Mac that runs Kokoro
-  sleeps at night.
+- `LECTERN_HEALTH_WORKER_GRACE_MINUTES` (default 720, 12 hours, so a Mac that runs Kokoro
+  and sleeps overnight does not alert every night; lower it for a worker that is always on).
 
-The server checks every 5 minutes (with background jobs on); the page reuses a result that is
-less than 15 seconds old, so leaving it open costs almost nothing on a Raspberry Pi. **Check
-now** runs every check at once. `/healthz` stays a bare liveness check and reveals nothing.
+The server checks every 5 minutes (with background jobs on) and the page shows that result, so
+leaving it open costs a database read on a Raspberry Pi. **Check now** runs every check at
+once. `/healthz` stays a bare liveness check and reveals nothing.
 
 ## Alerts
 
 When a check gets worse (OK → amber, amber → red), every owner gets one notification in the
 bell; when it is back to OK, one recovery notification. Each check alerts at most once a day
-per level, so a value that bounces around a threshold does not flood you.
+per level, so a value that bounces around a threshold does not flood you; a check that turns
+bad again within that day is alerted once the day is over if it is still bad.
 
 ### Push alerts (optional)
 

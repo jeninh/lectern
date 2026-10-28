@@ -14,8 +14,9 @@ notifications; with a push target in ``.env`` they are also pushed (:mod:`lecter
 with the check's title, level, and ``summary`` only, which is why summaries never hold book
 titles, usernames, worker names, or paths (``detail`` is for the page).
 
-The maintenance thread refreshes every :data:`POLL_S`; the page reuses a result younger than
-:data:`FRESH_S`, so polling it costs a single row read most of the time.
+The maintenance thread refreshes every :data:`POLL_S`; the page shows that stored result while
+it is younger than :data:`STALE_S` (so polling it is a row read), and evaluates by itself only
+without background jobs or on "Check now".
 
 Extension point (#76, restore drills): :func:`register_check` adds a provider whose checks
 are evaluated, shown (in their ``group``), and alerted like the built-in ones.
@@ -23,6 +24,7 @@ are evaluated, shown (in their ``group``), and alerted like the built-in ones.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -48,7 +50,7 @@ GROUPS = ("backups", "disk", "jobs", "workers", "other")
 STATE_KEY = "health"
 KIND = "health.alert"
 POLL_S = 300.0
-FRESH_S = 15.0
+STALE_S = POLL_S + 60.0  # the page refreshes by itself only when the thread has not
 ALERT_EVERY = timedelta(hours=20)  # "at most once a day", as the backup failure alert
 BACKUP_LATE = timedelta(hours=26)  # a nightly backup a couple of hours past its night
 BACKUP_CRITICAL = timedelta(hours=72)
@@ -515,13 +517,26 @@ def evaluate(db: Session, settings: Settings, now: datetime | None = None) -> li
         parts.append((name, lambda p=provider: _as_list(p(db, settings, now))))
     for name, part in parts:
         try:
-            checks.extend(part())
+            checks.extend(_valid(part()))
         except Exception:  # noqa: BLE001 - one broken check must not hide the others
             log.exception("health check %s failed", name)
             checks.append(
                 Check(f"check.{name}", "other", f"Check: {name}", WARNING, "Could not run")
             )
     return checks
+
+
+def _valid(found: Iterable[Check]) -> list[Check]:
+    """Only well-formed checks, with JSON-safe details (they are stored); raises otherwise, so
+    a broken provider is shown as "Could not run" instead of failing the whole refresh."""
+    out = []
+    for c in found:
+        if not isinstance(c, Check) or c.level not in RANK or not isinstance(c.detail, dict):
+            raise TypeError(f"not a health check: {type(c).__name__}")
+        c.detail = json.loads(json.dumps(c.detail))  # TypeError on a datetime, a set, ...
+        c.id, c.group, c.title, c.summary = str(c.id), str(c.group), str(c.title), str(c.summary)
+        out.append(c)
+    return out
 
 
 def _as_list(result: Check | Iterable[Check] | None) -> list[Check]:
@@ -560,7 +575,9 @@ def _transitions(db: Session, previous: dict, checks: list[Check], now: datetime
         prev = previous.get(c.id) or {"level": OK, "since": _iso(now), "alerted": False}
         level, was = RANK.get(c.level, 0), RANK.get(prev.get("level"), 0)
         alerted = bool(prev.get("alerted"))
-        if level > was:
+        # Worse than before, or still bad and not alerted yet (its alert was deduped after a
+        # flap): try again on every refresh; the dedupe caps it at one a day per level.
+        if level > was or (level > 0 and not alerted):
             alerted = _alert(db, owners, c, c.level, f"{c.id}:{c.level}") or alerted
         elif level == 0 and was > 0 and alerted:
             _alert(db, owners, c, OK, f"{c.id}:{OK}")
@@ -579,12 +596,14 @@ def refresh(
     db: Session, settings: Settings, now: datetime | None = None, *, max_age_s: float = 0
 ) -> dict:
     """Evaluate, alert on transitions, store, and commit; returns the stored view. With
-    ``max_age_s``, a stored result at most that old is returned as is."""
+    ``max_age_s``, a stored result at most that old is returned as is (without waiting for a
+    refresh another thread is running, which a hung backup mount could hold up)."""
+    now = now or utcnow()
+    if max_age_s and _fresh(_stored(db), now, max_age_s):
+        return _stored(db)
     with _lock:
         stored = _stored(db)
-        now = now or utcnow()
-        checked = _parse(stored.get("checked_at"))
-        if max_age_s and checked and 0 <= (now - checked).total_seconds() <= max_age_s:
+        if max_age_s and _fresh(stored, now, max_age_s):
             return stored
         checks = evaluate(db, settings, now)
         view = {
@@ -598,8 +617,17 @@ def refresh(
             db.add(InstanceSetting(key=STATE_KEY, value=view))
         else:
             row.value = view
-        db.commit()
+        try:
+            db.commit()  # pushes are handed over only now (lectern.push_alerts)
+        except Exception:
+            db.rollback()
+            raise
         return view
+
+
+def _fresh(stored: dict, now: datetime, max_age_s: float) -> bool:
+    checked = _parse(stored.get("checked_at"))
+    return checked is not None and 0 <= (now - checked).total_seconds() <= max_age_s
 
 
 def summary(db: Session) -> dict:

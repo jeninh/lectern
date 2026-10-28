@@ -339,3 +339,94 @@ def test_settings_summary_masks_push_secrets(settings):
     )
     dumped = json.dumps({k: str(v) for k, v in s.model_dump().items()})
     assert TOKEN not in dumped and TOPIC not in dumped and TOKEN not in repr(s)
+
+
+# --- review regressions ---------------------------------------------------------------------------
+
+
+def test_broken_providers_show_could_not_run_and_never_push_twice(
+    client, owner, settings, fake_push
+):
+    from datetime import datetime
+
+    from pydantic import SecretStr
+
+    srv, handler = fake_push
+    s = _settings(settings, alert_ntfy_url=SecretStr(f"http://127.0.0.1:{srv.server_port}/{TOPIC}"))
+    health.register_check("not_checks", lambda db, st, now: {"a": 1})  # a dict, not Checks
+    health.register_check(
+        "bad_detail",
+        lambda db, st, now: health.Check(
+            "drill", "backups", "Drill", "critical", "failed", {"at": datetime.now()}
+        ),
+    )
+    sink = push_alerts.install(s)
+    try:
+        db = session_factory()()
+        t0 = utcnow()
+        for i in range(3):
+            v = health.refresh(db, s, t0 + timedelta(minutes=i))
+        assert client.get("/api/admin/health").status_code == 200
+        broken = {c["id"]: c for c in v["checks"] if c["summary"] == "Could not run"}
+        assert set(broken) == {"check.not_checks", "check.bad_detail"}
+        sink.join()
+        # Both broken providers turned amber once: one alert each, one push each, not one a refresh.
+        assert sorted(n.data["check"] for n in _notes(db)) == sorted(broken)
+        assert len(handler.got) == 2
+        db.close()
+    finally:
+        health.unregister_check("not_checks")
+        health.unregister_check("bad_detail")
+        push_alerts.uninstall(sink)
+
+
+def test_a_push_waits_for_the_commit(client, owner, settings, fake_push):
+    from pydantic import SecretStr
+
+    srv, handler = fake_push
+    s = _settings(settings, alert_ntfy_url=SecretStr(f"http://127.0.0.1:{srv.server_port}/{TOPIC}"))
+    sink = push_alerts.install(s)
+    try:
+        db = session_factory()()
+        check = health.Check("disk.data", "disk", "Data volume", "critical", "3% free")
+        for _ in range(3):  # a refresh whose commit fails (e.g. the database is locked)
+            assert health._alert(db, notify.owners(db), check, "critical", "disk.data:critical")
+            db.rollback()
+        sink.join()
+        assert handler.got == [] and _notes(db) == []
+        assert health._alert(db, notify.owners(db), check, "critical", "disk.data:critical")
+        db.commit()
+        sink.join()
+        assert len(handler.got) == 1
+        db.close()
+    finally:
+        push_alerts.uninstall(sink)
+
+
+def test_a_check_that_flaps_back_to_bad_is_alerted_again(client, owner, settings):
+    level = {"v": "ok"}
+    health.register_check(
+        "flap", lambda db, s, now: health.Check("flap", "other", "Flap", level["v"], level["v"])
+    )
+    try:
+        db = session_factory()()
+        t0 = utcnow()
+        for i, lv in enumerate(["ok", "warning", "ok", "warning", "warning"]):
+            level["v"] = lv
+            health.refresh(db, settings, t0 + timedelta(minutes=i))
+        assert [n.title for n in _notes(db)] == ["Flap: warning", "Flap: back to OK"]
+        # Still amber once the day's dedupe is over: alerted again, then not again.
+        for n in _notes(db):
+            n.created_at -= timedelta(hours=21)
+        db.commit()
+        health.refresh(db, settings, t0 + timedelta(minutes=10))
+        health.refresh(db, settings, t0 + timedelta(minutes=15))
+        assert [n.title for n in _notes(db)][-1] == "Flap: warning" and len(_notes(db)) == 3
+        db.close()
+    finally:
+        health.unregister_check("flap")
+
+
+def test_disk_thresholds_must_be_ordered(settings):
+    with pytest.raises(ValueError, match="CRITICAL_PERCENT"):
+        Settings(**{**settings.model_dump(), "health_disk_critical_percent": 20.0})
