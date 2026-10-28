@@ -234,6 +234,9 @@ class ProgressIn(BaseModel):
     char: int | None = Field(default=None, ge=0)
     # Web reader only: its own precise locator (an EPUB CFI), kept as ``raw``.
     raw: str | None = Field(default=None, max_length=1024)
+    # The listening speed now in use for this work (player, read-along listen mode); kept per
+    # user and work, and returned as ``speed``. Omitted: the stored speed stays.
+    speed: float | None = Field(default=None, ge=0.5, le=4)
     # A position saved while offline, sent later from the device's queue (docs/offline.md).
     offline: OfflineReplay | None = None
 
@@ -270,6 +273,7 @@ def set_progress(auth: AuthCsrf, db: DbDep, work_id: int, body: ProgressIn) -> d
             audio_s=body.audio_s,
             text=(body.spine_index, body.char) if body.spine_index is not None else None,
             raw=body.raw if body.source == "web" else None,
+            speed=body.speed,
         )
     except ProgressError as exc:
         raise HTTPException(exc.status, exc.code) from None

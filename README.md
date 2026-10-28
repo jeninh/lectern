@@ -302,8 +302,10 @@ Readers never see add, edit, or trash controls, and the API refuses them (`403`)
   keeps different settings for one book. The fonts include OpenDyslexic, Atkinson
   Hyperlegible, and Lexend, served by Lectern itself ([`frontend/fonts`](frontend/fonts/README.md)).
   The page viewer for PDFs and comics uses the same theme. `←`/`→` turn pages.
-- **Listening** (`/app/listening`, `G` `P`): chapters across all tracks, 0.8–3× speed,
-  ±15/30 s skips, a sleep timer (minutes or end of chapter) that fades out and rewinds to the
+- **Listening** (`/app/listening`, `G` `P`): chapters across all tracks, 0.8–3× speed
+  remembered per book and synced across your devices (books not played yet use your default:
+  **Use 1.5× for new books** in the speed menu), ±15/30 s skips and previous/next chapter,
+  a sleep timer (minutes or end of chapter) that fades out and rewinds to the
   start of the last sentence heard, lock-screen and headphone controls (Media Session), and a
   mini-player that keeps playing while you browse (above the tab bar on phones). Audio streams
   with HTTP range requests; originals stay downloadable.
@@ -395,7 +397,7 @@ list (the expanded card on Home, or the book sheet in the Library) offers:
 
 - **Read-along** in the browser: the sentence being spoken is highlighted; click a sentence to
   play from it; the page follows the narration until you scroll away. Separate speeds for
-  reading along and for listening only; keyboard (`Space`, `←`/`→`, `<`/`>`, `F`) and
+  reading along (per browser) and for listening only (the book's own, synced); keyboard (`Space`, `←`/`→`, `<`/`>`, `F`) and
   screen-reader support; your position is saved.
 - **Narrated EPUB**: the book with EPUB 3 Media Overlays and the audio inside, built on request
   and cached at `<Author>/<Title>/derived/read-aloud.epub`. Download requires sign-in like any

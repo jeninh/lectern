@@ -7,6 +7,9 @@ import { PageTitle } from "../components/Shell";
 import { ApiError, get } from "../lib/api";
 import { getBook, orOffline } from "../lib/offline/store";
 import { useLocalStorage, useReducedMotion } from "../lib/hooks";
+import { legacyRate, pickRate } from "../lib/playback";
+import { readMark, writeMark } from "../lib/player";
+import { useStore } from "../lib/store";
 import {
   cpIndexer,
   formatClock,
@@ -130,11 +133,15 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
   const reduced = useReducedMotion();
   const [mode, setMode] = useLocalStorage<Mode>("lectern.readalong.mode", "readalong");
   // Separate speeds: following the text usually wants a gentler pace than listening alone.
+  // Listening uses the book's own speed, the one the player uses, kept per book on the server
+  // (lib/playback.ts). The read-along speed stays one per browser for every book.
+  const { me } = useStore();
   const [readSpeed, setReadSpeed] = useLocalStorage<number>("lectern.speed.readalong", 1);
-  const [listenSpeed, setListenSpeed] = useLocalStorage<number>("lectern.speed.listen", 1);
+  const [listenSpeed, setListenSpeedState] = useState(() => pickRate(data.progress, readMark(work.id), me?.preferences.playback_speed ?? legacyRate() ?? 1));
+  const listenSpeedRef = useRef(listenSpeed);
+  listenSpeedRef.current = listenSpeed;
   const [follow, setFollow] = useLocalStorage<boolean>("lectern.readalong.follow", true);
   const speed = mode === "readalong" ? readSpeed : listenSpeed;
-  const setSpeed = mode === "readalong" ? setReadSpeed : setListenSpeed;
 
   const tracks = data.tracks.tracks;
   const total = data.tracks.total_duration_s;
@@ -230,10 +237,24 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
       const n = currentRef.current;
       if (n < 0) return;
       lastSave.current = { at: Date.now(), n };
-      saveProgress(work.id, modeRef.current === "listen" ? "audio" : "web", { sentence_n: n }, keepalive, work.title).catch(() => {});
+      const listen = modeRef.current === "listen";
+      saveProgress(work.id, listen ? "audio" : "web", { sentence_n: n, ...(listen ? { speed: listenSpeedRef.current } : {}) }, keepalive, work.title)
+        .then((r) => listen && r?.received_at && writeMark(work.id, { seenAt: r.received_at }))
+        .catch(() => {});
     },
     [work.id],
   );
+
+  const setListenSpeed = useCallback(
+    (r: number) => {
+      listenSpeedRef.current = r;
+      setListenSpeedState(r);
+      writeMark(work.id, { rate: r });
+      save();
+    },
+    [work.id, save],
+  );
+  const setSpeed = mode === "readalong" ? setReadSpeed : setListenSpeed;
 
   const applyRate = useCallback(() => {
     const a = audio.current;

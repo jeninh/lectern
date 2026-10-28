@@ -21,6 +21,8 @@ export interface ServerPosition {
   percent?: number | null;
   audio_s?: number | null;
   raw?: string | null;
+  /** The work's listening speed (issue #71). */
+  speed?: number | null;
   /** Page progress: page, percentage, updated_at. */
   page?: number | null;
   percentage?: number | null;
