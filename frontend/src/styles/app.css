@@ -6529,3 +6529,42 @@ table.compare td:first-child {
   border-radius: 2px;
   padding: 0 1px;
 }
+
+/* Admin → Storage (docs/storage.md) */
+.storage-volumes {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px;
+  display: grid;
+  gap: 12px;
+}
+.storage-volumes .meter {
+  margin-top: 6px;
+}
+.storage-volumes li.low .meter span {
+  background: var(--danger);
+}
+.meter.thin {
+  height: 6px;
+}
+.storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.storage-items {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0;
+  max-height: 40vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.storage-items li {
+  padding: 8px 10px;
+}
+.storage-items li + li {
+  border-top: 1px solid var(--line);
+}

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from lectern import queue
 from lectern.align import jobs
 from lectern.align.transcribe import MODELS
+from lectern.jobs import CLEANUP
 from lectern.models import (
     JOB_ACTIVE_STATUSES,
     AlignmentStatus,
@@ -83,6 +84,8 @@ def list_jobs(
         stmt = stmt.where(Job.work_id == work_id)
     if kind:
         stmt = stmt.where(Job.kind == kind)
+    if auth.user.role != Role.OWNER:  # storage cleanup names files and sizes: owner only
+        stmt = stmt.where(Job.kind != CLEANUP)
     rows = db.scalars(stmt.order_by(Job.id.desc()).limit(JOBS_PAGE)).all()
     workers = _worker_names(db)
     speed = jobs.measured_speed(db, None)
@@ -97,7 +100,7 @@ def list_jobs(
 @router.get("/jobs/{job_id}")
 def job_detail(auth: JobViewer, db: DbDep, settings: SettingsDep, job_id: int) -> dict:
     job = db.get(Job, job_id)
-    if job is None:
+    if job is None or (job.kind == CLEANUP and auth.user.role != Role.OWNER):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     return _job_json(db, job, _worker_names(db), server_capabilities(db, settings),
                      auth.user.role == Role.OWNER)  # fmt: skip
@@ -276,7 +279,7 @@ def request_align_many(
 @router.post("/jobs/{job_id}/cancel")
 def cancel(request: Request, auth: JobManager, db: DbDep, job_id: int) -> dict:
     job = db.get(Job, job_id)
-    if job is None:
+    if job is None or (job.kind == CLEANUP and auth.user.role != Role.OWNER):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     from lectern.tts import jobs as tts_jobs
 

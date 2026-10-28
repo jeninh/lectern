@@ -78,6 +78,8 @@ services:
       LECTERN_ALIGN_THREADS: ${LECTERN_ALIGN_THREADS:-0}
       # 1 = offline mode: no outbound internet connections from Lectern (docs/offline-mode.md).
       LECTERN_OFFLINE: ${LECTERN_OFFLINE:-0}
+      # Admin → Storage flags a volume with less free space than this percentage (docs/storage.md).
+      LECTERN_STORAGE_WARN_FREE_PERCENT: ${LECTERN_STORAGE_WARN_FREE_PERCENT:-10}
       # Email-in (docs/email-in.md): off unless LECTERN_EMAIL_IN=1. Lectern reads one mailbox
       # over IMAP with TLS (outbound only; nothing here listens for mail). Empty = default.
       LECTERN_EMAIL_IN: ${LECTERN_EMAIL_IN:-}

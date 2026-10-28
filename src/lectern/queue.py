@@ -123,6 +123,7 @@ def _load_builtin() -> None:
         import lectern.jobs  # noqa: F401 - registers "transcode"
         import lectern.ocr.jobs  # noqa: F401 - registers "ocr" (scanned PDFs)
         import lectern.pdf2epub.jobs  # noqa: F401 - registers "pdf2epub" (server-only)
+        import lectern.storage  # noqa: F401 - registers "storage-cleanup" (server-only)
 
         try:
             import lectern.tts.jobs  # noqa: F401 - registers "tts" (generated audiobooks)
