@@ -6,8 +6,8 @@ copies it downloaded. Deleting the shelf or the device ends the follow.
 ``app_passwords.auto_download``: the plugin downloads queued books on its quiet automatic sync.
 ``device_queue_items.followed``: the item was queued by the followed shelf, not by a person.
 
-Revision ID: 0019_shelf_sync
-Revises: 0018_library_filters
+Revision ID: 0023_shelf_sync
+Revises: 0022_annotations
 Create Date: 2026-10-27
 
 """
@@ -17,8 +17,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0019_shelf_sync"
-down_revision = "0018_library_filters"
+revision = "0023_shelf_sync"
+down_revision = "0022_annotations"
 branch_labels = None
 depends_on = None
 

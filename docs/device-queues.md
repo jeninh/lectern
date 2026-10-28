@@ -203,9 +203,9 @@ OPDS (HTTP Basic with the device's app password; the per-IP Basic rate limit app
 `device_queue_items` (migration `0008`): `app_password_id`, `user_id` (the device's owner),
 `work_id`, `status` (`pending`/`delivered`/`removed`), `position`, `queued_by`, `queued_at`,
 `delivered_at`, `delivered_file_id`, `removed_at`, `removed_by`, `updated_at`, and `followed`
-(migration `0019`: queued by the followed shelf; with `removed_by` empty, removed because it
+(migration `0023_shelf_sync`: queued by the followed shelf; with `removed_by` empty, removed because it
 left the shelf). Deleting a device's app password, a user, or a work deletes their items.
 
-`device_follows` (migration `0019`): `app_password_id` (primary key), `shelf_id`, `cleanup`,
+`device_follows` (migration `0023_shelf_sync`): `app_password_id` (primary key), `shelf_id`, `cleanup`,
 `created_at`; deleting the shelf or the app password deletes the follow.
-`app_passwords.auto_download` (migration `0019`, default off).
+`app_passwords.auto_download` (migration `0023_shelf_sync`, default off).

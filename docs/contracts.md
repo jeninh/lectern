@@ -1200,7 +1200,7 @@ Table `device_queue_items` (migration `0008`), API `/api/device-queues/*`, and t
 `/opds/continue`, `/opds/up-next`, `/opds/queue` are specified in
 [`device-queues.md`](device-queues.md), including who may queue to which device and exactly
 which download marks an item delivered. Shelf sync (`device_follows`,
-`app_passwords.auto_download`, `device_queue_items.followed`, migration `0019`) is in
+`app_passwords.auto_download`, `device_queue_items.followed`, migration `0023_shelf_sync`) is in
 [Following a shelf](device-queues.md#following-a-shelf).
 - **Reading them.** `GET /api/notifications?limit=` → `{items: [{id, kind, severity, title,
   body, data, created_at, read_at}], unread}`; `POST /api/notifications/read {ids?, all?}`.
