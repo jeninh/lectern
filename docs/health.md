@@ -23,7 +23,11 @@ Failed jobs link to their book and have **Retry** where the app has one. The thr
 settings in `.env`:
 
 - `LECTERN_HEALTH_DISK_WARN_PERCENT` (default 10) and `LECTERN_HEALTH_DISK_CRITICAL_PERCENT`
-  (default 5);
+  (default 5). The warn percentage is also the "low" threshold on Admin → Storage. The old
+  name `LECTERN_STORAGE_WARN_FREE_PERCENT` still works as a deprecated alias (a startup
+  warning asks you to rename it); when both are set, `LECTERN_HEALTH_DISK_WARN_PERCENT`
+  wins. An old key set below the critical percentage stops Lectern from starting, with an
+  error naming the old key; rename it or lower `LECTERN_HEALTH_DISK_CRITICAL_PERCENT`;
 - `LECTERN_HEALTH_WORKER_GRACE_MINUTES` (default 720, 12 hours, so a Mac that runs Kokoro
   and sleeps overnight does not alert every night; lower it for a worker that is always on).
 

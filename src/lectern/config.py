@@ -240,9 +240,9 @@ class Settings(BaseSettings):
     # A drill that takes longer is stopped and counted as failed.
     restore_drill_timeout_minutes: int = Field(default=120, ge=5, le=24 * 60)
 
-    # Storage dashboard (docs/storage.md): a volume with less free space than this percentage
-    # is flagged low (Admin → Storage; the threshold to share with the health page, #75).
-    storage_warn_free_percent: float = Field(default=10.0, ge=0.0, le=100.0)
+    # Deprecated: the old name of health_disk_warn_percent (one disk threshold for the Health
+    # page and Admin → Storage). Only _storage_warn_alias reads it.
+    storage_warn_free_percent: float | None = Field(default=None, ge=0.0, le=100.0)
 
     # Seconds between checks whether the nightly backup is due.
     maintenance_poll_seconds: float = 60.0
@@ -389,6 +389,26 @@ class Settings(BaseSettings):
                 "LECTERN_DEVICE_URL must be the Tailscale address while home Wi-Fi access is on; "
                 "the home address goes in LECTERN_LAN_URL"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _storage_warn_alias(self) -> Settings:
+        # Must stay above _disk_thresholds_ordered: after-validators run in definition order.
+        if self.storage_warn_free_percent is None:
+            return self
+        # A constant message: never the value.
+        log.warning(
+            "LECTERN_STORAGE_WARN_FREE_PERCENT is deprecated; rename it to "
+            "LECTERN_HEALTH_DISK_WARN_PERCENT, which wins when both are set"
+        )
+        if "health_disk_warn_percent" not in self.model_fields_set:
+            if self.health_disk_critical_percent > self.storage_warn_free_percent:
+                raise ValueError(
+                    "LECTERN_STORAGE_WARN_FREE_PERCENT (deprecated alias of "
+                    "LECTERN_HEALTH_DISK_WARN_PERCENT) must be at least "
+                    "LECTERN_HEALTH_DISK_CRITICAL_PERCENT"
+                )
+            self.health_disk_warn_percent = self.storage_warn_free_percent
         return self
 
     @model_validator(mode="after")

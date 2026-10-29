@@ -390,3 +390,9 @@ def test_cleanup_jobs_are_hidden_from_members(sclient, sowner, ssettings):
     login(sclient, "mia", "mia-correct horse")
     assert all(j["kind"] != storage.CLEANUP for j in sclient.get("/api/jobs").json()["jobs"])
     assert sclient.get(f"/api/jobs/{job_id}").status_code == 404
+
+
+def test_the_page_reports_the_shared_disk_threshold(sclient, sowner, ssettings):
+    ssettings.health_disk_warn_percent = 23.5
+    view = sclient.get("/api/admin/storage").json()
+    assert view["warn_free_percent"] == 23.5

@@ -387,7 +387,7 @@ def _storage_view(db, settings) -> dict:
     )
     return {
         "volumes": storage.volumes(settings),
-        "warn_free_percent": settings.storage_warn_free_percent,
+        "warn_free_percent": settings.health_disk_warn_percent,
         "scan": cached.get("result"),
         "history": cached.get("history") or [],
         "scanning": storage.scanning(),

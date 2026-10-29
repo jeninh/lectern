@@ -25,6 +25,9 @@ VARIANTS = {
 }
 # Only meaningful with the LAN listener, which only deploy/tailscale/lan.yaml turns on.
 NOT_IN_ROOT_COMPOSE = {"LECTERN_LAN_URL"}
+# Deprecated aliases are gone from .env.example but stay passed through, with an empty default:
+# a default would set the old key on every install and make it warn.
+DEPRECATED_ALIASES = {"LECTERN_STORAGE_WARN_FREE_PERCENT"}
 
 
 def _documented_settings() -> set[str]:
@@ -56,3 +59,11 @@ def test_env_example_settings_are_passed_through(variant):
     passed = set().union(*(_passed_through(p) for p in VARIANTS[variant]))
     missing = sorted(expected - passed)
     assert not missing, f"{variant} does not pass through: {', '.join(missing)}"
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_deprecated_aliases_are_passed_through_with_no_default(variant):
+    text = "".join(p.read_text() for p in VARIANTS[variant])
+    for key in DEPRECATED_ALIASES:
+        assert re.search(rf"^      {key}: \$\{{{key}:-\}}$", text, re.M), key
+        assert key not in _documented_settings()

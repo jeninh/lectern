@@ -15,8 +15,10 @@ visit: the data folder, the library, and the backup target (when two share a dis
 row). Below it, how free space has changed per day, from the samples the background
 measurement keeps (at most one an hour, the last 120).
 
-A disk with less free space than `LECTERN_STORAGE_WARN_FREE_PERCENT` (default 10) is marked
-low. The health page (when it arrives) is meant to use the same setting.
+A disk with less free space than `LECTERN_HEALTH_DISK_WARN_PERCENT` (default 10) is marked
+low; the health page uses the same setting. The old name `LECTERN_STORAGE_WARN_FREE_PERCENT`
+still works but is deprecated (Lectern logs a warning at startup); when both are set,
+`LECTERN_HEALTH_DISK_WARN_PERCENT` wins.
 
 ## Where the space goes
 
