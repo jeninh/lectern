@@ -337,7 +337,7 @@ def test_migration_0041_round_trips_and_keeps_the_sibling_name_index(tmp_path):
     assert tables and "ix_works_updated_at" in idx and "coalesce(parent_id, 0)" in sibling
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.downgrade(cfg, "0029_playback_speed")
+        command.downgrade(cfg, "0039_vocabulary")
     tables, after, idx = state()
     assert not tables and "ix_works_updated_at" not in idx and after == sibling
     upgrade_to_head(engine)
