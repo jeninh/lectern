@@ -804,12 +804,12 @@ def _put_on_shelf(db: Session, user: User, work: Work, shelf_id: int) -> int | N
     """Put the filed work on the import's shelf (email-in's destination shelf). A shelf that
     is gone, became smart, or is no longer the person's to add to is skipped with a notice:
     the book is filed anyway. Returns the shelf's id, or None when skipped."""
-    from lectern.access import can_edit_shelf
+    from lectern.access import can_edit_shelf, takes_items
     from lectern.email_in import shelf_gone_notice
     from lectern.models import Shelf, ShelfItem
 
     shelf = db.get(Shelf, shelf_id)
-    if shelf is None or shelf.rule is not None or not can_edit_shelf(db, user, shelf):
+    if shelf is None or not takes_items(shelf) or not can_edit_shelf(db, user, shelf):
         shelf_gone_notice(db, user)
         return None
     if db.get(ShelfItem, (shelf.id, work.id)) is None:

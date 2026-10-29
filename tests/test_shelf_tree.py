@@ -24,9 +24,9 @@ from tests.conftest import (
     put_json,
 )
 
-from lectern.db import make_engine
+from lectern.db import make_engine, session_factory
 from lectern.migrate import alembic_config, upgrade_to_head
-from lectern.models import Role, User, Work
+from lectern.models import Role, ShelfAutoChild, User, Work
 
 TITLES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]
 
@@ -529,3 +529,286 @@ def test_move_up_under_a_hidden_parent_goes_to_the_callers_top_level(client, lib
     r = api_delete(client, f"/api/shelves/{sub}?contents=move_up", max_csrf)
     assert r.status_code == 204, r.text
     assert tree(client)["Inner"]["id"] == inner
+
+
+# --- auto-shelves (#73): the API and the guards on generated shelves ------------------------
+
+
+def make_group(client, csrf, name="Authors", field="author", parent=None, status=201, **auto):
+    body = {"name": name, "parent_id": parent, "auto": {"field": field, "min_books": 1, **auto}}
+    r = api_post(client, "/api/shelves", csrf, body)
+    assert r.status_code == status, r.text
+    return r.json()
+
+
+def add_books(author: str, n: int, *, tags=None) -> None:
+    """``n`` more books by ``author``, straight into the database."""
+    with session_factory()() as db:
+        for i in range(n):
+            title = f"{author} {i}"
+            db.add(Work(title=title, sort_title=title.lower(), author=author,
+                        sort_author=author.lower(), dir_path=title, tags=tags,
+                        authors=[{"name": author}]))  # fmt: skip
+        db.commit()
+
+
+def children_of(client, name: str) -> list[str]:
+    """Names directly under the shelf at path ``name``, in listing order."""
+    t = tree(client)
+    return [s["name"] for s in t.values() if s["parent_id"] == t[name]["id"]]
+
+
+def test_every_manual_edit_of_a_generated_shelf_is_409_auto_shelf(client, lib):
+    csrf = lib["csrf"]
+    group = make_group(client, csrf)
+    t = tree(client)
+    bucket, child = t["Authors/A"], t["Authors/A/A Alpha"]
+    assert group["auto"] == {
+        "kind": "group", "field": "author", "group_id": group["id"], "min_books": 1,
+        "child_order": "name", "buckets": True, "sort": "title", "order": None,
+    }  # fmt: skip
+    assert bucket["auto"] == {"kind": "bucket", "field": "author", "group_id": group["id"]}
+    assert child["auto"] == {"kind": "value", "field": "author", "group_id": group["id"]}
+    assert child["smart"] and child["work_count"] == 1
+    manual = mk(client, csrf, "Manual")
+    member = make_user(client, csrf, "mia", "member")
+    work = lib["ids"]["Alpha"]
+
+    def refused(r):
+        assert r.status_code == 409 and r.json() == {"detail": "auto_shelf"}, r.text
+
+    for sid in (bucket["id"], child["id"]):
+        refused(patch(client, f"/api/shelves/{sid}", csrf, {"name": "Mine"}))
+        refused(patch(client, f"/api/shelves/{sid}", csrf, {"parent_id": None}))
+        refused(patch(client, f"/api/shelves/{sid}", csrf, {"parent_id": manual}))
+        refused(api_delete(client, f"/api/shelves/{sid}", csrf))
+        refused(put_json(client, f"/api/shelves/{sid}/grants/{member['id']}", csrf,
+                         {"permission": "view"}))  # fmt: skip
+        refused(api_delete(client, f"/api/shelves/{sid}/grants/{member['id']}", csrf))
+        refused(api_post(client, f"/api/shelves/{sid}/items", csrf, {"work_id": work}))
+        refused(put_json(client, f"/api/shelves/{sid}/items", csrf, {"work_ids": [work]}))
+        refused(api_delete(client, f"/api/shelves/{sid}/items/{work}", csrf))
+        refused(api_post(client, "/api/shelves", csrf, {"name": "Sub", "parent_id": sid}))
+    # The group is a folder of generated shelves too: nothing is put in it or made in it by
+    # hand, and an ordinary shelf does not move into it. It can be renamed and shared.
+    gid = group["id"]
+    refused(api_post(client, f"/api/shelves/{gid}/items", csrf, {"work_id": work}))
+    refused(api_post(client, "/api/shelves", csrf, {"name": "Sub", "parent_id": gid}))
+    refused(patch(client, f"/api/shelves/{manual}", csrf, {"parent_id": gid}))
+    refused(patch(client, f"/api/shelves/{manual}", csrf, {"parent_id": bucket["id"]}))
+    assert (
+        patch(client, f"/api/shelves/{gid}", csrf, {"name": "Writers"}).json()["name"] == "Writers"
+    )
+    r = put_json(client, f"/api/shelves/{gid}/grants/{member['id']}", csrf, {"permission": "view"})
+    assert r.status_code == 200
+
+
+def test_auto_and_filter_are_exclusive_and_settings_are_checked(client, lib):
+    csrf = lib["csrf"]
+    both = {"name": "X", "filter": "tag:a", "auto": {"field": "author"}}
+    r = api_post(client, "/api/shelves", csrf, both)
+    assert r.status_code == 422 and r.json()["detail"] == "auto_and_filter"
+    for bad in ({"field": "nope"}, {"field": "author", "min_books": 0},
+                {"field": "author", "min_books": 51}, {"field": "author", "child_order": "x"},
+                {"field": "author", "sort": "nope"}, {"field": "author", "extra": 1}, {}):  # fmt: skip
+        r = api_post(client, "/api/shelves", csrf, {"name": "X", "auto": bad})
+        assert r.status_code == 422, (bad, r.text)
+    assert "X" not in tree(client)
+    # Defaults come from the field: authors need two books and sit in A–Z buckets.
+    g = make_group(client, csrf, "Defaults", min_books=None)
+    assert g["auto"]["min_books"] == 2 and g["auto"]["buckets"] is True
+
+
+def test_patching_a_group_changes_its_settings_but_never_its_field(client, lib):
+    csrf = lib["csrf"]
+    add_books("Zed", 3)
+    add_books("Yan", 2)
+    g = make_group(client, csrf)
+    gid = g["id"]
+    assert children_of(client, "Authors") == ["A", "Y", "Z"]  # buckets
+    r = patch(client, f"/api/shelves/{gid}", csrf, {"auto": {"buckets": False}})
+    assert r.status_code == 200 and r.json()["auto"]["buckets"] is False
+    assert children_of(client, "Authors") == [
+        "A Alpha", "A Bravo", "A Charlie", "A Delta", "A Echo", "A Foxtrot", "Yan", "Zed"
+    ]  # fmt: skip
+    r = patch(client, f"/api/shelves/{gid}", csrf, {"auto": {"child_order": "count"}})
+    assert children_of(client, "Authors")[:3] == ["Zed", "Yan", "A Alpha"]
+    r = patch(client, f"/api/shelves/{gid}", csrf,
+              {"auto": {"min_books": 2, "sort": "added", "order": "desc"}})  # fmt: skip
+    assert r.json()["auto"] | {} == {**g["auto"], "buckets": False, "child_order": "count",
+                                    "min_books": 2, "sort": "added", "order": "desc"}  # fmt: skip
+    assert children_of(client, "Authors") == ["Zed", "Yan"]  # the rest fell below two books
+    kid = tree(client)["Authors/Zed"]
+    assert kid["filter"] == "author:=Zed" and kid["sort"] == "added" and kid["order"] == "desc"
+    r = patch(client, f"/api/shelves/{gid}", csrf, {"auto": {"order": None}})
+    assert r.json()["auto"]["order"] is None
+    # field is fixed; naming it again is harmless; an ordinary shelf has no settings.
+    r = patch(client, f"/api/shelves/{gid}", csrf, {"auto": {"field": "tag"}})
+    assert r.status_code == 409 and r.json()["detail"] == "auto_field_immutable"
+    assert (
+        patch(client, f"/api/shelves/{gid}", csrf, {"auto": {"field": "author"}}).status_code == 200
+    )
+    plain = mk(client, csrf, "Plain")
+    r = patch(client, f"/api/shelves/{plain}", csrf, {"auto": {"min_books": 3}})
+    assert r.status_code == 409 and r.json()["detail"] == "not_auto_group"
+    # Settings are for managers: a member granted the group sees the field, not the settings.
+    mia = make_user(client, csrf, "mia", "member")
+    put_json(client, f"/api/shelves/{gid}/grants/{mia['id']}", csrf, {"permission": "edit"})
+    mc = login(client, "mia", mia["password"])
+    seen = {s["id"]: s for s in client.get("/api/shelves").json()["shelves"]}[gid]
+    assert seen["auto"] == {"kind": "group", "field": "author", "group_id": gid}
+    assert patch(client, f"/api/shelves/{gid}", mc, {"auto": {"min_books": 5}}).status_code == 403
+
+
+def test_deleting_a_group_needs_no_contents_and_takes_its_shelves(client, lib):
+    csrf = lib["csrf"]
+    g = make_group(client, csrf)
+    other = make_group(client, csrf, "Tags", "tag", buckets=False)
+    with session_factory()() as db:
+        assert db.scalar(sa.select(sa.func.count()).select_from(ShelfAutoChild)) > 6
+    r = api_delete(client, f"/api/shelves/{g['id']}", csrf)
+    assert r.status_code == 204, r.text
+    assert sorted(tree(client)) == ["Tags"]  # the other group is untouched
+    with session_factory()() as db:
+        kids = db.scalars(sa.select(ShelfAutoChild.group_id)).all()
+        assert g["id"] not in kids
+        assert db.scalar(sa.select(sa.func.count()).select_from(sa.text("shelves"))) == 1
+    assert api_delete(client, f"/api/shelves/{other['id']}", csrf).status_code == 204
+
+
+def test_the_depth_cap_counts_the_bucket_level(client, lib):
+    csrf = lib["csrf"]
+    ids = chain(client, csrf, "L", 6)  # the last is at depth 6
+    # Group at 7 with buckets would put its children at 9; without buckets, at 8.
+    r = api_post(client, "/api/shelves", csrf, {"name": "Authors", "parent_id": ids[-1],
+                                                "auto": {"field": "author"}})  # fmt: skip
+    assert r.status_code == 409 and r.json()["detail"] == "too_deep"
+    g = make_group(client, csrf, parent=ids[-1], buckets=False)
+    # Buckets cannot be turned on there, nor the group moved or carried deeper than it fits.
+    r = patch(client, f"/api/shelves/{g['id']}", csrf, {"auto": {"buckets": True}})
+    assert r.status_code == 409 and r.json()["detail"] == "too_deep"
+    # A group with no children yet is checked for the children it will get.
+    top = make_group(client, csrf, "Top", min_books=50)  # buckets: children at group + 2
+    r = patch(client, f"/api/shelves/{top['id']}", csrf, {"parent_id": ids[-1]})  # group at 7
+    assert r.status_code == 409 and r.json()["detail"] == "too_deep"
+    r = patch(client, f"/api/shelves/{top['id']}", csrf, {"parent_id": ids[-2]})  # group at 6
+    assert r.status_code == 200, r.text
+    holder = mk(client, csrf, "Holder")
+    make_group(client, csrf, "Inside", parent=holder, min_books=50)  # holder + 1
+    r = patch(client, f"/api/shelves/{holder}", csrf, {"parent_id": ids[-2]})  # group at 7
+    assert r.status_code == 409 and r.json()["detail"] == "too_deep"
+    assert patch(client, f"/api/shelves/{holder}", csrf, {"parent_id": ids[-3]}).status_code == 200
+
+
+def test_genre_map_is_validated_and_owner_only_and_makes_genre_children(client, lib):
+    csrf = lib["csrf"]
+    add_books("Ann", 1, tags=["Fantasy"])
+    add_books("Bob", 1, tags=["Epic", "épic"])
+    add_books("Cy", 1, tags=["Poetry"])
+    mia = make_user(client, csrf, "mia", "member")
+    rex = make_user(client, csrf, "rex", "reader")
+    g = make_group(client, csrf, "Genres", "genre")
+    assert children_of(client, "Genres") == []  # no map yet
+    got = client.get("/api/library-settings/genres").json()
+    assert (
+        got["genres"] == {}
+        and got["can_change"]
+        and (got["max_genres"], got["max_tags"]) == (40, 20)
+    )
+    r = put_json(client, "/api/library-settings/genres", csrf,
+                 {"genres": {" Fantasy ": ["Fantasy", " Epic ", "epic", ""]}})  # fmt: skip
+    assert r.status_code == 200 and r.json()["genres"] == {"Fantasy": ["Fantasy", "Epic", "epic"]}
+    t = tree(client)
+    assert list(k for k in t if k.startswith("Genres/")) == ["Genres/Fantasy"]  # Poetry: unmapped
+    assert (
+        t["Genres/Fantasy"]["filter"] == "tag:fantasy,epic"
+        and t["Genres/Fantasy"]["work_count"] == 2
+    )
+    assert g["auto"]["field"] == "genre"
+    # Limits: 40 genres of 20 tags pass, one more of either is 422.
+    ok = {f"G{i}": [f"t{j}" for j in range(20)] for i in range(40)}
+    assert put_json(client, "/api/library-settings/genres", csrf, {"genres": ok}).status_code == 200
+    r = put_json(client, "/api/library-settings/genres", csrf, {"genres": {**ok, "G40": ["x"]}})
+    assert r.status_code == 422 and r.json()["detail"] == "too_many_genres"
+    r = put_json(
+        client,
+        "/api/library-settings/genres",
+        csrf,
+        {"genres": {"A": [f"t{j}" for j in range(21)]}},
+    )
+    assert r.status_code == 422 and r.json()["detail"] == "too_many_tags"
+    for bad in ({"": ["a"]}, {"x" * 129: ["a"]}, {"A": ["y" * 129]}):
+        r = put_json(client, "/api/library-settings/genres", csrf, {"genres": bad})
+        assert r.status_code == 422 and r.json()["detail"] == "bad_genre", bad
+    assert len(client.get("/api/library-settings/genres").json()["genres"]) == 40  # unchanged
+    # Owner-only writes; members read; readers do neither.
+    mc = login(client, "mia", mia["password"])
+    assert put_json(client, "/api/library-settings/genres", mc, {"genres": {}}).status_code == 403
+    r = client.get("/api/library-settings/genres").json()
+    assert r["can_change"] is False and len(r["genres"]) == 40
+    login(client, "rex", rex["password"])
+    assert client.get("/api/library-settings/genres").status_code == 403
+
+
+def test_a_groups_folder_lists_the_works_its_generated_shelves_show(client, lib):
+    csrf = lib["csrf"]
+    g = make_group(client, csrf)
+    by_author = {w["title"]: w["id"] for w in client.get("/api/library").json()["works"]}
+    t = tree(client)
+    folder = client.get(f"/api/shelves/{g['id']}").json()
+    assert [s["name"] for s in folder["shelves"]] == ["A"] and folder["works"] == []
+    bucket = client.get(f"/api/shelves/{t['Authors/A']['id']}").json()
+    assert [s["name"] for s in bucket["shelves"]] == [f"A {x}" for x in TITLES]
+
+    def listed(shelf, **q):
+        r = client.get("/api/library", params={"shelf": shelf, **q})
+        assert r.status_code == 200, r.text
+        return {w["title"] for w in r.json()["works"]}
+
+    for sid in (g["id"], t["Authors/A"]["id"]):
+        assert listed(sid) == set()  # nothing is on the folder itself
+        assert listed(sid, subtree="true") == set(TITLES)
+        assert listed(sid, subtree="true", f="title:Alpha,Echo") == {"Alpha", "Echo"}
+    assert listed(t["Authors/A/A Delta"]["id"]) == {"Delta"}
+    assert set(by_author) == set(TITLES)
+
+
+def count_queries(client, url: str) -> int:
+    """SQL statements one GET of ``url`` runs, counted on the engine."""
+    engine = session_factory().kw["bind"]
+    seen: list[str] = []
+
+    def count(conn, cursor, statement, *rest):
+        seen.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", count)
+    try:
+        assert client.get(url).status_code == 200
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", count)
+    return len(seen)
+
+
+def test_list_shelves_runs_a_constant_number_of_queries(client, lib):
+    csrf = lib["csrf"]
+    make_group(client, csrf, min_books=2)
+    make_group(client, csrf, "Tags", "tag", min_books=2, child_order="count")
+    add_books("Small", 2, tags=["t"])
+    client.get("/api/shelves")  # the first look generates the shelves
+    small = count_queries(client, "/api/shelves")
+    n_small = len(client.get("/api/shelves").json()["shelves"])
+    with session_factory()() as db:
+        for a in range(500):  # 2,000 works by 500 authors, 4 each, 10 tags between them
+            for i in range(4):
+                title = f"Book {a}-{i}"
+                db.add(Work(title=title, sort_title=title.lower(), author=f"Author {a:03}",
+                            sort_author=f"author {a:03}", dir_path=title, tags=[f"tag{a % 10}"],
+                            authors=[{"name": f"Author {a:03}"}]))  # fmt: skip
+        db.commit()
+    client.get("/api/shelves")
+    big = count_queries(client, "/api/shelves")
+    shelves = client.get("/api/shelves").json()["shelves"]
+    assert len(shelves) - n_small >= 500  # one shelf per author, and the tags
+    assert sum(1 for s in shelves if s["name"].startswith("Author ")) == 500
+    print(f"list_shelves queries: {small} with 7 works, {big} with 2,000 works and 500 authors")
+    assert big == small

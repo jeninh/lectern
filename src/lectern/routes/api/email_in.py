@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from lectern import email_in
-from lectern.access import can_edit_shelf
+from lectern.access import can_edit_shelf, takes_items
 from lectern.models import EmailInbox, Role, Shelf
 from lectern.security import audit
 from lectern.security.deps import (
@@ -133,7 +133,7 @@ def set_shelf(
         shelf = db.get(Shelf, body.shelf_id)
         if shelf is None or not can_edit_shelf(db, auth.user, shelf):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {"detail": "bad_shelf"})
-        if shelf.rule is not None:
+        if not takes_items(shelf):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, {"detail": "smart_shelf"})
     inbox.shelf_id = body.shelf_id
     audit.record(db, "email_in.shelf", actor_user_id=auth.user.id, ip=client_ip(request),

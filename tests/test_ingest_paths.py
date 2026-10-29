@@ -696,6 +696,13 @@ def test_emailed_books_go_on_the_chosen_shelf(client, owner, settings, inbox, ep
         assert db.get(ShelfItem, (shelf, work_id)) is not None
 
 
+def test_email_in_destination_is_never_a_group_or_generated_shelf(client, owner, inbox):
+    group = api_post(client, "/api/shelves", owner["csrf"],
+                     {"name": "Authors", "auto": {"field": "author", "min_books": 1}}).json()  # fmt: skip
+    r = put(client, "/api/email-in/shelf", owner["csrf"], {"shelf_id": group["id"]})
+    assert r.status_code == 422 and r.json()["detail"] == "smart_shelf"
+
+
 def test_a_deleted_shelf_falls_back_to_no_shelf_with_a_notice(client, owner, settings, inbox, epub, tmp_path):  # fmt: skip
     shelf = _shelf(client, owner, "Inbox (email)")
     put(client, "/api/email-in/shelf", owner["csrf"], {"shelf_id": shelf})

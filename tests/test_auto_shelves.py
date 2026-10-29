@@ -293,6 +293,32 @@ def test_depth_cap_counts_the_bucket_level(db, owner):
     auto_shelves.create_group(db, owner, "Authors", "author", parent, buckets=False)
 
 
+def test_groups_buckets_and_children_never_take_items(db, owner):
+    """Ordinary shelves are the only places books are put by hand: editable_shelves, an
+    import's shelf, and email-in's destination all skip the generated ones."""
+    from lectern import editing, imports
+    from lectern.email_in import destination_shelf
+    from lectern.models import EmailInbox
+
+    for i in range(2):
+        book(db, f"Leo {i}", "Leo Tolstoy")
+    manual = Shelf(owner_id=owner.id, name="Manual")
+    db.add(manual)
+    group = auto_shelves.create_group(db, owner, "Authors", "author")
+    look(db, owner)
+    child = generated(db, group)["Leo Tolstoy"]
+    bucket = child.parent
+    assert (group.auto_kind, bucket.auto_kind, child.auto_kind) == ("group", "bucket", "value")
+    assert [s.name for s in editing.editable_shelves(db, owner)] == ["Manual"]
+    work = db.scalars(select(Work)).first()
+    for shelf in (group, bucket, child):
+        assert imports._put_on_shelf(db, owner, work, shelf.id) is None
+        inbox = EmailInbox(user_id=owner.id, shelf_id=shelf.id)
+        assert destination_shelf(db, inbox, owner) is None
+    assert imports._put_on_shelf(db, owner, work, manual.id) == manual.id
+    assert destination_shelf(db, EmailInbox(user_id=owner.id, shelf_id=manual.id), owner) is manual
+
+
 def test_migration_0041_round_trips_and_keeps_the_sibling_name_index(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'm.db'}")
     cfg = alembic_config(str(engine.url))

@@ -46,6 +46,15 @@ def genre_map(db: Session) -> dict[str, list[str]]:
     return out
 
 
+def set_genre_map(db: Session, genres: dict[str, list[str]], user_id: int) -> None:
+    row = db.get(InstanceSetting, GENRE_MAP)
+    if row is None:
+        db.add(InstanceSetting(key=GENRE_MAP, value=genres, updated_by=user_id))
+    else:
+        row.value, row.updated_by = genres, user_id
+    db.flush()
+
+
 def all_settings(db: Session) -> dict[str, bool]:
     return {k: get(db, k) for k in LIBRARY}
 
