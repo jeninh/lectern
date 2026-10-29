@@ -34,6 +34,7 @@ from lectern.routes.api import (
     shelves,
     tts,
     uploads,
+    vocabulary,
     worker,
     works,
 )
@@ -70,3 +71,4 @@ router.include_router(tts.router)
 router.include_router(pdf2epub.router)
 router.include_router(ocr.router)
 router.include_router(jobqueue.router)
+router.include_router(vocabulary.router)

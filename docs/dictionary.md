@@ -10,6 +10,12 @@ from bilingual dictionaries into the language you choose at the bottom of the po
 Every dictionary lives on your server. Nothing is looked up on the internet while you read, so
 lookups work the same in [offline mode](offline-mode.md), and lookups are not logged.
 
+## Save to vocabulary
+
+The popover has a **Save to vocabulary** button. It saves the word, its definition or
+translation, and the sentence around it to your private [vocabulary list](vocabulary.md). A
+lookup on its own saves nothing.
+
 ## How words are matched
 
 - **Case and accents do not matter**: `CAFE` finds *café*.

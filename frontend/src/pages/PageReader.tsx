@@ -20,6 +20,7 @@ import { DictionaryPopover, type LookupRequest } from "../components/DictionaryP
 import { ArrowLeft, Chevron, Follow, NextSentence, Pause, Play, PrevSentence } from "../components/Icons";
 import { ApiError, get } from "../lib/api";
 import { wordAt } from "../lib/dictionary";
+import { sentenceAround } from "../lib/vocabulary";
 import { getPdfInfo, orOffline } from "../lib/offline/store";
 import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
@@ -524,7 +525,7 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
             <div className="pages-spread" data-count={display.length} dir="ltr">
               {display.map((n) =>
                 info?.url ? (
-                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} find={n === findPage ? findText : ""} onPick={readalong ? pick : undefined} onMarked={keepInView} onWord={setLookup} onMiss={toggleChrome} />
+                  <PdfCanvas key={n} doc={pdf.current!} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} dark={theme === "dark"} marks={marksOn(n)} find={n === findPage ? findText : ""} onPick={readalong ? pick : undefined} onMarked={keepInView} onWord={setLookup} onMiss={toggleChrome} workId={workId} fileId={fileId} />
                 ) : (
                   <ComicPage key={n} fileId={fileId} n={n} count={display.length} fit={view.fit} zoom={view.zoom} stage={size} />
                 ),
@@ -617,12 +618,15 @@ interface PdfCanvasProps extends PageProps {
   find: string;
   /** Word lookup: the word double-clicked on this page, where it is on screen. */
   onWord?: (r: LookupRequest) => void;
+  /** The book and file this page belongs to, for saving a word with its place. */
+  workId?: number;
+  fileId?: number;
   /** A double-click with no word under it (blank space, an image, a scan): what the stage's
    * own double-click does (show or hide the toolbars). */
   onMiss?: () => void;
 }
 
-export function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked, find, onWord, onMiss }: PdfCanvasProps) {
+export function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick, onMarked, find, onWord, onMiss, workId, fileId }: PdfCanvasProps) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [found, setFound] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
   const markLayer = useRef<HTMLDivElement>(null);
@@ -722,7 +726,13 @@ export function PdfCanvas({ doc, n, count, fit, zoom, stage, dark, marks, onPick
       while (k < it.str.length - 1 && measure.measureText(it.str.slice(0, k + 1)).width / full < frac) k++;
       const query = wordAt(it.str, k);
       if (!query) break;
-      onWord({ query, rect: { left: clientX - 20, top: clientY - h / 2, bottom: clientY + h / 2, width: 40 } });
+      // The sentence around the word, in the page's text items joined by spaces.
+      const at = items.indexOf(it);
+      const base = items.slice(0, at).reduce((len, x) => len + x.str.length + 1, 0);
+      const inItem = it.str.lastIndexOf(query, k) >= 0 ? it.str.lastIndexOf(query, k) : Math.max(0, it.str.indexOf(query));
+      const context = sentenceAround(items.map((x) => x.str).join(" "), base + inItem, base + inItem + query.length);
+      const place = workId ? { work_id: workId, file_id: fileId, page: n, context } : undefined;
+      onWord({ query, place, rect: { left: clientX - 20, top: clientY - h / 2, bottom: clientY + h / 2, width: 40 } });
       return;
     }
     onMiss?.();
