@@ -8,12 +8,15 @@ import { Link } from "react-router-dom";
 import { defaultTarget, type DictionaryEntry, languageName, lookupWord, type LookupResult, placePopover } from "../lib/dictionary";
 import { useLocalStorage } from "../lib/hooks";
 import { useStore } from "../lib/store";
+import { type Place, saveBody, saveWord } from "../lib/vocabulary";
 import { Close } from "./Icons";
 
 export interface LookupRequest {
   query: string;
   /** The word on screen, in viewport pixels. */
   rect: { left: number; top: number; bottom: number; width: number };
+  /** Where in the book the word is; goes only into the explicit Save, never the lookup. */
+  place?: Place;
 }
 
 export function DictionaryPopover({ request, lang, onClose }: { request: LookupRequest; lang: string | null | undefined; onClose: () => void }) {
@@ -91,9 +94,9 @@ export function DictionaryPopover({ request, lang, onClose }: { request: LookupR
           </p>
         )}
         {result?.installed && result.dictionaries > 0 && nothing && <p className="hint">Not found in {result.dictionaries === 1 ? "the dictionary" : `${result.dictionaries} dictionaries`}.</p>}
-        {result?.entries.map((e, i) => <Entry key={`d${i}`} e={e} />)}
+        {result?.entries.map((e, i) => <Entry key={`d${i}`} e={e} request={request} result={result} />)}
         {result && result.translations.length > 0 && <h3 className="dict-section">{languageName(result.to)}</h3>}
-        {result?.translations.map((e, i) => <Entry key={`t${i}`} e={e} />)}
+        {result?.translations.map((e, i) => <Entry key={`t${i}`} e={e} request={request} result={result} />)}
       </div>
       {result && result.targets.length > 0 && (
         <label className="dict-to">
@@ -107,7 +110,17 @@ export function DictionaryPopover({ request, lang, onClose }: { request: LookupR
   );
 }
 
-function Entry({ e }: { e: DictionaryEntry }) {
+function Entry({ e, request, result }: { e: DictionaryEntry; request: LookupRequest; result: LookupResult }) {
+  const [state, setState] = useState<{ kind: "idle" | "saving" } | { kind: "saved"; text: string } | { kind: "error"; text: string }>({ kind: "idle" });
+  const save = async () => {
+    setState({ kind: "saving" });
+    try {
+      const r = await saveWord(saveBody(e, request, result));
+      setState({ kind: "saved", text: r.created ? "Saved" : `Saved again · seen ${r.word.seen_count}×` });
+    } catch (err) {
+      setState({ kind: "error", text: (err as Error).message });
+    }
+  };
   return (
     <section className="dict-entry">
       <p className="dict-word">
@@ -121,6 +134,11 @@ function Entry({ e }: { e: DictionaryEntry }) {
       </ol>
       {e.more > 0 && <p className="hint">and {e.more} more</p>}
       <p className="dict-src hint">{e.dictionary.name}</p>
+      <div className="dict-save">
+        <button type="button" className="btn ghost sm" onClick={() => void save()} disabled={state.kind === "saving"}>Save to vocabulary</button>
+        {state.kind === "saved" && <span className="hint" role="status">{state.text}</span>}
+        {state.kind === "error" && <span className="dict-save-err" role="alert">{state.text}</span>}
+      </div>
     </section>
   );
 }

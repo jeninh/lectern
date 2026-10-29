@@ -1501,3 +1501,51 @@ class Annotation(Base):
     loc_len: Mapped[int | None] = mapped_column(Integer, default=None)
     sentence_n: Mapped[int | None] = mapped_column(Integer, default=None)
     synced_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class VocabularyWord(Base):
+    """A word one person saved from the dictionary (migration 0039, :mod:`lectern.vocabulary`).
+
+    Private to ``user_id``. One row per (user, language, ``lemma_key``): saving the same word
+    again only counts it. ``lang`` is the primary language code ("" = unknown); ``lemma_key``
+    is :func:`lectern.dictionary.fold` of ``lemma``. ``work_id``/``file_id`` say where it was
+    met and go NULL if that book is deleted; the book is shown only while the person can still
+    see it. ``spine_index``/``char``/``length`` place it in an EPUB, ``page`` in a PDF, and
+    ``sentence_n`` is the work sentence it starts in. ``dictionary`` names the source for
+    attribution only.
+    """
+
+    __tablename__ = "vocabulary_words"
+    __table_args__ = (
+        UniqueConstraint("user_id", "lang", "lemma_key", name="uq_vocabulary_user_word"),
+        CheckConstraint("seen_count >= 1", name="ck_vocabulary_seen_count"),
+        Index("ix_vocabulary_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    lang: Mapped[str] = mapped_column(String(16), default="")
+    lemma: Mapped[str] = mapped_column(String(200))
+    lemma_key: Mapped[str] = mapped_column(String(200))
+    word: Mapped[str] = mapped_column(String(200))
+    to: Mapped[str | None] = mapped_column(String(16), default=None)
+    definition: Mapped[str] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text, default=None)
+    pos: Mapped[str | None] = mapped_column(String(32), default=None)
+    dictionary: Mapped[str | None] = mapped_column(String(120), default=None)
+    context: Mapped[str | None] = mapped_column(Text, default=None)
+    work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("works.id", ondelete="SET NULL"), default=None, index=True
+    )
+    file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("book_files.id", ondelete="SET NULL"), default=None
+    )
+    spine_index: Mapped[int | None] = mapped_column(Integer, default=None)
+    char: Mapped[int | None] = mapped_column(Integer, default=None)
+    length: Mapped[int | None] = mapped_column(Integer, default=None)
+    page: Mapped[int | None] = mapped_column(Integer, default=None)
+    sentence_n: Mapped[int | None] = mapped_column(Integer, default=None)
+    seen_count: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)

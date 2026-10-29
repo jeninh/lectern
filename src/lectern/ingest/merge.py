@@ -20,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from lectern.config import Settings
@@ -36,6 +36,7 @@ from lectern.models import (
     ProgressSource,
     ShelfItem,
     TrashedFile,
+    VocabularyWord,
     Work,
     WorkProgress,
     WorkRevision,
@@ -134,6 +135,10 @@ def merge_work(
         tf.work_id = target.id  # files stay where they are in _trash/files/
     for rev in db.scalars(select(WorkRevision).where(WorkRevision.work_id == source.id)):
         db.delete(rev)
+    # Saved words met in the source now point at the target (its files keep their ids).
+    db.execute(
+        update(VocabularyWord).where(VocabularyWord.work_id == source.id).values(work_id=target.id)
+    )
     db.flush()
     db.expire(target, ["files"])
     db.expire(source, ["files"])
