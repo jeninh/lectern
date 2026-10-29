@@ -202,6 +202,18 @@ uploading an image or **Use the EPUB's cover** goes the other way. In the Librar
 generated covers carry no caption underneath, since the cover already shows the title and
 author.
 
+In the **Cover** tab, **Generate** shows a grid of six candidate designs. Each candidate has a
+**seed** (it steps through the eleven palettes, so eleven in a row show every one) and a style,
+and a **font** picker re-sets them in the display serif, the text serif, or Noto. **More** loads
+the next six. **From the files** offers the EPUB's images and the pages of a PDF or comic; pick
+one, drag a crop, and save. **History** lists the current cover and earlier ones from the last
+30 days; putting one back is an ordinary save, so Undo reverts it. The editor also sets
+**subtitle**, **original published**, and **contributors** (name and role).
+
+![The cover grid with font variants](docs/screenshots/covers-editor-grid.png)
+![Cropping a page from the files](docs/screenshots/covers-editor-crop.png)
+![Cover history](docs/screenshots/covers-editor-history.png)
+
 ![Library with generated covers](docs/screenshots/covers-after-light.png)
 ![The three styles](docs/screenshots/covers-styles.png)
 
