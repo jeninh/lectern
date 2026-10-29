@@ -373,7 +373,7 @@ def staged_origin(settings: Settings, user_id: int, token: str, work_id: int) ->
 
 
 def staged_cover_path(settings: Settings, user_id: int, token: str) -> Path:
-    if not _TOKEN.match(token or "") or not token.startswith(f"{user_id}."):
+    if not _TOKEN.fullmatch(token or "") or not token.startswith(f"{user_id}."):
         raise EditError(404, "cover_not_found")
     p = staged_covers_dir(settings) / f"{token}.jpg"
     if not p.is_file():

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import colorsys
 import math
+import threading
 from io import BytesIO
 from pathlib import Path
 
@@ -55,6 +56,41 @@ def save_cover_jpeg(
             raise CoverRejected("not_an_image") from None
     dest.parent.mkdir(parents=True, exist_ok=True)
     rgb.save(dest, "JPEG", quality=quality)
+
+
+_THUMB_SLOTS = threading.BoundedSemaphore(2)
+
+
+def thumbnail_jpeg(data: bytes, side: int, *, formats: tuple[str, ...], quality: int = 80) -> bytes:
+    """A JPEG of ``data`` that fits ``side``×``side``, decoded with the same header checks as
+    :func:`save_cover_jpeg` but never at full size: JPEG is decoded at 1/2, 1/4 or 1/8 scale
+    (``Image.draft``), other formats are shrunk right after the decode, and at most two such
+    decodes run at once so a burst of requests cannot hold many 40 MP bitmaps."""
+    from PIL import Image
+
+    if len(data) > COVER_MAX_BYTES:
+        raise CoverRejected("cover_too_large")
+    try:
+        img = Image.open(BytesIO(data), formats=list(formats))
+    except Image.DecompressionBombError:
+        raise CoverRejected("cover_too_large") from None
+    except Exception:  # noqa: BLE001
+        raise CoverRejected("not_an_image") from None
+    with img:
+        w, h = img.size
+        if w < 1 or h < 1 or w > COVER_MAX_SIDE or h > COVER_MAX_SIDE or w * h > COVER_MAX_PIXELS:
+            raise CoverRejected("cover_too_large")
+        with _THUMB_SLOTS:
+            try:
+                if img.format == "JPEG":
+                    img.draft("RGB", (side, side))  # the decoder skips the detail it drops
+                rgb = img.convert("RGB")
+                rgb.thumbnail((side, side), reducing_gap=2.0)
+            except Exception:  # noqa: BLE001 - truncated or corrupt pixel data
+                raise CoverRejected("not_an_image") from None
+    out = BytesIO()
+    rgb.save(out, "JPEG", quality=quality)
+    return out.getvalue()
 
 
 class CropRejected(ValueError):

@@ -133,6 +133,27 @@ def test_epub_image_thumbnail_stage_and_crop(client, owner, settings):
     assert Image.open(io.BytesIO(got.content)).size == (300, 400)
 
 
+def test_epub_thumbnail_decodes_a_large_jpeg_reduced(client, owner, settings, monkeypatch):
+    from PIL import JpegImagePlugin
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4000, 3000), (200, 40, 40)).save(buf, "JPEG")
+    wid, fid = epub_work(settings, client, {"big.jpg": ("image/jpeg", buf.getvalue())})
+    seen = []
+    real = JpegImagePlugin.JpegImageFile.draft
+
+    def spy(self, mode, size):
+        out = real(self, mode, size)
+        seen.append(self.size)  # the size the decoder will now produce
+        return out
+
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", spy)
+    r = client.get(f"/api/works/{wid}/cover/sources/epub/{fid}/0.jpg")
+    assert r.status_code == 200
+    assert max(Image.open(io.BytesIO(r.content)).size) <= 360
+    assert seen and max(seen[0]) < 4000  # decoded at a fraction of the 12 MP, not in full
+
+
 def test_epub_index_out_of_range_and_other_works_file_are_404(client, owner, settings):
     wid, fid = epub_work(settings, client, {"a.png": ("image/png", big_png())})
     for idx in (1, 99, -1):
@@ -235,6 +256,7 @@ def test_foreign_traversal_and_malformed_tokens_are_404_even_as_crop_source(
         f"{uid}.{'a' * 24}/../../{token}",
         f"../{token}",
         token + ".json",
+        token + "\n",  # `$` would let a trailing newline through
         token.upper(),
         "",
         "x" * 64,
@@ -247,7 +269,10 @@ def test_foreign_traversal_and_malformed_tokens_are_404_even_as_crop_source(
             r = client.post(f"/api/works/{wid}/cover/stage", json=body, headers=hdr(owner))
             assert r.status_code in (404, 422), (bad, r.status_code)
             assert r.status_code != 200
-        assert client.get(f"/api/staged-covers/{bad}.jpg").status_code in (404, 422)
+        assert client.get(f"/api/staged-covers/{bad.replace(chr(10), '%0A')}.jpg").status_code in (
+            404,
+            422,
+        )
 
 
 def test_stage_request_shape_is_strict(client, owner, settings):
@@ -449,3 +474,11 @@ def test_staged_covers_per_user_are_capped(settings, monkeypatch):
     tokens = [editing.stage_cover(settings, 7, png()) for _ in range(5)]
     left = {p.stem for p in editing.staged_covers_dir(settings).glob("7.*.jpg")}
     assert len(left) == 3 and tokens[-1] in left
+
+
+def test_token_with_trailing_newline_is_not_a_token(settings):
+    token = f"7.{'a' * 24}"
+    (editing.staged_covers_dir(settings) / f"{token}\n.jpg").write_bytes(b"x")
+    with pytest.raises(editing.EditError) as exc:
+        editing.staged_cover_path(settings, 7, token + "\n")
+    assert exc.value.status == 404

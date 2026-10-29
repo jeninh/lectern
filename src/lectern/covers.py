@@ -5,8 +5,11 @@ Everything here is untrusted input and is handled that way:
 - the client names a file by id and an image or page by number, never by path; the file must
   belong to the work in the URL, and its resolved path must stay inside the library;
 - EPUB images come from the OPF manifest listing (:func:`lectern.ingest.epub.list_images`),
-  never SVG, at most ``MAX_COVER_BYTES`` each; PDF pages are rendered by the sandboxed child
-  under ``PARSER_SLOTS``; comic pages are read with the bounded comic reader;
+  never SVG, at most ``MAX_COVER_BYTES`` (10 MiB) each, so that is all that is buffered; PDF
+  pages are rendered by the sandboxed child under ``PARSER_SLOTS`` and read at most
+  ``COVER_MAX_BYTES + 1``; a comic page is read by the comic reader, which buffers up to
+  ``MAX_ENTRY_BYTES`` (64 MiB) of one entry before ``stage_cover`` refuses it as 413 (the
+  10 MiB limit applies to what is kept, not to what the reader buffers);
 - every image byte, whatever its source, is decoded by ``save_cover_jpeg`` with the allowlisted
   ``EMBEDDED_FORMATS`` before it is kept (staged as JPEG), and a crop is applied to that JPEG
   and re-validated the same way;
@@ -20,7 +23,6 @@ from __future__ import annotations
 import shutil
 import tempfile
 import zipfile
-from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
@@ -39,7 +41,7 @@ from lectern.ingest.cover import (
     CoverRejected,
     CropRejected,
     crop_jpeg,
-    save_cover_jpeg,
+    thumbnail_jpeg,
 )
 from lectern.models import BookFile, Work
 
@@ -221,21 +223,10 @@ def _result(settings: Settings, user_id: int, token: str) -> dict:
 
 
 def thumbnail(db: Session, settings: Settings, work: Work, file_id: int, index: int) -> bytes:
-    """A small JPEG of EPUB image ``index``. The original is decoded by ``save_cover_jpeg``
-    (bounded, allowlisted) into a scratch file; only that output is resized."""
-    from PIL import Image
-
+    """A small JPEG of EPUB image ``index``, decoded reduced and a few at a time
+    (:func:`lectern.ingest.cover.thumbnail_jpeg`), never at full size."""
     data = epub_image(db, settings, work, file_id, index)
-    base = settings.data_dir / "tmp"
-    base.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="cover-thumb-", dir=base) as tmp:
-        scratch = Path(tmp) / "image.jpg"
-        try:
-            save_cover_jpeg(data, scratch, formats=EMBEDDED_FORMATS, quality=80)
-        except CoverRejected as exc:
-            raise EditError(413 if exc.code == "cover_too_large" else 422, exc.code) from None
-        with Image.open(scratch, formats=["JPEG"]) as img:
-            img.thumbnail((THUMB_SIDE, THUMB_SIDE))
-            buf = BytesIO()
-            img.convert("RGB").save(buf, "JPEG", quality=80)
-    return buf.getvalue()
+    try:
+        return thumbnail_jpeg(data, THUMB_SIDE, formats=EMBEDDED_FORMATS)
+    except CoverRejected as exc:
+        raise EditError(413 if exc.code == "cover_too_large" else 422, exc.code) from None
