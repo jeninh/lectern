@@ -26,6 +26,26 @@ def get(db: Session, key: str) -> bool:
     return DEFAULTS[key] if row is None or row.value is None else bool(row.value)
 
 
+GENRE_MAP = "genre_map"
+MAX_GENRES = 40
+MAX_GENRE_TAGS = 20
+
+
+def genre_map(db: Session) -> dict[str, list[str]]:
+    """``{genre: [tags…]}``: the tags that make up each genre (lectern.auto_shelves), at most
+    :data:`MAX_GENRES` genres of :data:`MAX_GENRE_TAGS` tags; ``{}`` when not set. A stored
+    value of another shape counts as unset, and string entries only are kept."""
+    row = db.get(InstanceSetting, GENRE_MAP)
+    value = row.value if row is not None else None
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for genre, tags in list(value.items())[:MAX_GENRES]:
+        if isinstance(genre, str) and isinstance(tags, list):
+            out[genre] = [t for t in tags if isinstance(t, str)][:MAX_GENRE_TAGS]
+    return out
+
+
 def all_settings(db: Session) -> dict[str, bool]:
     return {k: get(db, k) for k in LIBRARY}
 
