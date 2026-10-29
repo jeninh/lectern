@@ -35,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
-from sqlalchemy import func, select, text
+from sqlalchemy import false, func, select, text
 from sqlalchemy.orm import Session
 
 from lectern import egress, notify, push_alerts, queue
@@ -305,20 +305,21 @@ def _job_checks(db: Session, now: datetime) -> list[Check]:
         key = (j.work_id, j.kind)
         if key not in failed and later.get(key, 0) < j.id:
             failed[key] = j
+    # A paused queue holds its queued jobs on purpose, so only a silent lease is stuck then.
+    # Running again, a queued job counts only from when the queue was resumed (resuming leaves
+    # run_after alone), recorded as the ``queue_paused`` setting's updated_at.
+    leased_stuck = (Job.status == JobStatus.LEASED) & (
+        func.coalesce(Job.heartbeat_at, Job.started_at) < now - STUCK_LEASED
+    )
+    stuck_clause = leased_stuck
+    if not queue.queue_paused(db):
+        row = db.get(InstanceSetting, "queue_paused")
+        queued_stuck = (Job.status == JobStatus.QUEUED) & (Job.run_after < now - STUCK_QUEUED)
+        if row is not None and row.updated_at >= now - STUCK_QUEUED:
+            queued_stuck = false()
+        stuck_clause = queued_stuck | leased_stuck
     stuck = list(
-        db.scalars(
-            select(Job)
-            .where(
-                Job.kind.in_(kinds),
-                (
-                    (Job.status == JobStatus.QUEUED) & (Job.run_after < now - STUCK_QUEUED)
-                    | (Job.status == JobStatus.LEASED)
-                    & (func.coalesce(Job.heartbeat_at, Job.started_at) < now - STUCK_LEASED)
-                ),
-            )
-            .order_by(Job.id)
-            .limit(200)
-        )
+        db.scalars(select(Job).where(Job.kind.in_(kinds), stuck_clause).order_by(Job.id).limit(200))
     )
     ids = {j.work_id for j in [*failed.values(), *stuck] if j.work_id}
     titles: dict[int, str] = {}
