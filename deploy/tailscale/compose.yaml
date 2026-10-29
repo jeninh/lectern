@@ -103,8 +103,9 @@ services:
       LECTERN_TRANSCODE_NICE: ${LECTERN_TRANSCODE_NICE:-}
       # 1 = offline mode: no outbound internet connections from Lectern (docs/offline-mode.md).
       LECTERN_OFFLINE: ${LECTERN_OFFLINE:-0}
-      # Admin → Storage flags a volume with less free space than this percentage (docs/storage.md).
-      LECTERN_STORAGE_WARN_FREE_PERCENT: ${LECTERN_STORAGE_WARN_FREE_PERCENT:-10}
+      # Deprecated: the old name of LECTERN_HEALTH_DISK_WARN_PERCENT. Empty (unset) so it only
+      # warns when someone still sets it.
+      LECTERN_STORAGE_WARN_FREE_PERCENT: ${LECTERN_STORAGE_WARN_FREE_PERCENT:-}
       # Restore drill (docs/backups.md#restore-drill): empty or 0 days = off; 7 = weekly.
       LECTERN_RESTORE_DRILL_DAYS: ${LECTERN_RESTORE_DRILL_DAYS:-}
       LECTERN_RESTORE_DRILL_READ_DATA_PARTS: ${LECTERN_RESTORE_DRILL_READ_DATA_PARTS:-}

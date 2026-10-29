@@ -518,3 +518,54 @@ def test_a_check_that_flaps_back_to_bad_is_alerted_again(client, owner, settings
 def test_disk_thresholds_must_be_ordered(settings):
     with pytest.raises(ValueError, match="CRITICAL_PERCENT"):
         Settings(**{**settings.model_dump(), "health_disk_critical_percent": 20.0})
+
+
+def _alias_settings(tmp_path, monkeypatch, old=None, new=None):
+    for key, value in (
+        ("LECTERN_STORAGE_WARN_FREE_PERCENT", old),
+        ("LECTERN_HEALTH_DISK_WARN_PERCENT", new),
+    ):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    return Settings(data_dir=tmp_path / "d", library_dir=tmp_path / "l", insecure_http=True)
+
+
+def test_old_storage_key_is_a_deprecated_alias(tmp_path, monkeypatch, caplog):
+    with caplog.at_level("WARNING", logger="lectern.config"):
+        s = _alias_settings(tmp_path, monkeypatch, old="23.5")
+    assert s.health_disk_warn_percent == 23.5
+    assert "LECTERN_STORAGE_WARN_FREE_PERCENT" in caplog.text
+    assert "LECTERN_HEALTH_DISK_WARN_PERCENT" in caplog.text
+    assert "23.5" not in caplog.text
+
+
+def test_new_key_wins_over_old(tmp_path, monkeypatch):
+    assert _alias_settings(tmp_path, monkeypatch, "23.5", "15").health_disk_warn_percent == 15
+    # Explicitly 10 (the default) still beats the old key.
+    assert _alias_settings(tmp_path, monkeypatch, "23.5", "10").health_disk_warn_percent == 10
+
+
+@pytest.mark.parametrize("old", [None, ""])
+def test_no_warning_without_old_key(tmp_path, monkeypatch, caplog, old):
+    with caplog.at_level("WARNING", logger="lectern.config"):
+        s = _alias_settings(tmp_path, monkeypatch, old=old)
+    assert s.health_disk_warn_percent == 10
+    assert "deprecated" not in caplog.text
+
+
+def test_old_key_below_critical_fails_naming_it(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="LECTERN_STORAGE_WARN_FREE_PERCENT") as err:
+        _alias_settings(tmp_path, monkeypatch, old="3.25")
+    assert "3.25" not in str(err.value)
+
+
+def test_alias_reaches_health_and_storage_views(tmp_path, monkeypatch):
+    from lectern import storage
+
+    s = _alias_settings(tmp_path, monkeypatch, old="100")
+    s.data_dir.mkdir()
+    s.library_dir.mkdir()
+    assert all(v["low"] for v in storage.volumes(s))
+    assert health.disk_level(99, 100, s) == health.WARNING
