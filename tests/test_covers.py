@@ -11,7 +11,15 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from tests.conftest import ORIGIN, OWNER_PASSWORD, drain_inbox, login, make_epub, make_user
+from tests.conftest import (
+    ORIGIN,
+    OWNER_PASSWORD,
+    api_post,
+    drain_inbox,
+    login,
+    make_epub,
+    make_user,
+)
 from tests.test_edit_hardening import image_bytes, png_claiming
 from tests.test_editing import editor, one_book, patch, png
 from tests.test_pdf_comics import make_cbz, make_pdf, works
@@ -20,7 +28,7 @@ from lectern import editing
 from lectern.db import session_factory
 from lectern.ingest import epub as epub_mod
 from lectern.ingest import formats
-from lectern.models import BookFile, Work
+from lectern.models import BookFile, Work, WorkRevision
 
 
 @pytest.fixture(autouse=True)
@@ -482,3 +490,160 @@ def test_token_with_trailing_newline_is_not_a_token(settings):
     with pytest.raises(editing.EditError) as exc:
         editing.staged_cover_path(settings, 7, token + "\n")
     assert exc.value.status == 404
+
+
+# --- cover history --------------------------------------------------------------------------------
+
+
+def _save_cover(client, owner, wid, cover) -> dict:
+    v = editor(client, wid)["version"]
+    r = patch(client, owner["csrf"], wid, {"version": v, "cover": cover})
+    assert r.status_code == 200, r.text
+    return r.json()["editor"]
+
+
+def _upload(client, owner, wid, color) -> bytes:
+    data = png(color)
+    token = client.post(f"/api/works/{wid}/cover", content=data, headers=hdr(owner)).json()["token"]
+    _save_cover(client, owner, wid, {"action": "upload", "token": token})
+    return data
+
+
+def _cover_file(settings, wid) -> Path:
+    with session_factory()() as db:
+        return settings.library_dir / db.get(Work, wid).dir_path / "cover.jpg"
+
+
+def _history(client, wid) -> list[dict]:
+    r = client.get(f"/api/works/{wid}/cover/history")
+    assert r.status_code == 200, r.text
+    return r.json()["entries"]
+
+
+def test_history_is_capped_deduplicated_and_editor_only(client, owner, settings):
+    wid = one_book(settings, title="Orlando", authors=["Virginia Woolf"])
+    for n in range(26):  # two designs, alternating: the same picture many times
+        _save_cover(client, owner, wid, {"action": "generate", "seed": n % 2})
+    entries = _history(client, wid)
+    assert [(e["current"], e["seed"]) for e in entries] == [(True, 1), (False, 0)]
+    # Distinct designs: capped at 20, newest first, current state first.
+    for n in range(2, 40):
+        _save_cover(client, owner, wid, {"action": "generate", "seed": n})
+    entries = _history(client, wid)
+    assert len(entries) == 20
+    assert entries[0]["current"] is True and entries[0]["seed"] == 39
+    assert [e["seed"] for e in entries[:3]] == [39, 38, 37]
+    assert len({(e["style"], e["seed"], e["font"]) for e in entries}) == 20
+    # Readers (even with a shelf grant) cannot list history.
+    reader = make_user(client, owner["csrf"], "kid", "reader")
+    login(client, "kid", reader["password"])
+    assert client.get(f"/api/works/{wid}/cover/history").status_code == 403
+    assert client.get(f"/api/works/{wid}/cover/history/1.jpg").status_code == 403
+
+
+def test_history_lists_art_once_even_when_saved_twice(client, owner, settings):
+    wid = one_book(settings, title="Pictures", authors=["Writer"])
+    _upload(client, owner, wid, (200, 10, 10))
+    _upload(client, owner, wid, (10, 200, 10))
+    _upload(client, owner, wid, (200, 10, 10))  # the first picture again
+    kinds = [(e["current"], e["kind"]) for e in _history(client, wid)]
+    # current (red) | green | the original generated cover; the earlier red copy is a duplicate.
+    assert kinds == [(True, "image"), (False, "image"), (False, "generated")]
+
+
+def test_history_image_bytes_other_work_and_tampered_path(client, owner, settings, monkeypatch):
+    wid = one_book(settings, title="First", authors=["Writer"])
+    _upload(client, owner, wid, (200, 10, 10))
+    red = _cover_file(settings, wid).read_bytes()
+    _upload(client, owner, wid, (10, 200, 10))
+    entry = _history(client, wid)[1]
+    assert entry["kind"] == "image" and entry["current"] is False
+    r = client.get(entry["url"])
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert r.content == red
+    rev = entry["revision_id"]
+
+    # A revision of another work is a 404 through this work's URL.
+    other = one_book(settings, title="Second", authors=["Else"])
+    assert client.get(f"/api/works/{other}/cover/history/{rev}.jpg").status_code == 404
+    assert client.get(f"/api/works/{wid}/cover/history/999999.jpg").status_code == 404
+
+    # A tampered backup path never reaches the filesystem: 404, and the file is not opened.
+    secret = settings.data_dir / "secret.jpg"
+    secret.write_bytes(b"top secret")
+    link = settings.data_dir / "revisions" / str(wid) / "0123456789abcdef.jpg"
+    link.symlink_to(secret)
+    opened: list[str] = []
+    real_open = Path.open
+
+    def spy(self, *a, **kw):
+        opened.append(str(self))
+        return real_open(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", spy)
+    for bad in (
+        "../../secret",
+        "revisions/../secret.jpg",
+        f"revisions/{wid}/../../secret.jpg",
+        f"revisions/{wid}/0123456789abcdef.jpg",  # a symlink out of the folder
+        f"revisions/{wid}/sub/../0123456789abcdef.jpg",
+        f"revisions/{other}/0123456789abcdef.jpg",
+        f"revisions/{wid}/notahash.jpg",
+        "/etc/passwd",
+        None,
+    ):
+        with session_factory()() as db:
+            row = db.get(WorkRevision, rev)
+            row.before = {**row.before, "cover": {**row.before["cover"], "backup": bad}}
+            db.commit()
+        assert client.get(entry["url"]).status_code == 404, bad
+        v = editor(client, wid)["version"]
+        r = patch(client, owner["csrf"], wid,
+                  {"version": v, "cover": {"action": "revision", "revision_id": rev}})  # fmt: skip
+        assert r.status_code == 404 and r.json()["detail"] == "cover_not_found", bad
+    assert not [p for p in opened if "secret" in p or "0123456789abcdef" in p]
+
+
+def test_revert_to_an_image_makes_a_forward_revision_that_can_be_undone(client, owner, settings):
+    wid = one_book(settings, title="Pictures", authors=["Writer"])
+    _upload(client, owner, wid, (200, 10, 10))
+    red = _cover_file(settings, wid).read_bytes()
+    _upload(client, owner, wid, (10, 200, 10))
+    green = _cover_file(settings, wid).read_bytes()
+    assert red != green
+    before = editor(client, wid)
+    rev = _history(client, wid)[1]["revision_id"]
+    after = _save_cover(client, owner, wid, {"action": "revision", "revision_id": rev})
+    assert _cover_file(settings, wid).read_bytes() == red
+    assert after["version"] == before["version"] + 1  # a new revision, not a rewind
+    assert after["last_revision"]["id"] != rev and after["last_revision"]["undoable"] is True
+    # The revert is itself undoable: the green cover comes back.
+    r = api_post(client, f"/api/works/{wid}/undo", owner["csrf"],
+                 {"revision_id": after["last_revision"]["id"]})  # fmt: skip
+    assert r.status_code == 200, r.text
+    assert _cover_file(settings, wid).read_bytes() == green
+    # A revision whose old state had no image cannot be reverted to as an image.
+    first = min(e["revision_id"] for e in _history(client, wid) if e["revision_id"])
+    v = editor(client, wid)["version"]
+    r = patch(client, owner["csrf"], wid,
+              {"version": v, "cover": {"action": "revision", "revision_id": first}})  # fmt: skip
+    assert r.status_code == 404
+
+
+def test_revert_to_a_generated_state_renders_the_same_cover(client, owner, settings):
+    from lectern import covergen
+
+    wid = one_book(settings, title="Orlando", authors=["Virginia Woolf"])
+    _save_cover(client, owner, wid, {"action": "generate", "style": "modern", "seed": 3,
+                                     "font": "noto"})  # fmt: skip
+    with session_factory()() as db:
+        want = covergen.render_jpeg(covergen.design_of(db.get(Work, wid)))
+    _upload(client, owner, wid, (200, 10, 10))
+    old = next(e for e in _history(client, wid) if e["kind"] == "generated")
+    assert (old["style"], old["seed"], old["font"]) == ("modern", 3, "noto")
+    _save_cover(client, owner, wid, {"action": "generate", "style": old["style"],
+                                     "seed": old["seed"], "font": old["font"]})  # fmt: skip
+    with session_factory()() as db:
+        work = db.get(Work, wid)
+        assert covergen.render_jpeg(covergen.design_of(work)) == want
+    assert client.get(f"/library/works/{wid}/cover.jpg").content == want

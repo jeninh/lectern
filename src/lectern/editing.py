@@ -73,6 +73,7 @@ COVER_MAX_BYTES = 10 * 1024 * 1024
 PENDING_FOLDERS: set[int] = set()
 STAGED_COVER_TTL_S = 24 * 3600
 _TOKEN = re.compile(r"^\d+\.[0-9a-f]{24}$")
+_BACKUP_NAME = re.compile(r"^([0-9a-f]{16}|import-[\w-]+)\.jpg$")
 
 
 class EditError(Exception):
@@ -131,8 +132,10 @@ class TrackEdit(BaseModel):
 class CoverChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["upload", "embedded", "remove", "generate"]
+    action: Literal["upload", "embedded", "remove", "generate", "revision"]
     token: str | None = Field(default=None, max_length=64)
+    # "revision": put back the cover image saved in that revision of this work (from history).
+    revision_id: int | None = Field(default=None, ge=1, le=2**62)
     # "generate": None = the style the title/author hash picks; seed = palette shuffle.
     style: Literal["classic", "modern", "minimal"] | None = None
     seed: int = Field(default=0, ge=0, le=1_000_000)
@@ -434,6 +437,34 @@ def embedded_cover_available(db: Session, settings: Settings, work: Work) -> boo
     return bool(ordered_tracks(db, work.id))
 
 
+def revision_backup(settings: Settings, work_id: int, rel: object) -> Path | None:
+    """The backup image a revision's ``before.cover.backup`` names, or None. The value is data
+    from the database, so it is trusted only when it resolves to a regular file directly
+    inside ``data/revisions/<work_id>/`` with a name this server generates; nothing else is
+    ever opened."""
+    if not isinstance(rel, str) or "\x00" in rel:
+        return None
+    base = (settings.data_dir / "revisions" / str(work_id)).resolve()
+    try:
+        path = (settings.data_dir / rel).resolve()
+        if path.parent != base or not _BACKUP_NAME.fullmatch(path.name) or not path.is_file():
+            return None
+    except (OSError, ValueError):
+        return None
+    return path
+
+
+def revision_cover(db: Session, settings: Settings, work_id: int, revision_id: int | None):
+    """``(state, backup path)`` of the cover image revision ``revision_id`` of this work
+    replaced, or 404 ``cover_not_found`` (other work's revision, no image, file gone)."""
+    rev = db.get(WorkRevision, revision_id) if revision_id else None
+    state = ((rev.before or {}).get("cover") if rev and rev.work_id == work_id else None) or {}
+    path = revision_backup(settings, work_id, state.get("backup")) if state else None
+    if path is None or not state.get("has_cover"):
+        raise EditError(404, "cover_not_found")
+    return state, path
+
+
 def _cover_state(work: Work) -> dict:
     return {
         "has_cover": work.has_cover,
@@ -472,6 +503,10 @@ def apply_cover(
             shutil.copyfile(src, new)
             src.unlink(missing_ok=True)
             _sidecar(settings, change.token or "").unlink(missing_ok=True)
+        elif change.action == "revision":
+            old, src = revision_cover(db, settings, work.id, change.revision_id)
+            shutil.copyfile(src, new)
+            origin = {"source": old.get("source") or "upload"}
         elif change.action == "embedded":
             if not _embedded_cover(db, settings, work, new):
                 raise EditError(422, "no_embedded_cover")
@@ -485,13 +520,13 @@ def apply_cover(
         else:
             new.replace(cover)
             work.has_cover, work.cover_source = True, change.action
-            if origin is not None:  # staged from a page or an EPUB image of this work
+            if origin is not None:  # staged from a page or image of this work; or reverted
                 work.cover_source = origin["source"]
             work.cover_tint = dominant_tint(cover)
     finally:
         new.unlink(missing_ok=True)
     after = _cover_state(work)
-    if origin is not None:
+    if origin is not None and change.action != "revision":
         after["origin"] = origin
     return before, after
 

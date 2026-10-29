@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 
-from lectern import covergen
+from lectern import covergen, editing
 from lectern import covers as sources
 from lectern.access import can_see_work
 from lectern.editing import EditError
@@ -96,4 +96,30 @@ def epub_image_thumbnail(
         raise _edit_error(exc) from None
     return Response(
         data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"}
+    )
+
+
+@router.get("/works/{work_id}/cover/history")
+def cover_history(auth: EditorRead, db: DbDep, settings: SettingsDep, work_id: int) -> dict:
+    """The current cover and up to 19 earlier ones (at most 20, the same picture once), built
+    from the saved revisions. Housekeeping drops revisions after 30 days, so this covers the
+    last 30 days. Put an image back with the ``revision`` cover action, a generated cover with
+    ``generate`` and its style, seed, and font."""
+    work = _visible_work(db, auth, work_id)
+    return {"entries": sources.history(db, settings, work)}
+
+
+@router.get("/works/{work_id}/cover/history/{revision_id}.jpg", include_in_schema=False)
+def cover_history_image(
+    auth: EditorRead, db: DbDep, settings: SettingsDep, work_id: int, revision_id: int
+) -> Response:
+    work = _visible_work(db, auth, work_id)
+    try:
+        _state, path = editing.revision_cover(db, settings, work.id, revision_id)
+    except EditError as exc:
+        raise _edit_error(exc) from None
+    return Response(
+        path.read_bytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
     )

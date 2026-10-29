@@ -20,13 +20,16 @@ HTTP-free: failures are :class:`lectern.editing.EditError`; ``routes.api.covers`
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import tempfile
 import zipfile
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlencode
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lectern import editing
@@ -43,7 +46,7 @@ from lectern.ingest.cover import (
     crop_jpeg,
     thumbnail_jpeg,
 )
-from lectern.models import BookFile, Work
+from lectern.models import BookFile, Work, WorkRevision
 
 THUMB_SIDE = 360
 
@@ -230,3 +233,95 @@ def thumbnail(db: Session, settings: Settings, work: Work, file_id: int, index: 
         return thumbnail_jpeg(data, THUMB_SIDE, formats=EMBEDDED_FORMATS)
     except CoverRejected as exc:
         raise EditError(413 if exc.code == "cover_too_large" else 422, exc.code) from None
+
+
+# --- history -------------------------------------------------------------------------------------
+
+HISTORY_MAX = 20
+_HISTORY_SCAN = 200  # revisions looked at, newest first, while looking for HISTORY_MAX states
+
+
+def _digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while chunk := fh.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def history(db: Session, settings: Settings, work: Work) -> list[dict]:
+    """The work's current cover and the covers earlier saves replaced: at most
+    :data:`HISTORY_MAX` states, newest first, the same picture listed once (images by content,
+    generated covers by style, seed, and font). Each entry is ``{"current": bool,
+    "revision_id": int | None, "kind": "image" | "generated", ...}``; an image carries its
+    ``url`` (``cover/history/<revision_id>.jpg``, or the live cover for the current one), a
+    generated one its ``style``/``seed``/``font`` to send back as the ``generate`` action.
+
+    Only revisions still kept count: housekeeping drops those older than 30 days, so this is
+    the last 30 days."""
+    from lectern import covergen
+
+    out: list[dict] = []
+    seen: set = set()
+
+    def add(key, entry: dict) -> None:
+        if len(out) < HISTORY_MAX and key not in seen:
+            seen.add(key)
+            out.append(entry)
+
+    def generated(style, seed, font, **extra) -> tuple[tuple, dict]:
+        font = font or covergen.DEFAULT_FONT
+        design = covergen.design_for(
+            work.title,
+            covergen.design_of(work).author,
+            style=style,
+            seed=seed or 0,
+            lang=work.language,
+            font=font,
+        )
+        query = urlencode(
+            {"title": work.title, "author": design.author, "style": design.style,
+             "seed": seed or 0, "font": font, "w": 240}
+        )  # fmt: skip
+        return (design.style, seed or 0, font), {
+            "kind": "generated",
+            "style": style,
+            "seed": seed or 0,
+            "font": font,
+            "url": f"/api/works/{work.id}/cover/generated.jpg?{query}",
+            **extra,
+        }
+
+    live = settings.library_dir / work.dir_path / "cover.jpg"
+    if work.has_cover and live.is_file():
+        add(
+            ("image", _digest(live)),
+            {"current": True, "revision_id": None, "kind": "image", "source": work.cover_source,
+             "url": f"/library/works/{work.id}/cover.jpg?v={work.version}"},
+        )  # fmt: skip
+    else:
+        key, entry = generated(work.cover_style, work.cover_seed, work.cover_font)
+        add(("generated", *key), {"current": True, "revision_id": None, **entry})
+    revs = db.scalars(
+        select(WorkRevision)
+        .where(WorkRevision.work_id == work.id)
+        .order_by(WorkRevision.id.desc())
+        .limit(_HISTORY_SCAN)
+    )
+    for rev in revs:
+        state = (rev.before or {}).get("cover")
+        if not isinstance(state, dict) or len(out) >= HISTORY_MAX:
+            continue
+        extra = {"current": False, "revision_id": rev.id, "replaced_at": rev.created_at}
+        if state.get("has_cover"):
+            path = editing.revision_backup(settings, work.id, state.get("backup"))
+            if path is not None:
+                add(
+                    ("image", _digest(path)),
+                    {**extra, "kind": "image", "source": state.get("source"),
+                     "url": f"/api/works/{work.id}/cover/history/{rev.id}.jpg"},
+                )  # fmt: skip
+        elif "style" in state:  # saves from before generated covers record no design
+            key, entry = generated(state.get("style"), state.get("seed"), state.get("font"))
+            add(("generated", *key), {**extra, **entry})
+    return out
