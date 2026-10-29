@@ -33,6 +33,8 @@ export function validate(m: Metadata): FieldErrors {
   if (m.language && !LANG_RE.test(m.language.trim())) e.language = "Use a language code such as en or pt-BR.";
   if (m.isbn && !normalizeIsbn(m.isbn)) e.isbn = "Not a valid ISBN-10 or ISBN-13 (check the digits).";
   if (m.published && !DATE_RE.test(m.published.trim())) e.published = "Use YYYY, YYYY-MM, or YYYY-MM-DD.";
+  if (m.original_published && !DATE_RE.test(m.original_published.trim())) e.original_published = "Use YYYY, YYYY-MM, or YYYY-MM-DD.";
+  if ((m.contributors ?? []).some((c) => !c.name.trim())) e.contributors = "Every contributor needs a name (remove empty rows).";
   if (m.series_index != null && (Number.isNaN(m.series_index) || m.series_index < 0)) e.series_index = "Use a number such as 1 or 2.5.";
   // The server refuses characters XML cannot carry (type ``control_characters``); say so here.
   for (const [k, v] of Object.entries(m) as [keyof Metadata, unknown][]) {
@@ -67,6 +69,10 @@ export function clean(m: Metadata): Metadata {
     published: t(m.published),
     tags: dedupe(m.tags),
     narrators: dedupe(m.narrators),
+    subtitle: t(m.subtitle),
+    original_published: t(m.original_published),
+    contributors: (m.contributors ?? []).filter((c) => c.name.trim()).map((c) => ({ name: c.name.trim(), role: c.role })),
+    cover_font: m.cover_font ?? null,
   };
 }
 
@@ -89,11 +95,15 @@ export const FIELD_LABEL: Record<keyof Metadata, string> = {
   published: "Published",
   tags: "Tags",
   narrators: "Narrators",
+  subtitle: "Subtitle",
+  original_published: "First published",
+  contributors: "Contributors",
+  cover_font: "Cover font",
 };
 
 export function display(field: keyof Metadata, v: unknown): string {
   if (v == null || v === "") return "—";
-  if (field === "authors") return (v as AuthorName[]).map((a) => a.name).join(", ") || "—";
+  if (field === "authors" || field === "contributors") return (v as AuthorName[]).map((a) => a.name).join(", ") || "—";
   if (Array.isArray(v)) return v.join(", ") || "—";
   return String(v);
 }
