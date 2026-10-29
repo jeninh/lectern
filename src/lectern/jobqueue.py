@@ -48,8 +48,8 @@ from lectern.models import (
 CLEANUP = "storage-cleanup"  # lectern.jobs.CLEANUP: names files and sizes, owner only
 RECENT_FAILED = 50
 RECENT_DONE = 30
-# Waiting jobs that get the full "why" (lectern.queue.explain_wait, a few queries each); the
-# rest of a long queue just shows its place. Keeps a 10 s poll cheap on a Pi.
+# Waiting jobs that get the full "why" (lectern.queue.explain_wait, sharing one
+# queue.wait_context per request); the rest of a long queue just shows its place.
 EXPLAINED = 30
 LIMIT_REACHED = (limits.FEATURE_LIMIT, limits.GLOBAL_LIMIT)
 GROUPS = ("running", "waiting", "paused", "failed", "done")
@@ -148,6 +148,7 @@ def listing(db: Session, user: User, server_caps: set[str] | None) -> dict:
             seen[j.capability] = ahead[j.id] + 1
     explained = {j.id for j in active if j.id in ahead and ahead[j.id] < EXPLAINED}
     now = utcnow()
+    ctx = None if paused_queue or not explained else queue.wait_context(db, with_queue=True)
 
     def one(j: Job) -> dict:
         group = group_of(j)
@@ -169,7 +170,7 @@ def listing(db: Session, user: User, server_caps: set[str] | None) -> dict:
                 summary = "Waiting: limit reached"
             elif j.id in explained:
                 wait = queue.explain_wait(db, j, server_caps=server_caps, for_owner=owner,
-                                          show_error=show_error, now=now)  # fmt: skip
+                                          show_error=show_error, now=now, ctx=ctx)  # fmt: skip
                 summary = wait["summary"] if wait else None
             else:
                 summary = f"Waiting ({ahead[j.id]} ahead)"
