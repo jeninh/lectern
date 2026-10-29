@@ -7,6 +7,7 @@ the code under test.
 from __future__ import annotations
 
 import base64
+import re
 
 import pytest
 import sqlalchemy as sa
@@ -28,6 +29,8 @@ from lectern.db import make_engine, session_factory
 from lectern.migrate import alembic_config, upgrade_to_head
 from lectern.models import Role, ShelfAutoChild, User, Work
 
+NAV = "application/atom+xml;profile=opds-catalog;kind=navigation"
+ACQ_KIND = "application/atom+xml;profile=opds-catalog;kind=acquisition"
 TITLES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]
 
 
@@ -812,3 +815,58 @@ def test_list_shelves_runs_a_constant_number_of_queries(client, lib):
     assert sum(1 for s in shelves if s["name"].startswith("Author ")) == 500
     print(f"list_shelves queries: {small} with 7 works, {big} with 2,000 works and 500 authors")
     assert big == small
+
+
+def test_opds_auto_shelves_are_navigation_down_to_acquisition_feeds(client, lib):
+    csrf, ids = lib["csrf"], lib["ids"]
+    auto = {"field": "author", "min_books": 1}
+    group = api_post(client, "/api/shelves", csrf, {"name": "Authors", "auto": auto}).json()["id"]
+    tags = {"field": "tag", "buckets": False}
+    empty = api_post(client, "/api/shelves", csrf, {"name": "Tags", "auto": tags}).json()["id"]
+    mine = mk(client, csrf, "Mine")
+    put_on(client, csrf, mine, ids["Alpha"], ids["Bravo"])
+    rex = make_user(client, csrf, "rex", "reader")
+    for sid in (group, mine):
+        r = put_json(client, f"/api/shelves/{sid}/grants/{rex['id']}", csrf, {"permission": "view"})
+        assert r.status_code == 200, r.text
+
+    def basic(user: str, pw: str) -> dict:
+        return {"authorization": "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()}
+
+    def subsections(text: str) -> list[tuple[str, str, str]]:
+        """(title, href, type) of each entry's link."""
+        return re.findall(
+            r"<entry><title>(.*?)</title>.*?<link [^>]*href=\"(.*?)\" type=\"(.*?)\"", text
+        )
+
+    owner_h = basic("owner", make_app_password(client, csrf, "Kobo"))
+    root = client.get("/opds/shelves", headers=owner_h).text
+    # A group is a navigation feed with no books of its own, so no "Books on" entry.
+    assert f'href="/opds/shelves/{group}" type="{NAV}"' in root
+    assert "Auto-generated from author fields · 1 shelf" in root
+    nav = client.get(f"/opds/shelves/{group}", headers=owner_h).text
+    assert "Books on" not in nav
+    [(name, href, kind)] = subsections(nav)
+    assert (name, kind) == ("A", NAV) and "Auto-generated · 6 shelves" in nav
+    leaves = subsections(client.get(href, headers=owner_h).text)
+    assert [n for n, _, _ in leaves] == [f"A {t}" for t in TITLES]
+    assert {(h.endswith("/books"), k) for _, h, k in leaves} == {(True, ACQ_KIND)}
+    # A group with nothing generated yet is still navigation, with no book entry.
+    assert f'href="/opds/shelves/{empty}" type="{NAV}"' in root
+    assert "Books on" not in client.get(f"/opds/shelves/{empty}", headers=owner_h).text
+
+    # rex sees only the authors of the two books he may see; the rest are absent and 404.
+    login(client, "rex", rex["password"])
+    rex_csrf = client.get("/api/me").json()["csrf_token"]
+    rex_h = basic("rex", make_app_password(client, rex_csrf, "Kindle"))
+    rex_root = client.get("/opds/shelves", headers=rex_h).text
+    rex_nav = client.get(f"/opds/shelves/{group}", headers=rex_h).text
+    [(_, bucket, _)] = subsections(rex_nav)
+    rex_leaves = client.get(bucket, headers=rex_h).text
+    assert [n for n, _, _ in subsections(rex_leaves)] == ["A Alpha", "A Bravo"]
+    for text in (rex_root, rex_nav, rex_leaves):
+        assert not any(f"A {t}" in text for t in ("Charlie", "Delta", "Echo", "Foxtrot"))
+    for name, href, _ in leaves:
+        want = 200 if name in ("A Alpha", "A Bravo") else 404
+        assert client.get(href, headers=rex_h).status_code == want, name
+        assert client.get(href.removesuffix("/books"), headers=rex_h).status_code == want, name

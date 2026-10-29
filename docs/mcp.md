@@ -157,7 +157,11 @@ under Devices → AI tools → Edit.`
   at your top level; shelves above it that are not shared with you are never named. A smart
   shelf has `smart: true` (and its `filter`, for people who manage it); its books are its
   filter's matches, so `search_library` with `shelf:"<path>"` lists them and nothing is
-  added to it by hand.
+  added to it by hand. `auto` is `null` for an ordinary shelf, else `group`, `bucket`, or
+  `value` for a shelf the library generates (for example one per author). Generated shelves
+  are read-only: `add_to_shelf`, `remove_from_shelf`, `create_shelf` inside one, and
+  `move_shelf` fail with `auto_shelf`. Ones you may not see (an author with too few books
+  visible to you) are absent, exactly as in the web app.
 - `add_to_shelf`, `remove_from_shelf`: shelves you may edit, with the shelf rules of the web
   app (for example, a reader with an edit grant cannot widen another reader's library). A book
   can be on several shelves; adding never takes it off another.

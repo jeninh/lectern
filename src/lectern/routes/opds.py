@@ -295,7 +295,19 @@ def _shelf_entry(tree, shelf) -> str:
     n = tree.counts().get(shelf.id, 0)
     kids = len(tree.children.get(shelf.id, []))
     parts = [_books(n)] + ([f"{kids} shelf" if kids == 1 else f"{kids} shelves"] if kids else [])
-    if kids:
+    # Generated shelves say so; a group or bucket holds no books itself, so only its shelves count.
+    group = tree.groups.get(shelf.id)
+    child = tree.auto.get(shelf.id)
+    if group is not None:
+        parts = [f"Auto-generated from {_AUTO_FIELD.get(group.field, group.field)} fields"]
+    elif child is not None and child.kind == "bucket":
+        parts = ["Auto-generated"]
+    elif child is not None:
+        parts.append("auto-generated")
+    if group is not None or (child is not None and child.kind == "bucket"):
+        parts.append(f"{kids} shelf" if kids == 1 else f"{kids} shelves")
+    # A group or bucket is always a navigation feed (an empty one says so), never a book list.
+    if kids or group is not None or (child is not None and child.kind == "bucket"):
         return _nav_entry(
             shelf.name, f"shelf:{shelf.id}", f"/opds/shelves/{shelf.id}", " · ".join(parts),
             kind=NAV,
@@ -303,6 +315,9 @@ def _shelf_entry(tree, shelf) -> str:
     return _nav_entry(
         shelf.name, f"shelf:{shelf.id}", f"/opds/shelves/{shelf.id}/books", " · ".join(parts)
     )
+
+
+_AUTO_FIELD = {"lang": "language"}
 
 
 def _shelf_up(tree, shelf) -> str:
