@@ -37,6 +37,7 @@ Core.ROUTE_TTL = 600 -- seconds a home/Tailscale choice is trusted before it is 
 Core.FETCH_INTERVAL = 900 -- seconds between quiet checks of the queue while KOReader runs
 Core.FETCH_MIN = 60 -- at most one quiet check per minute (Wi-Fi flapping, repeated wake-ups)
 Core.AUTO_BATCH = 3 -- books one quiet check downloads at most (Lectern's hourly cap still applies)
+Core.REPORT_BOOKS = 500 -- books one device report lists at most (the server keeps 2000)
 
 --- Looks like a home-network address (private IPv4, IPv6 link-local or unique-local, or an
 -- mDNS .local name). With home Wi-Fi access on, such an address is never the Tailscale
@@ -563,7 +564,8 @@ function Core:queuePush(item)
     self.store:flush()
 end
 
---- Send what is waiting, oldest first: positions, then highlights. Stops at the first failure
+--- Send what is waiting, oldest first: positions, then highlights, then the device report
+-- (docs/koreader-plugin.md#device-dashboard), which is never counted. Stops at the first failure
 -- and keeps the rest. Returns positions sent, what is left (positions and books of
 -- highlights), nil or the reason it stopped, and books of highlights sent.
 function Core:drain()
@@ -602,6 +604,9 @@ function Core:drain()
         self.store:flush()
     end
     local books, left, why = self:drainAnnotations()
+    -- Last, and only once everything else went out: a report that cannot go now waits for
+    -- the next drain, without a retry of its own.
+    if left == 0 then self:drainReport() end
     return sent, left, why, books
 end
 
@@ -864,6 +869,97 @@ function Core:cleanUp(work_ids, is_open)
         self.store:flush()
     end
     return deleted
+end
+
+-- --- device report (docs/koreader-plugin.md#device-dashboard) -------------------------------
+
+--- The ``version`` declared in this plugin's _meta.lua (read as text, as the server does).
+function Core:pluginVersion()
+    local f = io.open(self.plugin_dir .. "/_meta.lua", "rb")
+    if not f then return nil end
+    local text = f:read("*a") or ""
+    f:close()
+    return text:match("%f[%w_]version%s*=%s*[\"']([^\"']+)[\"']")
+end
+
+--- Keep the device's state for the Devices dashboard, replacing any report still waiting.
+-- ``info``: battery (0..100), charging, free_bytes, koreader_version, and books, a list of
+-- ``{ path, digest, percentage }`` for the books KOReader knows (recently read, with a
+-- sidecar). A book this plugin downloaded is reported by its work id, any other by its digest;
+-- downloaded books not opened yet are reported too. Sent with the next drain of the outbox,
+-- never on its own: it does not count as pending, so it never schedules a retry.
+function Core:queueReport(info)
+    if not self:isPaired() then return end
+    local books, by_path = {}, {}
+    for _, b in ipairs(info.books or {}) do
+        if b.path then by_path[b.path] = b end
+    end
+    local have = self:downloads()
+    local ids = {}
+    for id in pairs(have) do ids[#ids + 1] = id end
+    table.sort(ids, function(a, b) return (tonumber(a) or 0) < (tonumber(b) or 0) end)
+    local downloaded = {}
+    for _, id in ipairs(ids) do
+        local rec, work_id = have[id], tonumber(id)
+        if work_id and rec.path and file_size(rec.path) then
+            downloaded[rec.path] = true
+            local b = by_path[rec.path]
+            books[#books + 1] = { work_id = work_id, percentage = b and b.percentage }
+        end
+    end
+    for _, b in ipairs(info.books or {}) do
+        if #books >= Core.REPORT_BOOKS then break end
+        if not downloaded[b.path] and str(b.digest) then
+            books[#books + 1] = { document = str(b.digest), percentage = b.percentage }
+        end
+    end
+    while #books > Core.REPORT_BOOKS do table.remove(books) end
+    for _, b in ipairs(books) do
+        local p = tonumber(b.percentage)
+        b.percentage = p and p >= 0 and p <= 1 and p or nil
+    end
+    local battery = tonumber(info.battery)
+    local free = tonumber(info.free_bytes)
+    local charging = nil
+    if type(info.charging) == "boolean" then charging = info.charging end
+    local plugin_version, ko_version = self:pluginVersion(), str(info.koreader_version)
+    self.store:saveSetting("report", {
+        read_at = self.now(),
+        battery = battery and battery >= 0 and battery <= 100 and math.floor(battery) or nil,
+        charging = charging,
+        free_bytes = free and free >= 0 and math.floor(free) or nil,
+        -- Within the server's limits (32 and 64 characters), so the rest is never refused.
+        plugin_version = plugin_version and plugin_version:sub(1, 32),
+        koreader_version = ko_version and ko_version:sub(1, 64),
+        -- An empty list is left out: Lua encodes it as an object (the server reads none).
+        books = #books > 0 and books or nil,
+    })
+    self.store:flush()
+end
+
+--- Send the waiting report, if any. Returns nil, or the reason it stays for the next drain.
+function Core:drainReport()
+    local r = self.store:readSetting("report")
+    if type(r) ~= "table" then return nil end
+    local body = {}
+    for k, v in pairs(r) do
+        if k ~= "read_at" then body[k] = v end
+    end
+    -- How long ago the values were read: the server dates the report (the clock may be off).
+    body.age = math.max(0, self.now() - (tonumber(r.read_at) or self.now()))
+    local code, _, err = self:request("PUT", "/koplugin/report", {
+        basic = true, json = body, timeout = { 3, 10 },
+    })
+    self:noteResult(code, err)
+    if code and code < 500 and code ~= 401 and code ~= 429 then
+        -- Sent, or refused: dropped either way (unlike a position, the next quiet check
+        -- reads a newer one).
+        self.store:delSetting("report")
+        self.store:flush()
+        if code ~= 200 then self:log("warn", "Lectern refused the device report (HTTP " .. code .. ")") end
+        return nil
+    end
+    return code == 401 and "unauthorized" or (code and ("server " .. code) or (err or "offline"))
 end
 
 --- One line for the menu: what state the connection is in.

@@ -73,8 +73,26 @@ package.preload["datastorage"] = function()
     }
 end
 
+-- The device's state for the report (docs/koreader-plugin.md#device-dashboard).
+local POWER = { capacity = 63, charging = true }
 package.preload["device"] = function()
-    return { model = "Kindle", home_dir = settings_dir .. "/books", hasWifiToggle = function() return true end }
+    return {
+        model = "Kindle", home_dir = settings_dir .. "/books",
+        hasWifiToggle = function() return true end,
+        hasBattery = function() return true end,
+        getPowerDevice = function()
+            return {
+                getCapacity = function() return POWER.capacity end,
+                isCharging = function() return POWER.charging end,
+            }
+        end,
+    }
+end
+package.preload["util"] = function()
+    return { diskUsage = function() return { total = 8e9, used = 5e9, available = 3123456789 } end }
+end
+package.preload["version"] = function()
+    return { getCurrentRevision = function() return "v2025.10-42-gabcdef12_2025-11-01" end }
 end
 
 local NET = { online = true, connected = true, prompts = 0 }
@@ -418,6 +436,46 @@ elseif command == "highlights" then
         out.pending_after_reconnect = #p.core:annotationOutbox()
     end
     p.store:flush()
+elseif command == "report" then
+    -- The quiet check (and the device report riding on it), or a page-turn push. arg 4: a JSON
+    -- spec { action = "check" | "push", history = { { file, digest, percentage } }, open,
+    -- fail_report (connection fails for the report only), clock (seconds added to now) }.
+    local f = assert(io.open(arg[4], "rb"))
+    local spec = cjson.decode(f:read("*a"))
+    f:close()
+    NET.online, NET.connected = true, true
+    for _, h in ipairs(spec.history or {}) do
+        HISTORY.hist[#HISTORY.hist + 1] = { file = h.file }
+        SIDECARS[h.file] = { partial_md5_checksum = h.digest, percent_finished = h.percentage }
+    end
+    local p, ui = make(spec.open ~= nil)
+    if spec.open then ui.document.file = spec.open end
+    if spec.fail_report then
+        local real = p.core.http
+        p.core.http = function(req)
+            if req.url:find("/koplugin/report", 1, true) then
+                REQUESTS["/koplugin/report"] = (REQUESTS["/koplugin/report"] or 0) + 1
+                return nil, nil, "connection refused"
+            end
+            return real(req)
+        end
+    end
+    if spec.clock then p.core.now = function() return os.time() + spec.clock end end
+    UI.shown, UI.tasks = {}, {}
+    if spec.action == "check" then
+        p.store:delSetting("last_fetch_at")
+        p:autoFetch()
+    else
+        ui.kosync:updateProgress(false, false)
+    end
+    out.requests = REQUESTS["/koplugin/report"] or 0
+    out.tasks = {}
+    for _, t in ipairs(UI.tasks) do
+        out.tasks[#out.tasks + 1] = t.fn == p.fetch_task and "fetch" or t.fn == p.retry_task and "retry" or "other"
+    end
+    out.pending = p.core:pending()
+    out.status_line = p.core:statusLine(true)
+    out.messages = #UI.shown
 elseif command == "route" then
     -- Home Wi-Fi or Tailscale: what the next request uses, and what KOReader is set to.
     NET.online, NET.connected = true, true
