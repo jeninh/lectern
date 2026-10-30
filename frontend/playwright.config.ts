@@ -7,7 +7,7 @@ import { defineConfig, devices } from "@playwright/test";
 // - phones: the installed, offline app (docs/offline.md#tests), iPhone on WebKit and Android on
 //   Chromium (e2e/serve.py, :8765; helpers in e2e/helpers.ts).
 const PORT = Number(process.env.E2E_PORT ?? 8765);
-const DESKTOP = ["docs", "folders", "library", "platform", "review", "trash", "filters", "jobs"].map((n) => `${n}.spec.ts`);
+const DESKTOP = ["docs", "folders", "library", "platform", "review", "trash", "filters", "jobs", "dictionary"].map((n) => `${n}.spec.ts`);
 const PHONES = ["app", "listening", "offline", "pdfreadalong", "sync"].map((n) => `${n}.spec.ts`);
 
 export default defineConfig({

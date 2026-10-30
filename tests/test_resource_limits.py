@@ -235,3 +235,39 @@ def test_a_wedged_engine_is_stopped_and_a_kernel_oom_kill_is_not_retried():
             synth.sentence("oom-killed")
     finally:
         synth.close()
+
+
+# Answers the voice, then breaks the protocol on request and keeps running, so the parent has
+# to stop it itself; "oom-killed" is the kernel's out-of-memory killer, as above.
+BAD_REPLIES = """
+import json, os, signal, sys, time
+out = sys.stdout.buffer
+sys.stdin.buffer.readline()
+out.write(b'{"ok": true, "sample_rate": 16000}\\n'); out.flush()
+for line in sys.stdin.buffer:
+    text = json.loads(line)["text"]
+    if text == "oom-killed":
+        os.kill(os.getpid(), signal.SIGKILL)
+    out.write(b"not json\\n" if text == "garbage" else b'{"ok": true, "bytes": -1}\\n')
+    out.flush()
+    time.sleep(60)
+"""
+
+
+@pytest.mark.parametrize(("text", "why"), [("garbage", "not JSON"), ("size", "-1 bytes")])
+def test_an_invalid_reply_is_retryable_not_an_oom_kill(text, why):
+    command = [sys.executable, "-c", BAD_REPLIES]
+    synth = ChildSynth("piper", {}, limits.Limit(1, 1, None, 10), command=command)
+    try:
+        with pytest.raises(RuntimeError, match="invalid reply") as exc:
+            synth.sentence(text)
+        assert why in str(exc.value)
+        assert not isinstance(exc.value, OverMemoryLimit)  # we sent that SIGKILL: retryable
+    finally:
+        synth.close()
+    synth = ChildSynth("piper", {}, limits.Limit(1, 1, None, 10), command=command)
+    try:  # control: a SIGKILL nobody here sent is still the out-of-memory killer
+        with pytest.raises(OverMemoryLimit, match="too much memory"):
+            synth.sentence("oom-killed")
+    finally:
+        synth.close()

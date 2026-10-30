@@ -7,7 +7,7 @@ finished it, one row per read (re-reads are more rows). Nothing is backfilled: u
 saves read-throughs for a work, its dates are the ones ``reading_states`` derives.
 
 Revision ID: 0030_book_reviews
-Revises: 0029_playback_speed
+Revises: 0039_vocabulary
 Create Date: 2026-10-28
 
 """
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0030_book_reviews"
-down_revision = "0029_playback_speed"
+down_revision = "0039_vocabulary"
 branch_labels = None
 depends_on = None
 

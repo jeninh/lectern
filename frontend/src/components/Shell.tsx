@@ -32,6 +32,7 @@ const READ: NavEntry[] = [
   { to: "/app/listening", label: "Listening", icon: <Headphones />, keys: "g p" },
   { to: "/app/downloads", label: "Downloads", icon: <Download />, keys: "g o" },
   { to: "/app/highlights", label: "Highlights", icon: <Highlighter /> },
+  { to: "/app/vocabulary", label: "Vocabulary", icon: <Book /> },
 ];
 const MANAGE: NavEntry[] = [
   { to: "/app/devices", label: "Devices", icon: <Devices />, keys: "g d" },

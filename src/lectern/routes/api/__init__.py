@@ -12,6 +12,7 @@ from lectern.routes.api import (
     books,
     core,
     devices,
+    dictionary,
     editor,
     email_in,
     health,
@@ -34,6 +35,7 @@ from lectern.routes.api import (
     shelves,
     tts,
     uploads,
+    vocabulary,
     worker,
     works,
 )
@@ -62,6 +64,7 @@ router.include_router(notifications.router)
 router.include_router(readalong.router)
 router.include_router(reader.router)
 router.include_router(search.router)
+router.include_router(dictionary.router)
 router.include_router(pages.router)
 router.include_router(pdftext.router)
 router.include_router(align.router)
@@ -70,3 +73,4 @@ router.include_router(tts.router)
 router.include_router(pdf2epub.router)
 router.include_router(ocr.router)
 router.include_router(jobqueue.router)
+router.include_router(vocabulary.router)

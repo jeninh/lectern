@@ -312,7 +312,8 @@ def test_a_key_without_the_reviews_scope_never_sees_hand_entered_dates(app, hous
         read_to("owner", w, 1.0)
     set_state("owner", alpha, "2026-03-01", "2026-03-10")
     set_state("owner", bravo, "2026-01-02", "2026-01-20")
-    review(owner, alpha, read_throughs=[{"started_on": "2019-06-02", "finished_on": "2019-06-21"}])
+    review(owner, alpha, rating=4.5,
+           read_throughs=[{"started_on": "2019-06-02", "finished_on": "2019-06-21"}])  # fmt: skip
 
     def ids_of(mcp, **args) -> list[int]:
         return [b["id"] for b in mcp.ok("search_library", **args)["books"]]
@@ -322,10 +323,14 @@ def test_a_key_without_the_reviews_scope_never_sees_hand_entered_dates(app, hous
     assert ids_of(reader, query="started:2019-06-02") == []
     assert ids_of(reader, query="finished:2026-03") == [alpha]  # what Lectern recorded
     assert ids_of(reader, query="finished:2026", sort="finished") == [alpha, bravo]
-    shelf = api_post(
-        owner.http, "/api/shelves", owner.csrf, {"name": "Old", "filter": "finished:2019"}
-    )
-    assert shelf.status_code == 201, shelf.text
+    for name, rule in (
+        ("Old", "title:Alpha finished:2019"),
+        ("Started", "title:Alpha started:2019"),
+        ("Rated", "title:Alpha rating:4.5"),
+        ("Derived", "title:Alpha finished:2026"),
+    ):
+        shelf = api_post(owner.http, "/api/shelves", owner.csrf, {"name": name, "filter": rule})
+        assert shelf.status_code == 201, shelf.text
     assert ids_of(reader, query='shelf:"Old"') == []
     # With the scope (a key may hold all five), the corrected dates.
     full = MCP(app, owner.key("upload", "file", "read", "organize", "reviews", label="all"))
@@ -334,6 +339,25 @@ def test_a_key_without_the_reviews_scope_never_sees_hand_entered_dates(app, hous
     assert ids_of(full, query="finished:2026-03") == []
     assert ids_of(full, sort="finished")[:2] == [bravo, alpha]
     assert ids_of(full, query='shelf:"Old"') == [alpha]
+
+    # Shelf counts obey the same scope as searching their books, including after revocation.
+    def counts(mcp):
+        return {s["name"]: s["books"] for s in mcp.ok("list_shelves")["shelves"]}
+
+    restricted = {"Shared": 2, "Old": 0, "Started": 0, "Rated": 0, "Derived": 1}
+    allowed = {"Shared": 2, "Old": 1, "Started": 1, "Rated": 1, "Derived": 0}
+    assert counts(reader) == restricted
+    assert counts(full) == allowed
+    session_counts = {
+        s["name"]: s["work_count"] for s in owner.http.get("/api/shelves").json()["shelves"]
+    }
+    assert session_counts == allowed
+    key_id = next(
+        k["id"] for k in owner.http.get("/api/ai-keys").json()["keys"] if k["label"] == "all"
+    )
+    r = api_post(owner.http, f"/api/ai-keys/{key_id}/scopes", owner.csrf, {"scopes": ["read"]})
+    assert r.status_code == 200, r.text
+    assert counts(full) == restricted
 
 
 def test_merging_keeps_reviews(household):
@@ -401,9 +425,10 @@ def test_migration_0030_up_and_down(tmp_path):
         conn.commit()
     with engine.begin() as conn:
         cfg.attributes["connection"] = conn
-        command.downgrade(cfg, "0029_playback_speed")
+        command.downgrade(cfg, "0039_vocabulary")
     tables = sa.inspect(engine).get_table_names()
     assert "book_reviews" not in tables and "read_throughs" not in tables
+    assert "vocabulary_words" in tables
     upgrade_to_head(engine)
     with engine.connect() as conn:
         assert schema_diff(conn) == []

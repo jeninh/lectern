@@ -7,18 +7,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { BookHighlights } from "../components/BookHighlights";
 import { RatePrompt } from "../components/BookReview";
+import { DictionaryPopover, type LookupRequest } from "../components/DictionaryPopover";
 import { ArrowLeft, Chevron, Highlighter, TextSize, Toc } from "../components/Icons";
 import { Sheet } from "../components/Sheet";
 import { annotationPath } from "../lib/annotations";
+import { cleanQuery } from "../lib/dictionary";
 import { ApiError, get, OfflineError } from "../lib/api";
 import { getBook, orOffline } from "../lib/offline/store";
 import { savePosition } from "../lib/offline/sync";
 import { relativeTime } from "../lib/format";
 import { pickHandoff } from "../lib/handoff";
 import { useStore } from "../lib/store";
-import { hitTarget } from "../lib/formats";
+import { EPUB, hitTarget } from "../lib/formats";
 import { bookCss, FONT_LABELS, FONTS, fontFaces, PALETTE, resolveTheme, THEMES, useReaderSettings } from "../lib/reader";
-import { offsetOf, rangeAt, rangeBetween } from "../lib/textpos";
+import { normalizedText, offsetOf, rangeAt, rangeBetween } from "../lib/textpos";
+import { type Place, sentenceAround } from "../lib/vocabulary";
 import type { HandoffCandidate, Work, WorkProgressResponse } from "../lib/types";
 import { PageReader } from "./PageReader";
 
@@ -26,6 +29,8 @@ const WIDTH = { narrow: 560, normal: 680, wide: 860 };
 const GAP = { small: "4%", normal: "7%", large: "11%" };
 
 const FOUND = "lectern-found";
+/** The text highlight() selected itself, per section, where the browser has no Highlight API. */
+const marked = new WeakMap<Document, string>();
 
 /** Mark a search match in a section's document (the CSS Custom Highlight API where the
  * browser has it, else the selection), and return its range for the reader to show. */
@@ -47,6 +52,7 @@ function highlight(doc: Document, start: number, end: number): Range | null {
     const sel = doc.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
+    marked.set(doc, range.toString()); // not a selection to look up (watchSelection)
   }
   return range;
 }
@@ -128,8 +134,13 @@ function EpubReader() {
   const [panel, setPanel] = useState<"toc" | "type" | "highlights" | null>(null);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [chrome, setChrome] = useState(true);
+  // Word lookup: selecting a word or phrase in the book (double-click, or long-press on a phone).
+  const [lookup, setLookup] = useState<LookupRequest | null>(null);
+  const closeLookup = useCallback(() => setLookup(null), []);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<FoliateView | null>(null);
+  const epubId = useRef<number | undefined>(undefined);
+  epubId.current = work?.files.find((f) => f.media_type === EPUB)?.id;
   const ready = useRef(false);
   const saveTimer = useRef<number | null>(null);
   const lastSaved = useRef<string>("");
@@ -216,8 +227,10 @@ function EpubReader() {
           saveTimer.current = window.setTimeout(() => save().catch(() => {}), 1500);
         });
         v.addEventListener("load", (e: Event) => {
-          const doc = (e as CustomEvent<{ doc: Document }>).detail.doc;
+          // foliate's load detail carries the section's spine index with its document.
+          const { doc, index } = (e as CustomEvent<{ doc: Document; index: number }>).detail;
           doc.addEventListener("keydown", onKey);
+          watchSelection(doc, setLookup, () => ({ work_id: id, file_id: epubId.current, spine_index: index }));
         });
         await v.open(new File([blob], "book.epub", { type: "application/epub+zip" }));
         setToc(v.book.toc ?? []);
@@ -415,6 +428,8 @@ function EpubReader() {
         <span className="tabular">{pct}%</span>
       </footer>
 
+      {lookup && <DictionaryPopover request={lookup} lang={work?.language} onClose={closeLookup} />}
+
       <Sheet open={panel === "toc"} onClose={() => setPanel(null)} title="Contents" labelledBy="toc-title">
         <TocList items={toc} current={loc?.chapter} onPick={(href) => { view.current?.goTo(href); setPanel(null); }} />
       </Sheet>
@@ -450,6 +465,43 @@ function EpubReader() {
       </Sheet>
     </div>
   );
+}
+
+/** Open a lookup when a word or short phrase is selected in a section's document (the
+ * selection settles first, so dragging across a phrase asks once). */
+function watchSelection(doc: Document, open: (r: LookupRequest | null) => void, where: () => Place) {
+  let timer = 0;
+  let last = "";
+  // The book is in its own frame: clicks and keys there never reach the popover's listeners.
+  doc.addEventListener("pointerdown", () => {
+    marked.delete(doc);
+    open(null);
+  });
+  doc.addEventListener("keydown", (e) => e.key === "Escape" && open(null));
+  doc.addEventListener("selectionchange", () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => {
+      const sel = doc.getSelection();
+      const text = sel && !sel.isCollapsed && sel.rangeCount ? sel.toString() : "";
+      const query = marked.get(doc) === text ? null : cleanQuery(text);
+      if (!query || !sel) {
+        last = "";
+        return;
+      }
+      const r = sel.getRangeAt(0).getBoundingClientRect();
+      // The section is in an iframe: its rectangles are relative to the frame.
+      const frame = doc.defaultView?.frameElement?.getBoundingClientRect() ?? { left: 0, top: 0 };
+      const key = `${query}@${Math.round(r.left)},${Math.round(r.top)}`;
+      if (key === last) return;
+      last = key;
+      // Where the word is in the section's normalised text, and the sentence around it, for Save.
+      const range = sel.getRangeAt(0);
+      const char = offsetOf(doc, range.startContainer, range.startOffset);
+      const length = offsetOf(doc, range.endContainer, range.endOffset) - char;
+      const place = { ...where(), char, length, context: sentenceAround(normalizedText(doc), char, char + length) };
+      open({ query, place, rect: { left: frame.left + r.left, top: frame.top + r.top, bottom: frame.top + r.bottom, width: r.width } });
+    }, 350);
+  });
 }
 
 function TocList({ items, current, onPick, depth = 0 }: { items: TocItem[]; current?: string; onPick: (href: string) => void; depth?: number }) {
@@ -548,7 +600,7 @@ function TypePanel({ prefs, reset }: { prefs: ReturnType<typeof useReaderSetting
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <button className="btn sm ghost" onClick={reset}>{prefs.justThisBook ? "Reset this book" : "Reset"}</button>
       </div>
-      <p className="hint">Saved to your account, so they follow you to every browser you read on. Use ← and → (or the page edges) to turn pages.</p>
+      <p className="hint">Saved to your account, so they follow you to every browser you read on. Use ← and → (or the page edges) to turn pages. Double-click a word (long-press on a phone) or select a phrase to look it up.</p>
     </div>
   );
 }

@@ -836,7 +836,9 @@ def list_finished(ctx: Context, year: Annotated[int, Field(ge=1900, le=2999)]) -
 def _shelves(c: Call) -> list[dict]:
     from lectern.routes.api import shelves as shelves_api
 
-    return shelves_api.list_shelves(c.auth, c.db)["shelves"]
+    return shelves_api.Tree(c.db, c.user, private_reviews=c.has_scope("reviews")).list_json()[
+        "shelves"
+    ]
 
 
 def _path(s: dict) -> str:

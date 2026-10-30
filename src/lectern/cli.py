@@ -415,6 +415,33 @@ def highlights_reindex(_args: argparse.Namespace) -> None:
     print(f"highlights search index rebuilt: {n} highlights")
 
 
+def dictionary_import(args: argparse.Namespace) -> None:
+    from lectern import dictionary
+    from lectern.config import get_settings
+
+    try:
+        meta = dictionary.import_path(
+            get_settings(), args.path, lang=args.lang, to=args.to, name=args.name
+        )
+    except dictionary.DictionaryError as exc:
+        sys.exit(f"dictionary-import: {exc}")
+    pair = meta.lang if not meta.bilingual else f"{meta.lang} → {meta.to}"
+    print(f"installed {meta.name} ({pair}, {meta.entries} entries) as {meta.id}")
+
+
+def dictionary_list(_args: argparse.Namespace) -> None:
+    from lectern import dictionary
+    from lectern.config import get_settings
+
+    found = dictionary.installed(get_settings())
+    if not found:
+        print("no dictionaries installed")
+    for d in found:
+        pair = d.lang if not d.bilingual else f"{d.lang}->{d.to}"
+        state = "on" if d.enabled else "off"
+        print(f"{d.id}\t{pair}\t{d.entries} entries\t{state}\t{d.name}")
+
+
 def restore(args: argparse.Namespace) -> None:
     from lectern import backups
     from lectern.config import get_settings
@@ -579,6 +606,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="rebuild the search index of highlights and notes (it is kept up to date by itself)",
     )
 
+    di = sub.add_parser(
+        "dictionary-import",
+        help="install a StarDict dictionary for word lookup in the reader",
+        description="Install a StarDict dictionary (a folder or .ifo with its .idx and "
+        ".dict(.dz) files, or a .zip/.tar.gz of them) into LECTERN_DATA_DIR/dictionaries. "
+        "Reads only the local file; nothing is downloaded.",
+    )
+    di.add_argument("path", type=Path, help="the folder, .ifo, or archive")
+    di.add_argument("--lang", required=True, help="language of the headwords, e.g. en")
+    di.add_argument("--to", help="language of the definitions, if different (a bilingual one)")
+    di.add_argument("--name", help="name shown in Admin (default: the .ifo bookname)")
+    sub.add_parser("dictionary-list", help="list the installed dictionaries")
+
     r = sub.add_parser(
         "restore",
         help="restore a backup (stop the server first)",
@@ -632,7 +672,13 @@ def main(argv: list[str] | None = None) -> None:
         level=os.environ.get("LECTERN_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    if args.command in ("align-transcribe", "align-bench", "backup", "restore"):
+    if args.command in (
+        "align-transcribe",
+        "align-bench",
+        "backup",
+        "restore",
+        "dictionary-import",
+    ):
         # Beside the server, on its machine: LECTERN_OFFLINE=1 holds here too (prepare-models
         # checks it itself; the worker commands must reach their server).
         from lectern import egress
@@ -656,6 +702,8 @@ def main(argv: list[str] | None = None) -> None:
         "backup": backup,
         "restore": restore,
         "highlights-reindex": highlights_reindex,
+        "dictionary-import": dictionary_import,
+        "dictionary-list": dictionary_list,
         "prepare-models": prepare_models,
     }[args.command](args)
 

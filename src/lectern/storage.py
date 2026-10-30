@@ -170,7 +170,7 @@ def _roots(settings: Settings) -> list[tuple[str, Path]]:
 def volumes(settings: Settings) -> list[dict]:
     """Every volume Lectern stores on, live: the roots on one device share an entry, named
     after its first root (``data``, ``library``, ``backups``). ``low``: free space below
-    ``LECTERN_STORAGE_WARN_FREE_PERCENT`` (to be shared with the health page, #75)."""
+    ``LECTERN_HEALTH_DISK_WARN_PERCENT``."""
     out: dict[int, dict] = {}
     for role, path in _roots(settings):
         try:
@@ -188,7 +188,7 @@ def volumes(settings: Settings) -> list[dict]:
                 "used": usage.total - usage.free,
                 "free": usage.free,
                 "free_percent": round(free_pct, 1),
-                "low": free_pct < settings.storage_warn_free_percent,
+                "low": free_pct < settings.health_disk_warn_percent,
             }
         out[dev]["roles"].append(role)
         out[dev]["paths"].append(str(path))

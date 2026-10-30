@@ -12,7 +12,7 @@ from tests.conftest import api_post, login, make_user
 
 from lectern import limits, queue
 from lectern.align import jobs as align_jobs
-from lectern.db import session_factory
+from lectern.db import get_engine, session_factory
 from lectern.jobs import claim as local_claim
 from lectern.models import Job, JobStatus, Work, WorkerCredential, utcnow
 from lectern.tts import jobs as tts_jobs
@@ -158,6 +158,96 @@ def test_moving_an_ocr_job_to_the_top_makes_it_run_next_where_it_can(client, own
         assert local_claim(db, kinds=("pdf2epub",))[0].id == convert  # still runs: own runner
     assert act(client, owner, later, "move", to="top").status_code == 409  # running now
     assert act(client, owner, first, "move", to="sideways").status_code == 422
+
+
+def add_workers() -> None:
+    """A ready worker, one busy with a job, one offline, one with an allowlist that leaves out
+    ocr; all of them offer ocr and pdf2epub's capability."""
+    now = utcnow()
+    with session_factory()() as db:
+        caps = ["ocr", "pdf2epub"]
+        ready = WorkerCredential(
+            label="ready", key_hash="1" * 64, advertised=caps, last_used_at=now
+        )
+        busy = WorkerCredential(label="busy", key_hash="2" * 64, advertised=caps, last_used_at=now)
+        off = WorkerCredential(label="off", key_hash="3" * 64, advertised=caps,
+                               last_used_at=now - timedelta(days=1))  # fmt: skip
+        limited = WorkerCredential(label="limited", key_hash="4" * 64, advertised=caps,
+                                   capabilities=["align"], last_used_at=now)  # fmt: skip
+        db.add_all([ready, busy, off, limited])
+        db.flush()
+        db.add(Job(kind="transcode", payload={}, status=JobStatus.LEASED, leased_by_id=busy.id,
+                   lease_token_hash="h" * 64, lease_expires_at=now + timedelta(hours=1),
+                   heartbeat_at=now))  # fmt: skip
+        db.commit()
+
+
+def wait_statements(client, per_capability: int) -> tuple[int, int]:
+    """SQL statements and non-revoked credential loads of one GET /api/job-queue."""
+    import sqlalchemy as sa
+
+    with session_factory()() as db:
+        db.query(Job).filter(Job.status == JobStatus.QUEUED).delete()
+        db.commit()
+    for i in range(per_capability):
+        add_job("ocr", None, priority=i)
+        add_job("pdf2epub", None, priority=i)
+    seen: list[str] = []
+
+    def hook(conn, cursor, statement, *rest):
+        seen.append(statement)
+
+    engine = get_engine()
+    sa.event.listen(engine, "before_cursor_execute", hook)
+    try:
+        overview(client)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", hook)
+    return len(seen), sum("revoked_at IS NULL" in s for s in seen)
+
+
+def test_the_jobs_page_costs_the_same_however_many_jobs_wait(client, owner):
+    add_workers()
+    small = wait_statements(client, 5)
+    large = wait_statements(client, 25)
+    assert small == large
+    assert large[1] == 1  # the credentials are loaded once for the whole page
+
+
+def test_a_waiting_job_reads_the_same_on_the_page_as_when_explained_alone(client, owner):
+    member = make_user(client, owner["csrf"], "mia", "member")
+    add_workers()
+    work = iter([add_work(f"Shared {i}") for i in range(7)])
+    tie = utcnow() - timedelta(minutes=10)
+    ids = [
+        add_job("ocr", next(work), priority=5, created_by=member["id"], created_at=tie),
+        add_job("ocr", next(work), priority=5, created_by=member["id"], created_at=tie),  # a tie
+        add_job("ocr", next(work), priority=5, created_by=member["id"]),
+        add_job("ocr", next(work), priority=9, created_by=member["id"]),
+        # Paused and ahead of everything: explain_wait counts it, the page's own place does not.
+        add_job("ocr", next(work), priority=1, created_by=member["id"], run_after=queue.PAUSED_UNTIL),
+        add_job("pdf2epub", next(work), priority=2, created_by=member["id"], attempts=1,
+                error="boom", run_after=utcnow() + timedelta(minutes=5)),
+        add_job("pdf2epub", next(work), priority=3, created_by=member["id"]),
+    ]  # fmt: skip
+    checked = 0
+    for for_owner in (True, False):
+        if not for_owner:
+            client.cookies.clear()
+            login(client, "mia", member["password"])
+        rows = by_id(overview(client))
+        with session_factory()() as db:
+            for jid in ids:
+                row = rows[jid]
+                if row["group"] != "waiting":
+                    continue
+                want = queue.explain_wait(db, db.get(Job, jid), for_owner=for_owner)
+                assert row["waiting"] == want["summary"], (jid, for_owner)
+                checked += 1
+    assert checked == 12  # six waiting jobs, seen by both
+    with session_factory()() as db:
+        third = queue.explain_wait(db, db.get(Job, ids[2]), for_owner=True)
+    assert "(3 ahead)" in third["summary"]  # the tie pair and the paused job are all ahead
 
 
 @pytest.mark.parametrize(("kind", "payload", "keeps"), [

@@ -6834,3 +6834,88 @@ table.compare td:first-child {
 .review-actions {
   justify-content: space-between;
 }
+
+/* Word lookup in the readers (components/DictionaryPopover.tsx) */
+.dict-pop {
+  position: fixed;
+  z-index: 60;
+  width: min(360px, calc(100vw - 16px));
+  max-height: min(420px, calc(100vh - 16px));
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.dict-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 6px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.dict-head strong {
+  font-family: var(--font-display);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.dict-body {
+  overflow-y: auto;
+  padding: 8px 14px 10px;
+}
+.dict-body > p { margin: 4px 0; }
+.dict-entry + .dict-entry { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.dict-word { margin: 0 0 2px; }
+.dict-pron { color: var(--ink-2); }
+.dict-pos { color: var(--muted); }
+.dict-defs { margin: 2px 0; padding-left: 20px; }
+.dict-defs li { margin: 2px 0; }
+.dict-src { margin: 2px 0 0; font-size: 12px; }
+.dict-section {
+  margin: 10px 0 2px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.dict-to {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.dict-admin-list { list-style: none; margin: 12px 0; padding: 0; }
+.dict-admin-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.dict-admin-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 12px; }
+.dict-admin-form .field { margin: 0; flex: 1 1 110px; }
+.dict-admin-form .field:first-child { flex: 2 1 240px; }
+.dict-admin-form input[type="file"].input { padding: 4px; }
+.dict-save { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; }
+.dict-save-err { color: var(--danger); }
+
+/* Vocabulary list (pages/Vocabulary.tsx) */
+.vocab-head { justify-content: space-between; align-items: baseline; flex-wrap: wrap; }
+.vocab-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.vocab-item { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; }
+.vocab-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.vocab-word { font-size: 17px; }
+.vocab-def, .vocab-note { margin: 0; white-space: pre-line; }
+.vocab-context { margin: 0; padding-left: 10px; border-left: 3px solid var(--border); font-style: italic; }
+.vocab-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.vocab-edit textarea { width: 100%; }

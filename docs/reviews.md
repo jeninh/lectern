@@ -69,7 +69,8 @@ stats and the year in review build on it.
 - An AI app sees them only with an AI key that has the **Your ratings and notes** (`reviews`)
   scope. That scope is never a default; see [mcp.md](mcp.md). Without it, `started:` and
   `finished:` (and sorting by them) use only the dates Lectern recorded from your reading,
-  never ones you typed in.
+  never ones you typed in. Smart-shelf counts follow the same scope: `rating:` matches
+  nothing without it, and date rules use only recorded dates.
 - They are part of the database, so the owner's backups and restore include them. Deleting a person deletes theirs. Merging two copies of a book
   keeps everyone's: the kept book's rating and notes win, filled from the other's when empty, and
   both sets of dates are kept.

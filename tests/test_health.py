@@ -184,6 +184,94 @@ def test_backup_overdue_and_failed_job_and_kokoro_worker(client, owner, settings
     db.close()
 
 
+def _pause(client, owner, paused, db):
+    db.commit()  # release SQLite's write lock before the API writes
+    r = api_post(client, "/api/job-queue/pause", owner["csrf"], {"paused": paused})
+    assert r.status_code == 200, r.text
+
+
+def _stuck_pushes(db):
+    return [n for n in _notes(db) if n.data["check"] == "jobs.stuck"]
+
+
+def test_paused_queue_is_not_stuck_but_a_silent_lease_is(client, owner, settings):
+    db = session_factory()()
+    now = utcnow()
+    w = _work(db)
+    queued = Job(
+        kind="tts",
+        work_id=w.id,
+        status=JobStatus.QUEUED,
+        run_after=now - timedelta(hours=25),
+    )
+    db.add(queued)
+    db.commit()
+
+    _pause(client, owner, True, db)
+    v = health.refresh(db, settings, now + timedelta(minutes=1))
+    assert _check(v, "jobs.stuck")["level"] == "ok"
+    assert _stuck_pushes(db) == []
+
+    # A leased job with no heartbeat is stuck even while paused.
+    db.add(
+        Job(
+            kind="ocr",
+            work_id=w.id,
+            status=JobStatus.LEASED,
+            lease_token_hash="h" * 64,
+            started_at=now - timedelta(hours=2),
+        )
+    )
+    db.commit()
+    v = health.refresh(db, settings, now + timedelta(minutes=2))
+    assert _check(v, "jobs.stuck")["level"] == "warning"
+    assert _check(v, "jobs.stuck")["detail"]["total"] == 1
+    db.close()
+
+
+def test_running_queue_warns_on_a_day_old_waiting_job(client, owner, settings):
+    db = session_factory()()
+    now = utcnow()
+    w = _work(db)
+    db.add(
+        Job(
+            kind="tts",
+            work_id=w.id,
+            status=JobStatus.QUEUED,
+            run_after=now - timedelta(hours=25),
+        )
+    )
+    db.commit()
+    v = health.refresh(db, settings, now)
+    assert _check(v, "jobs.stuck")["level"] == "warning"
+    assert len(_stuck_pushes(db)) == 1
+    db.close()
+
+
+def test_resume_restarts_the_queued_clock(client, owner, settings):
+    db = session_factory()()
+    w = _work(db)
+    _pause(client, owner, True, db)
+    db.add(
+        Job(
+            kind="tts",
+            work_id=w.id,
+            status=JobStatus.QUEUED,
+            run_after=utcnow() - timedelta(days=3),
+        )
+    )
+    db.commit()
+    _pause(client, owner, False, db)
+    resumed = utcnow()
+
+    v = health.refresh(db, settings, resumed + timedelta(minutes=5))
+    assert _check(v, "jobs.stuck")["level"] == "ok"
+    assert _stuck_pushes(db) == []
+    v = health.refresh(db, settings, resumed + timedelta(hours=25))
+    assert _check(v, "jobs.stuck")["level"] == "warning"
+    db.close()
+
+
 def queue_presence(cred, at):
     from lectern import queue
 
@@ -430,3 +518,54 @@ def test_a_check_that_flaps_back_to_bad_is_alerted_again(client, owner, settings
 def test_disk_thresholds_must_be_ordered(settings):
     with pytest.raises(ValueError, match="CRITICAL_PERCENT"):
         Settings(**{**settings.model_dump(), "health_disk_critical_percent": 20.0})
+
+
+def _alias_settings(tmp_path, monkeypatch, old=None, new=None):
+    for key, value in (
+        ("LECTERN_STORAGE_WARN_FREE_PERCENT", old),
+        ("LECTERN_HEALTH_DISK_WARN_PERCENT", new),
+    ):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    return Settings(data_dir=tmp_path / "d", library_dir=tmp_path / "l", insecure_http=True)
+
+
+def test_old_storage_key_is_a_deprecated_alias(tmp_path, monkeypatch, caplog):
+    with caplog.at_level("WARNING", logger="lectern.config"):
+        s = _alias_settings(tmp_path, monkeypatch, old="23.5")
+    assert s.health_disk_warn_percent == 23.5
+    assert "LECTERN_STORAGE_WARN_FREE_PERCENT" in caplog.text
+    assert "LECTERN_HEALTH_DISK_WARN_PERCENT" in caplog.text
+    assert "23.5" not in caplog.text
+
+
+def test_new_key_wins_over_old(tmp_path, monkeypatch):
+    assert _alias_settings(tmp_path, monkeypatch, "23.5", "15").health_disk_warn_percent == 15
+    # Explicitly 10 (the default) still beats the old key.
+    assert _alias_settings(tmp_path, monkeypatch, "23.5", "10").health_disk_warn_percent == 10
+
+
+@pytest.mark.parametrize("old", [None, ""])
+def test_no_warning_without_old_key(tmp_path, monkeypatch, caplog, old):
+    with caplog.at_level("WARNING", logger="lectern.config"):
+        s = _alias_settings(tmp_path, monkeypatch, old=old)
+    assert s.health_disk_warn_percent == 10
+    assert "deprecated" not in caplog.text
+
+
+def test_old_key_below_critical_fails_naming_it(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="LECTERN_STORAGE_WARN_FREE_PERCENT") as err:
+        _alias_settings(tmp_path, monkeypatch, old="3.25")
+    assert "3.25" not in str(err.value)
+
+
+def test_alias_reaches_health_and_storage_views(tmp_path, monkeypatch):
+    from lectern import storage
+
+    s = _alias_settings(tmp_path, monkeypatch, old="100")
+    s.data_dir.mkdir()
+    s.library_dir.mkdir()
+    assert all(v["low"] for v in storage.volumes(s))
+    assert health.disk_level(99, 100, s) == health.WARNING

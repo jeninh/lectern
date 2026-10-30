@@ -65,8 +65,9 @@ class Tree:
     """One person's view of the shelves: which they see, with what permission, and the
     counts of what they may see in each. Loaded once per request."""
 
-    def __init__(self, db: Session, user: User) -> None:
+    def __init__(self, db: Session, user: User, *, private_reviews: bool = True) -> None:
         self.db, self.user = db, user
+        self.private_reviews = private_reviews
         self.shelves, self.perms = shelf_perms(db, user)
         self.children: dict[int | None, list[Shelf]] = {}
         for sid in self.perms:
@@ -96,7 +97,9 @@ class Tree:
                     .group_by(ShelfItem.shelf_id)
                 ).all()
             )
-            ctx = filters.Context(self.db, self.user).lenient()
+            ctx = filters.Context(
+                self.db, self.user, private_reviews=self.private_reviews
+            ).lenient()
             for sid in self.perms:
                 if self.shelves[sid].rule is not None:
                     self._counts[sid] = (
@@ -138,6 +141,19 @@ class Tree:
             "updated_at": iso(shelf.updated_at),
         }
 
+    def list_json(self) -> dict:
+        """Every visible shelf, top-level first and then depth-first."""
+        owners = _owners(self.db)
+        out: list[dict] = []
+
+        def walk(parent: int | None) -> None:
+            for s in self.children.get(parent, []):
+                out.append(self.json(s, owners))
+                walk(s.id)
+
+        walk(None)
+        return {"shelves": out, "can_create": can_create_shelf(self.user)}
+
 
 def _rule_json(rule: dict) -> dict:
     return {"filter": rule.get("filter", ""), "sort": rule.get("sort") or "title",
@@ -156,17 +172,7 @@ def _shelf_json(db, shelf: Shelf, user: User) -> dict:
 def list_shelves(auth: Auth, db: DbDep) -> dict:
     """Every shelf this person may see, top-level first and then depth-first, each child
     list in name order (a tree walk of ``parent_id``)."""
-    tree = Tree(db, auth.user)
-    owners = _owners(db)
-    out: list[dict] = []
-
-    def walk(parent: int | None) -> None:
-        for s in tree.children.get(parent, []):
-            out.append(tree.json(s, owners))
-            walk(s.id)
-
-    walk(None)
-    return {"shelves": out, "can_create": can_create_shelf(auth.user)}
+    return Tree(db, auth.user).list_json()
 
 
 def _clean_name(v: str) -> str:
