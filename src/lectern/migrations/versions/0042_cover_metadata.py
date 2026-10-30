@@ -5,7 +5,7 @@ face). ``works.subtitle``, ``works.original_published``, ``works.contributors`` 
 of ``{name, role}``): descriptive fields the editor can set.
 
 Revision ID: 0042_cover_metadata
-Revises: 0039_vocabulary
+Revises: 0033_audio_bookmarks
 Create Date: 2026-10-28
 
 """
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0042_cover_metadata"
-down_revision = "0039_vocabulary"
+down_revision = "0033_audio_bookmarks"
 branch_labels = None
 depends_on = None
 
