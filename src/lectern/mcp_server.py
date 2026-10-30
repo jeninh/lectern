@@ -876,7 +876,9 @@ def _shelf_ref(s: dict) -> dict:
 def list_shelves(ctx: Context) -> dict:
     """Every shelf (folder) this person sees, as paths from their top level ("Kids/Picture
     books"), with how many books are directly on each and what they may do there
-    (owner: manage, edit: add and remove books and make sub-shelves, view). Scope: read."""
+    (owner: manage, edit: add and remove books and make sub-shelves, view). "auto" is null, or
+    the kind ("group", "bucket", "value") of a library-generated shelf: those are read-only,
+    so adding to, removing from, or changing one is refused (auto_shelf). Scope: read."""
     with _call(ctx, "list_shelves", "read") as c:
         return {
             "shelves": [
@@ -890,6 +892,7 @@ def list_shelves(ctx: Context) -> dict:
                     # with shelf:"<path>" lists them); nothing is added to it by hand.
                     "smart": s["smart"],
                     **({"filter": s["filter"]} if "filter" in s else {}),
+                    "auto": s["auto"]["kind"] if s.get("auto") else None,
                 }
                 for s in _shelves(c)
             ]

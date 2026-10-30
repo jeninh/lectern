@@ -108,7 +108,7 @@ test("New shelf is made in the folder you are in", async ({ page }) => {
   await page.goto(`/app/library?shelf=${ids.kids}`);
   await page.getByRole("button", { name: "New shelf" }).click();
   const dialog = page.getByRole("dialog", { name: "New shelf in F Kids" });
-  await dialog.getByLabel("Name").fill("F Comics");
+  await dialog.getByRole("textbox", { name: "Name" }).fill("F Comics");
   await dialog.getByRole("button", { name: "Create" }).click();
   await expect(tile(page, "F Comics")).toBeVisible();
   expect((await shelfByName(page, "F Comics")).parent_id).toBe(ids.kids);
@@ -203,4 +203,32 @@ test("Ctrl+K opens a shelf by its path", async ({ page }) => {
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(new RegExp(`shelf=${ids.picture}`));
   await expect(crumbs(page)).toHaveText(/F Kids›F Picture/);
+});
+
+test("Auto-shelves: an Authors group shows in the tree and the folder; its shelves cannot be renamed or deleted", async ({ page }) => {
+  await page.getByRole("button", { name: "Add a shelf or auto-shelves" }).click();
+  await page.getByRole("menuitem", { name: "Auto-shelves…" }).click();
+  const dialog = page.getByRole("dialog", { name: "New auto-shelves" });
+  await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("Authors");
+  await dialog.getByRole("button", { name: "Create" }).click();
+  // The new group opens: A–Z shelves (the seed's "Author 00"…), none with Rename, Move, or Delete.
+  await expect(crumbs(page)).toHaveText(/Library›Authors/);
+  const bucket = page.getByRole("gridcell", { name: /^Auto-shelf A,/ });
+  await expect(bucket).toBeVisible();
+  await bucket.hover();
+  await page.getByRole("button", { name: "More for A", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Open" })).toBeVisible();
+  for (const name of ["Rename…", "Move to…", "Sharing…", "Delete…"]) await expect(page.getByRole("menuitem", { name })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  // In the sidebar tree the group is collapsed until something inside it is open.
+  await page.goto("/app/library");
+  const tree = page.getByRole("tree", { name: "Shelves" });
+  await expect(tree.getByRole("treeitem", { name: /Authors/ }).first()).toHaveAttribute("aria-expanded", "false");
+  // The group itself has its settings, and is deleted without a question about contents.
+  await page.getByRole("gridcell", { name: /^Auto-shelf Authors,/ }).hover();
+  await page.getByRole("button", { name: "More for Authors", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Auto-shelf settings…" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Delete…" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: /^Delete/ }).click();
+  await expect(page.getByRole("gridcell", { name: /^Auto-shelf Authors,/ })).toHaveCount(0);
 });

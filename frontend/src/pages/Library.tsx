@@ -10,6 +10,7 @@ import { OcrStatus } from "../components/OcrStatus";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, SmartFolder, Upload } from "../components/Icons";
 import { FilterBar, RuleChips } from "../components/FilterBar";
+import { AutoShelfDialog } from "../components/AutoShelfDialog";
 import { SmartShelfDialog } from "../components/SmartShelfDialog";
 import { SendToDevice } from "../components/SendToDevice";
 import { SaveArticle } from "../components/SaveArticle";
@@ -22,7 +23,7 @@ import { Breadcrumbs, canNestIn, DeleteShelfDialog, dragProps, FolderCell, folde
 import { del, get, post, put } from "../lib/api";
 import { clausesOf, extractChips, formatQuery, SORTS, type Clause } from "../lib/filters";
 import type { Items } from "../lib/folders";
-import { childrenOf, pathLabel, shelfKey, splitKeys, workKey, worksIn, type FolderId } from "../lib/shelves";
+import { childrenOf, pathLabel, shelfCan, shelfKey, splitKeys, workKey, worksIn, type FolderId } from "../lib/shelves";
 import { clock, usePlayer } from "../lib/player";
 import type { MatchSuggestion, MetaSuggestions, Shelf, ShelfGrant, User } from "../lib/types";
 import { fold } from "../lib/fuzzy";
@@ -111,6 +112,8 @@ export function LibraryPage() {
   const [naming, setNaming] = useState<{ parent: FolderId; shelf: Shelf | null } | null>(null);
   const [deleting, setDeleting] = useState<Shelf | null>(null);
   const [sharing, setSharing] = useState<Shelf | null>(null);
+  const [newAuto, setNewAuto] = useState(false);
+  const [autoSettings, setAutoSettings] = useState<Shelf | null>(null);
   const [moving, setMoving] = useState<{ items: Items; title: string } | null>(null);
   const review = params.get("review") === "1";
   const metaReview = params.get("metadata") === "1";
@@ -350,17 +353,14 @@ export function LibraryPage() {
     );
   const pickedTitles = useMemo(() => filtered.filter((w) => s.isSelected(workKey(w.id))).map((w) => w.title), [filtered, s]);
   const rowsShown = Array.from({ length: win.end - win.start }, (_, i) => win.start + i);
-  const canCreateHere = !reader && (folder === null ? canCreateShelf : !!current && current.permission !== "view" && !current.smart) && canNestIn(shelves, folder);
+  const canCreateHere = !reader && (folder === null ? canCreateShelf : !!current && shelfCan(current, "subShelf")) && canNestIn(shelves, folder);
   const folderMenu = (sh: Shelf): MenuAction[] => [
     { label: "Open", onSelect: () => openFolder(sh.id) },
-    ...(sh.permission === "owner"
-      ? [
-          { label: "Rename…", onSelect: () => setNaming({ parent: sh.parent_id, shelf: sh }) },
-          { label: "Move to…", onSelect: () => setMoving({ items: { shelves: [sh.id], works: null, workCount: 0, from: folder }, title: `Move “${sh.name}”` }) },
-          { label: "Sharing…", onSelect: () => setSharing(sh) },
-          { label: "Delete…", danger: true, onSelect: () => setDeleting(sh) },
-        ]
-      : []),
+    ...(shelfCan(sh, "settings") ? [{ label: "Auto-shelf settings…", onSelect: () => setAutoSettings(sh) }] : []),
+    ...(shelfCan(sh, "rename") ? [{ label: "Rename…", onSelect: () => setNaming({ parent: sh.parent_id, shelf: sh }) }] : []),
+    ...(shelfCan(sh, "move") ? [{ label: "Move to…", onSelect: () => setMoving({ items: { shelves: [sh.id], works: null, workCount: 0, from: folder }, title: `Move “${sh.name}”` }) }] : []),
+    ...(shelfCan(sh, "grant") ? [{ label: "Sharing…", onSelect: () => setSharing(sh) }] : []),
+    ...(shelfCan(sh, "delete") ? [{ label: "Delete…", danger: true, onSelect: () => setDeleting(sh) }] : []),
   ];
   const coversOf = (sh: Shelf) => worksIn(works, sh.id).slice(0, 3);
   const unknownFolder = !everything && folder !== null && worksLoaded && !current;
@@ -373,6 +373,17 @@ export function LibraryPage() {
         aside={
           <>
             {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
+            {!reader && canCreateHere && (
+              <OverflowMenu
+                label="Add a shelf or auto-shelves"
+                className="btn ghost"
+                trigger={<>New <Down /></>}
+                actions={[
+                  { label: "Shelf…", onSelect: () => setNaming({ parent: folder, shelf: null }) },
+                  { label: "Auto-shelves…", onSelect: () => setNewAuto(true) },
+                ]}
+              />
+            )}
             {keys.length > 0 && (
               <button className="btn ghost" aria-pressed={s.selecting} onClick={() => (s.selecting ? s.exit() : s.setSelecting(true))} title={`Click a book's circle to select it (or ${MOD}-click); while selecting, clicks add and remove. Shift-click for a range, ${MOD} A for all`}>
                 <Select /> {s.selecting ? "Done" : "Select"}
@@ -617,7 +628,7 @@ export function LibraryPage() {
           total={folders.length + bookTotal}
           target={target}
           titles={pickedTitles}
-          shelves={shelves.filter((sh) => sh.permission !== "view" && !sh.smart)}
+          shelves={shelves.filter((sh) => shelfCan(sh, "addTo"))}
           onSelectAll={s.selectAll}
           onClear={s.exit}
           onDone={async () => {
@@ -653,7 +664,7 @@ export function LibraryPage() {
         })}
         sort={sort}
         order={order}
-        parent={!everything && folder !== null && current && current.permission !== "view" && !current.smart ? folder : null}
+        parent={!everything && folder !== null && current && shelfCan(current, "subShelf") ? folder : null}
         onClose={() => setSavingSmart(false)}
         onSaved={(sh) => {
           setSavingSmart(false);
@@ -668,6 +679,18 @@ export function LibraryPage() {
         onSaved={() => {
           setEditingSmart(false);
           refreshLibrary().catch(() => {});
+        }}
+      />
+      <AutoShelfDialog
+        open={newAuto || !!autoSettings}
+        shelf={autoSettings}
+        parent={!everything && folder !== null && current && shelfCan(current, "subShelf") ? folder : null}
+        onClose={() => { setNewAuto(false); setAutoSettings(null); }}
+        onSaved={(sh) => {
+          const made = newAuto;
+          setNewAuto(false);
+          setAutoSettings(null);
+          if (made) openFolder(sh.id);
         }}
       />
       <FolderPicker items={moving?.items ?? null} title={moving?.title ?? ""} onClose={() => { setMoving(null); }} />
@@ -765,7 +788,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
   const ebook = books[0];
   const epub = hasEpub(work);
   const pos = work.position;
-  const editable = shelves.filter((sh) => sh.permission !== "view" && !sh.smart);
+  const editable = shelves.filter((sh) => shelfCan(sh, "addTo"));
   const member = new Set(work.shelf_ids ?? []);
   const [sending, setSending] = useState(false);
   const [merging, setMerging] = useState(false);
@@ -1036,7 +1059,7 @@ function ShelvesManager({ shelves, canCreate, folder, reload, onOpen }: { shelve
                     {sh.permission === "owner" ? (sh.grant_count ? ` · shared with ${sh.grant_count}` : "") : ` · ${sh.owner ? `@${sh.owner}’s` : "shared"} · you can ${sh.permission}`}
                   </div>
                 </div>
-                {sh.permission === "owner" && (
+                {shelfCan(sh, "grant") && (
                   <>
                     <button className="btn sm ghost" aria-expanded={open === sh.id} onClick={() => setOpen(open === sh.id ? null : sh.id)}>Sharing</button>
                     <OverflowMenu

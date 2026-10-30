@@ -5463,6 +5463,16 @@ table.compare td:first-child {
   font: 600 13px/1.2 var(--font-ui);
   box-shadow: var(--shadow-lg);
 }
+/* auto-shelves: shelves the library keeps itself (docs/auto-shelves.md) */
+.book.folder[aria-label^="Auto-shelf"] {
+  cursor: pointer;
+}
+.tree-row[data-auto="bucket"] .tree-link {
+  color: var(--muted);
+}
+.auto-genres .input {
+  min-width: 0;
+}
 /* sidebar tree */
 .shelf-tree {
   display: grid;

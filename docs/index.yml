@@ -111,6 +111,10 @@ sections:
         title: Ratings, notes, and read dates
         description: Rate books, keep private notes, and correct when you read them, re-reads included.
         icon: book
+      - file: auto-shelves.md
+        title: Auto-shelves
+        description: Shelves the library keeps for itself, one per author, tag, genre, language, or narrator.
+        icon: book
 
   - title: AI and automation
     docs:

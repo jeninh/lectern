@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ancestry, canHoldBooks, childrenOf, dropMode, height, moveBlocked, splitKeys, worksIn } from "../shelves";
+import { ancestry, autoPathLabel, canHoldBooks, childrenOf, dropMode, expandFor, height, moveBlocked, shelfCan, splitKeys, worksIn } from "../shelves";
 import type { Shelf, Work } from "../types";
 
 // Kids(1) > Picture(2) > Board(3); Kids > Chapter(4); Classics(5, view only); Deep: L1..L7
@@ -58,5 +58,40 @@ describe("folders hold books", () => {
     expect(dropMode({ altKey: true })).toBe("add");
     expect(dropMode({ altKey: false })).toBe("move");
     expect(splitKeys(["s1", "w20", "s3", "w4"])).toEqual({ shelves: [1, 3], works: [20, 4] });
+  });
+});
+
+describe("auto-shelves", () => {
+  const a = (id: number, name: string, parent: number | null, kind: "group" | "bucket" | "value"): Shelf => ({ ...shelf(id, name, parent), smart: kind === "value", auto: { kind, field: "author", group_id: 20 } });
+  const tree: Shelf[] = [a(20, "Authors", null, "group"), a(21, "T", 20, "bucket"), a(22, "Leo Tolstoy", 21, "value")];
+  const [group, bucket, child] = tree;
+  it("a group is renamed, moved, shared, deleted, and set up; generated shelves are none of that", () => {
+    for (const act of ["rename", "move", "delete", "grant", "settings"] as const) expect(shelfCan(group, act)).toBe(true);
+    for (const act of ["rename", "move", "delete", "grant", "drag", "settings"] as const) {
+      expect(shelfCan(bucket, act)).toBe(false);
+      expect(shelfCan(child, act)).toBe(false);
+    }
+  });
+  it("nothing goes in or under a group, bucket, or child", () => {
+    for (const s of tree) {
+      expect(shelfCan(s, "addTo")).toBe(false);
+      expect(shelfCan(s, "subShelf")).toBe(false);
+      expect(canHoldBooks(tree, s.id)).toBe(false);
+    }
+    expect(moveBlocked([...all, ...tree], [4], 20, true)).toMatch(/can’t add to/);
+    expect(moveBlocked([...all, ...tree], [22], 1, true)).toMatch(/kept up to date/);
+  });
+  it("ordinary shelves are unchanged", () => {
+    expect(shelfCan(all[0], "addTo")).toBe(true);
+    expect(shelfCan(all[0], "settings")).toBe(false);
+  });
+  it("the sidebar opens only the chain to the active shelf; the rest stays collapsed", () => {
+    expect(expandFor(tree, undefined, [])).toEqual([]);
+    expect(expandFor(tree, 22, [])).toEqual([20, 21]);
+    expect(expandFor(tree, 21, [5])).toEqual([5, 20]);
+  });
+  it("palette label skips the bucket", () => {
+    expect(autoPathLabel(tree, child)).toBe("Authors › Leo Tolstoy");
+    expect(autoPathLabel(tree, bucket)).toBe("Authors › T");
   });
 });

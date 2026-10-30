@@ -4,7 +4,7 @@ import { fixSummary } from "../lib/autometa";
 import { bulkSummary } from "../lib/editor";
 import { MOD } from "../lib/hooks";
 import { convertMany, convertSummary, type BulkConvertResult } from "../lib/pdf2epub";
-import { pathLabel } from "../lib/shelves";
+import { pathLabel, shelfCan } from "../lib/shelves";
 import { useStore } from "../lib/store";
 import type { BulkResult, FixStatus, Shelf } from "../lib/types";
 import { BulkConvertSheet } from "./BulkConvert";
@@ -164,7 +164,7 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
             <button className="btn sm" disabled={off("edit")} title={over("edit")} onClick={() => setDialog("author")}>Author</button>
             <button className="btn sm" disabled={off("edit")} title={over("edit")} onClick={() => setDialog("series")}>Series</button>
             <button className="btn sm" disabled={off("edit")} title={over("edit")} onClick={() => setDialog("tags")}>Tags</button>
-            {shelves.length > 0 && <button className="btn sm" disabled={off("edit")} title={over("edit")} onClick={() => setDialog("shelves")}>Shelves</button>}
+            {shelves.some((s) => shelfCan(s, "addTo")) && <button className="btn sm" disabled={off("edit")} title={over("edit")} onClick={() => setDialog("shelves")}>Shelves</button>}
           </>
         )}
         {canEdit && <button className="btn sm" disabled={off("edit") || !!lookupOff} title={over("edit") ?? lookupOff ?? "Look up missing description, series, ISBN, and subjects to review"} onClick={fix}>Fix metadata</button>}
@@ -182,7 +182,7 @@ export function BulkBar({ open, ready, count, books, all, total, target, titles,
         )}
       </SelectionBar>
       <Sheet open={dialog !== null} onClose={() => setDialog(null)} title={dialog ? `${dialog === "author" ? "Set author" : dialog === "series" ? "Set series" : dialog === "tags" ? "Tags" : "Shelves"} for ${plural(n, "book")}` : ""} variant="dialog" labelledBy="bulk-title">
-        {dialog && <BulkForm action={dialog} shelves={shelves} busy={busy} titles={titles} count={n} onSubmit={run} />}
+        {dialog && <BulkForm action={dialog} shelves={shelves.filter((s) => shelfCan(s, "addTo"))} busy={busy} titles={titles} count={n} onSubmit={run} />}
       </Sheet>
       <BulkConvertSheet results={converted} onClose={() => setConverted(null)} />
     </>

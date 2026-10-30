@@ -28,7 +28,7 @@ from lectern import imports, mcp_server
 from lectern.config import Settings
 from lectern.db import session_factory
 from lectern.ingest.watcher import InboxWatcher
-from lectern.models import AIKey, AuditLog, Import, Job, JobStatus, Notification, Work
+from lectern.models import AIKey, AuditLog, Import, Job, JobStatus, Notification, User, Work
 from lectern.security.ratelimit import SlidingWindowLimiter
 
 HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
@@ -536,6 +536,46 @@ def test_a_bad_whole_file_checksum_fails_the_upload(app, home, settings):
 
 
 # --- organize -------------------------------------------------------------------------------------
+
+
+def test_list_shelves_shows_auto_kinds_hides_what_readers_may_not_see_and_is_read_only(app, home):
+    owner, rex = home["owner"], home["rex"]
+    auto = {"field": "author", "min_books": 1}
+    r = api_post(owner.http, "/api/shelves", owner.csrf, {"name": "Authors", "auto": auto})
+    group = r.json()["id"]
+    with session_factory()() as db:
+        rex_id = db.scalar(select(User.id).where(User.username == "rex"))
+    r = put_json(
+        owner.http, f"/api/shelves/{group}/grants/{rex_id}", owner.csrf, {"permission": "view"}
+    )
+    assert r.status_code == 200, r.text
+
+    def kinds(mcp: MCP) -> dict[str, str | None]:
+        return {s["path"]: s["auto"] for s in mcp.ok("list_shelves")["shelves"]}
+
+    mine = MCP(app, owner.key("read", "organize"))
+    assert kinds(mine) == {
+        "Shared": None, "Favourites": None, "Authors": "group", "Authors/A": "bucket",
+        "Authors/A/Author Alpha": "value", "Authors/A/Author Bravo": "value",
+        "Authors/A/Author Hidden": "value",
+    }  # fmt: skip
+    # A reader gets exactly the authors of books they may see; a hidden author's name appears
+    # nowhere in the reply, as in the Tree.
+    theirs = MCP(app, rex.key("read", "organize"))
+    assert set(kinds(theirs)) == {
+        "Shared", "Authors", "Authors/A", "Authors/A/Author Alpha", "Authors/A/Author Bravo",
+    }  # fmt: skip
+    assert "Hidden" not in json.dumps(theirs.ok("list_shelves"))
+    # Generated shelves are read-only for the person who manages them too.
+    ids = home["ids"]
+    for tool, extra in (("add_to_shelf", {}), ("remove_from_shelf", {})):
+        ok, err = mine.call(tool, book_id=ids["Alpha"], shelf="Authors/A/Author Alpha", **extra)
+        assert not ok and "auto_shelf" in err, (tool, err)
+    ok, err = mine.call("create_shelf", path="Authors/A/Author Alpha/Mine")
+    assert not ok and "auto_shelf" in err
+    ok, err = mine.call("move_shelf", shelf="Favourites", to="Authors/A/Author Alpha")
+    assert not ok and "auto_shelf" in err
+    assert "read-only" in mcp_server.list_shelves.__doc__
 
 
 def test_shelves_devices_metadata_and_alignment(app, home):

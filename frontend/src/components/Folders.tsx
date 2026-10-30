@@ -6,7 +6,7 @@ import { Link, useLocation } from "react-router-dom";
 import { patch, post } from "../lib/api";
 import { deleteShelf, startDrag, endDrag, useDropTarget, useFolderOps, type Items } from "../lib/folders";
 import { useLocalStorage } from "../lib/hooks";
-import { ancestry, byId, childrenOf, MAX_DEPTH, pathLabel, type FolderId } from "../lib/shelves";
+import { ancestry, autoKind, byId, childrenOf, expandFor, isGenerated, MAX_DEPTH, pathLabel, type FolderId } from "../lib/shelves";
 import { useStore } from "../lib/store";
 import type { Shelf, Work } from "../lib/types";
 import type { CellProps } from "../lib/useSelection";
@@ -28,8 +28,12 @@ export function folderSummary(s: Pick<Shelf, "work_count" | "shelf_count">): str
 /** A shelf in the Library grid or list: opened like a folder (a click or tap when nothing is
  * selected, Enter, or Open in its menu), selected like a book, dragged and dropped onto. */
 export function FolderCell({ shelf, grid, cell, col, covers, menu, drag }: { shelf: Shelf; grid: boolean; cell: CellProps; col: number; covers: Work[]; menu: MenuAction[]; drag: { draggable: boolean; onDragStart: (e: React.DragEvent) => void; onDragEnd: () => void } }) {
-  const drop = useDropTarget()(shelf.id);
-  const label = `${shelf.smart ? "Smart shelf" : "Shelf"} ${shelf.name}, ${folderSummary(shelf)}`;
+  // Nothing is dropped on, or dragged out of, a shelf the library keeps itself.
+  const generated = isGenerated(shelf);
+  const dropProps = useDropTarget()(shelf.id);
+  const drop = autoKind(shelf) ? {} : dropProps;
+  if (generated) drag = { draggable: false, onDragStart: () => {}, onDragEnd: () => {} };
+  const label = `${autoKind(shelf) ? "Auto-shelf" : shelf.smart ? "Smart shelf" : "Shelf"} ${shelf.name}, ${folderSummary(shelf)}`;
   const pick = (
     <span className="pick" data-sel-toggle aria-hidden="true" title="Select">
       {cell["aria-selected"] ? "✓" : ""}
@@ -121,8 +125,8 @@ export function ShelfTree() {
   // Keep the open folder's ancestors expanded, so the active row is visible.
   useEffect(() => {
     if (!active) return;
-    const up = ancestry(shelves, active).slice(0, -1).map((s) => s.id);
-    if (up.some((id) => !open.includes(id))) setOpen([...new Set([...open, ...up])]);
+    const next = expandFor(shelves, active, open);
+    if (next.length !== open.length) setOpen(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, shelves]);
   if (!shelves.length) return null;
@@ -133,7 +137,7 @@ export function ShelfTree() {
       const expanded = open.includes(s.id);
       return (
         <li key={s.id} role="treeitem" aria-expanded={kids ? expanded : undefined} aria-selected={active === s.id} aria-level={depth + 1}>
-          <div className="tree-row" style={{ paddingLeft: 6 + depth * 14 }} {...drop(s.id)}>
+          <div className="tree-row" style={{ paddingLeft: 6 + depth * 14 }} data-auto={autoKind(s) ?? undefined} {...(autoKind(s) ? {} : drop(s.id))}>
             {kids ? (
               <button className="twisty" aria-label={`${expanded ? "Collapse" : "Expand"} ${s.name}`} onClick={() => toggle(s.id)} tabIndex={-1}>
                 <Chevron data-open={expanded || undefined} />
@@ -277,7 +281,8 @@ export function DeleteShelfDialog({ shelf, onClose, onDeleted }: { shelf: Shelf 
   const below = shelves.filter((s) => s.id !== shelf.id && ancestry(shelves, s.id).some((a) => a.id === shelf.id));
   const inTree = new Set([shelf.id, ...below.map((s) => s.id)]);
   const books = works.filter((w) => w.shelf_ids?.some((id) => inTree.has(id))).length;
-  const empty = !shelf.work_count && !shelf.shelf_count;
+  const group = autoKind(shelf) === "group";
+  const empty = group || (!shelf.work_count && !shelf.shelf_count);
   const parent = shelf.parent_id === null ? null : byId(shelves).get(shelf.parent_id) ?? null;
   const up = parent ? `“${parent.name}”` : "the top level";
   const run = async () => {
@@ -319,7 +324,7 @@ export function DeleteShelfDialog({ shelf, onClose, onDeleted }: { shelf: Shelf 
     <Sheet open onClose={onClose} title={`Delete “${shelf.name}”?`} variant="dialog" labelledBy="delete-shelf-title">
       <div className="stack">
         {empty ? (
-          <p className="sub" style={{ margin: 0 }}>It’s empty. People it was shared with lose nothing.</p>
+          <p className="sub" style={{ margin: 0 }}>{group ? "This also deletes every shelf the library made under it, and none of your books. You can make it again any time." : "It’s empty. People it was shared with lose nothing."}</p>
         ) : (
           <>
             <p className="sub" style={{ margin: 0 }}>

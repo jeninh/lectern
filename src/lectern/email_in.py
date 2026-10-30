@@ -362,12 +362,12 @@ def check(db: Session, settings: Settings, cfg: Config, msg: EmailMessage) -> tu
 
 def destination_shelf(db: Session, inbox: EmailInbox, user: User) -> Shelf | None:
     """The shelf emailed books go on, if it still exists and ``user`` may add to it."""
-    from lectern.access import can_edit_shelf
+    from lectern.access import can_edit_shelf, takes_items
 
     if inbox.shelf_id is None:
         return None
     shelf = db.get(Shelf, inbox.shelf_id)
-    if shelf is None or shelf.rule is not None or not can_edit_shelf(db, user, shelf):
+    if shelf is None or not takes_items(shelf) or not can_edit_shelf(db, user, shelf):
         return None
     return shelf
 

@@ -135,6 +135,12 @@ status now counts the web reader and the audio player as well as KOReader. Every
 
 ![Filter chips](docs/screenshots/filters-chips.png)
 
+### Auto-shelves
+
+**New → Auto-shelves…** makes a shelf the library fills itself: one shelf per author, tag,
+genre, language, or narrator, kept up to date, on OPDS too, and never showing a reader more
+than they may see. See [docs/auto-shelves.md](docs/auto-shelves.md).
+
 ## Search inside books
 
 Cmd/Ctrl+K also searches the text of your books: **In books**, below the other results, lists

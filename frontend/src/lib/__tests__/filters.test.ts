@@ -83,3 +83,19 @@ describe("chip labels", () => {
     expect(label("needs:ocr")).toBe("Needs OCR: yes");
   });
 });
+
+describe("exact text values", () => {
+  it("parses = as \"is exactly\" and keeps it when formatted", () => {
+    const q = parse('-author:="Leo Tolstoy",=Pushkin tag:=sf author:"=X"');
+    expect(q.clauses[0].values).toEqual([{ op: "==", a: "Leo Tolstoy", b: "" }, { op: "==", a: "Pushkin", b: "" }]);
+    expect(q.clauses[1].values).toEqual([{ op: "=", a: "sf", b: "" }]);
+    expect(q.clauses[2].values).toEqual([{ op: "=", a: "=X", b: "" }]);
+    expect(formatQuery(q)).toBe('-author:=\"Leo Tolstoy\",=Pushkin tag:sf author:\"=X\"');
+  });
+
+  it("renders the \"is exactly\" chip", () => {
+    expect(clauseLabel(parse("author:=Tolstoy").clauses[0])).toEqual({ field: "Author", values: "is exactly Tolstoy" });
+    expect(clauseLabel(parse("-author:=Tolstoy").clauses[0])).toEqual({ field: "Author", values: "is not exactly Tolstoy" });
+    expect(clauseLabel(parse("author:Tolstoy").clauses[0])).toEqual({ field: "Author", values: "Tolstoy" });
+  });
+});

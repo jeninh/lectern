@@ -18,11 +18,11 @@ from contextlib import contextmanager
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from lectern import filters
+from lectern import auto_shelves, filters
 from lectern.access import (
     MAX_DEPTH,
     can_create_shelf,
@@ -32,6 +32,7 @@ from lectern.access import (
     depth_of,
     lineage,
     shelf_perms,
+    takes_items,
     visible_parent,
     visible_path,
     visible_works,
@@ -40,7 +41,17 @@ from lectern.access import (
     shelf_permission as _shelf_permission,
 )
 from lectern.filters import smart_predicate
-from lectern.models import Role, Shelf, ShelfGrant, ShelfItem, ShelfPermission, User, Work
+from lectern.models import (
+    Role,
+    Shelf,
+    ShelfAutoChild,
+    ShelfAutoGroup,
+    ShelfGrant,
+    ShelfItem,
+    ShelfPermission,
+    User,
+    Work,
+)
 from lectern.routes.api.serializers import iso, work_json
 from lectern.security import audit
 from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
@@ -70,12 +81,36 @@ class Tree:
         self.private_reviews = private_reviews
         self.shelves, self.perms = shelf_perms(db, user)
         self.children: dict[int | None, list[Shelf]] = {}
+        # Generated shelves: a group's settings, and each generated shelf's row, loaded once
+        # (not per shelf); their counts come from the viewer's auto_shelves view.
+        self.groups = {g.shelf_id: g for g in db.scalars(select(ShelfAutoGroup))}
+        self.auto = (
+            {c.shelf_id: c for c in db.scalars(select(ShelfAutoChild))} if self.groups else {}
+        )
+        self.view = auto_shelves.view(db, user)
+        self.grants = dict(
+            db.execute(
+                select(ShelfGrant.shelf_id, func.count()).group_by(ShelfGrant.shelf_id)
+            ).all()
+        )
         for sid in self.perms:
             s = self.shelves[sid]
             self.children.setdefault(visible_parent(s, self.perms), []).append(s)
         for kids in self.children.values():
-            kids.sort(key=lambda s: (s.name.casefold(), s.id))
+            kids.sort(key=lambda s: (self._by_count(s), s.name.casefold(), s.id))
         self._counts: dict[int, int] | None = None
+
+    def _by_count(self, shelf: Shelf) -> int:
+        """Sort key ahead of the name: a generated child of a group that lists by count goes
+        by how many books this person sees in it, most first."""
+        child = self.auto.get(shelf.id)
+        if (
+            child is None
+            or child.kind != "value"
+            or self.groups[child.group_id].child_order != "count"
+        ):
+            return 0
+        return -self.view.counts.get(shelf.id, 0)
 
     def visible(self, shelf_id: int) -> Shelf:
         if shelf_id not in self.perms:
@@ -93,7 +128,10 @@ class Tree:
                 self.db.execute(
                     select(ShelfItem.shelf_id, func.count())
                     .join(Work, Work.id == ShelfItem.work_id)
-                    .where(ShelfItem.shelf_id.in_(list(self.perms)), visible_works(self.user))
+                    .where(
+                        ShelfItem.shelf_id.in_([s for s in self.perms if s not in self.auto]),
+                        visible_works(self.user),
+                    )
                     .group_by(ShelfItem.shelf_id)
                 ).all()
             )
@@ -101,7 +139,9 @@ class Tree:
                 self.db, self.user, private_reviews=self.private_reviews
             ).lenient()
             for sid in self.perms:
-                if self.shelves[sid].rule is not None:
+                if sid in self.view.counts:  # generated: already counted for this person
+                    self._counts[sid] = self.view.counts[sid]
+                elif self.shelves[sid].rule is not None:
                     self._counts[sid] = (
                         self.db.scalar(
                             select(func.count())
@@ -115,9 +155,6 @@ class Tree:
         return self._counts
 
     def json(self, shelf: Shelf, owners: dict[int, str]) -> dict:
-        grants = self.db.scalar(
-            select(func.count()).select_from(ShelfGrant).where(ShelfGrant.shelf_id == shelf.id)
-        )
         return {
             "id": shelf.id,
             "name": shelf.name,
@@ -128,8 +165,9 @@ class Tree:
             "permission": self.perms[shelf.id],
             "work_count": self.counts().get(shelf.id, 0),
             "shelf_count": len(self.children.get(shelf.id, [])),
-            "grant_count": grants or 0,
+            "grant_count": self.grants.get(shelf.id, 0),
             "smart": shelf.rule is not None,
+            "auto": self.auto_json(shelf),
             # The rule is for whoever manages the shelf: it may name shelves, devices, or
             # people others cannot see. Everyone else sees only what it matches for them.
             **(
@@ -153,6 +191,28 @@ class Tree:
 
         walk(None)
         return {"shelves": out, "can_create": can_create_shelf(self.user)}
+
+    def auto_json(self, shelf: Shelf) -> dict | None:
+        """``{kind: group|bucket|value, field, group_id}`` for a generated shelf or a group
+        (a group's managers also get its settings), else ``None``."""
+        group = self.groups.get(shelf.id)
+        if group is not None:
+            out = {"kind": "group", "field": group.field, "group_id": shelf.id}
+            if self.perms[shelf.id] == "owner":
+                out |= {
+                    "min_books": group.min_books,
+                    "child_order": group.child_order,
+                    "buckets": group.buckets,
+                    "sort": group.sort,
+                    "order": None if group.descending is None
+                    else ("desc" if group.descending else "asc"),
+                }  # fmt: skip
+            return out
+        child = self.auto.get(shelf.id)
+        if child is None:
+            return None
+        return {"kind": child.kind, "field": self.groups[child.group_id].field,
+                "group_id": child.group_id}  # fmt: skip
 
 
 def _rule_json(rule: dict) -> dict:
@@ -196,11 +256,34 @@ class RuleIn(BaseModel):
     order: Literal["asc", "desc"] | None = None
 
 
+class AutoIn(BaseModel):
+    """An auto-shelves group's settings (docs/contracts.md, "Auto-shelves"); each defaults to
+    the field's own default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_books: int | None = Field(default=None, ge=1, le=auto_shelves.MIN_BOOKS_MAX)
+    child_order: Literal["name", "count"] | None = None
+    buckets: bool | None = None
+    sort: str | None = Field(default=None, pattern=filters.SORT_PATTERN)
+    order: Literal["asc", "desc"] | None = None
+
+
+class AutoCreateIn(AutoIn):
+    field: str = Field(min_length=1, max_length=16)
+
+
+class AutoPatchIn(AutoIn):
+    field: str | None = Field(default=None, max_length=16)  # fixed: only the same value passes
+
+
 class CreateIn(RuleIn):
-    """``filter`` set: a smart shelf."""
+    """``filter`` set: a smart shelf. ``auto`` set: an auto-shelves group (not with
+    ``filter``)."""
 
     name: str = Field(min_length=1, max_length=128)
     parent_id: int | None = None
+    auto: AutoCreateIn | None = None
 
     @field_validator("name")
     @classmethod
@@ -214,6 +297,7 @@ class PatchIn(RuleIn):
 
     name: str | None = Field(default=None, min_length=1, max_length=128)
     parent_id: int | None = None
+    auto: AutoPatchIn | None = None
 
     @field_validator("name")
     @classmethod
@@ -265,7 +349,9 @@ def _target_parent(db, user: User, parent_id: int | None) -> Shelf | None:
     parent, perm = _shelf_or_404(db, user, parent_id)
     if perm not in ("owner", "edit"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "View-only shelf")
-    if parent.rule is not None:
+    if parent.auto_kind is not None:
+        raise _auto_shelf()  # the library keeps its own shelves; none are put in them by hand
+    if not takes_items(parent):
         raise HTTPException(status.HTTP_409_CONFLICT, "smart_shelf")
     return parent
 
@@ -283,6 +369,17 @@ def _tree_change(db: Session) -> Iterator[None]:
             if isinstance(obj, Shelf):
                 db.expire(obj)
         yield
+
+
+def _auto_shelf() -> HTTPException:
+    return HTTPException(status.HTTP_409_CONFLICT, "auto_shelf")
+
+
+def _not_generated(shelf: Shelf) -> None:
+    """A generated child or bucket is the library's to keep: it is not renamed, moved,
+    deleted, shared, or changed by hand (``409 auto_shelf``)."""
+    if shelf.auto_kind in ("value", "bucket"):
+        raise _auto_shelf()
 
 
 def _too_deep() -> HTTPException:
@@ -321,11 +418,34 @@ def create_shelf(request: Request, auth: AuthCsrf, db: DbDep, body: CreateIn) ->
             raise _too_deep()
         if _clash(db, auth.user.id, body.parent_id, body.name) is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
-        rule = _rule(db, auth.user, body, None) if body.filter is not None else None
-        shelf = Shelf(owner_id=auth.user.id, name=body.name, parent=parent, rule=rule)
-        db.add(shelf)
-        db.flush()
+        rule = None
+        if body.auto is not None:
+            if body.model_fields_set & {"filter", "sort", "order"}:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, {"detail": "auto_and_filter"}
+                )
+            a = body.auto
+            try:
+                shelf = auto_shelves.create_group(
+                    db, auth.user, body.name, a.field, parent,
+                    buckets=a.buckets, min_books=a.min_books,
+                    child_order=a.child_order or "name", sort=a.sort or "title",
+                    descending=None if a.order is None else a.order == "desc",
+                )  # fmt: skip
+            except ValueError as exc:
+                if str(exc) == "too_deep":
+                    raise _too_deep() from None
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT, {"detail": str(exc)}
+                ) from None
+        else:
+            rule = _rule(db, auth.user, body, None) if body.filter is not None else None
+            shelf = Shelf(owner_id=auth.user.id, name=body.name, parent=parent, rule=rule)
+            db.add(shelf)
+            db.flush()
         where = f"in shelf:{parent.id}" if parent else None
+        if body.auto is not None:
+            where = " ".join(filter(None, [where, f"auto: {body.auto.field}"]))
         if rule is not None:
             where = " ".join(filter(None, [where, f"smart: {rule['filter']}"]))
         _audit(db, request, auth, "shelf.create", body.name, where)
@@ -382,6 +502,13 @@ def update_shelf(
         shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
         if perm != "owner":
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the shelf's owner can change it")
+        _not_generated(shelf)
+        group = shelf.auto_group
+        if body.auto is not None:
+            if group is None:
+                raise HTTPException(status.HTTP_409_CONFLICT, "not_auto_group")
+            if body.auto.field is not None and body.auto.field != group.field:
+                raise HTTPException(status.HTTP_409_CONFLICT, "auto_field_immutable")
         moving = "parent_id" in body.model_fields_set and body.parent_id != shelf.parent_id
         name = body.name if body.name is not None else shelf.name
         parent_id = body.parent_id if moving else shelf.parent_id
@@ -393,6 +520,13 @@ def update_shelf(
                 shelves = {s.id: s for s in db.scalars(select(Shelf))}
                 if depth_of(parent) + depth_below(shelf.id, shelves) > MAX_DEPTH:
                     raise _too_deep()
+            base = (depth_of(parent) if parent else 0) + 1 - depth_of(shelf)
+            for s in _subtree(shelf):
+                # Room for a group's generated children too, not only for what is there now.
+                if s.auto_group is not None and not auto_shelves.fits_depth(
+                    base + depth_of(s), s.auto_group.buckets
+                ):
+                    raise _too_deep()
         if _clash(db, shelf.owner_id, parent_id, name, shelf.id) is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "duplicate_name")
         if body.model_fields_set & {"filter", "sort", "order"}:
@@ -403,6 +537,8 @@ def update_shelf(
             if rule != shelf.rule:
                 _audit(db, request, auth, "shelf.rule", shelf.name, rule["filter"])
                 shelf.rule = rule
+        if body.auto is not None:
+            _update_group(db, request, auth, shelf, group, body.auto)
         if name != shelf.name:
             _audit(db, request, auth, "shelf.rename", name, shelf.name)
             shelf.name = name
@@ -418,6 +554,28 @@ def update_shelf(
         if shelf.id not in tree.perms:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
         return tree.json(db.get(Shelf, shelf.id), _owners(db))
+
+
+def _update_group(db, request: Request, auth, shelf: Shelf, group, a: AutoIn) -> None:
+    """Apply the settings ``a`` names; the library's generated shelves follow on the next look
+    (lectern.auto_shelves.reconcile)."""
+    fields = a.model_fields_set
+    buckets = group.buckets if a.buckets is None else a.buckets
+    if buckets and not group.buckets and not auto_shelves.fits_depth(depth_of(shelf), True):
+        raise _too_deep()
+    changes = {
+        "min_books": a.min_books, "child_order": a.child_order, "buckets": a.buckets,
+        "sort": a.sort,
+    }  # fmt: skip
+    changes = {k: v for k, v in changes.items() if v is not None and getattr(group, k) != v}
+    descending = None if a.order is None else a.order == "desc"
+    if "order" in fields and descending != group.descending:
+        changes["descending"] = descending
+    if changes:
+        for k, v in changes.items():
+            setattr(group, k, v)
+        _audit(db, request, auth, "shelf.auto", shelf.name,
+               ", ".join(f"{k}={v}" for k, v in changes.items()))  # fmt: skip
 
 
 def _subtree(shelf: Shelf) -> list[Shelf]:
@@ -455,6 +613,14 @@ def delete_shelf(
         shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
         if perm != "owner":
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the shelf's owner can delete it")
+        _not_generated(shelf)
+        if shelf.auto_group is not None:
+            # Everything under a group is generated, and nothing is on it by hand: it goes
+            # with its children, which the library would only make again.
+            _audit(db, request, auth, "shelf.delete", shelf.name, "auto group with its shelves")
+            db.delete(shelf)
+            db.commit()
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
         subtree = _subtree(shelf)
         ids = [s.id for s in subtree]
         work_ids = list(
@@ -542,7 +708,9 @@ def _editable(db, auth, shelf_id: int) -> Shelf:
     shelf, perm = _shelf_or_404(db, auth.user, shelf_id)
     if perm not in ("owner", "edit"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "View-only shelf")
-    if shelf.rule is not None:
+    if shelf.auto_kind is not None:
+        raise _auto_shelf()
+    if not takes_items(shelf):
         # A smart shelf's books are its rule's matches; nothing is put on it by hand.
         raise HTTPException(status.HTTP_409_CONFLICT, "smart_shelf")
     return shelf
@@ -678,6 +846,7 @@ def put_grant(
     request: Request, auth: AuthCsrf, db: DbDep, shelf_id: int, user_id: int, body: GrantIn
 ) -> dict:
     shelf = _managed(db, auth, shelf_id)
+    _not_generated(shelf)
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
@@ -701,6 +870,7 @@ def delete_grant(
     request: Request, auth: AuthCsrf, db: DbDep, shelf_id: int, user_id: int
 ) -> Response:
     shelf = _managed(db, auth, shelf_id)
+    _not_generated(shelf)
     grant = db.get(ShelfGrant, (shelf.id, user_id))
     if grant is not None:
         db.delete(grant)

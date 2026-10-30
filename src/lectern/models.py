@@ -661,6 +661,17 @@ class Shelf(Base):
     grants: Mapped[list[ShelfGrant]] = relationship(
         back_populates="shelf", cascade="all, delete-orphan"
     )
+    # Auto-shelves (migration 0041, lectern.auto_shelves): a group, or a shelf it generated.
+    auto_group: Mapped[ShelfAutoGroup | None] = relationship(viewonly=True)
+    auto_child: Mapped[ShelfAutoChild | None] = relationship(viewonly=True)
+
+    @property
+    def auto_kind(self) -> str | None:
+        """``group``, ``bucket``, ``value`` (a generated child), or ``None`` (an ordinary
+        shelf)."""
+        if self.auto_group is not None:
+            return "group"
+        return self.auto_child.kind if self.auto_child is not None else None
 
 
 class ShelfItem(Base):
@@ -1666,3 +1677,52 @@ class AudioBookmark(Base):
     device: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+# --- Auto-shelves (migration 0041, issue #73) -------------------------------------------------
+#
+# A group is an ordinary shelf with a ``shelf_auto_groups`` row; lectern.auto_shelves keeps one
+# child shelf per value of its field under it (a smart shelf with a rule such as
+# ``author:="Leo Tolstoy"``), optionally inside A–Z buckets (rule-NULL shelves). Both kinds of
+# generated shelf have a ``shelf_auto_children`` row.
+
+
+class ShelfAutoGroup(Base):
+    __tablename__ = "shelf_auto_groups"
+
+    shelf_id: Mapped[int] = mapped_column(
+        ForeignKey("shelves.id", ondelete="CASCADE"), primary_key=True
+    )
+    field: Mapped[str] = mapped_column(String(16))  # a lectern.auto_shelves.FIELDS key; fixed
+    # A child is made (and shown) once at least this many books have its value.
+    min_books: Mapped[int] = mapped_column(Integer, default=2, server_default="2")
+    child_order: Mapped[str] = mapped_column(String(8), default="name", server_default="name")
+    buckets: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # Written into each child's rule (lectern.filters.SORTS key, and its direction).
+    sort: Mapped[str] = mapped_column(String(16), default="title", server_default="title")
+    descending: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class ShelfAutoChild(Base):
+    """A generated shelf: ``kind`` ``bucket`` (``key`` is ``A``–``Z`` or ``#``) or ``value``
+    (``key`` is the folded value, lectern.filters.fold)."""
+
+    __tablename__ = "shelf_auto_children"
+    __table_args__ = (
+        UniqueConstraint("group_id", "kind", "key", name="uq_shelf_auto_children_key"),
+    )
+
+    shelf_id: Mapped[int] = mapped_column(
+        ForeignKey("shelves.id", ondelete="CASCADE"), primary_key=True
+    )
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("shelf_auto_groups.shelf_id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(8))
+    key: Mapped[str] = mapped_column(String(256))
+
+
+# lectern.auto_shelves stamps the library with max(updated_at) to notice edits.
+Index("ix_works_updated_at", Work.updated_at)

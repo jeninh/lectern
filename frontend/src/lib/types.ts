@@ -511,6 +511,8 @@ export interface Shelf {
   filter?: string;
   sort?: string;
   order?: "asc" | "desc" | null;
+  /** Auto-shelves (docs/auto-shelves.md): null for an ordinary shelf. */
+  auto?: AutoInfo | null;
 }
 
 export interface ShelfGrant {
@@ -1107,4 +1109,32 @@ export interface CoverHistoryEntry {
   font?: CoverFont;
   source?: string | null;
   replaced_at?: string | null;
+}
+
+// --- Auto-shelves (#73) ---
+
+export type AutoShelfField = "author" | "tag" | "genre" | "lang" | "narrator";
+
+/** A group's settings, as sent to POST/PATCH /api/shelves `auto` (each optional: the field's default). */
+export interface AutoSettings {
+  min_books?: number;
+  child_order?: "name" | "count";
+  buckets?: boolean;
+  sort?: string;
+  order?: "asc" | "desc" | null;
+}
+
+/** `Shelf.auto`: what kind of auto-shelf this is. A group's managers also get its settings. */
+export interface AutoInfo extends AutoSettings {
+  kind: "group" | "bucket" | "value";
+  field: AutoShelfField;
+  group_id: number;
+}
+
+/** GET/PUT /api/library-settings/genres: genre name to the tags that make it up. */
+export interface GenreMap {
+  genres: Record<string, string[]>;
+  max_genres: number;
+  max_tags: number;
+  can_change: boolean;
 }

@@ -14,7 +14,7 @@ import { folderSummary } from "./Folders";
 import { usePlayer } from "../lib/player";
 import { bookFiles, hitPath, readerPath } from "../lib/formats";
 import { clauseLabel, extractChips, formatQuery } from "../lib/filters";
-import { pathLabel } from "../lib/shelves";
+import { autoKind, autoPathLabel, pathLabel } from "../lib/shelves";
 import { Book, Devices, Download, Filter, Folder, Gear, Headphones, Help, Home, Key, Library, Link2, Logout, Moon, Pencil, Person, Plus, Pulse, Reader, Search, Shield, Sun, Sync, Trash, Upload } from "./Icons";
 
 type Group = "Filter" | "Actions" | "Pages" | "Books" | "Shelves" | "Authors" | "Devices" | "Settings" | "Docs" | "In books" | "Highlights";
@@ -38,6 +38,8 @@ interface Item {
   mine?: HighlightHit;
   /** Score when the label does not match (a docs hit found in the text under a heading). */
   score?: number;
+  /** Points taken off a match, so it ranks below better-known results (auto-shelves, below your own). */
+  demote?: number;
   run: () => void;
 }
 
@@ -158,9 +160,11 @@ export function CommandPalette() {
       ...shelves.map<Item>((s) => ({
         id: `sh-${s.id}`,
         group: "Shelves",
-        label: s.path.join(" / "),
+        label: autoKind(s) ? autoPathLabel(shelves, s) : s.path.join(" / "),
         keywords: `${s.path.join("/")} folder shelf`,
         detail: folderSummary(s),
+        // The library's own shelves (one per author, tag, ...) are many: yours rank first.
+        demote: autoKind(s) ? 30 : undefined,
         icon: <Folder />,
         run: () => go(`/app/library?shelf=${s.id}`),
       })),
@@ -221,8 +225,8 @@ export function CommandPalette() {
         .map((item) => {
           const main = fuzzyScore(needle, item.label);
           const extra = fuzzyScore(needle, `${item.label} ${item.detail ?? ""} ${item.keywords ?? ""}`);
-          const score = main ?? (extra == null ? item.score ?? null : extra - 8);
-          return score == null ? null : { item, score };
+          const base = main ?? (extra == null ? item.score ?? null : extra - 8);
+          return base == null ? null : { item, score: base - (item.demote ?? 0) };
         })
         .filter((x): x is { item: Item; score: number } => x !== null)
         .sort((a, b) => b.score - a.score);

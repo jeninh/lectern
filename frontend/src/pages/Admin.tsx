@@ -10,7 +10,7 @@ import { PageTitle } from "../components/Shell";
 import { del, get, post, put } from "../lib/api";
 import { absoluteTime, bytes, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { Invite, User } from "../lib/types";
+import type { GenreMap, Invite, User } from "../lib/types";
 import { CapForm } from "./Devices";
 import { ElevenLabsCard } from "../components/ElevenLabsCard";
 import { EmailInAdminCard } from "../components/EmailIn";
@@ -231,6 +231,7 @@ export function AdminPage() {
       <WorkersCard />
       <LibrarySettingsCard />
       <DataSaverCard />
+      {me?.user.role === "owner" && <GenreMapCard />}
       <ResourceLimitsCard />
       <BackupsCard />
       {me?.user.role === "owner" && <StorageCard />}
@@ -423,5 +424,58 @@ function InviteLink({ inv, onDone }: { inv: Invite; onDone: () => void }) {
       </div>
       <p className="hint">{inv.role === "reader" ? "After they join, share shelves with them from Library → Shelves." : "Members see the whole library as soon as they join."}</p>
     </div>
+  );
+}
+
+/** The genre map behind "Genre" auto-shelves (docs/auto-shelves.md): a genre is the books with
+ * any of its tags. One row per genre, tags comma-separated. Owner only; saved as a whole. */
+function GenreMapCard() {
+  const { toast } = useStore();
+  const [data, setData] = useState<GenreMap | null>(null);
+  const [rows, setRows] = useState<{ name: string; tags: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+  const show = (d: GenreMap) => {
+    setData(d);
+    setRows(Object.entries(d.genres).map(([name, tags]) => ({ name, tags: tags.join(", ") })));
+  };
+  useEffect(() => {
+    get<GenreMap>("/api/library-settings/genres").then(show).catch(() => {});
+  }, []);
+  if (!data) return null;
+  const parsed = rows.filter((r) => r.name.trim()).map((r) => ({ name: r.name.trim(), tags: r.tags.split(",").map((t) => t.trim()).filter(Boolean) }));
+  const tooMany = parsed.length > data.max_genres ? `At most ${data.max_genres} genres.` : parsed.find((g) => new Set(g.tags).size > data.max_tags) ? `At most ${data.max_tags} tags in a genre.` : null;
+  const save = async () => {
+    setBusy(true);
+    try {
+      show(await put<GenreMap>("/api/library-settings/genres", { genres: Object.fromEntries(parsed.map((g) => [g.name, g.tags])) }));
+      toast("Genres saved.");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const edit = (i: number, patch: Partial<{ name: string; tags: string }>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <section className="card" id="genres" aria-labelledby="genres-h" style={{ marginTop: 18 }}>
+      <h2 id="genres-h" style={{ marginTop: 0 }}>Genres</h2>
+      <p className="sub">
+        Books carry tags, not genres. Map each genre to the tags that make it up and “Genre” auto-shelves (New → Auto-shelves in the Library) get one shelf per genre: the books with any of its tags. At most {data.max_genres} genres of {data.max_tags} tags.
+      </p>
+      <div className="auto-genres stack">
+        {rows.map((r, i) => (
+          <div className="row" key={i}>
+            <input className="input" aria-label={`Genre ${i + 1} name`} placeholder="Genre" maxLength={128} value={r.name} onChange={(e) => edit(i, { name: e.target.value })} style={{ flex: 1 }} />
+            <input className="input" aria-label={`Tags for genre ${i + 1}`} placeholder="Tags, comma-separated" value={r.tags} onChange={(e) => edit(i, { tags: e.target.value })} style={{ flex: 2 }} />
+            <button className="btn ghost sm" onClick={() => setRows(rows.filter((_, j) => j !== i))}>Remove</button>
+          </div>
+        ))}
+        {tooMany && <span className="field-error" role="alert">{tooMany}</span>}
+        <div className="row">
+          <button className="btn ghost" disabled={rows.length >= data.max_genres} onClick={() => setRows([...rows, { name: "", tags: "" }])}><Plus /> Add genre</button>
+          <button className="btn primary" disabled={busy || !!tooMany} onClick={save}>Save genres</button>
+        </div>
+      </div>
+    </section>
   );
 }
