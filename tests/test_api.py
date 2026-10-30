@@ -261,6 +261,7 @@ def test_technical_details_preference(client, owner):
         "auto_file_imports": False,
         "data_saver": False,
         "playback_speed": None,
+        "reading_timezone": None,
     }
     # Writes need the CSRF token.
     r = client.post(

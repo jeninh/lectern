@@ -29,6 +29,7 @@ from lectern.models import (
     ReadingProgress,
     Sentence,
     SyncKey,
+    User,
     WorkProgress,
     utcnow,
 )
@@ -305,6 +306,7 @@ def put_progress(
     text: tuple[int, int] | None = None,
     raw: str | None = None,
     speed: float | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Last write wins; ``received_at`` is the server clock. ``speed``, when given, replaces
     the work's listening speed; otherwise the stored one stays. Caller commits."""
@@ -333,9 +335,14 @@ def put_progress(
             raise ProgressError(409, "no_sentences")
         pos = wt.index.at_text(TextPos(*text))
         stored_raw = f"{text[0]}/{text[1]}"
+    now = now or utcnow()
     row = db.scalar(
         select(WorkProgress).where(WorkProgress.user_id == user_id, WorkProgress.work_id == work_id)
     )
+    same_source = row is not None and row.source == source
+    old_fraction = _fraction(wt, tl, row) if same_source else None
+    old_audio = _raw_seconds(row) if same_source and source == ProgressSource.AUDIO else None
+    old_at = row.received_at if same_source else None
     if row is None:
         row = WorkProgress(user_id=user_id, work_id=work_id, sentence_n=0, raw="", source=source)
         db.add(row)
@@ -343,9 +350,37 @@ def put_progress(
     row.source = source
     row.raw = (raw or stored_raw)[:1024]
     row.device = device[:128]
-    row.received_at = utcnow()
+    row.received_at = now
+    row.updated_at = now
     if speed is not None:
         row.speed = speed
+    from lectern import reading_stats
+
+    user = db.get(User, user_id)
+    if user is not None:
+        reading_stats.record(
+            db,
+            user=user,
+            work_id=work_id,
+            source=source.value,
+            before_fraction=old_fraction,
+            after_fraction=_position_fraction(wt, tl, pos, audio_s),
+            before_at=old_at,
+            at=now,
+            before_audio_s=old_audio,
+            after_audio_s=audio_s if source == ProgressSource.AUDIO else None,
+        )
+
+
+def _position_fraction(wt: WorkText, tl: Timeline, pos: SentencePos, audio_s: float | None) -> float:
+    if audio_s is not None and not wt.count:
+        return min(1.0, audio_s / tl.total_s) if tl.total_s else 0.0
+    return wt.fraction(pos) if wt.count else 0.0
+
+
+def _fraction(wt: WorkText, tl: Timeline, row: WorkProgress) -> float:
+    audio = _raw_seconds(row) if row.source == ProgressSource.AUDIO else None
+    return _position_fraction(wt, tl, SentencePos(row.sentence_n, row.sentence_offset), audio)
 
 
 # --- KOReader xpointers <-> sentence positions (lectern.routes.kosync) -----------------------
@@ -376,6 +411,11 @@ def set_progress(
     commits."""
     now = now or utcnow()
     row = get_progress(db, user_id, work_id)
+    wt = SentenceCache.get(db, work_id)
+    tl = audio_timeline(db, work_id)
+    same_source = row is not None and row.source == source
+    old_fraction = _fraction(wt, tl, row) if same_source else None
+    old_at = row.received_at if same_source else None
     if row is None:
         row = WorkProgress(
             user_id=user_id, work_id=work_id, sentence_n=pos.n, raw="", source=source
@@ -387,6 +427,20 @@ def set_progress(
     row.device = device[:128]
     row.received_at = now
     row.updated_at = now
+    from lectern import reading_stats
+
+    user = db.get(User, user_id)
+    if user is not None:
+        reading_stats.record(
+            db,
+            user=user,
+            work_id=work_id,
+            source=source.value,
+            before_fraction=old_fraction,
+            after_fraction=_position_fraction(wt, tl, pos, None),
+            before_at=old_at,
+            at=now,
+        )
     db.flush()
     return row
 

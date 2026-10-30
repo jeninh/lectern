@@ -308,6 +308,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshMe, toast]);
 
+  // A browser can supply an unambiguous IANA zone. Keep an existing choice intact: travelling
+  // must not silently rebucket a person's year review.
+  useEffect(() => {
+    if (me?.preferences.reading_timezone !== null) return;
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (zone) setPreference("reading_timezone", zone);
+  }, [me?.preferences.reading_timezone, setPreference]);
+
   const canUpload = me?.user.role === "owner" || me?.user.role === "member";
   const canEdit = canUpload && me?.can_edit !== false;
   const uploadManager = useMemo(() => (canUpload ? new UploadManager(httpTransport(), workerHasher(), localStore()) : null), [canUpload]);
