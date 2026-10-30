@@ -17,6 +17,10 @@ const meta = (over: Partial<Metadata> = {}): Metadata => ({
   published: "1968",
   tags: ["Fantasy"],
   narrators: [],
+  subtitle: null,
+  original_published: null,
+  contributors: [],
+  cover_font: null,
   ...over,
 });
 
@@ -134,10 +138,10 @@ describe("editor draft", () => {
   it("sends a generated cover's style and shuffle, and an unset style as null (the hashed one)", () => {
     const s = state();
     const d = { ...initialDraft(s), cover: { action: "generate" as const, style: "minimal" as const, seed: 2 } };
-    expect(buildPatch(s, d)).toEqual({ version: 3, cover: { action: "generate", style: "minimal", seed: 2 } });
+    expect(buildPatch(s, d)).toEqual({ version: 3, cover: { action: "generate", style: "minimal", seed: 2, font: "display" } });
     expect(changes(s, d)).toEqual(["cover"]);
     const auto = { ...initialDraft(s), cover: { action: "generate" as const } };
-    expect(buildPatch(s, auto).cover).toEqual({ action: "generate", style: null, seed: 0 });
+    expect(buildPatch(s, auto).cover).toEqual({ action: "generate", style: null, seed: 0, font: "display" });
   });
 
   it("previews the author line the server will draw", () => {
@@ -189,5 +193,37 @@ describe("review hardening", () => {
       "Undid 1 book; 3 books could not be changed (This book changed after that save, so it can no longer be undone.; a file could not be moved on the server).",
     );
     expect(bulkSummary("Changed", [{ ok: true }, { ok: true }]).text).toBe("Changed 2 books.");
+  });
+});
+
+describe("cover and metadata patches (issue #85)", () => {
+  it("sends a generated cover with its font, defaulting to display", () => {
+    const s = state();
+    const d = initialDraft(s);
+    expect(buildPatch(s, { ...d, cover: { action: "generate", style: "modern", seed: 4, font: "noto" } }).cover).toEqual({ action: "generate", style: "modern", seed: 4, font: "noto" });
+    expect(buildPatch(s, { ...d, cover: { action: "generate" } }).cover).toEqual({ action: "generate", style: null, seed: 0, font: "display" });
+  });
+
+  it("sends a reverted image as a revision and a cropped upload by its token only", () => {
+    const s = state();
+    const d = initialDraft(s);
+    expect(buildPatch(s, { ...d, cover: { action: "revision", revision_id: 22, preview: "/p.jpg" } }).cover).toEqual({ action: "revision", revision_id: 22 });
+    expect(buildPatch(s, { ...d, cover: { action: "upload", token: "abc", preview: "/p.jpg" } }).cover).toEqual({ action: "upload", token: "abc" });
+  });
+
+  it("sends the new descriptive fields when they change, and keeps cover_font through other edits", () => {
+    const s = state({ metadata: meta({ cover_font: "text" }) });
+    const d = initialDraft(s);
+    expect(buildPatch(s, { ...d, metadata: { ...d.metadata, title: "Earthsea" } }).metadata?.cover_font).toBe("text");
+    const edited = { ...d.metadata, subtitle: " Book One ", original_published: "1968-09", contributors: [{ name: " Jo ", role: "translator" as const }, { name: "  ", role: "editor" as const }] };
+    const p = buildPatch(s, { ...d, metadata: edited });
+    expect(p.metadata).toMatchObject({ subtitle: "Book One", original_published: "1968-09", contributors: [{ name: "Jo", role: "translator" }] });
+    expect(changes(s, { ...d, metadata: edited })).toEqual(["subtitle", "original published", "contributors"]);
+  });
+
+  it("validates the first-published date and nameless contributors", () => {
+    expect(validate(meta({ original_published: "1968-9" })).original_published).toBeTruthy();
+    expect(validate(meta({ original_published: "1968-09-01" })).original_published).toBeUndefined();
+    expect(validate(meta({ contributors: [{ name: " ", role: "editor" }] })).contributors).toBeTruthy();
   });
 });

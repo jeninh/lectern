@@ -405,3 +405,57 @@ def test_duplicate_merge_keeps_the_earliest_start_and_finish_when_both_were_read
         st = db.get(ReadingState, (uid, a))
         assert st.started_at == t0 and st.finished_at == t0 + timedelta(days=2)
         assert st.fraction == 0.5  # the kept copy's own position stands
+
+
+def test_applying_a_suggestion_keeps_the_new_editor_fields_and_the_cover(client, owner, settings):
+    """Applying saves the whole Metadata object: every field must survive the round trip."""
+    csrf = owner["csrf"]
+    wid = add_book(settings, "lh", "The Left Hand of Darkness", ["Ursula K. Le Guin"])
+    strip(wid, "description", "series", "isbn", "tags")
+    chosen = {
+        "subtitle": "A Novel",
+        "original_published": "1969",
+        "contributors": [{"name": "Someone", "role": "translator"}],
+        "cover_font": "text",
+        "cover_seed": 4,
+        "cover_style": "minimal",
+    }
+    with session_factory()() as db:
+        w = db.get(Work, wid)
+        for k, v in chosen.items():
+            setattr(w, k, v)
+        db.commit()
+    from lectern import covergen
+
+    def cover():
+        with session_factory()() as db:
+            return covergen.design_of(db.get(Work, wid)).key
+
+    before = cover()
+    enable(client, csrf)
+    api_post(client, "/api/metadata/fix", csrf, {"work_ids": [wid]})
+    run(FakeUpstream())
+    item = items(client)[wid]
+    # A stale version still conflicts (the work changed since the suggestion was shown).
+    with session_factory()() as db:
+        db.get(Work, wid).version += 1
+        db.commit()
+    r = api_post(
+        client,
+        f"/api/metadata/suggestions/{wid}/apply",
+        csrf,
+        {"version": item["version"], "fields": ["description"]},
+    )
+    assert r.status_code == 409 and r.json()["detail"] == "version_conflict", r.text
+    r = api_post(
+        client,
+        f"/api/metadata/suggestions/{wid}/apply",
+        csrf,
+        {"version": item["version"] + 1, "fields": ["description"]},
+    )
+    assert r.status_code == 200, r.text
+    with session_factory()() as db:
+        w = db.get(Work, wid)
+        assert w.description
+        assert {k: getattr(w, k) for k in chosen} == chosen
+    assert cover() == before

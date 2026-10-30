@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ApiError, del, get, patch, post, postBlob } from "../lib/api";
+import { ApiError, del, get, patch, post } from "../lib/api";
 import { buildPatch, changes, coverAuthor, initialDraft, rebase, type Draft } from "../lib/editor";
 import { bytes, relativeTime } from "../lib/format";
 import { applyFields, display, FIELD_LABEL, suggestionDiff, validate } from "../lib/metadata";
 import { clock } from "../lib/player";
 import { useStore } from "../lib/store";
-import type { CoverStyle, EditorState, LookupResult, LookupSuggestion, Metadata, TracksResponse } from "../lib/types";
-import { Book, Down, Headphones, Shuffle, Sparkle, Trash, Undo, Up, Upload } from "./Icons";
+import type { CoverFont, CoverStyle, EditorState, LookupResult, LookupSuggestion, Metadata, TracksResponse } from "../lib/types";
+import { Book, Down, Headphones, Sparkle, Trash, Undo, Up } from "./Icons";
+import { CoverPicker } from "./CoverPicker";
 import { MetadataForm } from "./MetadataForm";
 import { Sheet } from "./Sheet";
 
@@ -355,16 +356,14 @@ const clip = (t: string) => (t.length > 240 ? t.slice(0, 240) + "…" : t);
 
 // --- cover ---------------------------------------------------------------------------------------------
 
-const COVER_STYLES: [CoverStyle, string][] = [["classic", "Classic"], ["modern", "Modern"], ["minimal", "Minimal"]];
-
 /** The generated cover for the draft title and author, drawn by the server (debounced) so the
  * preview is the exact image the library, OPDS, and KOReader will get. */
-function useGeneratedPreview(workId: number, title: string, author: string, style: CoverStyle | null, seed: number, on: boolean) {
+function useGeneratedPreview(workId: number, title: string, author: string, style: CoverStyle | null, seed: number, font: CoverFont, on: boolean) {
   const [shown, setShown] = useState<{ url: string; style: CoverStyle; palette: string } | null>(null);
   useEffect(() => {
     if (!on) return;
     const ctl = new AbortController();
-    const q = new URLSearchParams({ title: title.trim().slice(0, 512), author: author.slice(0, 512), seed: String(seed) });
+    const q = new URLSearchParams({ title: title.trim().slice(0, 512), author: author.slice(0, 512), seed: String(seed), font });
     if (style) q.set("style", style);
     const t = window.setTimeout(async () => {
       try {
@@ -380,37 +379,24 @@ function useGeneratedPreview(workId: number, title: string, author: string, styl
       }
     }, 220);
     return () => (window.clearTimeout(t), ctl.abort());
-  }, [workId, title, author, style, seed, on]);
+  }, [workId, title, author, style, seed, font, on]);
   useEffect(() => () => setShown((old) => (old && URL.revokeObjectURL(old.url), null)), []);
   return shown;
 }
 
 function CoverTab({ state, draft, set }: { state: EditorState; draft: Draft; set: SetDraft }) {
   const { toast } = useStore();
-  const input = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
   const c = draft.cover;
   const gen = state.cover.generated;
   // Without art (now, or after this save) the generated cover is what everyone sees.
   const generated = c?.action === "generate" || c?.action === "remove" || (!c && !state.cover.has_cover);
   const style = c?.action === "generate" ? c.style ?? null : gen.style;
   const seed = c?.action === "generate" ? c.seed ?? 0 : gen.seed;
-  const preview = useGeneratedPreview(state.work.id, draft.metadata.title || state.metadata.title, coverAuthor(draft.metadata.authors), style, seed, generated);
+  const font = c?.action === "generate" ? c.font ?? "display" : gen.font ?? "display";
+  const author = coverAuthor(draft.metadata.authors);
+  const preview = useGeneratedPreview(state.work.id, draft.metadata.title || state.metadata.title, author, style, seed, font, generated);
   const shownStyle = style ?? preview?.style ?? gen.effective_style;
-  const src = c?.action === "upload" ? c.preview : generated ? preview?.url ?? gen.url : c ? null : state.cover.url;
-  const generate = (next: { style?: CoverStyle | null; seed?: number }) => set("cover", { action: "generate", style, seed, ...next });
-  const upload = async (f: File) => {
-    if (f.size > 10 * 1024 * 1024) return toast("That image is too large for a cover (10 MB at most).", "error");
-    setBusy(true);
-    try {
-      const r = await postBlob<{ token: string; preview_url: string }>(`/api/works/${state.work.id}/cover`, f);
-      set("cover", { action: "upload", token: r.token, preview: r.preview_url });
-    } catch (e) {
-      toast((e as Error).message, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const src = c?.action === "upload" || c?.action === "revision" ? c.preview : generated ? preview?.url ?? gen.url : c ? null : state.cover.url;
   const source = state.cover.source === "upload" ? "uploaded" : state.cover.source === "embedded" ? "from the book file" : state.cover.source;
   return (
     <div className="cover-tab">
@@ -418,7 +404,7 @@ function CoverTab({ state, draft, set }: { state: EditorState; draft: Draft; set
         {src ? <img src={src} alt={generated ? `Generated cover preview, ${shownStyle} style` : "Cover preview"} /> : (
           <div className="fallback">
             <strong>{draft.metadata.title}</strong>
-            <span>{c?.action === "embedded" ? "The book’s own cover" : coverAuthor(draft.metadata.authors)}</span>
+            <span>{c?.action === "embedded" ? "The book’s own cover" : author}</span>
           </div>
         )}
       </div>
@@ -426,35 +412,32 @@ function CoverTab({ state, draft, set }: { state: EditorState; draft: Draft; set
         <p className="hint" style={{ margin: 0 }} aria-live="polite">
           {c?.action === "upload"
             ? "New image, applied when you save."
-            : c?.action === "embedded"
-              ? "Uses the cover inside the EPUB (or the first page of a PDF or comic) when you save."
-              : generated && state.cover.has_cover
-                ? "The generated cover replaces the current image when you save; Undo in the history brings the image back."
-                : generated
-                  ? `Generated from the title and author${c ? ", applied when you save" : ""}. An uploaded image or the book’s own cover always takes its place.`
-                  : `Current cover${source ? ` (${source})` : ""}.`}
+            : c?.action === "revision"
+              ? "An earlier image is put back when you save."
+              : c?.action === "embedded"
+                ? "Uses the cover inside the EPUB (or the first page of a PDF or comic) when you save."
+                : generated && state.cover.has_cover
+                  ? "The generated cover replaces the current image when you save; the history below brings the image back."
+                  : generated
+                    ? `Generated from the title and author${c ? ", applied when you save" : ""}. An uploaded image or the book’s own cover always takes its place.`
+                    : `Current cover${source ? ` (${source})` : ""}.`}
           {" "}The book file itself is never changed.
         </p>
-        {generated ? (
-          <div className="gen-controls">
-            <div className="seg" role="radiogroup" aria-label="Cover style">
-              {COVER_STYLES.map(([v, l]) => (
-                <button key={v} type="button" role="radio" aria-checked={shownStyle === v} aria-pressed={shownStyle === v} onClick={() => generate({ style: v })}>{l}</button>
-              ))}
-            </div>
-            <button type="button" className="btn ghost" onClick={() => generate({ seed: seed + 1 })} title="Try the next colour palette">
-              <Shuffle /> Shuffle colours
-            </button>
-            {preview?.palette && <span className="hint palette-name">{preview.palette}</span>}
-          </div>
-        ) : (
-          <button className="btn ghost" onClick={() => generate({})}><Sparkle /> Generate a cover</button>
-        )}
-        <input ref={input} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) upload(f); }} />
-        <button className="btn" onClick={() => input.current?.click()} disabled={busy} aria-busy={busy}><Upload /> {busy ? "Uploading…" : "Upload an image"}</button>
-        {state.cover.embedded_available && <button className="btn ghost" onClick={() => set("cover", { action: "embedded" })} aria-pressed={c?.action === "embedded"}>Use the book’s own cover</button>}
-        {c && <button className="btn ghost" onClick={() => set("cover", null)}><Undo /> {state.cover.has_cover ? "Keep the current image" : "Reset"}</button>}
-        <p className="hint" style={{ margin: 0 }}>JPEG, PNG, or WebP up to 10 MB.</p>
+        <div className="row" style={{ flexWrap: "wrap" }}>
+          {state.cover.embedded_available && <button className="btn ghost" onClick={() => set("cover", { action: "embedded" })} aria-pressed={c?.action === "embedded"}>Use the book’s own cover</button>}
+          {c && <button className="btn ghost" onClick={() => set("cover", null)}><Undo /> {state.cover.has_cover ? "Keep the current image" : "Reset"}</button>}
+        </div>
+        <CoverPicker
+          workId={state.work.id}
+          title={draft.metadata.title || state.metadata.title}
+          author={author}
+          cover={c}
+          savedFont={gen.font}
+          files={state.files}
+          version={state.version}
+          onCover={(next) => set("cover", next)}
+          toast={toast}
+        />
       </div>
     </div>
   );

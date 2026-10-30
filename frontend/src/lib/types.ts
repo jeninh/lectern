@@ -601,6 +601,12 @@ export interface Metadata {
   published: string | null;
   tags: string[];
   narrators: string[];
+  /** Issue #85. Sent whole on every save, so they must round-trip even when untouched. */
+  subtitle: string | null;
+  original_published: string | null;
+  contributors: Contributor[];
+  /** Set by the cover editor's font choice; kept here so saving details does not wipe it. */
+  cover_font: CoverFont | null;
 }
 
 export interface WorkSummary {
@@ -713,7 +719,7 @@ export interface EditorState {
     url: string | null;
     source: string | null;
     embedded_available: boolean;
-    generated: { url: string | null; style: CoverStyle | null; seed: number; effective_style: CoverStyle; styles: CoverStyle[] };
+    generated: { url: string | null; style: CoverStyle | null; seed: number; font?: CoverFont; fonts?: CoverFont[]; effective_style: CoverStyle; styles: CoverStyle[] };
   };
   files: EditorFile[];
   tracks: EditorTrack[];
@@ -1056,4 +1062,49 @@ export interface DeviceDetail {
   not_in_library: number;
   /** Queued for the device and not on it yet. */
   queued: { item_id: number; queued_at: string | null; work: DashboardWork }[];
+}
+
+// --- cover editor (issue #85) ---------------------------------------------------------------------
+
+export type ContributorRole = "translator" | "editor" | "illustrator" | "foreword";
+
+export interface Contributor {
+  name: string;
+  role: ContributorRole;
+}
+
+export type CoverFont = "display" | "text" | "noto";
+
+export interface CoverCandidate {
+  style: CoverStyle;
+  seed: number;
+  font: CoverFont;
+  palette: string;
+  url: string;
+}
+
+export interface CoverCandidates {
+  fonts: CoverFont[];
+  styles: CoverStyle[];
+  candidates: CoverCandidate[];
+}
+
+/** A cover taken from a file or upload, waiting for the next save. */
+export interface StagedCover {
+  token: string;
+  preview_url: string;
+  width: number;
+  height: number;
+}
+
+export interface CoverHistoryEntry {
+  current: boolean;
+  revision_id: number | null;
+  kind: "image" | "generated";
+  url: string;
+  style?: CoverStyle | null;
+  seed?: number;
+  font?: CoverFont;
+  source?: string | null;
+  replaced_at?: string | null;
 }

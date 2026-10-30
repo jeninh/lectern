@@ -153,6 +153,8 @@ def editor_json(db, settings, request: Request, user: User, work: Work) -> dict:
                 "url": covergen.cover_url(work) if not work.has_cover else None,
                 "style": work.cover_style,
                 "seed": work.cover_seed or 0,
+                "font": work.cover_font or covergen.DEFAULT_FONT,
+                "fonts": list(covergen.FONTS),
                 "effective_style": covergen.design_of(work).style,
                 "styles": list(covergen.STYLES),
             },
@@ -367,9 +369,13 @@ async def generated_cover_preview(
     author: Annotated[str | None, Query(max_length=covergen.MAX_TEXT)] = None,
     style: Literal["classic", "modern", "minimal"] | None = None,
     seed: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+    font: Literal["display", "text", "noto"] | None = None,
+    w: int = 480,
 ):
     """The editor's live preview: the generated cover for the draft title, author, style, and
     shuffle, drawn but not stored. Headers name the style and palette it resolved to."""
+    if w not in covergen.PREVIEW_WIDTHS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "bad_width")
     work = db.get(Work, work_id)
     if work is None or work.trashed_at is not None or not can_see_work(db, auth.user, work_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
@@ -379,15 +385,16 @@ async def generated_cover_preview(
         style=style,
         seed=seed,
         lang=work.language,
+        font=font or work.cover_font,
     )
     from fastapi.concurrency import run_in_threadpool
 
-    data = await run_in_threadpool(covergen.render_jpeg, design, width=480, quality=86)
+    data = await run_in_threadpool(covergen.preview_jpeg, design, w)
     return Response(
         data,
         media_type="image/jpeg",
         headers={
-            "Cache-Control": "private, max-age=600",
+            "Cache-Control": "private, max-age=3600",
             "X-Cover-Style": design.style,
             "X-Cover-Palette": design.palette.name,
         },
