@@ -15,13 +15,13 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from lectern import jobqueue
 from lectern.access import can_edit_library, can_see_work, visible_works
 from lectern.align import jobs as align_jobs
 from lectern.editing import Journal
 from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest.merge import merge_work
 from lectern.jobs import (
+    NotYourJob,
     active_job,
     delete_renditions,
     enqueue_transcode,
@@ -442,12 +442,12 @@ def delete_transcode(auth: Manager, db: DbDep, settings: SettingsDep, work_id: i
     """Delete the work's data-saver copies and stop any being made (owner and member).
     Originals are untouched; ``POST`` makes them again."""
     work = _visible_work(db, auth.user, work_id)
-    job = active_job(db, work.id)
-    if job is not None and not jobqueue.may_see(job, auth.user):
-        # Stopping a copy being made is cancelling it: the owner or whoever started it
-        # (POST /api/jobs/{id}/cancel); an auto-queued copy has no starter.
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_job")
-    freed = delete_renditions(db, settings, work)
+    try:
+        freed = delete_renditions(db, settings, work, user=auth.user)
+    except NotYourJob:
+        # The authorization and cancellation use the same freshly-read job, so a copy queued
+        # after this request begins cannot be cancelled without its starter's permission.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_job") from None
     db.commit()
     return {"deleted_bytes": freed}
 

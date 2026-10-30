@@ -1122,7 +1122,11 @@ def job_status(
             job = c.db.scalar(select(Job).where(Job.work_id == book_id).order_by(Job.id.desc()))
         else:
             raise ToolError("invalid: give job_id or book_id")
-        if job is None or (job.work_id is not None and not can_see_work(c.db, c.user, job.work_id)):
+        if (
+            job is None
+            or (job.work_id is None and not jobqueue.may_see(job, c.user))
+            or (job.work_id is not None and not can_see_work(c.db, c.user, job.work_id))
+        ):
             raise ToolError("not_found: no such job")
         alignment = jobs.work_alignment(c.db, job.work_id) if job.work_id else None
         # the Jobs page's rule (lectern.jobqueue.shows_error): a job with a book got here only

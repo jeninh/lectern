@@ -583,9 +583,8 @@ def test_shelves_devices_metadata_and_alignment(app, home):
     assert not ok and "job_id or book_id" in err
 
 
-def test_job_status_shows_error_text_where_the_jobs_page_does(app, home):
-    """Issue #117 (4): job_status follows lectern.jobqueue.shows_error: a member gets no error
-    text for a job that has no book; the owner does, and so does a member on a book they see."""
+def test_job_status_hides_a_bookless_job_from_other_members(app, home):
+    """Issue #117: only the owner or starter may inspect bookless job metadata or errors."""
     leak = "/srv/library/A/Hidden/book.m4b: boom"
     with session_factory()() as db:
         bookless = Job(kind="transcode", work_id=None, payload={}, status=JobStatus.FAILED,
@@ -597,8 +596,8 @@ def test_job_status_shows_error_text_where_the_jobs_page_does(app, home):
         bookless_id, shown_id = bookless.id, shown.id
     mia = MCP(app, home["mia"].key("organize"))
     owner = MCP(app, home["owner"].key("organize"))
-    out = mia.ok("job_status", job_id=bookless_id)["job"]
-    assert out["error"] is None and "boom" not in json.dumps(out)
+    ok, err = mia.call("job_status", job_id=bookless_id)
+    assert not ok and "not_found" in err and "boom" not in err
     assert owner.ok("job_status", job_id=bookless_id)["job"]["error"] == leak
     assert mia.ok("job_status", job_id=shown_id)["job"]["error"] == leak
 

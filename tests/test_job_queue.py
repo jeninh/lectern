@@ -523,6 +523,54 @@ def test_trashing_a_book_does_not_cancel_a_job_that_finished_meanwhile(client, o
     assert (after.status, after.lease_token_hash) == (JobStatus.CANCELLED, None)
 
 
+def test_trashing_a_book_drops_a_cancelled_jobs_partial_upload(client, owner, settings):
+    """A trash that committed must remove artifacts that its cancelled job cannot resume."""
+    w = add_work("Trashed artifacts")
+    queued = add_job("transcode", w)
+    artifacts = queue.artifacts_dir(settings.data_dir, queued)
+    artifacts.mkdir(parents=True)
+    (artifacts / "track.m4a").write_bytes(b"partial")
+
+    assert api_post(client, f"/api/works/{w}/trash", owner["csrf"]).status_code == 200
+    assert not artifacts.exists()
+
+
+def test_audio_change_preserves_a_job_that_finished_meanwhile(client, owner):
+    """New audio invalidates the result, not a worker's concurrent successful completion."""
+    from lectern.ingest.audio import audio_changed
+    from lectern.models import Alignment, AlignmentStatus
+
+    w = add_work("Changed audio")
+    leased = add_job("align", w, status=JobStatus.LEASED, lease_token_hash="0" * 64)
+    with session_factory()() as db:
+        db.add(Alignment(work_id=w, model="m", status=AlignmentStatus.RUNNING,
+                         epub_sha256="e", audio_fingerprint="a"))  # fmt: skip
+        db.commit()
+
+    with session_factory()() as db:
+        read = db.scalars
+
+        def racing(stmt, *a, **kw):
+            rows = list(read(stmt, *a, **kw))
+            with session_factory()() as other:
+                done = other.get(Job, leased)
+                done.status, done.lease_token_hash, done.lease_expires_at = (
+                    JobStatus.SUCCEEDED,
+                    None,
+                    None,
+                )
+                align_jobs.work_alignment(other, w).status = AlignmentStatus.SUCCEEDED
+                other.commit()
+            return rows
+
+        db.scalars = racing
+        audio_changed(db, w)
+        db.commit()
+    assert job(leased).status == JobStatus.SUCCEEDED
+    with session_factory()() as db:
+        assert align_jobs.work_alignment(db, w).status == AlignmentStatus.STALE
+
+
 def test_cancelling_an_alignment_job_rereads_the_alignment_first(client, owner):
     """Issue #117 (5): align.jobs.cancel_job re-reads the alignment before failing it: a copy
     loaded earlier in this session must not overwrite a state committed meanwhile."""

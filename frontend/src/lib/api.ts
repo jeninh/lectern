@@ -116,6 +116,7 @@ const MESSAGES: Record<string, string> = {
   lookup_disabled: "Metadata suggestions are turned off. The owner can enable them in Admin.",
   rate_limited: "Too many requests. Wait a minute and try again.",
   job_running: "Alignment is running right now. Cancel it from the jobs list first.",
+  not_your_job: "Only the owner or the person who started this job can cancel it.",
   no_inputs: "This book needs both an EPUB and an audiobook to align.",
   work_gone: "That book was trashed or deleted.",
   io_error: "a file could not be moved on the server",
