@@ -3,7 +3,7 @@
 
 import { errorText } from "./api";
 import { changedFields, clean } from "./metadata";
-import type { CoverStyle, EditorState, Metadata, PlaybackDefault } from "./types";
+import type { CoverFont, CoverStyle, EditorState, Metadata, PlaybackDefault } from "./types";
 
 export interface TrackDraft {
   id: number;
@@ -12,13 +12,17 @@ export interface TrackDraft {
 }
 
 export interface CoverDraft {
-  action: "upload" | "embedded" | "remove" | "generate";
+  action: "upload" | "embedded" | "remove" | "generate" | "revision";
   token?: string;
   preview?: string;
   /** "generate": null = the style the server picks from the title and author. */
   style?: CoverStyle | null;
   /** "generate": the palette shuffle. */
   seed?: number;
+  /** "generate": the typeface; default display. */
+  font?: CoverFont;
+  /** "revision": the saved image to put back, from the cover history. */
+  revision_id?: number;
 }
 
 export interface Draft {
@@ -60,7 +64,7 @@ export interface WorkPatchBody {
   tracks?: { id: number; title?: string; chapters?: string[] }[];
   remove_file_ids?: number[];
   remove_track_ids?: number[];
-  cover?: { action: CoverDraft["action"]; token?: string; style?: CoverStyle | null; seed?: number };
+  cover?: { action: CoverDraft["action"]; token?: string; style?: CoverStyle | null; seed?: number; font?: CoverFont; revision_id?: number };
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -114,7 +118,14 @@ export function buildPatch(s: EditorState, d: Draft): WorkPatchBody {
   if (d.remove_track_ids.length) body.remove_track_ids = d.remove_track_ids;
   if (d.cover) {
     const c = d.cover;
-    body.cover = c.action === "upload" ? { action: "upload", token: c.token } : c.action === "generate" ? { action: "generate", style: c.style ?? null, seed: c.seed ?? 0 } : { action: c.action };
+    body.cover =
+      c.action === "upload"
+        ? { action: "upload", token: c.token }
+        : c.action === "generate"
+          ? { action: "generate", style: c.style ?? null, seed: c.seed ?? 0, font: c.font ?? "display" }
+          : c.action === "revision"
+            ? { action: "revision", revision_id: c.revision_id }
+            : { action: c.action };
   }
   return body;
 }

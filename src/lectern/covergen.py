@@ -31,7 +31,9 @@ import json
 import logging
 import os
 import secrets
+import threading
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -44,6 +46,10 @@ log = logging.getLogger(__name__)
 RENDERER_VERSION = 2
 WIDTH, HEIGHT = 800, 1200
 STYLES = ("classic", "modern", "minimal")
+# The title face: "display" (Newsreader Display, the default), "text" (Newsreader Text), or
+# "noto" (Noto Serif). Only the title's first face changes; fallbacks and the author line do not.
+FONTS = ("display", "text", "noto")
+DEFAULT_FONT = "display"
 PATTERNS = ("stripes", "arcs", "grid", "dots")
 MAX_TEXT = 512  # characters of title or author considered (bounds render cost)
 DERIVED_DIR = "derived"
@@ -137,26 +143,31 @@ class Design:
     pattern: str
     ornament: int
     lang: str | None
+    font: str = DEFAULT_FONT
+
+    def __post_init__(self) -> None:
+        if self.font not in FONTS:
+            raise ValueError(f"unknown cover font {self.font!r}")
 
     @property
     def key(self) -> str:
         """Everything the image depends on, fonts included (names ``derived/cover-<key>.jpg``)."""
-        raw = json.dumps(
-            [
-                RENDERER_VERSION,
-                self.title,
-                self.author,
-                self.style,
-                self.palette.name,
-                self.pattern,
-                self.ornament,
-                _cjk_variant(self.lang),
-                _bundled_fonts_digest(),
-                # Only CJK text is drawn with the system CJK font: its file and content.
-                _cjk_fonts_digest() if any(_is_cjk(c) for c in self.title + self.author) else "",
-            ],
-            ensure_ascii=False,
-        )
+        parts = [
+            RENDERER_VERSION,
+            self.title,
+            self.author,
+            self.style,
+            self.palette.name,
+            self.pattern,
+            self.ornament,
+            _cjk_variant(self.lang),
+            _bundled_fonts_digest(),
+            # Only CJK text is drawn with the system CJK font: its file and content.
+            _cjk_fonts_digest() if any(_is_cjk(c) for c in self.title + self.author) else "",
+        ]
+        if self.font != DEFAULT_FONT:  # appended only then: existing keys (and ?v=) stay valid
+            parts.append(self.font)
+        raw = json.dumps(parts, ensure_ascii=False)
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -167,6 +178,7 @@ def design_for(
     style: str | None = None,
     seed: int = 0,
     lang: str | None = None,
+    font: str | None = None,
 ) -> Design:
     """The deterministic design for a title and author. ``style`` overrides the hashed style;
     ``seed`` (the editor's shuffle) steps through the palettes from the hashed one."""
@@ -182,6 +194,7 @@ def design_for(
         pattern=PATTERNS[digest[5] % len(PATTERNS)],
         ornament=digest[6] % 3,
         lang=lang,
+        font=font or DEFAULT_FONT,
     )
 
 
@@ -191,7 +204,12 @@ UNKNOWN_AUTHOR = "Unknown Author"  # lectern.workmeta.display_author's placehold
 def design_of(work) -> Design:
     author = "" if work.author == UNKNOWN_AUTHOR else work.author
     return design_for(
-        work.title, author, style=work.cover_style, seed=work.cover_seed or 0, lang=work.language
+        work.title,
+        author,
+        style=work.cover_style,
+        seed=work.cover_seed or 0,
+        lang=work.language,
+        font=work.cover_font,
     )
 
 
@@ -729,7 +747,7 @@ def _pattern(kind: str, colour: str, x0: float, y0: float, x1: float, y1: float)
 def svg(design: Design) -> str:
     """The cover as an SVG document (``WIDTH`` × ``HEIGHT``)."""
     p = design.palette
-    title_chain = _chain(DISPLAY, design.lang)
+    title_chain = _chain({"text": TEXT, "noto": NOTO_SERIF}.get(design.font, DISPLAY), design.lang)
     text_chain = _chain(TEXT, design.lang)
     author = design.author
     author_tracking = 0.1 if _tracked(author) else 0.0
@@ -886,18 +904,23 @@ def _font_files(design: Design) -> list[str]:
     return files
 
 
+# At most two renders at once, so a grid of previews cannot saturate a small host.
+_RENDERS = threading.BoundedSemaphore(2)
+
+
 def render_png(design: Design, *, width: int = WIDTH) -> bytes:
     import resvg_py
 
-    return bytes(
-        resvg_py.svg_to_bytes(
-            svg_string=svg(design),
-            skip_system_fonts=True,
-            font_files=_font_files(design),
-            width=width,
-            height=round(width * HEIGHT / WIDTH),
+    with _RENDERS:
+        return bytes(
+            resvg_py.svg_to_bytes(
+                svg_string=svg(design),
+                skip_system_fonts=True,
+                font_files=_font_files(design),
+                width=width,
+                height=round(width * HEIGHT / WIDTH),
+            )
         )
-    )
 
 
 def render_jpeg(design: Design, *, width: int = WIDTH, quality: int = 88) -> bytes:
@@ -907,6 +930,36 @@ def render_jpeg(design: Design, *, width: int = WIDTH, quality: int = 88) -> byt
         out = BytesIO()
         img.convert("RGB").save(out, "JPEG", quality=quality, optimize=True, progressive=True)
         return out.getvalue()
+
+
+# --- in-memory previews -----------------------------------------------------------------------
+
+PREVIEW_WIDTHS = (240, 480)
+PREVIEW_QUALITY = 86
+PREVIEW_CACHE_BYTES = 8 * 1024 * 1024
+_previews: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+_previews_size = 0
+_previews_lock = threading.Lock()
+
+
+def preview_jpeg(design: Design, width: int) -> bytes:
+    """A preview JPEG from a small LRU (about 8 MB) keyed by ``(design.key, width)``; drawn
+    (at most two at a time) on a miss. The key covers everything drawn, so entries never go stale."""
+    global _previews_size
+    k = (design.key, width)
+    with _previews_lock:
+        if k in _previews:
+            _previews.move_to_end(k)
+            return _previews[k]
+    data = render_jpeg(design, width=width, quality=PREVIEW_QUALITY)
+    with _previews_lock:
+        if k not in _previews:
+            _previews[k] = data
+            _previews_size += len(data)
+        while _previews_size > PREVIEW_CACHE_BYTES and len(_previews) > 1:
+            _, old = _previews.popitem(last=False)
+            _previews_size -= len(old)
+    return data
 
 
 # --- the cache in derived/ ---------------------------------------------------------------------

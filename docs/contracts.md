@@ -736,6 +736,24 @@ carries `type`. Text read from files or metadata providers has those characters 
 OPDS strips them from old rows. Cover uploads are staged first:
 `POST /api/works/{id}/cover` (raw JPEG/PNG/WebP ≤ 10 MiB) → `{token, preview_url}`.
 
+Cover editor (issue #85). `cover` also takes `{action: generate, style?, seed?, font?}` (style
+`classic|modern|minimal`, `seed` ≥ 0 steps through the palettes, `font` `display|text|noto`) and
+`{action: revision, revision_id}`, which puts back the cover image saved in that revision of the
+same work. Supporting endpoints:
+
+- `GET /api/works/{id}/cover/candidates?title&author&font&offset&count≤6` → `{fonts, styles,
+  candidates: [{style, seed, font, palette, url}]}`. Candidate `i` has seed `i` and the `i`-th
+  style in rotation; `url` is a `cover/generated.jpg` preview.
+- `POST /api/works/{id}/cover/stage` `{source: staged|epub_image|page, token | file_id+index |
+  file_id+page, crop?: {x, y, w, h}}` (fractions of the image) → `{token, preview_url}`, saved
+  through the `upload` action. A bad rectangle is `422 bad_crop`.
+- `GET /api/works/{id}/cover/sources/epub/{file_id}/{index}.jpg`: thumbnail of an EPUB image.
+- `GET /api/works/{id}/cover/history` → `{entries}`: the current cover and up to 19 earlier ones
+  from saved revisions (the last 30 days, since housekeeping drops older revisions);
+  `GET …/cover/history/{revision_id}.jpg` serves one image.
+
+`Metadata` gains `subtitle`, `original_published`, and `contributors: [{name, role}]`.
+
 Folder moves never overwrite: same filesystem uses rename; across filesystems (`EXDEV`) the file
 is copied to a hidden temp name, fsynced, size- and SHA-256-verified, renamed, then the source is
 removed. Paths are checked against traversal. A move is deferred while a read-aloud build is

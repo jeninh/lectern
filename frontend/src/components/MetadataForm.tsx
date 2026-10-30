@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { FIELD_LABEL, sortName, type FieldErrors } from "../lib/metadata";
-import type { AuthorName, Metadata } from "../lib/types";
+import type { AuthorName, Contributor, ContributorRole, Metadata } from "../lib/types";
 import { Close, Plus } from "./Icons";
 
 /** Free-form list (tags, narrators): Enter or comma adds, Backspace on empty removes the last. */
@@ -69,11 +69,43 @@ function AuthorsField({ value, onChange, error }: { value: AuthorName[]; onChang
   );
 }
 
+export const CONTRIBUTOR_ROLES: [ContributorRole, string][] = [["translator", "Translator"], ["editor", "Editor"], ["illustrator", "Illustrator"], ["foreword", "Foreword by"]];
+export const MAX_CONTRIBUTORS = 20;
+
+/** Translators, editors, illustrators, and foreword writers: a name and a role per row. */
+export function ContributorsField({ value, onChange, error }: { value: Contributor[]; onChange: (v: Contributor[]) => void; error?: string }) {
+  const id = useId();
+  const set = (i: number, patch: Partial<Contributor>) => onChange(value.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+  return (
+    <fieldset className="field contributors span-2" aria-describedby={error ? `${id}-err` : undefined}>
+      <legend>Contributors</legend>
+      {value.map((c, i) => (
+        <div key={i} className="author-row contributor-row">
+          <label className="sr-only" htmlFor={`${id}-n${i}`}>Contributor {i + 1} name</label>
+          <input id={`${id}-n${i}`} className="input" value={c.name} placeholder="Name" maxLength={256} onChange={(e) => set(i, { name: e.target.value })} aria-invalid={!!error && !c.name.trim()} />
+          <label className="sr-only" htmlFor={`${id}-r${i}`}>Contributor {i + 1} role</label>
+          <select id={`${id}-r${i}`} className="select" value={c.role} onChange={(e) => set(i, { role: e.target.value as ContributorRole })}>
+            {CONTRIBUTOR_ROLES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+          <button type="button" className="icon-btn ghost sm" aria-label={`Remove contributor ${c.name || i + 1}`} onClick={() => onChange(value.filter((_, j) => j !== i))}>
+            <Close />
+          </button>
+        </div>
+      ))}
+      <button type="button" className="btn sm ghost" onClick={() => onChange([...value, { name: "", role: "translator" }])} disabled={value.length >= MAX_CONTRIBUTORS}>
+        <Plus /> Add contributor
+      </button>
+      {value.length >= MAX_CONTRIBUTORS && <span className="hint">At most {MAX_CONTRIBUTORS} contributors.</span>}
+      {error && <span className="field-error" id={`${id}-err`}>{error}</span>}
+    </fieldset>
+  );
+}
+
 /** Every descriptive field; shared by review-before-filing and the work editor. */
 export function MetadataForm({ value, onChange, errors = {}, detected }: { value: Metadata; onChange: (m: Metadata) => void; errors?: FieldErrors; detected?: Metadata | null }) {
   const id = useId();
   const set = <K extends keyof Metadata>(k: K, v: Metadata[K]) => onChange({ ...value, [k]: v });
-  const text = (k: "title" | "sort_title" | "series" | "language" | "isbn" | "publisher" | "published", opts: { placeholder?: string; max?: number; mode?: "numeric" | "text"; wide?: boolean } = {}) => (
+  const text = (k: "title" | "sort_title" | "series" | "language" | "isbn" | "publisher" | "published" | "subtitle" | "original_published", opts: { placeholder?: string; max?: number; mode?: "numeric" | "text"; wide?: boolean } = {}) => (
     <label className={`field${opts.wide ? " span-2" : ""}`}>
       <span>{FIELD_LABEL[k]}</span>
       <input
@@ -97,8 +129,10 @@ export function MetadataForm({ value, onChange, errors = {}, detected }: { value
   return (
     <div className="meta-form">
       {text("title", { max: 512, wide: true })}
+      {text("subtitle", { max: 512, wide: true })}
       {text("sort_title", { placeholder: value.title.replace(/^(the|a|an)\s+(.*)$/i, "$2, $1") || "Same as title", max: 512, wide: true })}
       <AuthorsField value={value.authors} onChange={(a) => set("authors", a)} error={errors.authors} />
+      <ContributorsField value={value.contributors ?? []} onChange={(c) => set("contributors", c)} error={errors.contributors} />
       <div className="field-pair span-2">
         {text("series", { placeholder: "e.g. Earthsea" })}
         <label className="field index">
@@ -124,6 +158,7 @@ export function MetadataForm({ value, onChange, errors = {}, detected }: { value
       {text("isbn", { placeholder: "978…", max: 20, mode: "numeric" })}
       {text("publisher")}
       {text("published", { placeholder: "YYYY or YYYY-MM-DD", max: 32 })}
+      {text("original_published", { placeholder: "YYYY or YYYY-MM-DD", max: 32 })}
       <label className="field span-2" htmlFor={`${id}-tags`}>
         <span>Tags and genres</span>
         <ChipInput id={`${id}-tags`} label="Tag" values={value.tags} onChange={(v) => set("tags", v)} placeholder="Fantasy, Classics… (Enter to add)" />

@@ -740,3 +740,29 @@ def test_revision_history_is_listed(client, owner, settings):
     assert revs[0]["undoable"] is True and revs[0]["kind"] == "edit"
     with session_factory()() as db:
         assert db.query(WorkRevision).count() == 1
+
+
+def test_generated_cover_font_round_trips_and_changes_the_cover(client, owner, settings):
+    from lectern import covergen
+    from lectern.editing import _cover_state, _restore_cover
+
+    wid = one_book(settings, title="Orlando", authors=["Virginia Woolf"])
+    ed = editor(client, wid)
+    assert ed["cover"]["generated"]["font"] == "display"
+    assert ed["cover"]["generated"]["fonts"] == ["display", "text", "noto"]
+    body = {"action": "generate", "style": "modern", "seed": 2, "font": "noto"}
+    r = patch(client, owner["csrf"], wid, {"version": ed["version"], "cover": body})
+    assert r.status_code == 200, r.text
+    with session_factory()() as db:
+        w = db.get(Work, wid)
+        state = _cover_state(w)
+        assert (state["style"], state["seed"], state["font"]) == ("modern", 2, "noto")
+        noto = covergen.render_png(covergen.design_of(w), width=200)
+        w.cover_style, w.cover_seed, w.cover_font = None, 0, None
+        assert covergen.render_png(covergen.design_of(w), width=200) != noto
+        _restore_cover(settings, w, state)
+        assert (w.cover_style, w.cover_seed, w.cover_font) == ("modern", 2, "noto")
+        assert covergen.render_png(covergen.design_of(w), width=200) == noto
+    assert editor(client, wid)["cover"]["generated"]["font"] == "noto"
+    bad = {"version": r.json()["editor"]["version"], "cover": {**body, "font": "comic"}}
+    assert patch(client, owner["csrf"], wid, bad).status_code == 422
