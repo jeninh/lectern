@@ -842,6 +842,29 @@ def test_force_is_refused_while_a_worker_holds_the_job(client, owner, work_id, w
     assert db_job(queued.json()["id"]).status == JobStatus.LEASED
 
 
+def test_force_replaces_only_a_job_the_caller_may_cancel(client, owner, work_id):
+    """Issue #117 (1): force cancels the active job, so it follows the cancel rule (the owner,
+    or whoever started it); a member cannot replace someone else's queued alignment."""
+    mia = make_user(client, owner["csrf"], "mia", "member")
+    m = TestClient(client.app)
+    m_csrf = login(m, "mia", mia["password"])
+    theirs = request_align(client, owner, work_id).json()["id"]
+    r = request_align(m, {"csrf": m_csrf}, work_id, force=True)
+    assert (r.status_code, r.json()["detail"]) == (403, "not_your_job")
+    assert db_job(theirs).status == JobStatus.QUEUED
+    r = request_align(m, {"csrf": m_csrf}, work_id)  # without force: the job, unchanged
+    assert (r.status_code, r.json()["id"]) == (200, theirs)
+
+    with session_factory()() as db:  # now hers: she may replace it
+        db.get(Job, theirs).created_by = mia["id"]
+        db.commit()
+    r = request_align(m, {"csrf": m_csrf}, work_id, force=True)
+    assert r.status_code == 202 and r.json()["id"] != theirs
+    assert db_job(theirs).status == JobStatus.CANCELLED
+    r = request_align(client, owner, work_id, force=True)  # and the owner may replace hers
+    assert r.status_code == 202
+
+
 def test_a_lease_is_bound_to_the_credential_that_claimed_it(client, owner, work_id, wc, app):
     other = api_post(client, "/api/worker-credentials", owner["csrf"], {"label": "other"}).json()
     wc2 = TestClient(app, headers={"Authorization": f"Bearer {other['secret']}"})

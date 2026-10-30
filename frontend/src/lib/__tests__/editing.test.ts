@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { errorText } from "../api";
 import { buildPatch, changes, coverAuthor, initialDraft, rebase } from "../editor";
 import { applyFields, clean, normalizeIsbn, sortName, suggestionDiff, validate } from "../metadata";
 import type { EditorState, Metadata } from "../types";
@@ -163,6 +164,10 @@ describe("editor draft", () => {
 });
 
 describe("review hardening", () => {
+  it("explains a job cancellation permission refusal in the data-saver toast", () => {
+    expect(errorText("not_your_job")).toBe("Only the owner or the person who started this job can cancel it.");
+  });
+
   it("flags XML-illegal control characters per field but allows tabs and newlines", () => {
     expect(validate(meta({ title: "Bad\u0001Title" })).title).toMatch(/control characters/);
     expect(validate(meta({ authors: [{ name: "A\u0000", sort: null }] })).authors).toMatch(/control characters/);

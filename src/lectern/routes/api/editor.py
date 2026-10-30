@@ -19,7 +19,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import autometa, covergen, editing, egress, idempotency, instance, lookup, trash
+from lectern import (
+    autometa,
+    covergen,
+    editing,
+    egress,
+    idempotency,
+    instance,
+    jobqueue,
+    lookup,
+    trash,
+)
 from lectern.access import can_see_work, shelf_perms, visible_path, visible_works
 from lectern.align import jobs as align_jobs
 from lectern.align.transcribe import DEFAULT_MODEL, MODELS
@@ -28,6 +38,7 @@ from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest import formats
 from lectern.models import (
     Alignment,
+    Job,
     MetadataSuggestion,
     Role,
     ShelfItem,
@@ -405,10 +416,12 @@ class TrashIn(BaseModel):
 
 def _trash_one(
     request, auth, db, settings, work: Work, journal: Journal, batch_id: str | None = None
-) -> WorkRevision:
+) -> tuple[WorkRevision, list[Job]]:
     version = work.version
     try:
-        trash.trash_work(db, settings, work, auth.user.id, busy=_busy(request), journal=journal)
+        cancelled = trash.trash_work(
+            db, settings, work, auth.user.id, busy=_busy(request), journal=journal
+        )
     except trash.Busy:
         raise HTTPException(status.HTTP_409_CONFLICT, "work_busy") from None
     rev = WorkRevision(
@@ -431,7 +444,7 @@ def _trash_one(
         f"work:{work.id} {work.trash_from} -> {work.dir_path}",
     )
     db.flush()
-    return rev
+    return rev, cancelled
 
 
 @router.post("/works/{work_id}/trash")
@@ -449,8 +462,10 @@ def trash_work(
             raise HTTPException(status.HTTP_409_CONFLICT, "version_conflict")
         journal = Journal()
         with _rollback_on_error(db, journal):
-            rev = _trash_one(request, auth, db, settings, work, journal)
+            rev, cancelled = _trash_one(request, auth, db, settings, work, journal)
             db.commit()
+        for job in cancelled:
+            jobqueue.drop_partial(settings.data_dir, job)
     return {"work_id": work.id, "revision_id": rev.id, "trashed_at": iso(work.trashed_at)}
 
 
@@ -717,7 +732,9 @@ def bulk_edit(
                 with _rollback_on_error(db, journal):
                     work = _work(db, auth.user, wid)
                     if body.action == "trash":
-                        _trash_one(request, auth, db, settings, work, journal, batch_id)
+                        _, cancelled = _trash_one(
+                            request, auth, db, settings, work, journal, batch_id
+                        )
                         changed = ["trashed"]
                     else:
                         result, _ = _save(
@@ -733,6 +750,9 @@ def bulk_edit(
                         )
                         changed = result.changed
                     db.commit()
+                if body.action == "trash":
+                    for job in cancelled:
+                        jobqueue.drop_partial(settings.data_dir, job)
                 results.append({"work_id": wid, "ok": True, "changed": changed})
             except Exception as exc:  # noqa: BLE001 - one work failing must not stop the rest
                 results.append({"work_id": wid, "ok": False, "error": _item_error(exc)})

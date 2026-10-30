@@ -53,8 +53,9 @@ To turn alignment on, either rebuild the image with the engine
 builds one image that both aligns and narrates with Piper ([`tts.md`](tts.md)).
 
 A job can also be requested by hand: `POST /api/works/{id}/align {"model": "medium",
-"force": true}` (owner or member). `force` cancels the active job first. Jobs are listed at
-`GET /api/jobs`.
+"force": true}` (owner or member). `force` cancels the active job first, so a
+member may force only over a job they started (`403 not_your_job` otherwise; the owner may
+replace any). Jobs are listed at `GET /api/jobs`.
 
 ## Where to run it (Raspberry Pi, NAS, laptop)
 

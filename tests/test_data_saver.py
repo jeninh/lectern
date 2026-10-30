@@ -19,7 +19,7 @@ from tests.conftest import ORIGIN, api_delete, api_post, drain_inbox, needs_ffmp
 from lectern import jobs as transcode
 from lectern.align.worker import RemoteWorker
 from lectern.db import session_factory
-from lectern.models import Job, JobStatus, WorkerCredential, utcnow
+from lectern.models import Job, JobStatus, Work, WorkerCredential, utcnow
 from lectern.worker.runners import TranscodeRunner
 
 pytestmark = needs_ffmpeg
@@ -303,6 +303,31 @@ def test_a_job_cancelled_mid_run_publishes_no_more_tracks(
     transcode.run_pending(session_factory(), settings)
     assert the_job().status == JobStatus.CANCELLED
     assert lows(client, book["id"]) == [None, None]  # the first finished after the cancel
+
+
+def test_only_the_owner_or_who_started_it_may_stop_a_copy_being_made(client, owner, settings, book):
+    """Issue #117 review: deleting the copies cancels the transcode in progress, so it follows
+    the cancel rule (POST /api/jobs/{id}/cancel): the owner or whoever started it."""
+    from tests.conftest import login, make_user
+
+    mia = make_user(client, owner["csrf"], "mia", "member")
+    m = TestClient(client.app)
+    m_csrf = login(m, "mia", mia["password"])
+    url = f"/api/works/{book['id']}/transcode"
+    with session_factory()() as db:  # queued automatically after the import: no starter
+        auto = transcode.enqueue_transcode(db, settings, db.get(Work, book["id"]))
+        db.commit()
+        auto_id = auto.id
+    r = api_delete(m, url, m_csrf)
+    assert (r.status_code, r.json()["detail"]) == (403, "not_your_job")
+    assert the_job().status == JobStatus.QUEUED
+
+    assert api_delete(client, url, owner["csrf"]).status_code == 200  # the owner may
+    with session_factory()() as db:
+        assert db.get(Job, auto_id).status == JobStatus.CANCELLED
+    assert api_post(m, url, m_csrf).json()["status"] == "queued"  # hers: she may stop it
+    assert api_delete(m, url, m_csrf).status_code == 200
+    assert the_job().status == JobStatus.CANCELLED
 
 
 def test_cancelling_a_stale_copy_never_undoes_a_finished_job(client, owner, settings, book):
