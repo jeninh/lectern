@@ -8,7 +8,7 @@ The append-only rows make the daily cache rebuildable when a person changes thei
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import delete, func, select
@@ -76,10 +76,11 @@ def record(
     if forward <= 0 or forward > MAX_FORWARD_FRACTION:
         return
     read_s = listen_s = 0
-    if source == "audio" and before_audio_s is not None and after_audio_s is not None:
-        advance = after_audio_s - before_audio_s
-        if 0 < advance <= MAX_AUDIO_ADVANCE_S:
-            listen_s = round(advance)
+    if source == "audio":
+        if before_audio_s is not None and after_audio_s is not None:
+            advance = after_audio_s - before_audio_s
+            if 0 < advance <= MAX_AUDIO_ADVANCE_S:
+                listen_s = round(advance)
     elif before_at is not None:
         elapsed = (at - before_at).total_seconds()
         if 0 < elapsed <= ACTIVE_GAP_S:
@@ -137,33 +138,66 @@ def _visible_activity(db: Session, user: User, start: datetime, end: datetime):
     )
 
 
+def _visible_days(db: Session, user: User, start: str, end: str):
+    return db.execute(
+        select(ReadingStatsDay, Work.author)
+        .join(Work, Work.id == ReadingStatsDay.work_id)
+        .where(
+            ReadingStatsDay.user_id == user.id,
+            ReadingStatsDay.day >= start,
+            ReadingStatsDay.day < end,
+            visible_works(user),
+        )
+    )
+
+
+def _longest_session(db: Session, user: User, start: datetime, end: datetime) -> int:
+    """Largest contiguous counted session in a selected local-year range.
+
+    Daily aggregates intentionally do not preserve session boundaries, so this bounded query is
+    the only summary field that reads raw rows. It neither assigns time to historic positions
+    nor crosses the requested year's local-calendar boundary.
+    """
+    longest = total = 0
+    previous: datetime | None = None
+    for row in db.scalars(_visible_activity(db, user, start, end).order_by(ReadingActivity.at)):
+        if previous is None or (row.at - previous).total_seconds() > ACTIVE_GAP_S:
+            total = 0
+        total += row.read_seconds + row.listened_seconds
+        longest = max(longest, total)
+        previous = row.at
+    return longest
+
+
 def summary(db: Session, user: User, year: int) -> dict:
     zone = timezone(user.reading_timezone)
     start = datetime(year, 1, 1, tzinfo=zone).astimezone(UTC)
     end = datetime(year + 1, 1, 1, tzinfo=zone).astimezone(UTC)
-    rows = db.scalars(_visible_activity(db, user, start, end)).all()
+    start_day = f"{year:04d}-01-01"
+    end_day = f"{year + 1:04d}-01-01"
     by_day: dict[str, dict[str, float]] = defaultdict(lambda: {"read_seconds": 0, "listened_seconds": 0, "pages": 0.0})
-    for row in rows:
-        bucket = by_day[day_at(row.at, user.reading_timezone)]
+    by_author: dict[str, float] = defaultdict(float)
+    for row, author in _visible_days(db, user, start_day, end_day):
+        bucket = by_day[row.day]
         bucket["read_seconds"] += row.read_seconds
         bucket["listened_seconds"] += row.listened_seconds
         bucket["pages"] += row.pages
+        by_author[author or "Unknown"] += row.read_seconds + row.listened_seconds
     active = {d for d, total in by_day.items() if total["read_seconds"] + total["listened_seconds"] >= STREAK_MIN_SECONDS}
-    current, longest = _streaks(active, datetime.now(zone).date())
+    # Current streak must not reset on New Year's Day merely because this review is filtered.
+    today = datetime.now(zone).date()
+    current_days = {
+        row.day
+        for row, _ in _visible_days(db, user, "0001-01-01", (today + timedelta(days=1)).isoformat())
+        if row.read_seconds + row.listened_seconds >= STREAK_MIN_SECONDS
+    }
+    current, longest = _streaks(active, today, current_days)
     totals = {
-        "read_seconds": sum(int(r.read_seconds) for r in rows),
-        "listened_seconds": sum(int(r.listened_seconds) for r in rows),
-        "pages": round(sum(float(r.pages) for r in rows), 1),
+        "read_seconds": sum(int(total["read_seconds"]) for total in by_day.values()),
+        "listened_seconds": sum(int(total["listened_seconds"]) for total in by_day.values()),
+        "pages": round(sum(float(total["pages"]) for total in by_day.values()), 1),
     }
     started, finished = _state_backfill(db, user, start, end)
-    top_authors = db.execute(
-        select(Work.author, func.count(ReadingActivity.id))
-        .join(ReadingActivity, ReadingActivity.work_id == Work.id)
-        .where(ReadingActivity.user_id == user.id, ReadingActivity.at >= start, ReadingActivity.at < end, visible_works(user))
-        .group_by(Work.author)
-        .order_by(func.count(ReadingActivity.id).desc(), Work.author)
-        .limit(5)
-    ).all()
     return {
         "year": year,
         "timezone": user.reading_timezone or "UTC",
@@ -172,7 +206,11 @@ def summary(db: Session, user: User, year: int) -> dict:
         "finished": finished,
         "streak": {"current": current, "longest": longest, "minimum_seconds": STREAK_MIN_SECONDS},
         "days": [{"day": d, **{k: round(v, 1) for k, v in total.items()}} for d, total in sorted(by_day.items())],
-        "top_authors": [{"author": author or "Unknown", "activity": count} for author, count in top_authors],
+        "longest_session_seconds": _longest_session(db, user, start, end),
+        "top_authors": [
+            {"author": author, "seconds": round(seconds)}
+            for author, seconds in sorted(by_author.items(), key=lambda item: (-item[1], item[0]))[:5]
+        ],
         "estimate": "Text time is an active-window estimate from forward position changes; audio is content seconds advanced.",
     }
 
@@ -199,7 +237,7 @@ def _state_backfill(db: Session, user: User, start: datetime, end: datetime) -> 
     return int(started), int(finished)
 
 
-def _streaks(days: set[str], today: date) -> tuple[int, int]:
+def _streaks(days: set[str], today: date, current_days: set[str] | None = None) -> tuple[int, int]:
     parsed = sorted(date.fromisoformat(day) for day in days)
     longest = run = 0
     previous = None
@@ -209,7 +247,8 @@ def _streaks(days: set[str], today: date) -> tuple[int, int]:
         previous = item
     current = 0
     cursor = today
-    while cursor.isoformat() in days:
+    current_days = current_days if current_days is not None else days
+    while cursor.isoformat() in current_days:
         current += 1
         cursor = date.fromordinal(cursor.toordinal() - 1)
     return current, longest

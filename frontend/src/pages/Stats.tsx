@@ -8,10 +8,25 @@ type Stats = {
   totals: { read_seconds: number; listened_seconds: number; pages: number };
   streak: { current: number; longest: number; minimum_seconds: number };
   days: { day: string; read_seconds: number; listened_seconds: number; pages: number }[];
-  top_authors: { author: string; activity: number }[]; estimate: string;
+  longest_session_seconds: number;
+  top_authors: { author: string; seconds: number }[]; estimate: string;
 };
 
 const duration = (seconds: number) => `${Math.floor(seconds / 3600)}h ${Math.round(seconds % 3600 / 60)}m`;
+
+function Heatmap({ year, days }: Pick<Stats, "year" | "days">) {
+  const totals = new Map(days.map((day) => [day.day, day.read_seconds + day.listened_seconds]));
+  const start = new Date(Date.UTC(year, 0, 1));
+  const end = new Date(Date.UTC(year + 1, 0, 1));
+  const cells = [];
+  for (const day = new Date(start); day < end; day.setUTCDate(day.getUTCDate() + 1)) {
+    const key = day.toISOString().slice(0, 10);
+    const seconds = totals.get(key) ?? 0;
+    const level = seconds ? Math.min(4, Math.ceil(seconds / 900)) : 0;
+    cells.push(<span key={key} className={`stats-day level-${level}`} title={`${key}: ${duration(seconds)}`} />);
+  }
+  return <div className="stats-heatmap" aria-label={`Calendar heatmap for ${year}`}>{cells}</div>;
+}
 
 export function StatsPage() {
   const { me, setPreference, toast } = useStore();
@@ -30,11 +45,12 @@ export function StatsPage() {
         <strong>{duration(stats.totals.read_seconds)} reading</strong><strong>{duration(stats.totals.listened_seconds)} listening</strong><strong>{Math.round(stats.totals.pages)} estimated pages</strong>
       </div></section>
       <section className="card"><h2>Streak</h2><p className="sub">{stats.streak.current} current · {stats.streak.longest} longest. A day needs at least {stats.streak.minimum_seconds} seconds of counted activity.</p>
-        <div className="hint">{stats.days.length} active days · {stats.started} started · {stats.finished} finished</div></section>
+        <div className="hint">{stats.days.length} active days · {stats.started} started · {stats.finished} finished · {duration(stats.longest_session_seconds)} longest session</div></section>
+      <section className="card"><h2>Calendar</h2><p className="sub">Each square is a day; darker means more counted reading or listening.</p><Heatmap year={year} days={stats.days} /></section>
       <section className="card"><h2>Calendar timezone</h2><p className="sub">Changing it rebuckets retained activity and handles daylight-saving transitions.</p>
         <input aria-label="IANA timezone" value={me?.preferences.reading_timezone ?? stats.timezone} onChange={(e) => setPreference("reading_timezone", e.target.value)} />
       </section>
-      <section className="card"><h2>Top authors</h2>{stats.top_authors.length ? <ul>{stats.top_authors.map((a) => <li key={a.author}>{a.author}</li>)}</ul> : <p className="hint">No counted activity this year yet.</p>}</section>
+      <section className="card"><h2>Top authors</h2>{stats.top_authors.length ? <ul>{stats.top_authors.map((a) => <li key={a.author}>{a.author} · {duration(a.seconds)}</li>)}</ul> : <p className="hint">No counted activity this year yet.</p>}</section>
     </div>
   </>;
 }

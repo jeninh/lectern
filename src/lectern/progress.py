@@ -308,8 +308,9 @@ def put_progress(
     speed: float | None = None,
     now: datetime | None = None,
 ) -> None:
-    """Last write wins; ``received_at`` is the server clock. ``speed``, when given, replaces
-    the work's listening speed; otherwise the stored one stays. Caller commits."""
+    """Last write wins; ``received_at`` is ``now`` (the corrected replay time or server clock).
+    ``speed``, when given, replaces the work's listening speed; otherwise the stored one stays.
+    Caller commits."""
     wt = SentenceCache.get(db, work_id)
     tl = audio_timeline(db, work_id)
     if sentence is not None:
