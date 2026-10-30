@@ -41,6 +41,7 @@ import unicodedata
 from array import array
 from bisect import bisect_right
 from dataclasses import dataclass
+from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -411,6 +412,8 @@ def as_json(a: Annotation, f: BookFile) -> dict:
             else None
         ),
         "sentence_n": a.sentence_n,
+        "favourite": a.favourite,
+        "hidden": a.hidden,
     }
 
 
@@ -588,3 +591,45 @@ def markdown(groups, *, title: str | None = None) -> str:
         for work, pairs in groups:
             lines += _work_md(work, pairs, 2)
     return "\n".join(lines).rstrip() + "\n"
+
+
+# --- quotes and the highlight of the day (issue #83) --------------------------------------------
+
+
+def _digest(*parts) -> str:
+    return hashlib.sha256("\n".join(map(str, parts)).encode()).hexdigest()
+
+
+def in_order(hits: list, order: str, seed: str = "") -> list:
+    """The quotes feed's order: ``newest`` (KOReader's creation time) first, or ``shuffle``d by
+    ``seed`` (the same seed gives the same order, so the feed pages through one shuffle)."""
+    if order == "shuffle":
+        return sorted(hits, key=lambda h: _digest(seed, h[1].key))
+    return sorted(hits, key=lambda h: (h[1].created, h[1].id), reverse=True)
+
+
+def of_the_day(db: Session, library: Path, user: User, day: date):
+    """``(work, annotation, file)``: the user's highlight of the day for ``day`` (their local
+    date), or None when they have none to show. Drawn from :func:`visible` (so only their own,
+    on works they can still see) minus the ones they hid.
+
+    Each highlight gets a per-person, per-day rank from its stable ``key``. On even days (by
+    ordinal) the best wins; on odd days the best that is neither neighbouring day's, so two days
+    running never show the same one. The pick depends only on the person, the day, and which
+    highlights there are (not hidden, still visible), so it is the same all day while those stay
+    the same. A sync that adds or removes highlights can change it: on an even day only if the
+    new one outranks it, on an odd day also by changing a neighbouring day's pick. With two, they
+    take turns. ``day`` must have a day before and after it (not 0001-01-01 or 9999-12-31)."""
+    pool = [(w, a, f) for w, pairs in visible(db, library, user) for a, f in pairs if not a.hidden]
+    if len(pool) < 3:
+        pool.sort(key=lambda h: _digest(user.id, h[1].key))
+        return pool[day.toordinal() % len(pool)] if pool else None
+
+    def best(d: date, skip: set[str] = frozenset()):
+        rank = lambda h: _digest(user.id, d.isoformat(), h[1].key)  # noqa: E731
+        return min((h for h in pool if h[1].key not in skip), key=rank)
+
+    if day.toordinal() % 2 == 0:
+        return best(day)
+    one = timedelta(days=1)
+    return best(day, {best(day - one)[1].key, best(day + one)[1].key})

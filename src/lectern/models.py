@@ -73,6 +73,8 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # Migration 0032: Home shows a highlight of the day (issue #83).
+    quote_of_the_day: Mapped[bool] = mapped_column(Boolean, default=True)
     # UI preference: reveal KOReader xpointers, partial-MD5 ids, and storage paths.
     show_technical_details: Mapped[bool] = mapped_column(Boolean, default=False)
     # Owner-set override of LECTERN_DOWNLOAD_CAP_PER_HOUR for this user; NULL = default, 0 = off.
@@ -1575,6 +1577,10 @@ class Annotation(Base):
     loc_len: Mapped[int | None] = mapped_column(Integer, default=None)
     sentence_n: Mapped[int | None] = mapped_column(Integer, default=None)
     synced_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+    # Migration 0032: the owner's marks for the quotes feed (issue #83); a hidden one leaves
+    # the feed and the highlight of the day.
+    favourite: Mapped[bool] = mapped_column(Boolean, default=False)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class VocabularyWord(Base):

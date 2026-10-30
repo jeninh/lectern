@@ -193,3 +193,7 @@ export const Filter = (p: P) => (
 export const SmartFolder = (p: P) => (
   <svg {...base} {...p}><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" /><path d="M8.5 10.5h7l-2.8 3.1v2.6l-1.4-.7v-1.9z" /></svg>
 );
+/** A quotation: the Highlights page's quotes feed. */
+export const Quote = (p: P) => (
+  <svg {...base} {...p}><path d="M10 7H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h3v1a3 3 0 0 1-3 3" /><path d="M20 7h-4a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h3v1a3 3 0 0 1-3 3" /></svg>
+);
