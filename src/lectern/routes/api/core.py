@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -100,6 +101,7 @@ def _preferences(user: User) -> dict:
         "auto_file_imports": user.auto_file_imports,
         "data_saver": user.data_saver,
         "playback_speed": user.playback_speed,
+        "reading_timezone": user.reading_timezone,
     }
 
 
@@ -110,6 +112,7 @@ class PreferencesIn(BaseModel):
     data_saver: bool | None = None
     # Listening speed for books not played yet (each book keeps its own once played).
     playback_speed: float | None = Field(default=None, ge=0.5, le=4)
+    reading_timezone: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 @router.post("/me/preferences")
@@ -125,6 +128,16 @@ def update_preferences(auth: AuthCsrf, db: DbDep, body: PreferencesIn) -> dict:
         auth.user.data_saver = body.data_saver
     if body.playback_speed is not None:
         auth.user.playback_speed = body.playback_speed
+    if body.reading_timezone is not None:
+        try:
+            ZoneInfo(body.reading_timezone)
+        except ZoneInfoNotFoundError:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_timezone") from None
+        if auth.user.reading_timezone != body.reading_timezone:
+            from lectern.reading_stats import rebuild_days
+
+            auth.user.reading_timezone = body.reading_timezone
+            rebuild_days(db, auth.user)
     db.commit()
     return {"preferences": _preferences(auth.user)}
 

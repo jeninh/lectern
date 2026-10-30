@@ -562,6 +562,27 @@ textarea {
   color: var(--muted);
   font-size: 14px;
 }
+
+.stats-heatmap {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 12px);
+  gap: 3px;
+  overflow-x: auto;
+  padding: 4px;
+}
+
+.stats-day {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.stats-day.level-1 { background: color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.stats-day.level-2 { background: color-mix(in srgb, var(--accent) 48%, var(--line)); }
+.stats-day.level-3 { background: color-mix(in srgb, var(--accent) 70%, var(--line)); }
+.stats-day.level-4 { background: var(--accent); }
 .stack {
   display: grid;
   gap: 18px;

@@ -199,17 +199,38 @@ def put_page(auth: AuthCsrf, db: DbDep, settings: SettingsDep, file_id: int, bod
         wins, recorded = body.offline.judge(server_at)
         if not wins:
             raise conflict(shown, recorded)
+    else:
+        recorded = None
     now = int(time.time())
     if row is None:
         row = ReadingProgress(user_id=auth.user.id, document=book.partial_md5, timestamp=now)
         db.add(row)
+        old_fraction, old_at = None, None
+    else:
+        old_fraction, old_at = row.percentage, row.updated_at
     row.progress = str(page)
     row.percentage = round(page / body.pages, 4)
     row.device = (body.device or "Web reader")[:128]
     row.device_id = WEB_DEVICE_ID
     row.timestamp = now
     row.sync_key_id = None
-    _project_page(db, settings, auth.user.id, book, page, row.device)
+    if recorded is not None:
+        row.updated_at = recorded
+    projected = _project_page(db, settings, auth.user.id, book, page, row.device, now=recorded)
+    if not projected:
+        from lectern import reading_stats
+
+        reading_stats.record(
+            db,
+            user=auth.user,
+            work_id=book.work_id,
+            source="web",
+            before_fraction=old_fraction,
+            after_fraction=row.percentage,
+            before_at=old_at,
+            at=recorded,
+            pages=body.pages,
+        )
     db.commit()
     return _progress(db, auth.user.id, book)
 
@@ -231,7 +252,9 @@ def _work_position_as_page(db, settings, user_id: int, book: BookFile, pages: in
     }}, page + 1  # fmt: skip
 
 
-def _project_page(db, settings, user_id: int, book: BookFile, page: int, device: str) -> None:
+def _project_page(
+    db, settings, user_id: int, book: BookFile, page: int, device: str, now=None
+) -> bool:
     """Move the work's canonical position to the first sentence on ``page`` (1-based) of a
     text PDF, unless it is on that page already (reading a page must not rewind the audio to
     the page's first sentence)."""
@@ -242,13 +265,13 @@ def _project_page(db, settings, user_id: int, book: BookFile, page: int, device:
 
     m = pdf_map(db, settings.library_dir, book)
     if m is None:
-        return
+        return False
     n = m.sentence_at_page(page - 1)
     if n is None:
-        return
+        return False
     wp = get_progress(db, user_id, book.work_id)
     if wp is not None and m.page_of(wp.sentence_n) == page - 1:
-        return
+        return False
     set_progress(
         db,
         user_id=user_id,
@@ -257,4 +280,6 @@ def _project_page(db, settings, user_id: int, book: BookFile, page: int, device:
         source=ProgressSource.WEB,
         raw=f"page:{page}",
         device=device or "Web reader",
+        now=now,
     )
+    return True
