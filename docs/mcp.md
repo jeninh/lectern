@@ -67,6 +67,7 @@ reachable only from devices on your tailnet. Nothing about AI access needs to be
 | `file` (default): “Can file books (confirm imports)” | file reviewed imports **this key uploaded** into the library; owners and members only | `confirm_import`, and auto-filing a certain match from `upload_book` |
 | `read` | search, book details, alignment status, your progress, your shelves | `search_library`, `get_book`, `list_recent`, `list_shelves` |
 | `organize` | shelves, send to device, alignment, metadata, PDF → EPUB | `add_to_shelf`, `remove_from_shelf`, `create_shelf`, `move_shelf`, `send_to_device`, `list_device_queue`, `start_alignment`, `job_status`, `edit_metadata`, `analyse_pdf_conversion`, `convert_pdf_to_epub` |
+| `reviews`: “Your ratings and notes” | your private ratings, notes, and read dates ([reviews.md](reviews.md)); never a default | `get_review`, `list_finished`, and `rating:` in `search_library` |
 
 - A key belongs to one person and acts **as them**: the same role and visibility checks as
   the web app. Readers only see books on shelves shared with them and cannot add books, so a
@@ -141,7 +142,13 @@ under Devices → AI tools → Edit.`
 - `search_library` takes the Library's filter syntax ([filters.md](filters.md)), such as
   `format:epub -has:audio author:"Tolstoy" year:1850..1900 progress:<50%`, and a `sort`; it
   returns the filter it ran in canonical form as `filter`. A value it cannot take is an
-  `invalid_filter` error with the reason.
+  `invalid_filter` error with the reason. `rating:` and `sort: rating` also need the `reviews`
+  scope; without it a smart shelf whose rule uses `rating:` lists nothing, and `started:`,
+  `finished:`, and sorting by them use only the dates Lectern recorded from your reading, never
+  read dates you entered by hand ([reviews.md](reviews.md)).
+- `get_review` (scope `reviews`): your own rating, Markdown notes, and read-throughs of a book.
+  `list_finished` (scope `reviews`): the books you finished in a year, with your corrected dates
+  and ratings.
 - `list_recent` (`added`, or what you `read` most recently), `get_book`
   (metadata, formats, audiobook length, alignment status and job, shelves, your progress).
   Formats are labelled `EPUB`, `PDF`, `CBZ`, or `audiobook`.

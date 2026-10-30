@@ -66,7 +66,8 @@ format:epub,pdf -has:audio author:"Tolstoy" year:1850..1900 progress:<50% war
 | Reading | `status` | `unread`, `reading`, `finished` (yours) |
 | | `progress` | your progress: `<50%`, `25%..75%` |
 | | `read` | when you last read it |
-| | `started`, `finished` | when you first started or finished it |
+| | `started`, `finished` | when you started or finished it: any read, with your corrected dates ([reviews.md](reviews.md)) |
+| | `rating` | your own rating, ½ to 5 stars: `5`, `>=4`, `3..4.5`; `-rating:>0` is unrated |
 | Book details | `title`, `author`, `series`, `publisher` | part of it |
 | | `lang` | a language code: `lang:en` also matches `en-GB` |
 | | `tag` | a whole tag |
@@ -141,7 +142,7 @@ start.
 - `GET /api/library?f=&sort=&order=asc|desc&shelf=&subtree=&unshelved=&offline=`: `f` is a
   filter. A filter that cannot run is `422 {detail, message, field}`. `sort` is any field in the
   **More** menu (`title`, `author`, `added`, `series`, `year`, `size`, `length`, `pages`,
-  `progress`, `read`, `started`, `finished`, `lang`, `publisher`); books without a value sort
+  `progress`, `read`, `started`, `finished`, `rating`, `lang`, `publisher`); books without a value sort
   last. `subtree` with `shelf` includes the shelf's sub-shelves; a smart `shelf` is its matches.
   `offline` is the comma-separated ids for `is:offline`. Each work carries
   `reading: {fraction, status, last_read_at, started_at, finished_at}`.

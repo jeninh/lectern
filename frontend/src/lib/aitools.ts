@@ -1,6 +1,6 @@
 // AI tools (MCP): key scopes and the exact config each AI app needs (docs/mcp.md).
 
-export type AIScope = "upload" | "file" | "read" | "organize";
+export type AIScope = "upload" | "file" | "read" | "organize" | "reviews";
 
 /** How a person confirms a sensitive action such as adding scopes to a key. */
 export type StepUpMethod = "passkey" | "password";
@@ -36,6 +36,7 @@ export const SCOPE_TEXT: Record<AIScope, { label: string; detail: string }> = {
   file: { label: "Can file books (confirm imports)", detail: "File reviewed uploads into the library. Without it, uploads wait in Review before filing for you." },
   read: { label: "Read the library", detail: "Search, book details, alignment status, and your progress." },
   organize: { label: "Organize", detail: "Shelves, send to device, start alignment, and edit metadata." },
+  reviews: { label: "Your ratings and notes", detail: "Read your private ratings, notes, and read dates, and filter by rating. Off unless you add it." },
 };
 
 export type AIApp = "claude-desktop" | "claude-code";
@@ -80,7 +81,7 @@ export function claudeCodeJson(endpoint: string, secret: string): string {
 
 
 /** The display order of scopes (the server's order). */
-export const SCOPE_ORDER: AIScope[] = ["upload", "file", "read", "organize"];
+export const SCOPE_ORDER: AIScope[] = ["upload", "file", "read", "organize", "reviews"];
 
 /**
  * Scopes ``after`` adds to ``before``, in display order. Removing scopes applies at once;

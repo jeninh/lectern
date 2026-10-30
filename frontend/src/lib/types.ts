@@ -982,3 +982,29 @@ export interface HighlightSearch {
   total: number;
   truncated: boolean;
 }
+
+/** One read of a book (lectern.reviews): the days it started and finished. `derived`: from
+ * reading progress, not saved by you; saving any read-through replaces it. */
+export interface ReadThrough {
+  id: number | null;
+  started_on: string | null;
+  finished_on: string | null;
+  derived: boolean;
+}
+
+/** Your private rating, notes, and read-throughs of a book (GET /api/works/{id}/review). */
+export interface BookReview {
+  work_id: number;
+  /** Stars, ½ to 5 in halves. */
+  rating: number | null;
+  /** Markdown. */
+  notes: string;
+  read_throughs: ReadThrough[];
+  corrected: boolean;
+  finished: boolean;
+  /** You said "Not now" to "Rate it?" for this book. */
+  dismissed: boolean;
+  /** Offer "Rate it?": finished, not rated, not dismissed. */
+  prompt: boolean;
+  updated_at: string | null;
+}

@@ -227,6 +227,7 @@ const HELP: Partial<Record<Field["kind"], string>> = {
   duration: "Such as 10h or 1h30m (a bare number is hours).",
   percent: "Such as 50%.",
   date: "A date (2026, 2026-03, 2026-03-15) or an age: 30d, 2w, 6m, 1y.",
+  rating: "Stars, 0 to 5 in halves: 4.5, or >=4. Only you see your ratings.",
 };
 
 /** One chip: click to edit, × to remove. */
