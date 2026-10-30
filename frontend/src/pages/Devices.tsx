@@ -2,19 +2,21 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AIToolsSection } from "../components/AITools";
 import { EmptyState } from "../components/EmptyState";
+import { DeviceDashboardView, DeviceReportMeta } from "../components/DeviceDashboard";
 import { DeviceQueueView } from "../components/DeviceQueue";
 import { KOReaderPlugin } from "../components/KOReaderPlugin";
-import { Book, Close, Download, Plus, Reader, Send, Shelf as ShelfIcon, Sync } from "../components/Icons";
+import { Book, Close, Download, Plus, Pulse, Reader, Send, Shelf as ShelfIcon, Sync } from "../components/Icons";
 import { OverflowMenu } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
 import { PageTitle } from "../components/Shell";
 import { get, post } from "../lib/api";
+import { batteryText, staleSync } from "../lib/dashboard";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { pluginSetupText } from "../lib/koplugin";
 import { followOptions, shelfSyncChips } from "../lib/queues";
 import { useStore } from "../lib/store";
-import type { AppPassword, Device, QueueDevice, Shelf } from "../lib/types";
+import type { AppPassword, DashboardDevice, Device, QueueDevice, Shelf } from "../lib/types";
 import { AddDeviceFlow } from "./AddDevice";
 
 const ACTIVE_MS = 5 * 60 * 1000;
@@ -39,15 +41,24 @@ export function DevicesPage() {
   const [queues, setQueues] = useState<QueueDevice[]>([]);
   const [queueFor, setQueueFor] = useState<QueueDevice | null>(null);
   const [pluginFor, setPluginFor] = useState<string | null>(null);
+  const [dash, setDash] = useState<{ plugin_version: string | null; devices: DashboardDevice[] }>({ plugin_version: null, devices: [] });
+  const [dashFor, setDashFor] = useState<DashboardDevice | null>(null);
   const pluginDevice = (devices ?? []).find((d) => d.id === pluginFor && !d.revoked_at) ?? null;
 
   const load = useCallback(async () => {
-    const [d, q] = await Promise.all([get<{ devices: Device[] }>("/api/devices"), get<{ devices: QueueDevice[] }>("/api/device-queues")]);
+    const [d, q, b] = await Promise.all([
+      get<{ devices: Device[] }>("/api/devices"),
+      get<{ devices: QueueDevice[] }>("/api/device-queues"),
+      get<{ plugin_version: string | null; devices: DashboardDevice[] }>("/api/devices/dashboard"),
+    ]);
     setDevices(d.devices);
     setQueues(q.devices);
+    setDash(b);
   }, []);
   const queueOf = (d: Device) => (d.app_password ? queues.find((q) => q.id === d.app_password!.id && q.own) : undefined);
+  const dashOf = (d: Device) => (d.app_password ? dash.devices.find((x) => x.id === d.app_password!.id && x.own) : undefined);
   const household = queues.filter((q) => !q.own);
+  const householdDash = (q: QueueDevice) => dash.devices.find((x) => x.id === q.id);
   useEffect(() => {
     load().catch(() => {});
   }, [load]);
@@ -101,25 +112,32 @@ export function DevicesPage() {
           ) : (
             <ul className="device-grid" aria-label="Active devices">
               {active.map((d) => (
-                <DeviceCard key={d.id} d={d} now={now} shelves={shelves} highlight={target === d.id} queue={queueOf(d)} onQueue={(q) => setQueueFor(q)} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} onShelfSync={() => setSyncFor(d)} onPlugin={d.koplugin ? () => setPluginFor(d.id) : undefined} />
+                <DeviceCard key={d.id} d={d} now={now} shelves={shelves} highlight={target === d.id} queue={queueOf(d)} dash={dashOf(d)} latest={dash.plugin_version} onDashboard={setDashFor} onQueue={(q) => setQueueFor(q)} onRevoke={() => setConfirm(d)} onCap={() => setCapFor(d)} onShelfSync={() => setSyncFor(d)} onPlugin={d.koplugin ? () => setPluginFor(d.id) : undefined} />
               ))}
             </ul>
           )}
           {household.length > 0 && (
             <section aria-labelledby="household-h">
               <div className="section-head"><h2 id="household-h">Household devices</h2></div>
-              <p className="hint" style={{ marginTop: 0 }}>As the owner you can send books to anyone’s e-reader and tidy their queues. They only receive books they can already see.</p>
+              <p className="hint" style={{ marginTop: 0 }}>As the owner you can send books to anyone’s e-reader and tidy their queues, and see what is on it. They only receive books they can already see.</p>
               <ul className="queue-devices">
-                {household.map((q) => (
+                {household.map((q) => {
+                  const hd = householdDash(q);
+                  const battery = batteryText(hd?.report);
+                  return (
                   <li key={q.id}>
                     <span className="device-icon" aria-hidden="true"><Reader /></span>
                     <span className="queue-text">
                       <strong>{q.label}</strong>
-                      <span className="hint">{q.user.display_name || q.user.username} · {q.pending ? `${q.pending} waiting` : "queue empty"} · catalogue {relativeTime(q.last_used_at, now)}</span>
+                      <span className="hint">{q.user.display_name || q.user.username} · {q.pending ? `${q.pending} waiting` : "queue empty"} · {hd?.last_sync_at ? `synced ${relativeTime(hd.last_sync_at, now)}` : `catalogue ${relativeTime(q.last_used_at, now)}`}{battery ? ` · battery ${battery}` : ""}{hd?.report ? ` · ${hd.report.books} on it` : ""}</span>
                     </span>
-                    <button className="btn sm" onClick={() => setQueueFor(q)}>Open queue</button>
+                    <span className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                      {hd && <button className="btn sm ghost" onClick={() => setDashFor(hd)}>On device</button>}
+                      <button className="btn sm" onClick={() => setQueueFor(q)}>Open queue</button>
+                    </span>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             </section>
           )}
@@ -150,6 +168,10 @@ export function DevicesPage() {
 
       <Sheet open={!!queueFor} onClose={() => setQueueFor(null)} title={queueFor ? `Queue for ${queueFor.label}` : ""} labelledBy="queue-title">
         {queueFor && <DeviceQueueView deviceId={queueFor.id} onChanged={() => load().catch(() => {})} />}
+      </Sheet>
+
+      <Sheet open={!!dashFor} onClose={() => setDashFor(null)} title={dashFor ? `On ${dashFor.label}` : ""} labelledBy="dash-title">
+        {dashFor && <DeviceDashboardView deviceId={dashFor.id} latest={dash.plugin_version} />}
       </Sheet>
 
       <Sheet open={!!pluginDevice} onClose={() => setPluginFor(null)} title={pluginDevice ? `KOReader plugin for ${pluginDevice.label}` : ""} labelledBy="plugin-title">
@@ -276,7 +298,7 @@ export function ShelfSyncForm({ initial, shelves, plugin, onSave }: { initial: A
   );
 }
 
-function DeviceCard({ d, now, shelves, highlight, queue, onQueue, onRevoke, onCap, onShelfSync, onPlugin }: { d: Device; now: number; shelves: readonly Shelf[]; highlight?: boolean; queue?: QueueDevice; onQueue?: (q: QueueDevice) => void; onRevoke?: () => void; onCap?: () => void; onShelfSync?: () => void; onPlugin?: () => void }) {
+function DeviceCard({ d, now, shelves, highlight, queue, dash, latest, onDashboard, onQueue, onRevoke, onCap, onShelfSync, onPlugin }: { d: Device; now: number; shelves: readonly Shelf[]; highlight?: boolean; queue?: QueueDevice; dash?: DashboardDevice; latest?: string | null; onDashboard?: (d: DashboardDevice) => void; onQueue?: (q: QueueDevice) => void; onRevoke?: () => void; onCap?: () => void; onShelfSync?: () => void; onPlugin?: () => void }) {
   const s = deviceStatus(d, now);
   const plugin = d.revoked_at ? null : pluginSetupText(d.plugin, now);
   const sync = d.revoked_at ? [] : shelfSyncChips(d.app_password, shelves);
@@ -296,6 +318,7 @@ function DeviceCard({ d, now, shelves, highlight, queue, onQueue, onRevoke, onCa
             label={`Actions for ${d.label}`}
             actions={[
               ...(onPlugin ? [{ label: "KOReader plugin…", icon: <Download />, onSelect: onPlugin }] : []),
+              ...(dash && onDashboard ? [{ label: "On this device…", icon: <Pulse />, onSelect: () => onDashboard(dash) }] : []),
               ...(queue && onQueue ? [{ label: "Queue…", icon: <Send />, onSelect: () => onQueue(queue) }] : []),
               ...(d.app_password && onShelfSync ? [{ label: "Shelf sync…", icon: <ShelfIcon />, onSelect: onShelfSync }] : []),
               ...(d.app_password && onCap ? [{ label: "Download limit…", icon: <Download />, onSelect: onCap }] : []),
@@ -318,6 +341,8 @@ function DeviceCard({ d, now, shelves, highlight, queue, onQueue, onRevoke, onCa
           <dd title={absoluteTime(d.revoked_at ?? d.created_at)}>{relativeTime(d.revoked_at ?? d.created_at, now)}</dd>
         </div>
       </dl>
+      {dash && !d.revoked_at && <DeviceReportMeta d={dash} now={now} latest={latest} />}
+      {dash && !d.revoked_at && staleSync(dash, now) && <p className="hint device-stale" role="note">Not synced for over two weeks.</p>}
       <div className="caps" aria-label="Capabilities">
         {d.sync_key && <span className="cap"><Sync /> Progress sync</span>}
         {d.app_password && <span className="cap"><Book /> Catalogue</span>}
@@ -331,6 +356,9 @@ function DeviceCard({ d, now, shelves, highlight, queue, onQueue, onRevoke, onCa
           <span>{queue.pending ? <><strong>{queue.pending}</strong> {queue.pending === 1 ? "book" : "books"} waiting to download</> : "Nothing queued"}</span>
           <span className="go" aria-hidden="true">Open queue</span>
         </button>
+      )}
+      {dash?.report && onDashboard && (
+        <button className="btn sm ghost" onClick={() => onDashboard(dash)}><Book /> Books on this device</button>
       )}
       {onPlugin && !d.plugin && (
         <button className="btn sm ghost plugin-cta" onClick={onPlugin}><Download /> Set up with the KOReader plugin</button>

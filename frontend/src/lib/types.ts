@@ -1008,3 +1008,52 @@ export interface BookReview {
   prompt: boolean;
   updated_at: string | null;
 }
+
+// --- Device dashboard: GET /api/devices/dashboard[/{app_password_id}] (issue #86) -----------
+
+/** The KOReader plugin's latest report about its device (null until it sends one). */
+export interface DeviceReport {
+  reported_at: string | null;
+  /** When the plugin read these values (a report can wait in its outbox). */
+  as_of: string | null;
+  battery: number | null;
+  charging: boolean | null;
+  free_bytes: number | null;
+  plugin_version: string | null;
+  koreader_version: string | null;
+  /** The device runs an older plugin than the one this server hands out. */
+  update_available: boolean;
+  /** Lectern books on the device that are in the library (hidden ones included). */
+  books: number;
+}
+
+export interface DashboardDevice {
+  /** The app password id, as in the queues. */
+  id: number;
+  device_id: string;
+  label: string;
+  own: boolean;
+  user: { id: number; username: string; display_name: string };
+  last_sync_at: string | null;
+  catalogue_at: string | null;
+  pending: number;
+  report: DeviceReport | null;
+}
+
+export interface DashboardWork {
+  id: number;
+  title: string;
+  author: string;
+  has_cover?: boolean;
+  cover_url?: string | null;
+  cover_tint?: string | null;
+}
+
+export interface DeviceDetail {
+  device: DashboardDevice;
+  /** In the order the plugin listed them; ``work`` is null for a book the device's user can no longer see. */
+  books: { work: DashboardWork | null; hidden?: boolean; percentage: number | null }[];
+  not_in_library: number;
+  /** Queued for the device and not on it yet. */
+  queued: { item_id: number; queued_at: string | null; work: DashboardWork }[];
+}

@@ -194,6 +194,34 @@ again; trashed books hide them). They are not in the catalogue (OPDS) or availab
 (MCP). Lectern and the plugin never log their text or notes, only counts. They are stored in
 `lectern.db` (`annotations`, migration `0022`), so [backups](backups.md) and restore include them.
 
+## Device dashboard
+
+**Devices** shows, for each device, its last progress sync and last catalogue use, and, once
+the KOReader plugin has reported them, its battery (and whether it is charging), free storage,
+the plugin and KOReader versions with *update available* when the plugin is older than the one
+this server hands out, and how many Lectern books are on it, all with an "as of" time.
+**On this device…** (or **Books on this device**) lists those books with their reading
+position, and the books queued for the device that it has not downloaded yet.
+
+- The owner sees every household device (under **Household devices**, **On device**); everyone
+  else sees only their own, as with queues ([device-queues.md](device-queues.md)). A book the
+  device's user can no longer see is counted as hidden, never shown by title; a book no longer
+  in the library is only counted.
+- A device that uses only the catalogue (no plugin) shows what OPDS knows: its last catalogue use.
+- A device not synced for over two weeks, or with low battery, is marked on its card.
+- The report is kept on the Pi (one row per device, replaced by each newer one). Nothing is
+  looked up anywhere else, over the home Wi-Fi address and Tailscale alike, and in offline mode.
+
+**Plugin side (not in this release of the plugin).** The server accepts the report at
+`PUT /koplugin/report` (below). The bundled plugin does not send it yet; it needs to send it
+with its quiet sync and through its outbox, never waking the device for it:
+`{age, battery, charging, free_bytes, plugin_version, koreader_version, books: [{work_id |
+document, percentage}]}`, where `age` is how many seconds ago the values were read (the server
+dates the report, so the device's clock does not matter), `work_id` names a file the plugin
+downloaded from Lectern and `document` the KOReader digest of another book with a sidecar. For
+*update available*, `_meta.lua` must declare a `version`; until it does, no update is ever
+claimed.
+
 ## Security
 
 - **Per-device.** Each device has its own sync key and catalogue password. **Devices → ⋯ →
@@ -284,6 +312,9 @@ do not enable *Force userspace mode*, for the same reason as above.
 | `POST /koplugin/pair` `{username, code}` | the code | credentials, `server_url` (the Tailscale address, if known), and `lan_url`, or `401 invalid_code` |
 | `GET /koplugin/status` | HTTP Basic (catalogue password) | device, last sync, queue (first 50, EPUB first), `lan_url`, `auto_download`, `follow` (`{shelf, cleanup}` or null), `remove` (work ids that left the followed shelf with clean-up on) |
 | `PUT /koplugin/annotations` `{document, device, annotations: [...]}` | kosync headers (the device's sync key) | the device's current highlights of one book: `{document, added, updated, deleted, total}` |
+| `PUT /koplugin/report` `{age, battery, charging, free_bytes, plugin_version, koreader_version, books: [{work_id \| document, percentage}]}` | HTTP Basic (catalogue password) | `{stored}`: false when a newer report is already kept ([Device dashboard](#device-dashboard)) |
+| `GET /api/devices/dashboard` | session; own devices, the owner everyone's | `{plugin_version, devices: [{id, device_id, label, own, user, last_sync_at, catalogue_at, pending, report}]}` |
+| `GET /api/devices/dashboard/{app_password_id}` | session; as above, else `404` | `{device, books: [{work \| null, hidden?, percentage}], not_in_library, queued: [...]}` |
 | `GET /api/works/{id}/annotations`, `GET /api/works/{id}/annotations.md` | session, own highlights, visible work | one book's highlights; as Markdown |
 | `GET /api/annotations`, `GET /api/annotations.md?q=&work=&author=&tag=&since=&until=` | session, own highlights | books with highlights, counts, and tags; all (or the filtered ones) as Markdown |
 | `GET /api/annotations/search?q=&work=&author=&tag=&since=&until=&limit=&partial=` | session, own highlights | `{results: [{work_id, title, author, annotation, text_parts, note_parts, field, snippet}], total, truncated}`; `422` `query_too_long`/`too_many_words`, `429` `too_many_searches` |
@@ -291,7 +322,8 @@ do not enable *Force userspace mode*, for the same reason as above.
 
 `GET /api/devices` adds `koplugin` (the device has both credentials) and `plugin` (state of the
 newest setup secret) to each device. Storage: `device_bootstraps` and `device_pairing_codes`
-(migration `0011`).
+(migration `0011`); `device_reports` (migration `0031_device_reports`) keeps each device's
+latest report.
 
 The plugin's KOReader-independent logic is `lectern_core.lua`; `tests/test_koplugin.py` runs
 the real plugin files under LuaJIT, against a live Lectern, with small stand-ins for

@@ -1262,6 +1262,29 @@ class DeviceQueueItem(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
+class DeviceReport(Base):
+    """The latest state a KOReader plugin reported for its device (migration 0031,
+    :mod:`lectern.device_report`): battery, versions, free space, and the Lectern books on it.
+    One row per device (app password), replaced by each newer report. ``books`` is kept as
+    sent (``[{"w": work id, "d": document digest, "p": 0..1}]``) and resolved against the
+    library, and the device user's visibility, whenever it is read."""
+
+    __tablename__ = "device_reports"
+
+    app_password_id: Mapped[int] = mapped_column(
+        ForeignKey("app_passwords.id", ondelete="CASCADE"), primary_key=True
+    )
+    reported_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # When the plugin read these values (server time: received minus the age it sent).
+    as_of: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    battery: Mapped[int | None] = mapped_column(Integer, default=None)  # percent
+    charging: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    free_bytes: Mapped[int | None] = mapped_column(Integer, default=None)
+    plugin_version: Mapped[str | None] = mapped_column(String(32), default=None)
+    koreader_version: Mapped[str | None] = mapped_column(String(64), default=None)
+    books: Mapped[list] = mapped_column(JSON, default=list)
+
+
 # --- KOReader plugin setup (migration 0011) ---------------------------------------------------
 
 

@@ -11,13 +11,15 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from lectern import device_queue, koplugin, lan
+from lectern import device_queue, device_report, koplugin, lan
 from lectern.access import shelf_permission
+from lectern.covergen import cover_fields
 from lectern.models import (
     AppPassword,
     BookFile,
     DeviceBootstrap,
     DeviceFollow,
+    DeviceReport,
     ReadingProgress,
     Role,
     Shelf,
@@ -375,6 +377,89 @@ def set_shelf_sync(
     device_queue.sync_follow(db, row.id)
     db.refresh(row)
     return {"app_password": app_password_json(row)}
+
+
+# --- Dashboard (docs/koreader-plugin.md#device-dashboard) -----------------------------------
+
+
+def _report_json(db, report: DeviceReport | None, owner: User) -> dict | None:
+    """The plugin's latest report without its books (``books``: how many of them are in the
+    library, hidden ones included)."""
+    if report is None:
+        return None
+    return {
+        "reported_at": iso(report.reported_at),
+        "as_of": iso(report.as_of),
+        "battery": report.battery,
+        "charging": report.charging,
+        "free_bytes": report.free_bytes,
+        "plugin_version": report.plugin_version,
+        "koreader_version": report.koreader_version,
+        "update_available": device_report.update_available(report.plugin_version),
+        "books": len(device_report.books_on_device(db, report, owner)["books"]),
+    }
+
+
+def _dashboard_json(db, t: device_queue.Target, viewer: User) -> dict:
+    pw = t.pw
+    key = db.get(SyncKey, pw.sync_key_id) if pw.sync_key_id else None
+    return {
+        "id": pw.id,
+        "device_id": f"k{pw.sync_key_id}" if pw.sync_key_id else f"p{pw.id}",
+        "label": pw.label,
+        "own": pw.user_id == viewer.id,
+        "user": {
+            "id": t.owner.id,
+            "username": t.owner.username,
+            "display_name": t.owner.display_name,
+        },
+        "last_sync_at": iso(key.last_used_at) if key else None,
+        "catalogue_at": iso(pw.last_used_at),
+        "pending": device_queue.pending_count(db, pw.id, t.owner),
+        "report": _report_json(db, db.get(DeviceReport, pw.id), t.owner),
+    }
+
+
+def _work_json(work: Work) -> dict:
+    return {"id": work.id, "title": work.title, "author": work.author, **cover_fields(work)}
+
+
+@router.get("/dashboard")
+def dashboard(auth: Auth, db: DbDep) -> dict:
+    """Every active device the caller may see, with the KOReader plugin's latest report: the
+    caller's own, and for the owner everyone's (the queues' rule, lectern.device_queue)."""
+    return {
+        "plugin_version": device_report.bundled_plugin_version(),
+        "devices": [_dashboard_json(db, t, auth.user) for t in device_queue.targets(db, auth.user)],
+    }
+
+
+@router.get("/dashboard/{pw_id}")
+def device_dashboard(auth: Auth, db: DbDep, pw_id: int) -> dict:
+    """One device: the books on it as its user sees them (hidden ones without title) and the
+    queued books it has not downloaded yet. A device the caller may not see answers 404."""
+    t = device_queue.target(db, auth.user, pw_id, active=False)
+    if t is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    report = db.get(DeviceReport, pw_id)
+    found = device_report.books_on_device(db, report, t.owner)
+    on_device = {w.id for w, _ in found["books"] if w is not None}
+    queued = [
+        {"item_id": item.id, "queued_at": iso(item.queued_at), "work": _work_json(work)}
+        for item, work in db.execute(device_queue.pending_query(pw_id, t.owner)).all()
+        if work.id not in on_device
+    ]
+    return {
+        "device": _dashboard_json(db, t, auth.user),
+        "books": [
+            {"work": _work_json(w), "percentage": p}
+            if w is not None
+            else {"work": None, "hidden": True, "percentage": p}
+            for w, p in found["books"]
+        ],
+        "not_in_library": found["not_in_library"],
+        "queued": queued,
+    }
 
 
 # --- KOReader plugin (docs/koreader-plugin.md) ----------------------------------------------
