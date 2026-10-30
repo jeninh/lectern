@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from lectern.access import shelf_perms, visible_path
+from lectern.access import shelf_perms, takes_items, visible_path
 from lectern.config import Settings
 from lectern.fsops import checked, free_dir, move_dir, move_file, prune_empty_parents
 from lectern.ingest.library import safe_component
@@ -201,7 +201,7 @@ def _tracks_state(tracks: list[AudioTrack]) -> list[dict]:
 def editable_shelves(db: Session, user: User) -> list[Shelf]:
     """Manual shelves ``user`` may add works to and remove them from, in folder order."""
     shelves, perms = shelf_perms(db, user)
-    out = [shelves[sid] for sid, p in perms.items() if p != "view" and shelves[sid].rule is None]
+    out = [shelves[sid] for sid, p in perms.items() if p != "view" and takes_items(shelves[sid])]
     return sorted(out, key=lambda s: [x.name.casefold() for x in visible_path(s, shelves, perms)])
 
 

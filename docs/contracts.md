@@ -603,6 +603,50 @@ filter, sort?, order?}` creates one; `PATCH` with `filter`/`sort`/`order` change
 (`409 not_smart` on a manual shelf); adding items is `409 smart_shelf`. `filter`, `sort`, and
 `order` are in the shelf JSON only for its managers.
 
+Auto-shelves (#73): the library keeps shelves of its own. `POST /api/shelves {name, parent_id?,
+auto: {field, min_books?, child_order?, buckets?, sort?, order?}}` makes a **group**: an ordinary
+shelf under which `lectern.auto_shelves` keeps one **child** per value of `field` (`author`,
+`tag`, `genre`, `lang`, `narrator`). A child is a smart shelf whose rule is the exact filter for the
+value (`author:=Leo Tolstoy`, `tag:fantasy`, `tag:fantasy,epic` for a mapped genre, `lang:en`), so
+OPDS, follows, `shelf:` filters, MCP, and Cmd+K treat it like any smart shelf. With `buckets` (the
+default for `author` and `tag`) children sit in A–Z and `#` **buckets** between them and the group
+(plain shelves with no rule). `min_books` (1–50; default 2 for `author` and `tag`, else 1) is the
+fewest books a person must see under a value for them to see its child; `child_order`
+`name`|`count` lists children by name or by how many books the caller sees in each (most first);
+`sort` and `order` are written into every child's rule. `auto` and `filter` (or top-level
+`sort`/`order`) together are `422 auto_and_filter`; an unknown `field` or a setting out of range is
+`422` with the setting named in `detail`; the group's children must fit the depth cap, so a group
+at depth `d` needs `d + 2 ≤ 8` with buckets and `d + 1 ≤ 8` without (`409 too_deep`, also on
+moving it or a shelf holding it, and on turning `buckets` on).
+
+Shelf JSON gains `auto`: `null` for an ordinary shelf, else `{kind: "group"|"bucket"|"value",
+field, group_id}`; for a group, its managers also get `min_books`, `child_order`, `buckets`,
+`sort`, and `order`. Children and buckets are counted from the caller's `auto_shelves.view`
+(`work_count`), not per shelf. A child below `min_books` for the caller, and a bucket with no
+child they may see, is hidden exactly like a missing shelf (`404`, absent from lists): names are
+generated from the whole library, so what a reader may learn of them follows what they may see.
+A child that falls below the minimum for everyone keeps its id (so a device following it keeps
+working) and a child with no books and no follower is removed.
+
+- `PATCH /api/shelves/{id} {auto: {…}}` (managers, groups only; `409 not_auto_group` otherwise)
+  changes the settings above; `field` is fixed (`409 auto_field_immutable` for another value).
+- `DELETE /api/shelves/{id}` on a group needs no `contents`: the group and every generated shelf
+  under it go (`204`).
+- **`409 auto_shelf`**: a bucket or child cannot be renamed, moved, changed, deleted, granted or
+  revoked, given works (`PUT`/`POST`/`DELETE …/items`), or given sub-shelves; a group cannot be
+  given works or sub-shelves, and no shelf is moved into a group, bucket, or child. A group itself
+  is renamed, moved, shared, and deleted like any shelf. A group, bucket, or child is never an
+  email-in destination, an import's shelf, or a choice in the editor's "add to shelf".
+- `GET /api/library?shelf={group or bucket}&subtree=true` lists the works its visible generated
+  shelves show the caller (without `subtree`, nothing: no work is on the folder itself);
+  `GET /api/shelves/{id}` lists its generated children in `shelves`.
+- `GET /api/library-settings/genres` (owner, member) → `{genres: {name: [tags]}, max_genres: 40,
+  max_tags: 20, can_change}`; `PUT` (owner only) `{genres}` replaces the map that `genre` groups
+  use: at most 40 genres of 20 tags (`422 too_many_genres` / `too_many_tags`; `422 bad_genre` for a
+  blank or over-128-character name or tag). Names and tags are trimmed, blank tags and repeats
+  dropped. A genre child's rule is `tag:` and its mapped tags; a tag that is in no genre makes no
+  child.
+
 ### Invites — `/api/invites`, `/invite/{token}`
 
 Owner-only management; the sign-up page is the only unauthenticated route added.

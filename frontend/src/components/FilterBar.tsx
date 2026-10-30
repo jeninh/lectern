@@ -4,7 +4,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { get } from "../lib/api";
-import { clauseLabel, FIELDS, fieldOf, FilterError, formatClause, GROUPS, isComparable, parse, valueLabel, type Clause, type Field, type Names, type Op, type Value } from "../lib/filters";
+import { clauseLabel, EXACT_KEYS, FIELDS, fieldOf, FilterError, formatClause, GROUPS, isComparable, parse, valueLabel, type Clause, type Field, type Names, type Op, type Value } from "../lib/filters";
 import { pathLabel } from "../lib/shelves";
 import { useStore } from "../lib/store";
 import type { AppPassword } from "../lib/types";
@@ -103,10 +103,13 @@ function ClauseEditor({ field, initial, onApply, onCancel, names, devices }: { f
         ? [{ value: "any", label: "Any device" }, ...devices.map((d) => ({ value: `#${d.id}`, label: d.label }))]
         : [];
 
+  // A leading "=" on a text value means "is exactly" ("is exactly" chip), as in the syntax.
+  const typed = (t: string): Value => (t.startsWith("=") && EXACT_KEYS.includes(field.key) && t.slice(1).trim() ? { op: "==", a: t.slice(1).trim(), b: "" } : { op: "=", a: t, b: "" });
+
   const build = (): Clause | null => {
     let vals = values;
     if (comparable) vals = [{ op, a: op === ".." ? a : a, b: op === ".." ? b : "" }];
-    else if (text.trim()) vals = [...values, { op: "=", a: text.trim(), b: "" }];
+    else if (text.trim()) vals = [...values, typed(text.trim())];
     if (!vals.length || (comparable && !a.trim() && !b.trim())) {
       setError("Choose or type a value.");
       return null;
@@ -197,7 +200,7 @@ function ClauseEditor({ field, initial, onApply, onCancel, names, devices }: { f
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && text.trim() && !e.metaKey && !e.ctrlKey) {
                     e.preventDefault();
-                    if (!has(text.trim())) setValues((cur) => [...cur, { op: "=", a: text.trim(), b: "" }]);
+                    if (!has(text.trim())) setValues((cur) => [...cur, typed(text.trim())]);
                     setText("");
                   }
                 }}
@@ -207,7 +210,7 @@ function ClauseEditor({ field, initial, onApply, onCancel, names, devices }: { f
                   {suggest.map((s) => <option key={s} value={s} />)}
                 </datalist>
               )}
-              <p className="hint clause-help">{field.key === "lang" ? "A language code, such as en or fr." : field.key === "tag" ? "The whole tag; accents and case don’t matter." : "Matches part of the name; accents and case don’t matter."}</p>
+              <p className="hint clause-help">{field.key === "lang" ? "A language code, such as en or fr." : field.key === "tag" ? "The whole tag; accents and case don’t matter." : "Matches part of the name; start with = for the whole name. Accents and case don’t matter."}</p>
             </>
           )}
         </div>

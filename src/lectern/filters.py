@@ -262,7 +262,8 @@ def field_of(key: str) -> Field | None:
 @dataclass(frozen=True)
 class Value:
     """One alternative of a clause: ``op`` is ``=``, ``<``, ``<=``, ``>``, ``>=``, or ``..``
-    (``a``..``b``, either end may be empty)."""
+    (``a``..``b``, either end may be empty), or ``==``: a text field's value is exactly ``a``
+    (``author:="Leo Tolstoy"``), case and accents folded."""
 
     op: str
     a: str
@@ -301,9 +302,10 @@ _DATE_RE = re.compile(r"^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$")
 _AGE_RE = re.compile(r"^(\d+)(d|w|m|y)$")
 
 
-def _scan(s: str) -> list[tuple[bool, str | None, list[tuple[str, bool]]]]:
+def _scan(s: str) -> list[tuple[bool, str | None, list[tuple[str, bool, bool]]]]:
     """Tokens: (negated, key or None, items). A filter token's items are its comma-separated
-    values; a free word has one item. Each item is (text, quoted)."""
+    values; a free word has one item. Each item is (text, quoted, exact): ``exact`` is true
+    when the value began with an unquoted ``=`` (which stays in the text)."""
     out = []
     i, n = 0, len(s)
     while i < n:
@@ -317,9 +319,9 @@ def _scan(s: str) -> list[tuple[bool, str | None, list[tuple[str, bool]]]]:
         m = _KEY_RE.match(s, i)
         if m and field_of(m.group(1)):
             key, i = field_of(m.group(1)).key, m.end()  # type: ignore[union-attr]
-        items: list[tuple[str, bool]] = []
+        items: list[tuple[str, bool, bool]] = []
         cur: list[str] = []
-        quoted = False
+        quoted = exact = False
         while i < n and not s[i].isspace():
             c = s[i]
             if c == '"':
@@ -332,13 +334,15 @@ def _scan(s: str) -> list[tuple[bool, str | None, list[tuple[str, bool]]]]:
                 i += 1
                 quoted = True
             elif c == "," and key:
-                items.append(("".join(cur), quoted))
-                cur, quoted = [], False
+                items.append(("".join(cur), quoted, exact))
+                cur, quoted, exact = [], False, False
                 i += 1
             else:
+                if c == "=" and not cur and not quoted:
+                    exact = True
                 cur.append(c)
                 i += 1
-        items.append(("".join(cur), quoted))
+        items.append(("".join(cur), quoted, exact))
         out.append((neg, key, items))
     return out
 
@@ -387,7 +391,20 @@ def _check_scalar(f: Field, text: str) -> str:
     return t
 
 
-def _value(f: Field, text: str, quoted: bool) -> Value:
+EXACT_KEYS = {"author", "series", "narrator", "title", "publisher", "tag"}
+
+
+def _value(f: Field, text: str, quoted: bool, exact: bool = False) -> Value:
+    if exact and f.key in EXACT_KEYS:
+        t = text[1:].strip()
+        if not t and not quoted:
+            raise FilterError("empty_value", f"{f.label}: add a value after “=”.", f.key)
+        if len(t) > MAX_VALUE_CHARS:
+            raise FilterError(
+                "too_long", f"{f.label}: a value is at most {MAX_VALUE_CHARS} characters.", f.key
+            )
+        # A tag is always matched exactly, so ``tag:=x`` is just ``tag:x``.
+        return Value("=" if f.key == "tag" else "==", t)
     if f.kind in COMPARABLE and not quoted:
         t = text.strip()
         m = _OP_RE.match(t)
@@ -439,7 +456,7 @@ def parse(text: str) -> Query:
     q = Query()
     for neg, key, items in _scan(text):
         if key is None:
-            word, quoted = items[0]
+            word, quoted, _exact = items[0]
             if word.strip() or quoted:
                 if not word.strip():
                     continue
@@ -451,7 +468,7 @@ def parse(text: str) -> Query:
             raise FilterError("empty_value", f"{f.label}: add a value after “{key}:”.", key)
         if len(values) > MAX_VALUES:
             raise FilterError("too_many", f"{f.label}: at most {MAX_VALUES} values.", key)
-        vals = tuple(dict.fromkeys(_value(f, t, quoted) for t, quoted in values))
+        vals = tuple(dict.fromkeys(_value(f, t, quoted, exact) for t, quoted, exact in values))
         q.clauses.append(Clause(key, vals, neg))
     if len(q.clauses) > MAX_CLAUSES:
         raise FilterError("too_many", f"A filter has at most {MAX_CLAUSES} conditions.")
@@ -467,6 +484,8 @@ def _quote(t: str) -> str:
 def _fmt_value(f: Field, v: Value) -> str:
     if v.op == "..":
         return f"{v.a}..{v.b}"
+    if v.op == "==":
+        return "=" + (_quote(v.a) if not v.a or re.search(r'[\s,"]', v.a) else v.a)
     if v.op != "=":
         return f"{v.op}{v.a}"
     t = v.a
@@ -905,7 +924,9 @@ def _enum_pred(ctx: Context, f: Field, v: str) -> ColumnElement[bool]:
     raise AssertionError(f.key)
 
 
-def _text_pred(f: Field, t: str) -> ColumnElement[bool]:
+def _text_pred(f: Field, t: str, exact: bool = False) -> ColumnElement[bool]:
+    if exact:
+        return _exact_pred(f, fold(t) or "")
     if f.key == "title":
         return _contains(Work.title, t)
     if f.key == "author":
@@ -925,6 +946,22 @@ def _text_pred(f: Field, t: str) -> ColumnElement[bool]:
         lang = func.lectern_fold(Work.language)
         return or_(lang == fold(t), lang.like(fold(t).replace("%", "").replace("_", "") + "-%"))
     raise AssertionError(f.key)
+
+
+def _exact_pred(f: Field, t: str) -> ColumnElement[bool]:
+    """``key:=value``: the whole value, folded, equals ``t`` (already folded)."""
+    if f.key == "author":
+        no_authors = or_(Work.authors.is_(None), func.json_array_length(Work.authors) == 0)
+        return or_(
+            _json_any(
+                Work.authors, lambda v: func.lectern_fold(func.json_extract(v, "$.name")) == t
+            ),
+            and_(no_authors, func.lectern_fold(Work.author) == t),
+        )
+    if f.key == "narrator":
+        return _json_any(Work.narrators, lambda v: func.lectern_fold(v) == t)
+    return func.lectern_fold({"title": Work.title, "series": Work.series,
+                              "publisher": Work.publisher}[f.key]) == t  # fmt: skip
 
 
 def _scalar(f: Field, u: User, private_reviews: bool = True):
@@ -957,7 +994,7 @@ def clause_pred(ctx: Context, c: Clause) -> ColumnElement[bool]:
     elif f.kind == ENUM:
         pred = or_(*(_enum_pred(ctx, f, v.a) for v in c.values))
     elif f.kind == TEXT:
-        pred = or_(*(_text_pred(f, v.a) for v in c.values))
+        pred = or_(*(_text_pred(f, v.a, v.op == "==") for v in c.values))
     elif f.key in ("started", "finished") and ctx.private_reviews:
         # Any read-through's date; the reading state's for a work with none saved.
         pred = reviews.date_pred(

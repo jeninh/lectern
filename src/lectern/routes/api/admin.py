@@ -29,6 +29,57 @@ router = APIRouter(prefix="/admin")
 OwnerRead = Annotated[AuthContext, Depends(require_role_read(Role.OWNER))]
 OwnerWrite = Annotated[AuthContext, Depends(require_role(Role.OWNER))]
 
+# The genre map behind "genre" auto-shelves: GET (owner, member) and PUT (owner).
+genres_router = APIRouter(prefix="/library-settings")
+GenresRead = Annotated[AuthContext, Depends(require_role_read(Role.OWNER, Role.MEMBER))]
+
+
+class GenresIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    genres: dict[str, list[str]]
+
+
+@genres_router.get("/genres")
+def get_genres(auth: GenresRead, db: DbDep) -> dict:
+    return {
+        "genres": instance.genre_map(db),
+        "max_genres": instance.MAX_GENRES,
+        "max_tags": instance.MAX_GENRE_TAGS,
+        "can_change": auth.user.role == Role.OWNER,
+    }
+
+
+@genres_router.put("/genres")
+def put_genres(request: Request, auth: OwnerWrite, db: DbDep, body: GenresIn) -> dict:
+    """Replace the genre map: genre name to the tags that make it up. At most 40 genres of 20
+    tags; names and tags are trimmed, blank tags and repeats dropped (``422`` with a reason)."""
+    if len(body.genres) > instance.MAX_GENRES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"detail": "too_many_genres", "limit": instance.MAX_GENRES},
+        )
+    cleaned: dict[str, list[str]] = {}
+    for name, tags in body.genres.items():
+        genre = name.strip()
+        got = list(dict.fromkeys(t.strip() for t in tags if t.strip()))
+        if not genre or len(genre) > 128 or any(len(t) > 128 for t in got):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, {"detail": "bad_genre", "genre": name[:128]}
+            )
+        if len(got) > instance.MAX_GENRE_TAGS:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {"detail": "too_many_tags", "genre": genre, "limit": instance.MAX_GENRE_TAGS},
+            )
+        cleaned[genre] = got
+    instance.set_genre_map(db, cleaned, auth.user.id)
+    audit.record(db, "settings.genres", actor_user_id=auth.user.id, ip=client_ip(request),
+                 target="genre_map", detail=f"{len(cleaned)} genres")  # fmt: skip
+    db.commit()
+    return get_genres(auth, db)
+
+
 USERNAME_RE = r"^[a-z0-9][a-z0-9._-]{1,31}$"
 
 

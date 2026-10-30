@@ -8,7 +8,8 @@
 import { fold } from "./fuzzy";
 
 export type Kind = "enum" | "text" | "number" | "size" | "duration" | "percent" | "date" | "shelf" | "user" | "device" | "rating";
-export type Op = "=" | "<" | "<=" | ">" | ">=" | "..";
+/** "==" is a text value that must match exactly (`author:="Leo Tolstoy"`), folded. */
+export type Op = "=" | "==" | "<" | "<=" | ">" | ">=" | "..";
 
 export interface Value {
   op: Op;
@@ -143,7 +144,8 @@ const isSpace = (c: string) => /\s/.test(c);
 export interface Token {
   negate: boolean;
   key: string | null;
-  items: [string, boolean][];
+  /** [text, quoted, exact]: exact when the value began with an unquoted "=" (kept in the text). */
+  items: [string, boolean, boolean][];
   /** Where the token starts and ends in the input (the search box keeps what is not a chip). */
   start: number;
   end: number;
@@ -172,9 +174,10 @@ export function scan(s: string): Token[] {
       key = fieldOf(m[0].slice(0, -1))!.key;
       i += m[0].length;
     }
-    const items: [string, boolean][] = [];
+    const items: [string, boolean, boolean][] = [];
     let cur = "";
     let quoted = false;
+    let exact = false;
     while (i < n && !isSpace(s[i])) {
       const c = s[i];
       if (c === '"') {
@@ -187,16 +190,18 @@ export function scan(s: string): Token[] {
         i++;
         quoted = true;
       } else if (c === "," && key) {
-        items.push([cur, quoted]);
+        items.push([cur, quoted, exact]);
         cur = "";
         quoted = false;
+        exact = false;
         i++;
       } else {
+        if (c === "=" && !cur && !quoted) exact = true;
         cur += c;
         i++;
       }
     }
-    items.push([cur, quoted]);
+    items.push([cur, quoted, exact]);
     out.push({ negate, key, items, start, end: Math.min(i, n) });
   }
   return out;
@@ -238,7 +243,16 @@ function checkScalar(x: Field, text: string): string {
   return t;
 }
 
-function toValue(x: Field, text: string, quoted: boolean): Value {
+export const EXACT_KEYS = ["author", "series", "narrator", "title", "publisher", "tag"];
+
+function toValue(x: Field, text: string, quoted: boolean, exact = false): Value {
+  if (exact && EXACT_KEYS.includes(x.key)) {
+    const t = text.slice(1).trim();
+    if (!t && !quoted) throw new FilterError("empty_value", `${x.label}: add a value after “=”.`, x.key);
+    if (t.length > MAX_VALUE_CHARS) throw new FilterError("too_long", `${x.label}: a value is at most ${MAX_VALUE_CHARS} characters.`, x.key);
+    // A tag is always matched exactly, so tag:=x is just tag:x.
+    return { op: x.key === "tag" ? "=" : "==", a: t, b: "" };
+  }
   if (isComparable(x.kind) && !quoted) {
     let t = text.trim();
     const m = t.match(OP_RE);
@@ -276,8 +290,8 @@ export function tokenClause(t: Token): Clause {
   if (!items.length) throw new FilterError("empty_value", `${x.label}: add a value after “${x.key}:”.`, x.key);
   if (items.length > MAX_VALUES) throw new FilterError("too_many", `${x.label}: at most ${MAX_VALUES} values.`, x.key);
   const values: Value[] = [];
-  for (const [s, q] of items) {
-    const v = toValue(x, s, q);
+  for (const [s, q, e] of items) {
+    const v = toValue(x, s, q, e);
     if (!values.some((w) => sameValue(w, v))) values.push(v);
   }
   return { key: x.key, values, negate: t.negate };
@@ -303,6 +317,7 @@ const quote = (t: string) => `"${t.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
 
 function formatValue(x: Field, v: Value): string {
   if (v.op === "..") return `${v.a}..${v.b}`;
+  if (v.op === "==") return "=" + (!v.a || /[\s,"]/.test(v.a) ? quote(v.a) : v.a);
   if (v.op !== "=") return `${v.op}${v.a}`;
   if (x.kind === "enum" || isComparable(x.kind)) return v.a;
   if (!v.a || /[\s,"]/.test(v.a) || OP_RE.test(v.a) || v.a.includes("..")) return quote(v.a);
@@ -361,8 +376,8 @@ export function extractChips(text: string, all: boolean): { clauses: Clause[]; r
 
 // --- labels ------------------------------------------------------------------------------------
 
-const OP_LABEL: Record<Exclude<Op, "..">, string> = { "=": "", "<": "under ", "<=": "at most ", ">": "over ", ">=": "at least " };
-const DATE_OP: Record<Exclude<Op, "..">, string> = { "=": "", "<": "before ", "<=": "up to ", ">": "after ", ">=": "from " };
+const OP_LABEL: Record<Exclude<Op, "..">, string> = { "=": "", "==": "", "<": "under ", "<=": "at most ", ">": "over ", ">=": "at least " };
+const DATE_OP: Record<Exclude<Op, "..">, string> = { "=": "", "==": "", "<": "before ", "<=": "up to ", ">": "after ", ">=": "from " };
 
 function ageLabel(t: string): string | null {
   const m = t.match(AGE_RE);
@@ -414,7 +429,7 @@ export function valueLabel(x: Field, v: Value, names?: Names): string {
     if (v.op === "..") return v.a && v.b ? `${scalarLabel(x, v.a)}–${scalarLabel(x, v.b)}` : v.a ? `at least ${scalarLabel(x, v.a)}` : `at most ${scalarLabel(x, v.b)}`;
     return `${OP_LABEL[v.op]}${scalarLabel(x, v.a)}`;
   }
-  return v.a;
+  return v.op === "==" ? `exactly ${v.a}` : v.a;
 }
 
 /** A chip's text: "Format: EPUB or PDF", "Has audiobook: no" for -has:audio. */
@@ -426,7 +441,8 @@ export function clauseLabel(c: Clause, names?: Names): { field: string; values: 
     const field = { has: `Has ${what.toLowerCase()}`, is: what, needs: `Needs ${what.toLowerCase().replace("text recognition (ocr)", "OCR")}` }[x.key]!;
     return { field, values: c.negate ? "no" : "yes" };
   }
-  return { field: x.label, values: `${c.negate ? "is not " : ""}${values.join(" or ")}` };
+  const exact = !c.negate && c.values.every((v) => v.op === "==");
+  return { field: x.label, values: `${c.negate ? "is not " : exact ? "is " : ""}${values.join(" or ")}` };
 }
 
 /** Same text as the server's fold, for matching shelf paths typed as values. */

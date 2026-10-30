@@ -7,11 +7,17 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from lectern import egress, filters, instance
-from lectern.access import can_edit_library, shelf_permission, visible_shelf_ids, visible_works
+from lectern.access import (
+    can_edit_library,
+    shelf_permission,
+    shelf_perms,
+    visible_shelf_ids,
+    visible_works,
+)
 from lectern.models import (
     UPLOAD_CHUNK_MAX_BYTES,
     AudioTrack,
@@ -246,7 +252,24 @@ def library_query(
         found = db.get(Shelf, shelf)
         if found is None or shelf_permission(db, user, found) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-        if found.rule is not None:
+        if found.auto_kind in ("group", "bucket"):
+            # A folder of generated shelves has no works of its own: it lists what the shelves
+            # inside it show this person (with ``subtree``; otherwise nothing is directly on it).
+            shelves, perms = shelf_perms(db, user)
+            below, todo = {shelf}, [shelf]
+            while todo:
+                parent = todo.pop()
+                for s in shelves.values():
+                    if s.parent_id == parent and s.id in perms and s.id not in below:
+                        below.add(s.id)
+                        todo.append(s.id)
+            smart = [
+                filters.smart_predicate(ctx.lenient(), shelves[i])
+                for i in below
+                if shelves[i].rule is not None
+            ]
+            stmt = stmt.where(or_(*smart) if subtree and smart else false())
+        elif found.rule is not None:
             stmt = stmt.where(filters.smart_predicate(ctx.lenient(), found))
         elif subtree:
             clause = filters.Clause("shelf", (filters.Value("=", f"#{shelf}"),))

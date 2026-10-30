@@ -32,6 +32,45 @@ export function ancestry(shelves: readonly Shelf[], id: number): Shelf[] {
   return out;
 }
 
+/** Auto-shelves (docs/auto-shelves.md): the library keeps these shelves itself. A *group* is an
+ * ordinary shelf you rename, move, share, and delete; its buckets (A–Z) and children (one per
+ * value) are generated and never changed by hand. Nothing is ever put in any of the three. */
+export const autoKind = (s: Pick<Shelf, "auto">) => s.auto?.kind ?? null;
+export const isGenerated = (s: Pick<Shelf, "auto">) => autoKind(s) === "bucket" || autoKind(s) === "value";
+
+export type ShelfAction = "rename" | "move" | "delete" | "grant" | "settings" | "addTo" | "subShelf" | "drag";
+
+/** Whether the person may do `action` to `s` (the server enforces it again: `409 auto_shelf`). */
+export function shelfCan(s: Shelf, action: ShelfAction): boolean {
+  const owner = s.permission === "owner";
+  switch (action) {
+    case "rename":
+    case "move":
+    case "delete":
+    case "grant":
+    case "drag":
+      return owner && !isGenerated(s);
+    case "settings":
+      return owner && autoKind(s) === "group";
+    case "addTo":
+    case "subShelf":
+      return s.permission !== "view" && !s.smart && autoKind(s) === null;
+  }
+}
+
+/** Open folders after the sidebar tree makes room for the active one: groups and buckets stay
+ * collapsed until something inside is open, then only the chain down to it expands. */
+export function expandFor(shelves: readonly Shelf[], active: number | null | undefined, open: readonly number[]): number[] {
+  if (!active) return [...open];
+  return [...new Set([...open, ...ancestry(shelves, active).slice(0, -1).map((x) => x.id)])];
+}
+
+/** "Authors › Leo Tolstoy": the group and the value, without the A–Z bucket between them. */
+export function autoPathLabel(shelves: readonly Shelf[], s: Shelf): string {
+  const chain = ancestry(shelves, s.id).filter((x) => autoKind(x) !== "bucket" || x.id === s.id);
+  return (chain.length ? chain : [s]).map((x) => x.name).join(" › ");
+}
+
 export const pathLabel = (s: Pick<Shelf, "path" | "name">) => (s.path?.length ? s.path : [s.name]).join(" / ");
 
 /** Whether `id` is `ancestor` or sits somewhere below it. */
@@ -60,10 +99,11 @@ export function moveBlocked(all: readonly Shelf[], moving: readonly number[], ta
   if (target === null) return canCreate ? null : "You can’t make top-level shelves";
   const t = m.get(target);
   if (!t) return "Not found";
-  if (t.permission === "view" || t.smart) return `You can’t add to ${t.name}`;
+  if (!shelfCan(t, "subShelf")) return `You can’t add to ${t.name}`;
   for (const id of moving) {
     const s = m.get(id);
     if (!s) continue;
+    if (isGenerated(s)) return `${s.name} is kept up to date by the library, so it can’t be moved`;
     if (s.permission !== "owner") return `Only its owner can move ${s.name}`;
     if (isWithin(all, target, id)) return id === target ? `Can’t move ${s.name} into itself` : `Can’t move ${s.name} into a shelf inside it`;
     if (ancestry(all, target).length + height(all, id) > MAX_DEPTH) return `Shelves nest at most ${MAX_DEPTH} deep`;
@@ -75,7 +115,7 @@ export function moveBlocked(all: readonly Shelf[], moving: readonly number[], ta
 export function canHoldBooks(all: readonly Shelf[], target: FolderId): boolean {
   if (target === null) return true;
   const t = byId(all).get(target);
-  return !!t && t.permission !== "view" && !t.smart;
+  return !!t && shelfCan(t, "addTo");
 }
 
 /** What a drop does: Alt (Option on a Mac) adds a copy of the membership; otherwise the

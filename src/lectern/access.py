@@ -23,7 +23,16 @@ from typing import Literal
 from sqlalchemy import ColumnElement, Select, and_, exists, or_, select
 from sqlalchemy.orm import Session
 
-from lectern.models import Role, Shelf, ShelfGrant, ShelfItem, ShelfPermission, User, Work
+from lectern.models import (
+    Role,
+    Shelf,
+    ShelfAutoChild,
+    ShelfGrant,
+    ShelfItem,
+    ShelfPermission,
+    User,
+    Work,
+)
 
 # How deep shelves may nest: a top-level shelf is depth 1.
 MAX_DEPTH = 8
@@ -105,7 +114,13 @@ def can_manage_shelf(user: User, shelf: Shelf) -> bool:
 
 def shelf_permission(db: Session, user: User, shelf: Shelf) -> Perm | None:
     """``owner`` (manage), ``edit`` (add and remove works, make sub-shelves), ``view``, or
-    ``None`` (hidden). Grants on any ancestor count."""
+    ``None`` (hidden). Grants on any ancestor count. A generated auto-shelf this person must
+    not see (lectern.auto_shelves.view) is ``None`` for everyone, its manager included."""
+    if shelf.auto_child is not None:
+        from lectern import auto_shelves  # it imports this module
+
+        if not auto_shelves.view(db, user).shows(shelf.id):
+            return None
     if can_manage_shelf(user, shelf):
         return "owner"
     ids = [s.id for s in lineage(shelf)]
@@ -131,8 +146,20 @@ def can_create_shelf(user: User) -> bool:
 
 
 def shelf_perms(db: Session, user: User) -> tuple[dict[int, Shelf], dict[int, Perm]]:
-    """Every shelf, and ``user``'s permission on each one they may see (one query each)."""
-    shelves = {s.id: s for s in db.scalars(select(Shelf))}
+    """Every shelf, and ``user``'s permission on each one they may see (one query each).
+    Generated auto-shelves hidden from them (lectern.auto_shelves.view) are left out."""
+    from lectern import auto_shelves  # it imports this module
+
+    view = auto_shelves.view(db, user)
+    # Each shelf with its generated kind in one statement: a generated shelf the view does not
+    # positively show (one made since, by another request) is hidden.
+    rows = db.execute(
+        select(Shelf, ShelfAutoChild.kind).outerjoin(
+            ShelfAutoChild, ShelfAutoChild.shelf_id == Shelf.id
+        )
+    ).all()
+    shelves = {s.id: s for s, _kind in rows}
+    hidden = {s.id for s, kind in rows if kind is not None and not view.shows(s.id)}
     grants = {
         g.shelf_id: g.permission
         for g in db.scalars(select(ShelfGrant).where(ShelfGrant.user_id == user.id))
@@ -156,7 +183,15 @@ def shelf_perms(db: Session, user: User) -> tuple[dict[int, Shelf], dict[int, Pe
         memo[sid] = best
         return best
 
-    return shelves, {sid: p for sid in shelves if (p := perm(sid)) is not None}
+    return shelves, {
+        sid: p for sid in shelves if sid not in hidden and (p := perm(sid)) is not None
+    }
+
+
+def takes_items(shelf: Shelf) -> bool:
+    """Whether works can be put on ``shelf`` by hand: not a smart shelf (generated auto-shelf
+    children are smart shelves) and not an auto-shelves group or bucket."""
+    return shelf.rule is None and shelf.auto_kind not in ("group", "bucket")
 
 
 def visible_parent(shelf: Shelf, perms: dict[int, Perm]) -> int | None:
