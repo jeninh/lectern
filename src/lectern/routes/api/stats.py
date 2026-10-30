@@ -13,6 +13,8 @@ router = APIRouter(prefix="/stats")
 
 
 @router.get("")
-def get_stats(auth: Auth, db: DbDep, year: int | None = Query(default=None, ge=1900, le=2999)) -> dict:
+def get_stats(
+    auth: Auth, db: DbDep, year: int | None = Query(default=None, ge=1900, le=2999)
+) -> dict:
     """The signed-in person's visible activity only, including their selected calendar zone."""
     return reading_stats.summary(db, auth.user, year or datetime.now().year)

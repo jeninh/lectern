@@ -35,7 +35,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_reading_activity_user_at", "reading_activity", ["user_id", "at"])
-    op.create_index("ix_reading_activity_user_work_at", "reading_activity", ["user_id", "work_id", "at"])
+    op.create_index(
+        "ix_reading_activity_user_work_at", "reading_activity", ["user_id", "work_id", "at"]
+    )
     op.create_table(
         "reading_stats_days",
         sa.Column("id", sa.Integer(), nullable=False),

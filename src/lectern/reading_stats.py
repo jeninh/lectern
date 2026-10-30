@@ -38,7 +38,9 @@ def day_at(at: datetime, zone: str | None) -> str:
 def _day_row(db: Session, user_id: int, work_id: int, day: str) -> ReadingStatsDay:
     row = db.scalar(
         select(ReadingStatsDay).where(
-            ReadingStatsDay.user_id == user_id, ReadingStatsDay.work_id == work_id, ReadingStatsDay.day == day
+            ReadingStatsDay.user_id == user_id,
+            ReadingStatsDay.work_id == work_id,
+            ReadingStatsDay.day == day,
         )
     )
     if row is None:
@@ -116,7 +118,9 @@ def rebuild_days(db: Session, user: User) -> None:
     """
     db.execute(delete(ReadingStatsDay).where(ReadingStatsDay.user_id == user.id))
     rows = db.scalars(
-        select(ReadingActivity).where(ReadingActivity.user_id == user.id).order_by(ReadingActivity.at)
+        select(ReadingActivity)
+        .where(ReadingActivity.user_id == user.id)
+        .order_by(ReadingActivity.at)
     )
     for row in rows:
         daily = _day_row(db, user.id, row.work_id, day_at(row.at, user.reading_timezone))
@@ -175,7 +179,9 @@ def summary(db: Session, user: User, year: int) -> dict:
     end = datetime(year + 1, 1, 1, tzinfo=zone).astimezone(UTC)
     start_day = f"{year:04d}-01-01"
     end_day = f"{year + 1:04d}-01-01"
-    by_day: dict[str, dict[str, float]] = defaultdict(lambda: {"read_seconds": 0, "listened_seconds": 0, "pages": 0.0})
+    by_day: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"read_seconds": 0, "listened_seconds": 0, "pages": 0.0}
+    )
     by_author: dict[str, float] = defaultdict(float)
     for row, author in _visible_days(db, user, start_day, end_day):
         bucket = by_day[row.day]
@@ -183,7 +189,11 @@ def summary(db: Session, user: User, year: int) -> dict:
         bucket["listened_seconds"] += row.listened_seconds
         bucket["pages"] += row.pages
         by_author[author or "Unknown"] += row.read_seconds + row.listened_seconds
-    active = {d for d, total in by_day.items() if total["read_seconds"] + total["listened_seconds"] >= STREAK_MIN_SECONDS}
+    active = {
+        d
+        for d, total in by_day.items()
+        if total["read_seconds"] + total["listened_seconds"] >= STREAK_MIN_SECONDS
+    }
     # Current streak must not reset on New Year's Day merely because this review is filtered.
     today = datetime.now(zone).date()
     current_days = {
@@ -205,11 +215,16 @@ def summary(db: Session, user: User, year: int) -> dict:
         "started": started,
         "finished": finished,
         "streak": {"current": current, "longest": longest, "minimum_seconds": STREAK_MIN_SECONDS},
-        "days": [{"day": d, **{k: round(v, 1) for k, v in total.items()}} for d, total in sorted(by_day.items())],
+        "days": [
+            {"day": d, **{k: round(v, 1) for k, v in total.items()}}
+            for d, total in sorted(by_day.items())
+        ],
         "longest_session_seconds": _longest_session(db, user, start, end),
         "top_authors": [
             {"author": author, "seconds": round(seconds)}
-            for author, seconds in sorted(by_author.items(), key=lambda item: (-item[1], item[0]))[:5]
+            for author, seconds in sorted(by_author.items(), key=lambda item: (-item[1], item[0]))[
+                :5
+            ]
         ],
         "estimate": "Text time is an active-window estimate from forward position changes; audio is content seconds advanced.",
     }
@@ -218,22 +233,34 @@ def summary(db: Session, user: User, year: int) -> dict:
 def _state_backfill(db: Session, user: User, start: datetime, end: datetime) -> tuple[int, int]:
     # Existing state dates give honest historical started/finished counts only; no duration is
     # manufactured for them. Visibility applies at read time, including after unsharing.
-    started = db.scalar(
-        select(func.count()).select_from(ReadingState).join(Work).where(
-            ReadingState.user_id == user.id,
-            ReadingState.started_at >= start,
-            ReadingState.started_at < end,
-            visible_works(user),
+    started = (
+        db.scalar(
+            select(func.count())
+            .select_from(ReadingState)
+            .join(Work)
+            .where(
+                ReadingState.user_id == user.id,
+                ReadingState.started_at >= start,
+                ReadingState.started_at < end,
+                visible_works(user),
+            )
         )
-    ) or 0
-    finished = db.scalar(
-        select(func.count()).select_from(ReadingState).join(Work).where(
-            ReadingState.user_id == user.id,
-            ReadingState.finished_at >= start,
-            ReadingState.finished_at < end,
-            visible_works(user),
+        or 0
+    )
+    finished = (
+        db.scalar(
+            select(func.count())
+            .select_from(ReadingState)
+            .join(Work)
+            .where(
+                ReadingState.user_id == user.id,
+                ReadingState.finished_at >= start,
+                ReadingState.finished_at < end,
+                visible_works(user),
+            )
         )
-    ) or 0
+        or 0
+    )
     return int(started), int(finished)
 
 

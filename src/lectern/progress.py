@@ -373,7 +373,9 @@ def put_progress(
         )
 
 
-def _position_fraction(wt: WorkText, tl: Timeline, pos: SentencePos, audio_s: float | None) -> float:
+def _position_fraction(
+    wt: WorkText, tl: Timeline, pos: SentencePos, audio_s: float | None
+) -> float:
     if audio_s is not None and not wt.count:
         return min(1.0, audio_s / tl.total_s) if tl.total_s else 0.0
     return wt.fraction(pos) if wt.count else 0.0
