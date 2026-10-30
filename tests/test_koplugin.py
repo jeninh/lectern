@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 import zipfile
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -1145,3 +1145,95 @@ def test_plugin_sends_highlights_and_notes(live, settings, tmp_path):
     logged = "\n".join(LOGGED)
     for private in (PHRASE, OTHER, note, "changed my mind"):
         assert private not in logged
+
+
+@needs_lua
+def test_plugin_reports_the_device_for_the_dashboard(live, settings, tmp_path):
+    """Issue #86: the quiet check sends the device report (battery, free space, versions, the
+    books on the device) without a timer or retry of its own; one that cannot go waits beside
+    the outbox and goes with the next push, dated by its age, not the device's clock."""
+    from lectern import device_report
+    from lectern.models import BookFile
+
+    http, base = live["http"], live["base"]
+    LOGGED.clear()
+    settings.inbox_path.mkdir(parents=True, exist_ok=True)
+    for title in ("Alpha", "Bravo", "Charlie"):
+        make_epub(settings.inbox_path / f"{title}.epub", title=title, authors=["Ann"])
+    w = InboxWatcher(settings.inbox_path, settings.library_dir, session_factory(), 0.01)
+    w.scan_once()
+    w.scan_once()
+    with session_factory()() as db:
+        ids = {wk.title: wk.id for wk in db.scalars(select(Work))}
+        bravo_md5 = db.scalar(select(BookFile.partial_md5).where(BookFile.work_id == ids["Bravo"]))
+    dev = http.post("/api/devices", json={"label": "Kindle"}).json()
+    dev_id, pw_id = dev["device"]["id"], dev["device"]["app_password"]["id"]
+    http.post(f"/api/device-queues/{pw_id}/items", json={"work_ids": [ids["Alpha"]]})
+    z = http.post(f"/api/devices/{dev_id}/koplugin", json={"server_url": base})
+    root = tmp_path / "koreader"
+    (root / "plugins").mkdir(parents=True)
+    (root / "settings").mkdir()
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        zf.extractall(root / "plugins")
+    plugin, sdir = root / "plugins" / "lectern.koplugin", root / "settings"
+    assert lua(plugin, sdir, "setup")["paired"]
+    alpha = lua(plugin, sdir, "status")["downloaded"]  # downloaded by the plugin: by work id
+
+    bravo = "/mnt/us/books/Bravo.epub"  # side-loaded: by its digest
+    history = [
+        {"file": alpha, "digest": "c" * 32, "percentage": 0.25},
+        {"file": bravo, "digest": bravo_md5, "percentage": 0.5},
+        {"file": "/mnt/us/books/Elsewhere.epub", "digest": "d" * 32, "percentage": 0.9},
+    ]
+
+    def run(spec: dict) -> dict:
+        path = tmp_path / "spec.json"
+        path.write_text(json.dumps({"history": history, **spec}))
+        return lua(plugin, sdir, "report", str(path))
+
+    def dashboard() -> dict:
+        r = http.get(f"/api/devices/dashboard/{pw_id}")
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def age(iso: str) -> float:
+        return (datetime.now(UTC) - datetime.fromisoformat(iso)).total_seconds()
+
+    # The report cannot go (Lectern answered the check, then the connection dropped): kept,
+    # quietly, with no retry of its own and nothing shown as waiting to send.
+    out = run({"action": "check", "open": bravo, "fail_report": True})
+    assert out["requests"] == 1 and out["tasks"] == ["fetch"] and out["messages"] == 0
+    assert out["pending"] == 0 and "waiting" not in out["status_line"]
+    assert out["settings"]["report"]["battery"] == 63
+    assert dashboard()["device"]["report"] is None
+
+    # Ten minutes later a page-turn push drains the outbox and the report goes with it.
+    out = run({"action": "push", "open": bravo, "clock": 600})
+    assert out["requests"] == 1 and "report" not in out["settings"] and not out["tasks"]
+    d = dashboard()
+    rep = d["device"]["report"]
+    assert 570 <= age(rep["as_of"]) <= 660 and age(rep["reported_at"]) < 60
+    assert (rep["battery"], rep["charging"], rep["free_bytes"]) == (63, True, 3123456789)
+    assert rep["koreader_version"] == "v2025.10-42-gabcdef12_2025-11-01"
+    assert rep["plugin_version"] == device_report.bundled_plugin_version() is not None
+    assert rep["update_available"] is False and rep["books"] == 2
+    # The open book's position is the reader's current one (0.42), not its sidecar's.
+    assert [(b["work"]["title"], b["percentage"]) for b in d["books"]] == [
+        ("Alpha", 0.25),
+        ("Bravo", 0.42),
+    ]
+    assert d["not_in_library"] == 1
+
+    # The next quiet check sends a fresh report at once, in the same wake-up.
+    out = run({"action": "check"})
+    assert out["requests"] == 1 and out["tasks"] == ["fetch"] and "report" not in out["settings"]
+    d = dashboard()
+    assert age(d["device"]["report"]["as_of"]) < 60
+    assert [(b["work"]["title"], b["percentage"]) for b in d["books"]] == [
+        ("Alpha", 0.25),
+        ("Bravo", 0.5),
+    ]
+    s = out["settings"]
+    logged = "\n".join(LOGGED)
+    for value in (s["userkey"], s["app_password"]):
+        assert value not in logged

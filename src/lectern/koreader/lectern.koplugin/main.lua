@@ -22,6 +22,10 @@ start, wake, Wi-Fi back, and every Core.FETCH_INTERVAL, which downloads queued b
 when the device's Auto-download setting in Lectern is on, and deletes the copies it downloaded
 of books that left the followed shelf when clean-up is on.
 
+Device report (docs/koreader-plugin.md#device-dashboard): each check that reached Lectern (and
+Sync now) also sends battery, free space, versions, and the books on the device. One that cannot
+go waits beside the outbox for its next drain; it never schedules anything itself.
+
 Whether the network is up is decided by trying the request (short timeouts), never by
 KOReader's NetworkMgr alone: on jailbroken Kindles whose Wi-Fi is brought up outside KOReader
 it reports offline forever. NetworkMgr only decides how soon to retry.
@@ -546,7 +550,63 @@ function Lectern:autoFetch(status)
         if #items > 0 then UIManager:nextTick(nextBook) end
     end
     nextBook()
+    -- The device report rides on this check, which just reached Lectern: sent now unless
+    -- positions or highlights are waiting, whose pending retry then carries it.
+    self:queueReport()
+    if self.core:pending() == 0 then self.core:drainReport() end
     return planned, deleted
+end
+
+--- What the Devices dashboard shows (docs/koreader-plugin.md#device-dashboard): battery,
+-- free space, versions, and the books KOReader knows. Read only during a check that already
+-- reached Lectern; anything unreadable on this device is left out.
+function Lectern:queueReport()
+    local info = { books = self:knownBooks() }
+    pcall(function()
+        if Device.hasBattery and not Device:hasBattery() then return end
+        local powerd = Device:getPowerDevice()
+        info.battery = powerd:getCapacity()
+        info.charging = powerd:isCharging() and true or false
+    end)
+    pcall(function()
+        info.free_bytes = require("util").diskUsage(self:downloadDir()).available
+    end)
+    pcall(function()
+        info.koreader_version = require("version"):getCurrentRevision()
+    end)
+    self.core:queueReport(info)
+end
+
+--- Recently read books with a sidecar (the first Core.HISTORY_SCAN of the history): path,
+-- KOReader digest, and position; the open book's position as the reader has it now.
+function Lectern:knownBooks()
+    local ok_h, ReadHistory = pcall(require, "readhistory")
+    local ok_d, DocSettings = pcall(require, "docsettings")
+    if not ok_h or not ok_d or type(ReadHistory.hist) ~= "table" then return {} end
+    local open = self.ui and self.ui.document and self.ui.document.file
+    local out = {}
+    for i, item in ipairs(ReadHistory.hist) do
+        if i > Core.HISTORY_SCAN then break end
+        local file = item.file
+        if file and not item.dim then
+            pcall(function()
+                if DocSettings.hasSidecarFile and not DocSettings:hasSidecarFile(file) then return end
+                local ds = DocSettings:open(file)
+                local book = {
+                    path = file,
+                    digest = ds:readSetting("partial_md5_checksum"),
+                    percentage = ds:readSetting("percent_finished"),
+                }
+                local k = self.ui and self.ui.kosync
+                if file == open and k and k.getLastPercent then
+                    local ok, p = pcall(k.getLastPercent, k)
+                    if ok and p then book.percentage = p end
+                end
+                out[#out + 1] = book
+            end)
+        end
+    end
+    return out
 end
 
 -- --- Sync now ------------------------------------------------------------------------------
