@@ -30,6 +30,7 @@ from lectern.ingest.library import book_file_name
 from lectern.ingest.sentences import ensure_text_sentences
 from lectern.jobs import EXT
 from lectern.models import (
+    AudioBookmark,
     AudioTrack,
     BookFile,
     FileKind,
@@ -89,7 +90,9 @@ def merge_work(
         f.work_id, f.rel_path = target.id, rel
 
     moved_audio = False
+    moved_tracks: list[tuple[AudioTrack, float]] = []  # with its offset in the source
     for t in db.scalars(select(AudioTrack).where(AudioTrack.work_id == source.id)):
+        moved_tracks.append((t, t.offset_s))
         rel = _free_name(dst_dir, t.rel_path, t.sha256)
         if (src_dir / t.rel_path).exists():
             move(src_dir / t.rel_path, dst_dir / rel, t.sha256)
@@ -107,6 +110,18 @@ def merge_work(
     if moved_audio:
         relayout(db, target.id)
         audio_changed(db, target.id)
+
+        # Audiobook bookmarks and clips (issue #81) follow their audio to where it now plays.
+        def moved(at: float) -> float:
+            t, was = max(((t, o) for t, o in moved_tracks if o <= at), key=lambda p: p[1])
+            return round(t.offset_s + at - was, 2)
+
+        for m in db.scalars(select(AudioBookmark).where(AudioBookmark.work_id == source.id)):
+            m.work_id = target.id
+            m.start_s = moved(m.start_s)
+            m.end_s = moved(m.end_s) if m.end_s is not None else None
+            if m.end_s is not None and m.end_s <= m.start_s:  # a clip across a now-split join
+                m.end_s = None
 
     if not target.has_cover and source.has_cover and (src_dir / "cover.jpg").exists():
         move(src_dir / "cover.jpg", dst_dir / "cover.jpg")

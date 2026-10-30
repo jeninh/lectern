@@ -1,10 +1,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { BookmarkIcon, useAudioMarks } from "../components/AudioBookmarks";
 import { Cover } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { Alert, Book, Follow, Headphones, NextSentence, Pause, Play, PrevSentence } from "../components/Icons";
 import { PageTitle } from "../components/Shell";
 import { ApiError, get } from "../lib/api";
+import { createMark, markLabel, marksBySentence, marksChanged, startAt } from "../lib/audiobookmarks";
 import { getBook, orOffline } from "../lib/offline/store";
 import { useLocalStorage, useReducedMotion } from "../lib/hooks";
 import { legacyRate, pickRate } from "../lib/playback";
@@ -135,7 +137,8 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
   // Separate speeds: following the text usually wants a gentler pace than listening alone.
   // Listening uses the book's own speed, the one the player uses, kept per book on the server
   // (lib/playback.ts). The read-along speed stays one per browser for every book.
-  const { me } = useStore();
+  const { me, toast, deviceName } = useStore();
+  const [search] = useSearchParams();
   const [readSpeed, setReadSpeed] = useLocalStorage<number>("lectern.speed.readalong", 1);
   const [listenSpeed, setListenSpeedState] = useState(() => pickRate(data.progress, readMark(work.id), me?.preferences.playback_speed ?? legacyRate() ?? 1));
   const listenSpeedRef = useRef(listenSpeed);
@@ -336,11 +339,12 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
     [speed, setSpeed],
   );
 
-  // Resume from the stored position (no autoplay).
+  // Resume from the stored position (no autoplay), or open at an audio bookmark (`?t=`).
   useEffect(() => {
     const p = data.progress;
-    const n = p.position ? Math.min(p.position.sentence_n, sentences.length - 1) : -1;
-    const t = p.audio_s ?? (n >= 0 ? sentences[n].audio_start_s : null) ?? matched[0].audio_start_s ?? 0;
+    const at = startAt(search);
+    const n = at != null ? sentenceAt(at) : p.position ? Math.min(p.position.sentence_n, sentences.length - 1) : -1;
+    const t = at ?? p.audio_s ?? (n >= 0 ? sentences[n].audio_start_s : null) ?? matched[0].audio_start_s ?? 0;
     const a = audio.current;
     if (!a) return;
     const { index, local } = locate(tracks, t);
@@ -484,6 +488,30 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
     return () => handlers.forEach(([a]) => { try { ms.setActionHandler(a, null); } catch { /* ignore */ } });
   }, [work, step, seek]);
 
+  // Audiobook bookmarks and clips (issue #81) on the sentences they cover, marked as audio.
+  const marks = useAudioMarks(work.id).data?.bookmarks;
+  useLayoutEffect(() => {
+    const by = marksBySentence(marks ?? []);
+    for (const [n, els] of spans.current) {
+      const here = by.get(n);
+      for (const el of els) {
+        el.classList.toggle("has-audio-mark", !!here);
+        if (here) el.title = here.map((m) => (m.note ? `${markLabel(m)}: ${m.note}` : markLabel(m))).join("\n");
+        else el.removeAttribute("title");
+      }
+    }
+  }, [marks, data]);
+  const bookmark = async () => {
+    try {
+      const t = Math.round(now() * 100) / 100;
+      const m = await createMark(work.id, { start_s: t, device: deviceName });
+      marksChanged(work.id);
+      toast(`Bookmarked ${formatClock(m.start_s)}. Add a note on the book's page.`);
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
+
   const onTextClick = (e: React.MouseEvent) => {
     if (window.getSelection()?.toString()) return; // selecting text, not seeking
     const el = (e.target as HTMLElement).closest<HTMLElement>("[data-n][data-m]");
@@ -572,6 +600,9 @@ function Player({ work, data }: { work: Work; data: ReadAlongData }) {
           <span className="ra-time" aria-hidden="true">{formatClock(total)}</span>
         </div>
         <div className="ra-options">
+          <button className="icon-btn ghost" onClick={bookmark} aria-label="Bookmark this moment" title="Bookmark this moment">
+            <BookmarkIcon />
+          </button>
           <label className="ra-speed" title="Slower (<) / faster (>)">
             <span className="sr-only">{label}</span>
             <span aria-hidden="true" className="ra-speed-label">{mode === "readalong" ? "Read" : "Listen"}</span>

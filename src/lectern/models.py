@@ -1629,3 +1629,32 @@ class VocabularyWord(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class AudioBookmark(Base):
+    """A moment (``end_s`` NULL) or a clip (``start_s``..``end_s``) in a work's audiobook, with
+    an optional note (migration 0033, :mod:`lectern.audio_bookmarks`, issue #81).
+
+    Private to ``user_id``, and shown to them only while they can see the work, like their
+    KOReader highlights. Times are on the work's audio timeline (``audio_tracks.offset_s``); a
+    clip is played back from the original tracks, no audio is cut or encoded. ``chapter`` is
+    the audio chapter it was made in, as the player showed it.
+    """
+
+    __tablename__ = "audio_bookmarks"
+    __table_args__ = (
+        CheckConstraint("start_s >= 0", name="ck_audio_bookmark_start"),
+        CheckConstraint("end_s IS NULL OR end_s > start_s", name="ck_audio_bookmark_span"),
+        Index("ix_audio_bookmarks_user_work", "user_id", "work_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    start_s: Mapped[float] = mapped_column(Float)
+    end_s: Mapped[float | None] = mapped_column(Float, default=None)
+    note: Mapped[str | None] = mapped_column(Text, default=None)
+    chapter: Mapped[str | None] = mapped_column(String(512), default=None)
+    device: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
