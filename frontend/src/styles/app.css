@@ -6919,3 +6919,26 @@ table.compare td:first-child {
 .vocab-context { margin: 0; padding-left: 10px; border-left: 3px solid var(--border); font-style: italic; }
 .vocab-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .vocab-edit textarea { width: 100%; }
+
+/* Device dashboard (issue #86): the KOReader plugin's report on a device card. A card with a
+   report is taller; its neighbours keep their own layout instead of stretching their rows. */
+.device-card {
+  align-content: start;
+}
+.device-report dd {
+  white-space: normal;
+}
+.device-report .device-report-foot {
+  grid-column: 1 / -1;
+}
+.device-report .device-report-foot dd {
+  white-space: normal;
+  font-weight: 400;
+  font-size: 12px;
+}
+.device-report dd[data-low] {
+  color: var(--danger, #b42318);
+}
+.device-stale {
+  margin: 0;
+}
