@@ -12,11 +12,15 @@ position written to either into the person's reading state for that work, in the
 
 Every write path (KOReader sync and its projection, the page viewer, web reader, audio
 player, offline replays) goes through the ORM, so the hook sees all of them. The Library's
-reading status and the ``status:``, ``progress:``, ``read:``, ``started:``, and ``finished:``
-filters read only this table (``lectern.filters``).
+reading status and the ``status:``, ``progress:``, and ``read:`` filters read only this table
+(``lectern.filters``); ``started:`` and ``finished:`` read it for works the person has saved
+no read-throughs for (``lectern.reviews``). Reaching the end also closes their open
+read-through, if any.
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime
 
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
@@ -27,6 +31,7 @@ from lectern.models import (
     ProgressSource,
     ReadingProgress,
     ReadingState,
+    ReadThrough,
     Sentence,
     WorkProgress,
     utcnow,
@@ -74,12 +79,34 @@ def record(
         db.add(state)
     pending[(user_id, work_id)] = state
     f = max(0.0, min(1.0, fraction or 0.0))
+    was = state.fraction or 0.0
     state.fraction = f
     state.last_read_at = now
     if f > 0 and state.started_at is None:
         state.started_at = now
     if f >= FINISHED and state.finished_at is None:
         state.finished_at = now
+    if f >= FINISHED > was:
+        _close_open_read(db, user_id, work_id, now)
+
+
+def _close_open_read(db: Session, user_id: int, work_id: int, now) -> None:
+    """Reaching the end closes the person's latest open read-through (``lectern.reviews``)
+    on today's date, so a re-read they started by hand gets its finish."""
+    today = datetime(now.year, now.month, now.day, tzinfo=UTC)
+    open_read = db.scalar(
+        select(ReadThrough)
+        .where(
+            ReadThrough.user_id == user_id,
+            ReadThrough.work_id == work_id,
+            ReadThrough.finished_at.is_(None),
+            ReadThrough.started_at <= today,
+        )
+        .order_by(ReadThrough.started_at.desc())
+        .limit(1)
+    )
+    if open_read is not None:
+        open_read.finished_at = today
 
 
 def _written(db: Session, cls):

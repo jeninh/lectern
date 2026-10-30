@@ -229,6 +229,18 @@
    "members_only": false
   },
   {
+   "key": "rating",
+   "kind": "rating",
+   "label": "Your rating",
+   "group": "Reading",
+   "aliases": [
+    "rated",
+    "stars"
+   ],
+   "options": [],
+   "members_only": false
+  },
+  {
    "key": "title",
    "kind": "text",
    "label": "Title",
@@ -445,6 +457,11 @@
   {
    "key": "finished",
    "label": "Finished",
+   "desc": true
+  },
+  {
+   "key": "rating",
+   "label": "Your rating",
    "desc": true
   },
   {

@@ -28,6 +28,7 @@ from lectern.routes.api import (
     queues,
     readalong,
     reader,
+    reviews,
     search,
     security,
     selection,
@@ -57,6 +58,7 @@ router.include_router(editor.router)
 router.include_router(shelves.router)
 router.include_router(works.router)
 router.include_router(highlights.router)
+router.include_router(reviews.router)
 router.include_router(offline.router)
 router.include_router(notifications.router)
 router.include_router(readalong.router)

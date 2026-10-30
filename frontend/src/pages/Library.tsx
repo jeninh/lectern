@@ -5,6 +5,7 @@ import { EmptyState } from "../components/EmptyState";
 import { MakeAudiobookRow } from "../components/MakeAudiobook";
 import { ConvertPdfRow } from "../components/ConvertPdfRow";
 import { BookHighlights } from "../components/BookHighlights";
+import { BookReview } from "../components/BookReview";
 import { OcrStatus } from "../components/OcrStatus";
 import { ReadAloudFormats } from "../components/ReadAloudFormats";
 import { Book, Close, Down, Download, Folder, Headphones, Pencil, Plus, Reader, Search as SearchIcon, Select, Send, Shelf as ShelfIcon, SmartFolder, Upload } from "../components/Icons";
@@ -838,6 +839,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
         </div>
       </div>
       {work.description && <p style={{ margin: 0, color: "var(--ink-2)" }}>{work.description.length > 900 ? work.description.slice(0, 900) + "…" : work.description}</p>}
+      <BookReview work={work} />
       <div>
         <h3 className="detail-h">Files</h3>
         <table className="list">

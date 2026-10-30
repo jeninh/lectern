@@ -7,7 +7,7 @@
 
 import { fold } from "./fuzzy";
 
-export type Kind = "enum" | "text" | "number" | "size" | "duration" | "percent" | "date" | "shelf" | "user" | "device";
+export type Kind = "enum" | "text" | "number" | "size" | "duration" | "percent" | "date" | "shelf" | "user" | "device" | "rating";
 export type Op = "=" | "<" | "<=" | ">" | ">=" | "..";
 
 export interface Value {
@@ -74,6 +74,7 @@ export const FIELDS: Field[] = [
   f("read", "date", "Last read", "Reading", { aliases: ["last-read", "lastread"], hint: "30d" }),
   f("started", "date", "Started", "Reading", { hint: "2026" }),
   f("finished", "date", "Finished", "Reading", { hint: "2026-03" }),
+  f("rating", "rating", "Your rating", "Reading", { aliases: ["rated", "stars"], hint: ">=4" }),
   f("title", "text", "Title", "Book details"),
   f("author", "text", "Author", "Book details", { aliases: ["by-author", "authors"] }),
   f("series", "text", "Series", "Book details"),
@@ -105,6 +106,7 @@ export const SORTS: { key: string; label: string; desc: boolean }[] = [
   { key: "read", label: "Last read", desc: true },
   { key: "started", label: "Started", desc: true },
   { key: "finished", label: "Finished", desc: true },
+  { key: "rating", label: "Your rating", desc: true },
   { key: "lang", label: "Language", desc: false },
   { key: "publisher", label: "Publisher", desc: false },
 ];
@@ -113,7 +115,7 @@ const BY_KEY = new Map<string, Field>();
 for (const x of FIELDS) for (const k of [x.key, ...x.aliases]) BY_KEY.set(k, x);
 export const fieldOf = (key: string): Field | undefined => BY_KEY.get(key.toLowerCase());
 
-const COMPARABLE = new Set<Kind>(["number", "size", "duration", "percent", "date"]);
+const COMPARABLE = new Set<Kind>(["number", "size", "duration", "percent", "date", "rating"]);
 export const isComparable = (k: Kind) => COMPARABLE.has(k);
 export const MAX_CHARS = 1000;
 const MAX_CLAUSES = 24;
@@ -133,6 +135,7 @@ const OP_RE = /^(<=|>=|<|>|=)/;
 const SIZE_RE = /^(\d+(?:\.\d+)?)\s*(b|k|kb|kib|m|mb|mib|g|gb|gib|t|tb|tib)?$/;
 const DUR_RE = /^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?:in)?)?(?:(\d+(?:\.\d+)?)s)?$/;
 const PCT_RE = /^(\d+(?:\.\d+)?)%?$/;
+const RATING_RE = /^[0-5](?:\.[05])?$/;
 const DATE_RE = /^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$/;
 const AGE_RE = /^(\d+)(d|w|m|y)$/;
 const isSpace = (c: string) => /\s/.test(c);
@@ -221,6 +224,8 @@ function checkScalar(x: Field, text: string): string {
   const t = text.trim().toLowerCase();
   if (x.kind === "number") {
     if (!/^\d{1,9}$/.test(t)) throw new FilterError("bad_number", `${x.label}: “${text}” is not a whole number.`, x.key);
+  } else if (x.kind === "rating") {
+    if (!RATING_RE.test(t) || Number(t) > 5) throw new FilterError("bad_rating", `${x.label}: “${text}” is not 0 to 5 stars in halves (4.5).`, x.key);
   } else if (x.kind === "size") bad("bad_size", x, t, SIZE_RE);
   else if (x.kind === "duration") {
     if (!/^\d+(?:\.\d+)?$/.test(t)) bad("bad_duration", x, t, DUR_RE);
@@ -369,6 +374,7 @@ function ageLabel(t: string): string | null {
 
 function scalarLabel(x: Field, t: string): string {
   if (x.kind === "percent") return t.endsWith("%") ? t : `${t}%`;
+  if (x.kind === "rating") return `${t} ★`;
   if (x.kind === "size") {
     const m = t.replace(/ /g, "").match(SIZE_RE);
     if (!m) return t;

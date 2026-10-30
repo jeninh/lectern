@@ -182,8 +182,8 @@ class AIKey(Base):
     """Bearer credential for an AI app (MCP client). key_hash = SHA-256(secret).
 
     Created by its user in Devices, shown once, revocable. It acts as that user, limited to
-    its ``scopes`` (``upload``, ``file``, ``read``, ``organize``), and authenticates only ``/mcp``:
-    sessions, OPDS, and downloads never accept it (lectern.mcp).
+    its ``scopes`` (``upload``, ``file``, ``read``, ``organize``, ``reviews``), and authenticates
+    only ``/mcp``: sessions, OPDS, and downloads never accept it (lectern.mcp).
     """
 
     __tablename__ = "ai_keys"
@@ -518,6 +518,57 @@ class ReaderOverride(Base):
     )
     settings: Mapped[dict] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class BookReview(Base):
+    """One person's private rating and notes for one work (migration 0030, ``lectern.reviews``,
+    issue #84). ``rating`` is in half stars, 1–10 (½ to 5 stars); ``notes`` is Markdown.
+    ``prompt_dismissed_at``: when they said "not now" to "Rate it?". Never shown to anyone
+    else, owners included, nor over OPDS; over MCP only with the ``reviews`` scope."""
+
+    __tablename__ = "book_reviews"
+    __table_args__ = (
+        CheckConstraint("rating IS NULL OR rating BETWEEN 1 AND 10", name="ck_book_review_rating"),
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    rating: Mapped[int | None] = mapped_column(Integer, default=None)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    prompt_dismissed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class ReadThrough(Base):
+    """One time one person read one work, with the days they started and finished it
+    (migration 0030, ``lectern.reviews``). Dates are days, stored as midnight UTC. Once a
+    person has any for a work, these are their started and finished dates for it, in place of
+    the ones ``reading_states`` derives; several are re-reads. Either date may be unknown, not
+    both."""
+
+    __tablename__ = "read_throughs"
+    __table_args__ = (
+        CheckConstraint(
+            "started_at IS NOT NULL OR finished_at IS NOT NULL", name="ck_read_through_dates"
+        ),
+        CheckConstraint(
+            "started_at IS NULL OR finished_at IS NULL OR finished_at >= started_at",
+            name="ck_read_through_order",
+        ),
+        Index("ix_read_throughs_user_work", "user_id", "work_id"),
+        Index("ix_read_throughs_user_finished", "user_id", "finished_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 # --- Invites ---------------------------------------------------------------------------
