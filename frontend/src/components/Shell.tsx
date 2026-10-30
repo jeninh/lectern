@@ -38,6 +38,7 @@ const MANAGE: NavEntry[] = [
   { to: "/app/devices", label: "Devices", icon: <Devices />, keys: "g d" },
   { to: "/app/security", label: "Security", icon: <Shield />, keys: "g s" },
   { to: "/app/activity", label: "Activity", icon: <Pulse />, keys: "g a" },
+  { to: "/app/stats", label: "Reading stats", icon: <Pulse /> },
   { to: "/app/jobs", label: "Jobs", icon: <Sync /> },
 ];
 const ADMIN: NavEntry = { to: "/app/admin", label: "Admin", icon: <Gear />, keys: "g u" };

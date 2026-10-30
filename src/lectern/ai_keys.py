@@ -11,6 +11,7 @@ its scopes:
 - ``organize`` shelves, send to device and its queues, start alignment and its jobs, metadata.
 - ``reviews``  the user's private ratings, notes, and read-through dates (``lectern.reviews``),
                and the ``rating:`` filter. Never a default: only when its user adds it.
+- ``stats``    the user's private reading statistics and year review. Never a default.
 
 Its owner can change a key's scopes later (``routes/api/ai_keys.py``) without seeing or
 rotating the secret. Every tool call reads the scopes from the database again, so a change
@@ -35,7 +36,7 @@ from lectern.security import audit
 from lectern.security.tokens import new_secret, sha256_hex
 
 PREFIX = "lak_"
-SCOPES = ("upload", "file", "read", "organize", "reviews")
+SCOPES = ("upload", "file", "read", "organize", "reviews", "stats")
 # Scopes only people who can add books may hold.
 EDITOR_SCOPES = ("upload", "file")
 HOUR = timedelta(hours=1)

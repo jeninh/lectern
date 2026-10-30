@@ -91,6 +91,7 @@ You act as one person, with only their permissions and only the scopes their AI 
   the match is not certain.
 - With the reviews scope only: get_review (this person's private rating, notes, and read
   dates for a book), list_finished (what they finished in a year), and rating: in filters.
+- With the separate stats scope only: get_reading_stats (this person's private year review).
 - Find books with search_library / list_recent and inspect one with get_book. Book ids are
   numbers; use them for every other tool. search_library takes the Library's filters, e.g.
   format:epub -has:audio author:"Tolstoy" year:1850..1900 progress:<50% status:reading.
@@ -830,6 +831,15 @@ def list_finished(ctx: Context, year: Annotated[int, Field(ge=1900, le=2999)]) -
         return {"year": year, "count": len(items), "books": items}
 
 
+def get_reading_stats(ctx: Context, year: Annotated[int, Field(ge=1900, le=2999)]) -> dict:
+    """This person's private reading and listening totals, streaks, and year review. It excludes
+    books they can no longer see. Scope: stats (separate opt-in; not covered by read or reviews)."""
+    with _call(ctx, "get_reading_stats", "stats") as c:
+        from lectern import reading_stats
+
+        return reading_stats.summary(c.db, c.user, year)
+
+
 # --- tools: organize ------------------------------------------------------------------------------
 
 
@@ -1247,6 +1257,7 @@ _TOOLS: list[tuple[Any, ToolAnnotations]] = [
     (list_recent, READ),
     (get_review, READ),
     (list_finished, READ),
+    (get_reading_stats, READ),
     (list_shelves, READ),
     (add_to_shelf, WRITE),
     (remove_from_shelf, DESTRUCTIVE),

@@ -17,6 +17,7 @@ import { TrashPage } from "./pages/Trash";
 import { JobsPage } from "./pages/Jobs";
 import { DownloadsPage } from "./pages/Downloads";
 import { ReaderPage } from "./pages/Reader";
+import { StatsPage } from "./pages/Stats";
 import { PlayerProvider } from "./lib/player";
 import { sharedUrl } from "./lib/ingest";
 
@@ -63,6 +64,7 @@ export default function App() {
           <Route path="/app/vocabulary" element={<VocabularyPage />} />
           <Route path="/app/security" element={<SecurityPage />} />
           <Route path="/app/activity" element={<ActivityPage />} />
+          <Route path="/app/stats" element={<StatsPage />} />
           <Route path="/app/jobs" element={<JobsPage />} />
           <Route path="/app/trash" element={<EditorsOnly><TrashPage /></EditorsOnly>} />
           <Route path="/app/save-article" element={<EditorsOnly><ShareTarget /></EditorsOnly>} />

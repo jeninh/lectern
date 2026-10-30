@@ -263,6 +263,8 @@ def set_progress(auth: AuthCsrf, db: DbDep, work_id: int, body: ProgressIn) -> d
         wins, recorded = body.offline.judge(row.received_at if row else None)
         if not wins:
             raise conflict(progress_json(db, auth.user.id, work_id), recorded)
+    else:
+        recorded = None
     try:
         put_progress(
             db,
@@ -275,6 +277,7 @@ def set_progress(auth: AuthCsrf, db: DbDep, work_id: int, body: ProgressIn) -> d
             text=(body.spine_index, body.char) if body.spine_index is not None else None,
             raw=body.raw if body.source == "web" else None,
             speed=body.speed,
+            now=recorded,
         )
     except ProgressError as exc:
         raise HTTPException(exc.status, exc.code) from None

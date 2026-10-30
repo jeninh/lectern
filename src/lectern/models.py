@@ -88,6 +88,9 @@ class User(Base):
     reader_settings: Mapped[dict | None] = mapped_column(JSON, default=None)
     # Migration 0029: listening speed for books not played yet; NULL until first chosen.
     playback_speed: Mapped[float | None] = mapped_column(Float, default=None)
+    # Migration 0043: local calendar used for private reading statistics.  It is set from the
+    # browser on first use and is always an IANA zone, never an ambiguous numeric offset.
+    reading_timezone: Mapped[str | None] = mapped_column(String(64), default=None)
 
     passkeys: Mapped[list[Passkey]] = relationship(back_populates="user", cascade="all, delete")
     sync_keys: Mapped[list[SyncKey]] = relationship(back_populates="user", cascade="all, delete")
@@ -343,6 +346,49 @@ class ReadingProgress(Base):
         ForeignKey("sync_keys.id", ondelete="SET NULL"), default=None
     )
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class ReadingActivity(Base):
+    """One counted, forward reading/listening increment.
+
+    ``work_id`` deliberately remains after access changes so an unshared work can be excluded
+    by the stats query without deleting the person's private history.  ``at`` is the corrected
+    device recording time for offline replays, not the time a queued request reached Lectern.
+    """
+
+    __tablename__ = "reading_activity"
+    __table_args__ = (
+        Index("ix_reading_activity_user_at", "user_id", "at"),
+        Index("ix_reading_activity_user_work_at", "user_id", "work_id", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"))
+    source: Mapped[str] = mapped_column(String(16))
+    at: Mapped[datetime] = mapped_column(UTCDateTime())
+    # The normalised work fraction is retained for auditable seek/retry decisions.
+    from_fraction: Mapped[float] = mapped_column(Float)
+    to_fraction: Mapped[float] = mapped_column(Float)
+    read_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    listened_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    pages: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class ReadingStatsDay(Base):
+    """Incremental per-calendar-day cache, rebuildable from ``reading_activity`` on timezone edits."""
+
+    __tablename__ = "reading_stats_days"
+    __table_args__ = (UniqueConstraint("user_id", "work_id", "day", name="uq_reading_stats_day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # Keep attribution even when raw activity is later pruned: visibility is applied on Work.
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"))
+    day: Mapped[str] = mapped_column(String(10), index=True)  # YYYY-MM-DD in user's chosen zone
+    read_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    listened_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    pages: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 # --- Audio, alignment, and canonical positions (contracts for milestones 2-4) --------------

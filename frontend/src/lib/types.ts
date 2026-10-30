@@ -100,6 +100,8 @@ export interface Preferences {
   data_saver: boolean;
   /** Listening speed for books not played yet; null until chosen (lib/playback.ts). */
   playback_speed: number | null;
+  /** IANA timezone used to bucket personal reading statistics. */
+  reading_timezone: string | null;
 }
 
 export interface LibrarySettings {

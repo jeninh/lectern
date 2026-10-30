@@ -35,6 +35,7 @@ from lectern.routes.api import (
     security,
     selection,
     shelves,
+    stats,
     tts,
     uploads,
     vocabulary,
@@ -45,6 +46,7 @@ from lectern.routes.api import (
 router = APIRouter(prefix="/api")
 router.include_router(selection.router)
 router.include_router(core.router)
+router.include_router(stats.router)
 router.include_router(devices.router)
 router.include_router(ai_keys.router)
 router.include_router(queues.router)
