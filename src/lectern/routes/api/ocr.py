@@ -20,10 +20,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from lectern import jobqueue
 from lectern.access import can_see_work
 from lectern.fsops import LIBRARY_LOCK
 from lectern.ingest import formats
-from lectern.models import BookFile, Role, Work
+from lectern.models import BookFile, Job, Role, User, Work
 from lectern.ocr import engine
 from lectern.ocr import jobs as ocr
 from lectern.security import audit, downloads
@@ -58,6 +59,13 @@ def ocr_status(auth: Auth, db: DbDep, settings: SettingsDep, file_id: int) -> di
     return ocr.status_json(db, settings, book, work)
 
 
+def _may_cancel(job: Job, user: User) -> None:
+    """Stopping a run is cancelling it: the owner or whoever started it
+    (``POST /api/jobs/{id}/cancel``)."""
+    if not jobqueue.may_see(job, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_job")
+
+
 @router.post("/files/{file_id}/ocr")
 def start_ocr(
     auth: Editor, db: DbDep, settings: SettingsDep, file_id: int, body: OcrIn | None = None
@@ -83,6 +91,7 @@ def start_ocr(
         if current is not None and (current.payload or {}).get("file_id") == book.id:
             if language is None or language == (current.payload or {}).get("language"):
                 return ocr.status_json(db, settings, book, work)
+            _may_cancel(current, auth.user)
             ocr.cancel(db, current)  # a new language replaces the run in progress
             db.flush()
         try:
@@ -102,6 +111,7 @@ def delete_ocr(auth: Editor, db: DbDep, settings: SettingsDep, file_id: int) -> 
     with LIBRARY_LOCK:
         current = ocr.active_job(db, work.id)
         if current is not None and (current.payload or {}).get("file_id") == book.id:
+            _may_cancel(current, auth.user)
             ocr.cancel(db, current)
         removed = ocr.delete_output(settings.library_dir, work, book.sha256)
         audit.record(db, "ocr.delete", actor_user_id=auth.user.id, target=f"file:{book.id}",

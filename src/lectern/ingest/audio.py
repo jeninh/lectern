@@ -34,7 +34,6 @@ from lectern.models import (
     AlignmentStatus,
     AudioTrack,
     Job,
-    JobStatus,
     MatchSuggestion,
     Work,
     utcnow,
@@ -491,13 +490,18 @@ def relayout(db: Session, work_id: int) -> None:
 def audio_changed(db: Session, work_id: int) -> None:
     """The work's audio changed: an alignment computed from the old tracks is stale and any
     in-flight align job is cancelled (docs/contracts.md, staleness)."""
+    from lectern.align import jobs as align_jobs
+
     for job in db.scalars(
         select(Job).where(
             Job.work_id == work_id, Job.kind == "align", Job.status.in_(JOB_ACTIVE_STATUSES)
         )
     ):
-        job.status = JobStatus.CANCELLED
-        job.finished_at = utcnow()
+        # Conditional on the row: a worker that succeeded while the audio was changing keeps
+        # its completed job and cleared lease. Its now-stale alignment is handled below.
+        align_jobs.cancel_job(db, job)
     al = db.scalar(select(Alignment).where(Alignment.work_id == work_id))
-    if al is not None and al.status == AlignmentStatus.SUCCEEDED:
-        al.status = AlignmentStatus.STALE
+    if al is not None:
+        db.refresh(al)  # a worker may have committed its result after this session read it
+        if al.status == AlignmentStatus.SUCCEEDED:
+            al.status = AlignmentStatus.STALE

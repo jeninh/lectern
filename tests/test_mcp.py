@@ -28,7 +28,7 @@ from lectern import imports, mcp_server
 from lectern.config import Settings
 from lectern.db import session_factory
 from lectern.ingest.watcher import InboxWatcher
-from lectern.models import AIKey, AuditLog, Import, Notification, Work
+from lectern.models import AIKey, AuditLog, Import, Job, JobStatus, Notification, Work
 from lectern.security.ratelimit import SlidingWindowLimiter
 
 HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
@@ -581,6 +581,25 @@ def test_shelves_devices_metadata_and_alignment(app, home):
     assert not ok and "no_inputs" in err  # an EPUB without an audiobook
     ok, err = mcp.call("job_status")
     assert not ok and "job_id or book_id" in err
+
+
+def test_job_status_hides_a_bookless_job_from_other_members(app, home):
+    """Issue #117: only the owner or starter may inspect bookless job metadata or errors."""
+    leak = "/srv/library/A/Hidden/book.m4b: boom"
+    with session_factory()() as db:
+        bookless = Job(kind="transcode", work_id=None, payload={}, status=JobStatus.FAILED,
+                       error=leak)  # fmt: skip
+        shown = Job(kind="align", work_id=home["ids"]["Alpha"], payload={},
+                    status=JobStatus.FAILED, error=leak)  # fmt: skip
+        db.add_all([bookless, shown])
+        db.commit()
+        bookless_id, shown_id = bookless.id, shown.id
+    mia = MCP(app, home["mia"].key("organize"))
+    owner = MCP(app, home["owner"].key("organize"))
+    ok, err = mia.call("job_status", job_id=bookless_id)
+    assert not ok and "not_found" in err and "boom" not in err
+    assert owner.ok("job_status", job_id=bookless_id)["job"]["error"] == leak
+    assert mia.ok("job_status", job_id=shown_id)["job"]["error"] == leak
 
 
 # --- rate limits, audit, alerts -------------------------------------------------------------------

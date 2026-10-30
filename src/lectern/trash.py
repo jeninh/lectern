@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lectern import queue
 from lectern.config import Settings
 from lectern.fsops import (
     TRASH_DIR,
@@ -41,7 +42,6 @@ from lectern.models import (
     BookFile,
     FileKind,
     Job,
-    JobStatus,
     TrashedFile,
     Work,
     WorkRevision,
@@ -61,17 +61,20 @@ class Busy(Exception):
     """A background build is writing into the work's folder right now."""
 
 
-def _cancel_jobs(db: Session, work_id: int) -> None:
+def _cancel_jobs(db: Session, work_id: int) -> list[Job]:
     from lectern.align import jobs as align_jobs
 
+    cancelled = []
     for job in db.scalars(
         select(Job).where(Job.work_id == work_id, Job.status.in_(JOB_ACTIVE_STATUSES))
-    ):
+    ).all():
         if job.kind == align_jobs.KIND_ALIGN:
-            align_jobs.cancel_job(db, job)
+            did_cancel = align_jobs.cancel_job(db, job)
         else:
-            job.status, job.finished_at = JobStatus.CANCELLED, utcnow()
-            job.lease_token_hash, job.lease_expires_at = None, None
+            did_cancel = queue.cancel_row(db, job)  # a job that finished meanwhile stays so
+        if did_cancel:
+            cancelled.append(job)
+    return cancelled
 
 
 def _digests(db: Session, work_id: int) -> dict[str, str]:
@@ -94,9 +97,9 @@ def trash_work(
     *,
     busy: Callable[[int], bool] = lambda _id: False,
     journal: Journal | None = None,
-) -> None:
+) -> list[Job]:
     if work.trashed_at is not None:
-        return
+        return []
     if busy(work.id):
         raise Busy()
     library = settings.library_dir
@@ -104,11 +107,12 @@ def trash_work(
     rel = f"{TRASH_DIR}/works/{work.id}-{secrets.token_hex(4)}"
     _move_folder(db, library, work.id, src, library / rel, journal)
     prune_empty_parents(src.parent, library)
-    _cancel_jobs(db, work.id)
+    cancelled = _cancel_jobs(db, work.id)
     work.trash_from, work.dir_path = work.dir_path, rel
     work.trashed_at, work.trashed_by = utcnow(), actor_id
     work.version = (work.version or 1) + 1
     db.flush()
+    return cancelled
 
 
 def _move_folder(

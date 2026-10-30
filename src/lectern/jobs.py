@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from lectern import limits, queue
 from lectern.article import ARTICLE
 from lectern.config import Settings
-from lectern.models import JOB_ACTIVE_STATUSES, AudioTrack, Job, JobStatus, Work, utcnow
+from lectern.models import JOB_ACTIVE_STATUSES, AudioTrack, Job, JobStatus, User, Work, utcnow
 from lectern.pdf2epub.build import PDF2EPUB
 from lectern.security.tokens import new_secret, sha256_hex
 
@@ -54,6 +54,10 @@ TRANSCODE = "transcode"
 CLEANUP = "storage-cleanup"  # lectern.storage (the storage dashboard's cleanup)
 EXT = {"aac": "m4a", "opus": "opus"}
 MEDIA_TYPE = {"aac": "audio/mp4", "opus": "audio/ogg"}
+
+
+class NotYourJob(Exception):
+    """Deleting copies would cancel a job the caller did not start."""
 
 
 def variant_path(library: Path, work: Work, sha256: str, codec: str) -> Path:
@@ -151,14 +155,22 @@ def cancel_all_transcodes(db: Session) -> int:
     return len(jobs)
 
 
-def delete_renditions(db: Session, settings: Settings, work: Work) -> int:
+def delete_renditions(
+    db: Session, settings: Settings, work: Work, *, user: User | None = None
+) -> int:
     """Cancel the work's transcode job and delete every rendition in its ``derived/audio``
     folder (stale ones of replaced tracks too). Originals are not touched. Returns the bytes
-    freed. Caller commits; the copies can be made again."""
+    freed. ``user`` may cancel only their own job; callers that remove inputs or the feature
+    pass no user. Caller commits; the copies can be made again."""
     from lectern.fsops import LIBRARY_LOCK
 
     job = active_job(db, work.id)
     if job is not None:
+        if user is not None:
+            from lectern import jobqueue
+
+            if not jobqueue.may_see(job, user):
+                raise NotYourJob()
         cancel_transcode(db, job)
         db.commit()
     freed = 0
