@@ -1,20 +1,23 @@
 """Your KOReader highlights and notes (lectern.annotations): per book, all books, searched and
-filtered (issue #72), and as Markdown. Session only, and only the caller's own highlights on
-works they can see."""
+filtered (issue #72), as Markdown, and as the quotes feed and Home's highlight of the day
+(issue #83). Session only, and only the caller's own highlights on works they can see."""
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Annotated
+from datetime import date
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 
 from lectern import annotations, search
-from lectern.access import can_see_work
-from lectern.models import Work
-from lectern.security.deps import Auth, DbDep, SettingsDep
+from lectern.access import can_see_work, shelf_permission
+from lectern.models import Shelf, Work
+from lectern.routes.api.shelves import shelf_works
+from lectern.security.deps import Auth, AuthCsrf, DbDep, SettingsDep
 
 router = APIRouter()
 
@@ -182,3 +185,118 @@ def all_annotations_md(
     if not groups:
         text = "# Highlights\n\nNo highlights yet.\n"
     return _download(text, "Lectern highlights")
+
+
+# --- quotes and the highlight of the day (issue #83) --------------------------------------------
+
+
+def _quote_json(w: Work, a, f) -> dict:
+    return {
+        "work_id": w.id,
+        "title": w.title,
+        "author": w.author,
+        "annotation": annotations.as_json(a, f),
+    }
+
+
+@router.get("/quotes")
+def quotes(
+    auth: Auth,
+    db: DbDep,
+    settings: SettingsDep,
+    filters: Filters,
+    shelf: int | None = None,
+    order: Literal["newest", "shuffle"] = "newest",
+    seed: Annotated[str, Query(max_length=64)] = "",
+    show: Literal["all", "favourites", "hidden"] = "all",
+    limit: Annotated[int, Query(ge=1, le=MAX_LIST)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> JSONResponse:
+    """The quotes feed: your highlights under the highlights page's filters and on ``shelf``
+    (one you can see), newest first or shuffled by ``seed``. Hidden ones only with
+    ``show=hidden``; ``show=favourites`` only favourites."""
+    on_shelf = None
+    if shelf is not None:
+        s = db.get(Shelf, shelf)
+        if s is None or shelf_permission(db, auth.user, s) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+        on_shelf = {w.id for w in shelf_works(db, auth.user, s)}
+    found = annotations.find(db, settings.library_dir, auth.user, "", filters)
+    hits = [
+        (w, a, f)
+        for w, a, f in found.hits()
+        if (on_shelf is None or w.id in on_shelf)
+        and (a.hidden if show == "hidden" else not a.hidden)
+        and (show != "favourites" or a.favourite)
+    ]
+    db.commit()  # placements redone against a changed EPUB
+    hits = annotations.in_order(hits, order, seed)
+    body = {
+        "results": [_quote_json(*h) for h in hits[offset : offset + limit]],
+        "total": len(hits),
+        "daily": auth.user.quote_of_the_day,
+    }
+    return JSONResponse(body, headers=PRIVATE)
+
+
+@router.get("/quotes/today")
+def quote_of_the_day(
+    auth: Auth,
+    db: DbDep,
+    settings: SettingsDep,
+    # The person's local date (the app sends its own); the server's date when left out.
+    day: Annotated[str | None, Query(pattern=_DAY)] = None,
+) -> JSONResponse:
+    """Home's highlight of the day: one of your own, the same all day, another tomorrow;
+    ``quote`` is null when it is turned off or there is none."""
+    try:
+        today = date.fromisoformat(day) if day else date.today()
+        if not date.min < today < date.max:  # the pick looks at the day before and after
+            raise ValueError
+    except ValueError:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Not a date") from None
+    hit = None
+    if auth.user.quote_of_the_day:
+        hit = annotations.of_the_day(db, settings.library_dir, auth.user, today)
+        db.commit()
+    body = {
+        "enabled": auth.user.quote_of_the_day,
+        "day": today.isoformat(),
+        "quote": _quote_json(*hit) if hit else None,
+    }
+    return JSONResponse(body, headers=PRIVATE)
+
+
+class QuoteSettingsIn(BaseModel):
+    daily: bool
+
+
+@router.post("/quotes/settings")
+def quote_settings(auth: AuthCsrf, db: DbDep, body: QuoteSettingsIn) -> dict:
+    """Turn Home's highlight of the day on or off."""
+    auth.user.quote_of_the_day = body.daily
+    db.commit()
+    return {"daily": auth.user.quote_of_the_day}
+
+
+class QuoteMarkIn(BaseModel):
+    favourite: bool | None = None
+    hidden: bool | None = None
+
+
+@router.post("/annotations/{annotation_id}/mark")
+def mark_quote(
+    auth: AuthCsrf, db: DbDep, settings: SettingsDep, annotation_id: int, body: QuoteMarkIn
+) -> JSONResponse:
+    """Favourite or hide one of your highlights (only fields present change). 404 for anyone
+    else's, and for yours on a work you can no longer see."""
+    groups = annotations.visible(db, settings.library_dir, auth.user, ids=[annotation_id])
+    if not groups:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    w, [(a, f)] = groups[0]
+    if body.favourite is not None:
+        a.favourite = body.favourite
+    if body.hidden is not None:
+        a.hidden = body.hidden
+    db.commit()
+    return JSONResponse(_quote_json(w, a, f), headers=PRIVATE)

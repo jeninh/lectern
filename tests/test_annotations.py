@@ -472,3 +472,180 @@ def test_highlight_search_limits_match_the_search_inside_books(client, app, book
     assert r.json()["detail"] == "too_many_searches"
     assert client.get("/api/annotations/search").status_code == 200  # listing is not a search
     assert client.get("/api/search/text", params={"q": "della"}).status_code == 200
+
+
+# --- quotes feed and highlight of the day (issue #83) -------------------------------------------
+
+THIRD = "So Della did it"
+FOURTH = "A furnished flat at $8 per week"
+
+
+def feed(http, **params) -> list[str]:
+    r = http.get("/api/quotes", params=params)
+    assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
+    return [q["annotation"]["text"] for q in r.json()["results"]]
+
+
+def today(http, day: str) -> dict:
+    r = http.get("/api/quotes/today", params={"day": day})
+    assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
+    return r.json()
+
+
+def mark(http, csrf, annotation_id, **body):
+    return api_post(http, f"/api/annotations/{annotation_id}/mark", csrf, body)
+
+
+def test_quotes_feed_orders_filters_and_follows_favourites_and_hides(client, owner, book):
+    put(client, book["kindle"], book["doc"], [
+        ann(OTHER, "2026-10-02 09:41:12", note="a note"),
+        ann(PHRASE, "2026-09-30 22:00:00"),
+        ann(THIRD, "2026-10-05 08:00:00"),
+    ])  # fmt: skip
+    # Newest first by KOReader's creation time (not reading order, not sync order).
+    assert feed(client) == [THIRD, OTHER, PHRASE]
+    # A shuffle is a stable permutation per seed, and pages through that one order.
+    a = feed(client, order="shuffle", seed="abc")
+    assert sorted(a) == sorted([THIRD, OTHER, PHRASE])
+    assert feed(client, order="shuffle", seed="abc") == a
+    pages = [*feed(client, order="shuffle", seed="abc", limit=2), *feed(
+        client, order="shuffle", seed="abc", limit=2, offset=2)]  # fmt: skip
+    assert pages == a
+    assert {tuple(feed(client, order="shuffle", seed=str(s))) for s in range(12)} != {tuple(a)}
+    # The highlights page's filters apply.
+    assert feed(client, since="2026-10-01") == [THIRD, OTHER]
+
+    ids = {h["annotation"]["text"]: h["annotation"]["id"] for h in found(client)}
+    csrf = owner["csrf"]
+    r = mark(client, csrf, ids[OTHER], favourite=True)
+    assert r.status_code == 200 and r.json()["annotation"]["favourite"] is True
+    assert mark(client, csrf, ids[THIRD], hidden=True).json()["annotation"]["hidden"] is True
+    # Hidden ones leave the feed (and come back under show=hidden); favourites filter.
+    assert feed(client) == [OTHER, PHRASE]
+    assert feed(client, show="favourites") == [OTHER]
+    assert feed(client, show="hidden") == [THIRD]
+    # A mark only changes the fields sent; the search shows the marks too.
+    mark(client, csrf, ids[OTHER], hidden=False)
+    hit = next(h for h in found(client) if h["annotation"]["id"] == ids[OTHER])
+    assert (hit["annotation"]["favourite"], hit["annotation"]["hidden"]) == (True, False)
+    # A mark survives the next sync of the same highlight.
+    put(client, book["kindle"], book["doc"], [
+        ann(OTHER, "2026-10-02 09:41:12", note="an edited note", datetime_updated="2026-10-06 10:00:00"),
+        ann(PHRASE, "2026-09-30 22:00:00"),
+        ann(THIRD, "2026-10-05 08:00:00"),
+    ])  # fmt: skip
+    assert feed(client, show="favourites") == [OTHER] and feed(client, show="hidden") == [THIRD]
+    # Writes need the CSRF token.
+    r = client.post(f"/api/annotations/{ids[PHRASE]}/mark", json={"hidden": True})
+    assert r.status_code == 403
+
+    # By shelf: only works on a shelf you can see.
+    with session_factory()() as db:
+        owner_id = db.scalar(select(User.id).where(User.username == "owner"))
+        on, off = Shelf(owner_id=owner_id, name="Christmas"), Shelf(owner_id=owner_id, name="Sea")
+        db.add_all([on, off])
+        db.flush()
+        db.add(ShelfItem(shelf_id=on.id, work_id=book["work_id"]))
+        db.commit()
+        on_id, off_id = on.id, off.id
+    assert feed(client, shelf=on_id) == [OTHER, PHRASE]
+    assert feed(client, shelf=off_id) == []
+    assert client.get("/api/quotes", params={"shelf": off_id + 100}).status_code == 404
+
+
+def test_highlight_of_the_day_is_one_per_day_and_can_be_turned_off(client, owner, book):
+    put(client, book["kindle"], book["doc"], [
+        ann(PHRASE, "2026-09-30 22:00:00"),
+        ann(OTHER, "2026-10-02 09:41:12"),
+        ann(THIRD, "2026-10-05 08:00:00"),
+        ann(FOURTH, "2026-10-06 08:00:00"),
+    ])  # fmt: skip
+    days = [f"2026-11-{d:02d}" for d in range(1, 31)]
+    picks = [today(client, d)["quote"]["annotation"]["text"] for d in days]
+    # The same all day (asking again, or after a re-sync that changes nothing)...
+    put(client, book["kindle"], book["doc"], [
+        ann(PHRASE, "2026-09-30 22:00:00"),
+        ann(OTHER, "2026-10-02 09:41:12"),
+        ann(THIRD, "2026-10-05 08:00:00"),
+        ann(FOURTH, "2026-10-06 08:00:00"),
+    ])  # fmt: skip
+    assert [today(client, d)["quote"]["annotation"]["text"] for d in days] == picks
+    # ...a different one the next day, and over a month more than a couple of them.
+    assert all(a != b for a, b in zip(picks, picks[1:], strict=False))
+    assert len(set(picks)) >= 3
+    # Whose day it is comes from the app (the person's local date), so "today" is theirs.
+    assert today(client, "2026-11-02")["day"] == "2026-11-02"
+    assert client.get("/api/quotes/today", params={"day": "2026-13-40"}).status_code == 422
+    assert client.get("/api/quotes/today", params={"day": "tomorrow"}).status_code == 422
+    for edge in ("0001-01-01", "9999-12-31"):  # no day before or after: refused, not a 500
+        assert client.get("/api/quotes/today", params={"day": edge}).status_code == 422
+    assert today(client, "0001-01-02")["quote"] and today(client, "9999-12-30")["quote"]
+    assert today(client, "2026-11-02")["quote"]["title"]
+
+    # A hidden highlight is never the highlight of the day.
+    ids = {h["annotation"]["text"]: h["annotation"]["id"] for h in found(client)}
+    mark(client, owner["csrf"], ids[picks[0]], hidden=True)
+    after = [today(client, d)["quote"]["annotation"]["text"] for d in days]
+    assert picks[0] not in after
+    # Only one left to show: that one, every day.
+    for t in (PHRASE, OTHER, THIRD, FOURTH):
+        mark(client, owner["csrf"], ids[t], hidden=t != FOURTH)
+    assert {today(client, d)["quote"]["annotation"]["text"] for d in days[:3]} == {FOURTH}
+
+    # Turned off: no card; on again: back.
+    r = api_post(client, "/api/quotes/settings", owner["csrf"], {"daily": False})
+    assert r.status_code == 200 and r.json() == {"daily": False}
+    off = today(client, days[0])
+    assert (off["enabled"], off["quote"]) == (False, None)
+    assert client.get("/api/quotes").json()["daily"] is False
+    api_post(client, "/api/quotes/settings", owner["csrf"], {"daily": True})
+    assert today(client, days[0])["quote"]["annotation"]["text"] == FOURTH
+
+
+def test_quotes_are_only_your_own_on_books_you_can_see(client, owner, app, book):
+    doc = book["doc"]
+    put(client, book["kindle"], doc, [ann(PHRASE, "2026-10-01 09:30:00", note="mine")])
+    rita = make_user(client, owner["csrf"], "rita", "reader")
+    mia = make_user(client, owner["csrf"], "mia", "member")
+    rita_http, mia_http = TestClient(app), TestClient(app)
+    rita_csrf = login(rita_http, "rita", rita["password"])
+    mia_csrf = login(mia_http, "mia", mia["password"])
+    rita_ko = ko_headers("rita", make_sync_key(rita_http, rita_csrf, "rita's kobo"))
+    put(rita_http, rita_ko, doc, [ann(OTHER, "2026-10-05 10:00:00", note="rita's")])
+    mine = found(client)[0]["annotation"]["id"]
+
+    # A household member who sees the whole library sees none of the owner's highlights, and
+    # cannot mark them (nor learn they exist).
+    assert feed(mia_http) == [] and today(mia_http, "2026-11-01")["quote"] is None
+    assert mark(mia_http, mia_csrf, mine, hidden=True).status_code == 404
+    assert mark(mia_http, mia_csrf, mine + 999, hidden=True).status_code == 404
+    assert feed(client) == [PHRASE]
+    # A reader without the book: her own highlight stays out of her feed and her Home.
+    assert feed(rita_http) == [] and today(rita_http, "2026-11-01")["quote"] is None
+    with session_factory()() as db:
+        owner_id = db.scalar(select(User.id).where(User.username == "owner"))
+        rita_id = db.scalar(select(User.id).where(User.username == "rita"))
+        shelf = Shelf(owner_id=owner_id, name="For Rita")
+        db.add(shelf)
+        db.flush()
+        db.add(ShelfItem(shelf_id=shelf.id, work_id=book["work_id"]))
+        db.add(ShelfGrant(shelf_id=shelf.id, user_id=rita_id, permission=Perm.VIEW))
+        db.commit()
+        shelf_id = shelf.id
+    # Shared: hers, never the owner's.
+    assert feed(rita_http) == [OTHER] and feed(rita_http, shelf=shelf_id) == [OTHER]
+    assert today(rita_http, "2026-11-01")["quote"]["annotation"]["note"] == "rita's"
+    assert mark(rita_http, rita_csrf, mine, favourite=True).status_code == 404
+    # Unshared again: out of her feed and Home, and she cannot mark it; the shelf is gone too.
+    with session_factory()() as db:
+        db.delete(db.scalar(select(ShelfGrant).where(ShelfGrant.user_id == rita_id)))
+        db.commit()
+    assert feed(rita_http) == [] and today(rita_http, "2026-11-01")["quote"] is None
+    assert rita_http.get("/api/quotes", params={"shelf": shelf_id}).status_code == 404
+    theirs = rita_http.get("/api/quotes", params={"show": "hidden"}).json()["results"]
+    assert theirs == []
+    anon = TestClient(app)
+    assert anon.get("/api/quotes").status_code == 401
+    assert anon.get("/api/quotes/today").status_code == 401
