@@ -8,6 +8,7 @@ import { clock, RATES, usePlayer } from "../lib/player";
 import { useStore } from "../lib/store";
 import { Cover, tintStyle } from "./Cover";
 import { Back, Close, Expand, Forward, NextChapter, Pause, Play, PrevChapter, Timer } from "./Icons";
+import { BookmarkButton } from "./AudioBookmarks";
 import { OverflowMenu } from "./Menu";
 
 export function PlayButton({ big }: { big?: boolean }) {
@@ -152,6 +153,7 @@ export function MiniPlayer() {
             {p.chapters.length > 1 && <button className="icon-btn ghost" onClick={p.nextChapter} aria-label="Next chapter" title="Next chapter"><NextChapter /></button>}
           </span>
           <span className="mobile-inline"><PlayButton /></span>
+          <BookmarkButton className="icon-btn ghost" label={false} />
           <Link className="icon-btn ghost desktop-only" to="/app/listening" aria-label="Open player" title="Open player"><Expand /></Link>
           <button className="icon-btn ghost sm" onClick={p.close} aria-label="Stop and close player" title="Close"><Close /></button>
         </div>

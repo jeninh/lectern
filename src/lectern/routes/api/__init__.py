@@ -9,6 +9,7 @@ from lectern.routes.api import (
     ai_keys,
     align,
     articles,
+    audio_bookmarks,
     books,
     core,
     devices,
@@ -74,3 +75,4 @@ router.include_router(pdf2epub.router)
 router.include_router(ocr.router)
 router.include_router(jobqueue.router)
 router.include_router(vocabulary.router)
+router.include_router(audio_bookmarks.router)

@@ -582,14 +582,27 @@ def _work_md(work: Work, pairs, level: int) -> list[str]:
     return lines
 
 
-def markdown(groups, *, title: str | None = None) -> str:
-    """The export: one work (``title`` None) or all of them under ``title``."""
+def markdown(groups, *, title: str | None = None, audio=None) -> str:
+    """The export: one work (``title`` None) or all of them under ``title``. ``audio``:
+    ``[(work, marks, placements), ...]``, the audiobook bookmarks and clips (issue #81,
+    :mod:`lectern.audio_bookmarks`) shown under each work after its highlights."""
+    from lectern.audio_bookmarks import markdown_lines
+
+    works: dict[int, list] = {w.id: [w, pairs, None] for w, pairs in groups}
+    for w, marks, placed in audio or []:
+        works.setdefault(w.id, [w, [], None])[2] = (marks, placed)
+    ordered = sorted(works.values(), key=lambda p: (p[0].title.casefold(), p[0].id))
+
+    def one(work, pairs, marks, level: int) -> list[str]:
+        out = _work_md(work, pairs, level)
+        return out + markdown_lines(*marks, level) if marks else out
+
     if title is None:
-        lines = _work_md(*groups[0], 1) if groups else []
+        lines = one(*ordered[0], 1) if ordered else []
     else:
         lines = [f"# {title}", ""]
-        for work, pairs in groups:
-            lines += _work_md(work, pairs, 2)
+        for work, pairs, marks in ordered:
+            lines += one(work, pairs, marks, 2)
     return "\n".join(lines).rstrip() + "\n"
 
 

@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { MarkList } from "../components/AudioBookmarks";
 import { EmptyState } from "../components/EmptyState";
 import { Close, Download, Highlighter, Quote as QuoteIcon, Search as SearchIcon } from "../components/Icons";
 import { QuoteFeed } from "../components/QuoteFeed";
 import { PageTitle } from "../components/Shell";
 import { ApiError, get } from "../lib/api";
+import type { AudioBookmark, AudioHit, SearchWithAudio, SummaryWithAudio } from "../lib/audiobookmarks";
 import { annotationWhere, type HighlightFilters, highlightHitPath, highlightsQuery } from "../lib/annotations";
 import { useStore } from "../lib/store";
-import type { AnnotationsSummary, HighlightHit, HighlightSearch } from "../lib/types";
+import type { HighlightHit, Work } from "../lib/types";
 
 const LIMIT = 200;
 const DEBOUNCE_MS = 250;
@@ -18,7 +20,7 @@ function Marked({ parts, text }: { parts: [string, boolean][] | null; text: stri
   return <>{parts.map(([t, m], k) => (m ? <mark key={k}>{t}</mark> : <span key={k}>{t}</span>))}</>;
 }
 
-/** All your KOReader highlights and notes, searched and filtered by book, author, tag, and date,
+/** All your KOReader highlights and notes, and your audiobook bookmarks and clips, searched and filtered by book, author, tag, and date,
  * with the Markdown export of what is shown (docs/koreader-plugin.md#searching-your-highlights).
  * The search and filters live in the URL, so a filtered view can be bookmarked. `view=quotes`
  * shows them as the quotes feed instead (components/QuoteFeed.tsx, issue #83). */
@@ -27,14 +29,18 @@ export function HighlightsPage() {
   const [params, setParams] = useSearchParams();
   const filters = useMemo(() => Object.fromEntries(KEYS.map((k) => [k, params.get(k) ?? ""])) as Required<HighlightFilters>, [params]);
   const [typed, setTyped] = useState(filters.q);
-  const [summary, setSummary] = useState<AnnotationsSummary | null>(null);
-  const [data, setData] = useState<HighlightSearch | null>(null);
+  const [summary, setSummary] = useState<SummaryWithAudio | null>(null);
+  const [data, setData] = useState<SearchWithAudio | null>(null);
   const [error, setError] = useState<string | null>(null);
   const query = highlightsQuery(filters);
   const quotes = params.get("view") === "quotes";
+  // Highlights and audio marks together (issue #81).
+  const all = (summary?.total ?? 0) + (summary?.audio_total ?? 0);
+  const audioHits = data?.audio ?? [];
+  const shown = (data?.total ?? 0) + (data?.audio_total ?? 0);
 
   useEffect(() => {
-    get<AnnotationsSummary>("/api/annotations").then(setSummary).catch((e) => setError((e as Error).message));
+    get<SummaryWithAudio>("/api/annotations").then(setSummary).catch((e) => setError((e as Error).message));
   }, []);
 
   const set = (next: HighlightFilters) => setParams(highlightsQuery({ ...filters, ...next }), { replace: true });
@@ -48,9 +54,9 @@ export function HighlightsPage() {
   }, [typed]);
 
   useEffect(() => {
-    if (!summary?.total || quotes) return;
+    if (!all || quotes) return;
     let live = true;
-    get<HighlightSearch>(`/api/annotations/search?${query}${query ? "&" : ""}limit=${LIMIT}&partial=false`)
+    get<SearchWithAudio>(`/api/annotations/search?${query}${query ? "&" : ""}limit=${LIMIT}&partial=false`)
       .then((d) => {
         if (!live) return;
         setData(d);
@@ -60,7 +66,7 @@ export function HighlightsPage() {
     return () => {
       live = false;
     };
-  }, [query, summary?.total, quotes]);
+  }, [query, all, quotes]);
 
   const books = summary?.works ?? [];
   const authors = useMemo(() => [...new Set(books.map((w) => w.author).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [books]);
@@ -82,12 +88,12 @@ export function HighlightsPage() {
         </div>
       )}
       {summary && summary.total > 0 && quotes && <QuoteFeed books={summary.works} />}
-      {summary && summary.total === 0 && (
+      {summary && all === 0 && (
         <EmptyState icon={<Highlighter />} title="No highlights yet" action={<Link className="btn" to="/app/devices">Set up KOReader</Link>}>
-          Passages you highlight in KOReader, and the notes you add to them, show up here and on each book once the Lectern plugin syncs.
+          Passages you highlight in KOReader, and the notes you add to them, show up here and on each book once the Lectern plugin syncs. So do the bookmarks and clips you make while listening to an audiobook.
         </EmptyState>
       )}
-      {summary && summary.total > 0 && !quotes && (
+      {summary && all > 0 && !quotes && (
         <div className="stack">
           <div className="filter-bar highlights-filters" role="search" aria-label="Highlights">
             <div className="filter-input">
@@ -145,13 +151,13 @@ export function HighlightsPage() {
             <div className="row highlights-head">
               <span className="hint" role="status">
                 {filtered
-                  ? `${data.total} of ${summary.total} ${summary.total === 1 ? "highlight" : "highlights"}`
-                  : `${summary.total} ${summary.total === 1 ? "highlight" : "highlights"} in ${books.length} ${books.length === 1 ? "book" : "books"}`}
+                  ? `${shown} of ${all} ${summary.audio_total ? "highlights and audio bookmarks" : all === 1 ? "highlight" : "highlights"}`
+                  : `${summary.total} ${summary.total === 1 ? "highlight" : "highlights"}${summary.audio_total ? ` and ${summary.audio_total} audio ${summary.audio_total === 1 ? "bookmark" : "bookmarks"}` : ""} in ${books.length} ${books.length === 1 ? "book" : "books"}`}
                 {data.truncated && ` · showing the first ${data.results.length}`}
               </span>
               <span className="row">
                 {filtered && <button className="btn sm ghost" onClick={clear}>Clear filters</button>}
-                {data.total > 0 && (
+                {shown > 0 && (
                   <a className="btn sm" href={exportUrl} download>
                     <Download /> {filtered ? "Export these as Markdown" : "Export all as Markdown"}
                   </a>
@@ -159,7 +165,7 @@ export function HighlightsPage() {
               </span>
             </div>
           )}
-          {data && data.total === 0 && (
+          {data && shown === 0 && (
             <EmptyState icon={<SearchIcon />} title={filters.q ? `No highlights match “${filters.q}”` : "No highlights match these filters"} action={<button className="btn" onClick={clear}>Clear filters</button>}>
               Try fewer words, another book, or a wider date range.
             </EmptyState>
@@ -170,6 +176,23 @@ export function HighlightsPage() {
                 <HighlightItem key={h.annotation.id} hit={h} to={highlightHitPath(h, works.find((w) => w.id === h.work_id))} />
               ))}
             </ul>
+          )}
+          {audioHits.length > 0 && (
+            <section aria-labelledby="hl-audio-h" className="audio-marks">
+              <h2 id="hl-audio-h" className="detail-h">Audio bookmarks</h2>
+              {groupByWork(audioHits).map(([h, list]) => {
+                const work = works.find((w) => w.id === h.work_id);
+                return (
+                  <div key={h.work_id} className="highlight-group">
+                    <div className="highlight-book">
+                      <Link to={`/app/library/${h.work_id}`}><strong>{h.title}</strong></Link>
+                      {h.author && <span className="hint"> · {h.author}</span>}
+                    </div>
+                    <MarkList work={work ?? ({ id: h.work_id, title: h.title, author: h.author, files: [] } as unknown as Work)} marks={list} />
+                  </div>
+                );
+              })}
+            </section>
           )}
         </div>
       )}
@@ -198,4 +221,15 @@ function HighlightItem({ hit, to }: { hit: HighlightHit; to: string }) {
       </div>
     </li>
   );
+}
+
+/** Audio hits under their book, in the order the server sent them. */
+function groupByWork(hits: AudioHit[]): [AudioHit, AudioBookmark[]][] {
+  const out = new Map<number, [AudioHit, AudioBookmark[]]>();
+  for (const h of hits) {
+    const g = out.get(h.work_id) ?? [h, []];
+    g[1].push(h.bookmark);
+    out.set(h.work_id, g);
+  }
+  return [...out.values()];
 }
