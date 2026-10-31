@@ -235,6 +235,10 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
                     <span className="t">{c.title}</span>
                     <span className="d tabular">{clock(c.end - c.start)}</span>
                   </button>
+                  <button className="btn sm ghost" onClick={() => {
+                    const track = p.tracks.find((t) => t.offset_s <= c.start && t.offset_s + t.duration_s > c.start);
+                    if (track) enqueueListening(w.id, track.id, c.start - track.offset_s, c.end - track.offset_s).catch((e) => toast((e as Error).message, "error"));
+                  }} aria-label={`Add ${c.title} to Up next`}>Add</button>
                 </li>
               );
             })}

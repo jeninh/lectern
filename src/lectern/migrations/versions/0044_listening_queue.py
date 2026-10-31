@@ -22,6 +22,8 @@ def upgrade() -> None:
         sa.Column("user_id", sa.Integer(), nullable=False),
         sa.Column("work_id", sa.Integer(), nullable=False),
         sa.Column("track_id", sa.Integer(), nullable=True),
+        sa.Column("chapter_start_s", sa.Float(), nullable=True),
+        sa.Column("chapter_end_s", sa.Float(), nullable=True),
         sa.Column("position", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -30,7 +32,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["work_id"], ["works.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["track_id"], ["audio_tracks.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("user_id", "work_id", "track_id", name="uq_listening_queue_item"),
+        sa.UniqueConstraint(
+            "user_id", "work_id", "track_id", "chapter_start_s", name="uq_listening_queue_item"
+        ),
     )
     op.create_index("ix_listening_queue_items_user_id", "listening_queue_items", ["user_id"])
     op.create_index("ix_listening_queue_items_work_id", "listening_queue_items", ["work_id"])
@@ -45,9 +49,17 @@ def upgrade() -> None:
         unique=True,
         sqlite_where=sa.text("track_id IS NULL"),
     )
+    op.create_table(
+        "listening_queue_states",
+        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("user_id"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("listening_queue_states")
     op.drop_index("uq_listening_queue_whole_work", table_name="listening_queue_items")
     op.drop_index("ix_listening_queue_items_user_position", table_name="listening_queue_items")
     op.drop_index("ix_listening_queue_items_track_id", table_name="listening_queue_items")

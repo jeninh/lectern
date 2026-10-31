@@ -212,9 +212,13 @@ export interface ListeningQueueItem {
   work: Work;
   track_id: number | null;
   track_position: number | null;
+  chapter_start_s: number | null;
+  chapter_end_s: number | null;
 }
 
 export interface ListeningQueue {
+  /** Incremented for every mutation; clients use it to avoid stale writes winning. */
+  version: number;
   items: ListeningQueueItem[];
 }
 

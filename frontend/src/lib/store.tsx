@@ -4,6 +4,7 @@ import { isOnline, probe, subscribe as onNetwork } from "./offline/net";
 import { bindOwner, checkFresh, clearDevice, listBooks, onChange as onOfflineChange, ownerSnapshot, revalidate, type OfflineBook } from "./offline/store";
 import { finishSignOut, pendingSignOut } from "./offline/signout";
 import { flush, refreshSyncState, registerWorker } from "./offline/sync";
+import { flushListeningQueue } from "./listeningQueue";
 import { useLocalStorage, useVisiblePolling } from "./hooks";
 import type { AppNotification, ImportInfo, Me, Preferences, Shelf, Work } from "./types";
 import { ACCEPT, filesFromDataTransfer, groupFiles, httpTransport, localStore, UploadManager, workerHasher, type PathedFile, type UploadItem } from "./uploads";
@@ -269,6 +270,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!isOnline()) return;
     await refreshMe().catch(() => {});
     await flush().catch(() => {});
+    await flushListeningQueue().catch(() => {});
     try {
       const { removed } = await revalidate();
       if (removed.length) toast(`Removed from this device, no longer available to you: ${removed.join(", ")}.`, "info");
@@ -287,7 +289,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!me) return;
     reconnect();
-    const onFocus = () => (isOnline() ? flush().catch(() => {}) : probe());
+    const onFocus = () => (isOnline() ? Promise.all([flush(), flushListeningQueue()]).catch(() => {}) : probe());
     const onVisible = () => !document.hidden && onFocus();
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisible);

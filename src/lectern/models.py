@@ -540,7 +540,9 @@ class ListeningQueueItem(Base):
 
     __tablename__ = "listening_queue_items"
     __table_args__ = (
-        UniqueConstraint("user_id", "work_id", "track_id", name="uq_listening_queue_item"),
+        UniqueConstraint(
+            "user_id", "work_id", "track_id", "chapter_start_s", name="uq_listening_queue_item"
+        ),
         Index("ix_listening_queue_items_user_position", "user_id", "position"),
         Index(
             "uq_listening_queue_whole_work",
@@ -559,9 +561,23 @@ class ListeningQueueItem(Base):
     track_id: Mapped[int | None] = mapped_column(
         ForeignKey("audio_tracks.id", ondelete="CASCADE"), default=None, index=True
     )
+    # A selected chapter may be a range inside one audio file; nulls mean the whole work.
+    chapter_start_s: Mapped[float | None] = mapped_column(Float, default=None)
+    chapter_end_s: Mapped[float | None] = mapped_column(Float, default=None)
     position: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class ListeningQueueState(Base):
+    """The compare-and-set version for one person's playback queue."""
+
+    __tablename__ = "listening_queue_states"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class ReadingState(Base):

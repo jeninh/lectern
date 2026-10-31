@@ -8,7 +8,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { get, post } from "./api";
 import { getBook, orOffline } from "./offline/store";
 import { savePosition } from "./offline/sync";
-import { listeningQueue, removeListening } from "./listeningQueue";
+import { consumeListening, listeningQueue } from "./listeningQueue";
 import { pickHandoff } from "./handoff";
 import { useLocalStorage } from "./hooks";
 import { legacyRate, pickRate, sleepRewind, sleepStep, type Sleep } from "./playback";
@@ -45,7 +45,7 @@ interface Player {
   dataSaverDevice: boolean | null;
   usingLow: boolean;
   handoff: HandoffCandidate | null;
-  open: (work: Work, opts?: { autoplay?: boolean; at?: number; endTrackPosition?: number | null }) => Promise<void>;
+  open: (work: Work, opts?: { autoplay?: boolean; at?: number; endAt?: number | null }) => Promise<void>;
   close: () => void;
   toggle: () => void;
   play: () => void;
@@ -124,6 +124,9 @@ export function trackAt(tracks: Track[], t: number): number {
   return i;
 }
 
+/** A queued chapter ends on its own boundary, not at the containing audio file's end. */
+export const chapterEndReached = (t: number, endAt: number | null) => endAt != null && t >= endAt;
+
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const { deviceName, toast, me, online, setPreference } = useStore();
   const audio = useRef<HTMLAudioElement | null>(null);
@@ -145,7 +148,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [clip, setClip] = useState<{ workId: number; start: number; end: number } | null>(null);
   const clipRef = useRef(clip);
   clipRef.current = clip;
-  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate, endTrackPosition: null as number | null });
+  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate, endAt: null as number | null, ending: false });
 
   const duration = useMemo(() => tracks.reduce((s, tr) => s + tr.duration_s, 0), [tracks]);
   const chapters = useMemo(() => chaptersOf(tracks), [tracks]);
@@ -215,7 +218,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
 
   const open = useCallback(
-    async (w: Work, opts: { autoplay?: boolean; at?: number; endTrackPosition?: number | null } = {}) => {
+    async (w: Work, opts: { autoplay?: boolean; at?: number; endAt?: number | null } = {}) => {
       if (state.current.work && state.current.work.id !== w.id) await save();
       setLoading(true);
       try {
@@ -227,7 +230,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         ]);
         if (!tr.tracks.length) throw new Error("This book has no audio yet.");
         state.current.local = !!local;
-        state.current.endTrackPosition = opts.endTrackPosition ?? null;
+        state.current.endAt = opts.endAt ?? null;
+        state.current.ending = false;
         state.current.work = w;
         state.current.tracks = tr.tracks;
         setWork(w);
@@ -374,13 +378,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const queue = await listeningQueue();
       const next = queue.items[0];
       if (!next) return;
-      await removeListening(next.id);
-      // A single queued chapter intentionally starts at its file boundary rather than resume.
-      await open(next.work, { autoplay: true, ...(next.track_position != null ? { at: 0, endTrackPosition: next.track_position } : {}) });
-      if (next.track_position != null) {
-        const loaded = state.current.tracks.find((x) => x.position === next.track_position);
-        if (loaded) seek(loaded.offset_s);
-      }
+      await consumeListening(next.id);
+      // A single queued chapter starts and ends at its selected boundaries rather than resuming.
+      await open(next.work, { autoplay: true, ...(next.chapter_start_s != null ? { at: next.chapter_start_s, endAt: next.chapter_end_s } : {}) });
     } catch {
       // Playback has ended normally; a later queue refresh can retry the next action.
     }
@@ -417,7 +417,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const el = audio.current!;
     const onTime = () => {
       const tr = state.current.tracks[state.current.index];
+      const endAt = state.current.endAt;
       if (tr) setT(tr.offset_s + el.currentTime);
+      if (tr && endAt != null && chapterEndReached(tr.offset_s + el.currentTime, endAt) && !state.current.ending) {
+        state.current.ending = true;
+        el.pause();
+        save(endAt).finally(() => advanceQueue());
+        return;
+      }
       const c = clipRef.current;
       if (tr && c && c.workId === state.current.work?.id && tr.offset_s + el.currentTime >= c.end) {
         el.pause();
@@ -446,7 +453,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
     const onEnded = () => {
       const i = state.current.index + 1;
-      if (i < state.current.tracks.length && state.current.tracks[state.current.index].position !== state.current.endTrackPosition) load(i, 0, true);
+      if (i < state.current.tracks.length && state.current.endAt == null) load(i, 0, true);
       else {
         setPlaying(false);
         save(duration).finally(() => advanceQueue());

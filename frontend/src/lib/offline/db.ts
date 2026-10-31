@@ -4,8 +4,8 @@
 // (routes.ts BOOKS_CACHE). Everything here is deleted on sign-out.
 
 const NAME = "lectern-offline";
-const VERSION = 1;
-export const STORES = ["meta", "books", "readalong", "queue"] as const;
+const VERSION = 2;
+export const STORES = ["meta", "books", "readalong", "queue", "listening-queue"] as const;
 export type StoreName = (typeof STORES)[number];
 
 let opening: Promise<IDBDatabase> | null = null;
