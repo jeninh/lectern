@@ -8,6 +8,11 @@ vi.mock("../offline/db", () => ({
     all: async () => [...env.rows.values()],
     put: async (_store: string, key: string, value: unknown) => void env.rows.set(key, value),
     del: async (_store: string, key: string) => void env.rows.delete(key),
+    next: async (_store: string, key: string) => {
+      const next = (env.rows.get(key) as number | undefined ?? 0) + 1;
+      env.rows.set(key, next);
+      return next;
+    },
   },
 }));
 vi.mock("../api", async (orig) => ({ ...(await orig<typeof import("../api")>()), get: env.get, post: env.post }));
@@ -53,6 +58,39 @@ describe("offline listening queue", () => {
     await flushListeningQueue();
     env.get.mockRejectedValueOnce(new OfflineError());
     expect(await listeningQueue()).toEqual({ version: 5, items: [item(3)] });
+  });
+
+  it("replays offline mutations in creation order, not UUID key order", async () => {
+    vi.stubGlobal("crypto", { randomUUID: vi.fn().mockReturnValueOnce("z-enqueue").mockReturnValueOnce("a-clear") });
+    env.post.mockRejectedValue(new OfflineError());
+    await enqueueListening(7);
+    await clearListening();
+
+    // getAll can return keys in any order. Reverse UUID order must not resurrect the item.
+    const rows = [...env.rows.entries()].reverse();
+    env.rows.clear();
+    for (const [key, value] of rows) env.rows.set(key, value);
+    env.post.mockReset();
+    env.post.mockResolvedValueOnce({ version: 1, items: [item(1, 7)] });
+    env.post.mockResolvedValueOnce({ version: 2, items: [] });
+    await flushListeningQueue();
+
+    expect(env.post.mock.calls.map(([, body]) => (body as { operation: string }).operation)).toEqual(["enqueue", "clear"]);
+    env.get.mockRejectedValueOnce(new OfflineError());
+    expect(await listeningQueue()).toEqual({ version: 2, items: [] });
+  });
+
+  it("orders legacy ties by UUID, then later enqueue, remove, consume, and reorder by sequence", async () => {
+    env.rows.set("z-legacy", { id: "z-legacy", operation: "reorder", item_ids: [] });
+    env.rows.set("a-legacy", { id: "a-legacy", operation: "reorder", item_ids: [] });
+    env.rows.set("enqueue", { id: "enqueue", sequence: 4, operation: "enqueue", work_id: 7, track_id: null });
+    env.rows.set("remove", { id: "remove", sequence: 5, operation: "remove", item_id: 3 });
+    env.rows.set("consume", { id: "consume", sequence: 6, operation: "remove", item_id: 4 });
+    env.rows.set("reorder", { id: "reorder", sequence: 7, operation: "reorder", item_ids: [2, 1] });
+    env.post.mockResolvedValue({ version: 1, items: [] });
+    await flushListeningQueue();
+
+    expect(env.post.mock.calls.map(([, body]) => (body as { id: string }).id)).toEqual(["a-legacy", "z-legacy", "enqueue", "remove", "consume", "reorder"]);
   });
 });
 

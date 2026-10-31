@@ -379,8 +379,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const next = queue.items[0];
       if (!next) return;
       await consumeListening(next.id);
-      // A single queued chapter starts and ends at its selected boundaries rather than resuming.
-      await open(next.work, { autoplay: true, ...(next.chapter_start_s != null ? { at: next.chapter_start_s, endAt: next.chapter_end_s } : {}) });
+      // Whole books restart when queued; a single queued chapter uses its selected bounds.
+      await open(next.work, { autoplay: true, ...(next.chapter_start_s != null ? { at: next.chapter_start_s, endAt: next.chapter_end_s } : { at: 0 }) });
     } catch {
       // Playback has ended normally; a later queue refresh can retry the next action.
     }

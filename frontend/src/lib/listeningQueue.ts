@@ -11,9 +11,10 @@ type Operation =
   | { operation: "remove"; item_id: number }
   | { operation: "clear"; item_ids: number[] }
   | { operation: "reorder"; item_ids: number[] };
-type Mutation = Operation & { id: string; base_version: number };
+type Mutation = Operation & { id: string; base_version: number; sequence?: number };
 
 const STATE = "state";
+const SEQUENCE = "sequence";
 const changed = () => window.dispatchEvent(new Event("lectern:listening-queue"));
 const key = () => crypto.randomUUID();
 
@@ -32,7 +33,18 @@ function optimistic(queue: ListeningQueue, op: Operation): ListeningQueue {
   return { version: queue.version + 1, items };
 }
 async function send(m: Mutation): Promise<ListeningQueue> {
-  return post<ListeningQueue>("/api/listening-queue/mutations", m, { "idempotency-key": m.id });
+  const { sequence: _sequence, ...body } = m;
+  return post<ListeningQueue>("/api/listening-queue/mutations", body, { "idempotency-key": m.id });
+}
+function isMutation(value: unknown): value is Mutation {
+  return typeof value === "object" && value != null && "id" in value && "operation" in value;
+}
+function pending(rows: unknown[]): Mutation[] {
+  // Older installs have UUID-keyed records without a sequence. They still replay before newly
+  // created records, and their UUID tie-breaker makes that upgrade path deterministic.
+  return rows.filter(isMutation).sort((a, b) =>
+    (a.sequence ?? -1) - (b.sequence ?? -1) || a.id.localeCompare(b.id),
+  );
 }
 
 /** The current server queue, falling back to the per-user device cache while offline. */
@@ -63,15 +75,15 @@ async function run(op: Operation): Promise<ListeningQueue> {
   } catch (e) {
     if (e instanceof ApiError && e.code === "queue_changed") return rebase(m);
     if (!(e instanceof OfflineError)) throw e;
-    await idb.put("listening-queue", m.id, m);
+    const queued = { ...m, sequence: await idb.next("listening-queue", SEQUENCE) };
+    await idb.put("listening-queue", m.id, queued);
     return remember(optimistic(before, op));
   }
 }
 
 /** Replay edits one at a time. A network failure leaves the exact mutation and key intact. */
 export async function flushListeningQueue(): Promise<void> {
-  const pending = (await idb.all<Mutation>("listening-queue")).filter((x) => x.id !== STATE);
-  for (const m of pending) {
+  for (const m of pending(await idb.all("listening-queue"))) {
     try {
       await remember(await send(m));
       await idb.del("listening-queue", m.id);

@@ -59,6 +59,21 @@ export const idb = {
   put: (store: StoreName, key: IDBValidKey, value: unknown) => tx(store, "readwrite", (s) => s.put(value, key)).then(() => undefined),
   del: (store: StoreName, key: IDBValidKey) => tx(store, "readwrite", (s) => s.delete(key)).then(() => undefined),
   clear: (store: StoreName) => tx(store, "readwrite", (s) => s.clear()).then(() => undefined),
+  /** Allocate a durable, per-store sequence in the same transaction as its increment. */
+  next: async (store: StoreName, key: IDBValidKey): Promise<number> => {
+    const db = await open();
+    const t = db.transaction(store, "readwrite");
+    const s = t.objectStore(store);
+    const current = await wrap(s.get(key) as IDBRequest<unknown>);
+    const next = typeof current === "number" ? current + 1 : 1;
+    s.put(next, key);
+    await new Promise<void>((resolve, reject) => {
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error("aborted"));
+    });
+    return next;
+  },
 };
 
 /** Remove the whole database (sign-out). Closes our connection first so the delete is not blocked. */
