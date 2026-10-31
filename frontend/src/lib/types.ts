@@ -205,6 +205,19 @@ export interface Work {
   shelf_ids?: number[];
 }
 
+/** A private, per-user playback queue entry. `track_id` limits it to one audio file/chapter. */
+export interface ListeningQueueItem {
+  id: number;
+  position: number;
+  work: Work;
+  track_id: number | null;
+  track_position: number | null;
+}
+
+export interface ListeningQueue {
+  items: ListeningQueueItem[];
+}
+
 export interface SyncKey {
   id: number;
   label: string;

@@ -8,6 +8,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { get, post } from "./api";
 import { getBook, orOffline } from "./offline/store";
 import { savePosition } from "./offline/sync";
+import { listeningQueue, removeListening } from "./listeningQueue";
 import { pickHandoff } from "./handoff";
 import { useLocalStorage } from "./hooks";
 import { legacyRate, pickRate, sleepRewind, sleepStep, type Sleep } from "./playback";
@@ -36,13 +37,15 @@ interface Player {
   /** The person's speed for books not played yet. */
   defaultRate: number;
   sleep: Sleep;
+  /** Session-only: do not move to Up next after this natural completion. */
+  stopAfterCurrent: boolean;
   /** Whether data saver is in effect here: this device's choice, else the account's default. */
   dataSaver: boolean;
   /** This device's own choice, or null when it follows the account (Security page). */
   dataSaverDevice: boolean | null;
   usingLow: boolean;
   handoff: HandoffCandidate | null;
-  open: (work: Work, opts?: { autoplay?: boolean; at?: number }) => Promise<void>;
+  open: (work: Work, opts?: { autoplay?: boolean; at?: number; endTrackPosition?: number | null }) => Promise<void>;
   close: () => void;
   toggle: () => void;
   play: () => void;
@@ -58,6 +61,7 @@ interface Player {
   /** Make the current speed the default for books not played yet. */
   setDefaultRate: () => void;
   setSleep: (s: "chapter" | number | null) => void;
+  setStopAfterCurrent: (v: boolean) => void;
   /** Choose for this device; null follows the account's default again. */
   setDataSaver: (v: boolean | null) => Promise<void>;
   nextChapter: () => void;
@@ -135,12 +139,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [dataSaverDevice, setDataSaverState] = useLocalStorage<boolean | null>(DATA_SAVER_KEY, null);
   const dataSaver = dataSaverDevice ?? !!me?.preferences.data_saver;
   const [sleep, setSleepState] = useState<Sleep>(null);
+  const [stopAfterCurrent, setStopAfterCurrent] = useState(false);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [usingLow, setUsingLow] = useState(false);
   const [clip, setClip] = useState<{ workId: number; start: number; end: number } | null>(null);
   const clipRef = useRef(clip);
   clipRef.current = clip;
-  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate });
+  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate, endTrackPosition: null as number | null });
 
   const duration = useMemo(() => tracks.reduce((s, tr) => s + tr.duration_s, 0), [tracks]);
   const chapters = useMemo(() => chaptersOf(tracks), [tracks]);
@@ -210,7 +215,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
 
   const open = useCallback(
-    async (w: Work, opts: { autoplay?: boolean; at?: number } = {}) => {
+    async (w: Work, opts: { autoplay?: boolean; at?: number; endTrackPosition?: number | null } = {}) => {
       if (state.current.work && state.current.work.id !== w.id) await save();
       setLoading(true);
       try {
@@ -222,6 +227,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         ]);
         if (!tr.tracks.length) throw new Error("This book has no audio yet.");
         state.current.local = !!local;
+        state.current.endTrackPosition = opts.endTrackPosition ?? null;
         state.current.work = w;
         state.current.tracks = tr.tracks;
         setWork(w);
@@ -362,6 +368,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setHandoff(null);
   }, [save]);
 
+  const advanceQueue = useCallback(async () => {
+    if (stopAfterCurrent || sleep) return;
+    try {
+      const queue = await listeningQueue();
+      const next = queue.items[0];
+      if (!next) return;
+      await removeListening(next.id);
+      // A single queued chapter intentionally starts at its file boundary rather than resume.
+      await open(next.work, { autoplay: true, ...(next.track_position != null ? { at: 0, endTrackPosition: next.track_position } : {}) });
+      if (next.track_position != null) {
+        const loaded = state.current.tracks.find((x) => x.position === next.track_position);
+        if (loaded) seek(loaded.offset_s);
+      }
+    } catch {
+      // Playback has ended normally; a later queue refresh can retry the next action.
+    }
+  }, [open, seek, sleep, stopAfterCurrent]);
+
   // Sleep timer: fade over the last 10 s, then pause and rewind to the start of the sentence
   // being heard (exact once aligned; otherwise the last pause in the audio).
   useEffect(() => {
@@ -422,8 +446,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
     const onEnded = () => {
       const i = state.current.index + 1;
-      if (i < state.current.tracks.length) load(i, 0, true);
-      else setPlaying(false);
+      if (i < state.current.tracks.length && state.current.tracks[state.current.index].position !== state.current.endTrackPosition) load(i, 0, true);
+      else {
+        setPlaying(false);
+        save(duration).finally(() => advanceQueue());
+      }
     };
     const onError = () => {
       const tr = state.current.tracks[state.current.index];
@@ -458,7 +485,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       el.removeEventListener("canplay", onCan);
       document.removeEventListener("visibilitychange", onHide);
     };
-  }, [save, load]);
+  }, [save, load, advanceQueue, duration]);
 
   // Media Session: lock screen, headphones, car controls.
   useEffect(() => {
@@ -528,8 +555,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [handoff, work, t]);
 
   const value = useMemo<Player>(
-    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
-    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
+    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, stopAfterCurrent, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setStopAfterCurrent, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
+    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, stopAfterCurrent, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
   );
   void index;
   return (

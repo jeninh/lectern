@@ -535,6 +535,35 @@ class WorkProgress(Base):
     speed: Mapped[float | None] = mapped_column(Float, default=None)
 
 
+class ListeningQueueItem(Base):
+    """One person's ordered playback item (issue #82), separate from device and job queues."""
+
+    __tablename__ = "listening_queue_items"
+    __table_args__ = (
+        UniqueConstraint("user_id", "work_id", "track_id", name="uq_listening_queue_item"),
+        Index("ix_listening_queue_items_user_position", "user_id", "position"),
+        Index(
+            "uq_listening_queue_whole_work",
+            "user_id",
+            "work_id",
+            unique=True,
+            sqlite_where=text("track_id IS NULL"),
+        ),
+        CheckConstraint("position >= 0", name="ck_listening_queue_position"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    # Null means the whole book; a track means play only that chapter/file, then advance.
+    track_id: Mapped[int | None] = mapped_column(
+        ForeignKey("audio_tracks.id", ondelete="CASCADE"), default=None, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
 class ReadingState(Base):
     """How far one person is with one work, whatever they read or listened on (migration
     0018, ``lectern.reading_state``): the fraction from the latest position written to
