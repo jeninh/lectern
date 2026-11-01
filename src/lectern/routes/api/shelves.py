@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from lectern import auto_shelves, filters
+from lectern import auto_shelves, filters, guests
 from lectern.access import (
     MAX_DEPTH,
     can_create_shelf,
@@ -78,6 +78,7 @@ class Tree:
 
     def __init__(self, db: Session, user: User, *, private_reviews: bool = True) -> None:
         self.db, self.user = db, user
+        self.guest = user.guest is not None
         self.private_reviews = private_reviews
         self.shelves, self.perms = shelf_perms(db, user)
         self.children: dict[int | None, list[Shelf]] = {}
@@ -160,12 +161,13 @@ class Tree:
             "name": shelf.name,
             "parent_id": visible_parent(shelf, self.perms),
             "path": [s.name for s in self.path(shelf)],
-            "owner": owners.get(shelf.owner_id),
-            "owner_id": shelf.owner_id,
+            # A guest is not told who owns a shelf or how many people it is shared with.
+            "owner": None if self.guest else owners.get(shelf.owner_id),
+            "owner_id": None if self.guest else shelf.owner_id,
             "permission": self.perms[shelf.id],
             "work_count": self.counts().get(shelf.id, 0),
             "shelf_count": len(self.children.get(shelf.id, [])),
-            "grant_count": self.grants.get(shelf.id, 0),
+            "grant_count": 0 if self.guest else self.grants.get(shelf.id, 0),
             "smart": shelf.rule is not None,
             "auto": self.auto_json(shelf),
             # The rule is for whoever manages the shelf: it may name shelves, devices, or
@@ -853,6 +855,13 @@ def put_grant(
     if user.role == Role.READER and auth.user.role != Role.OWNER:
         # What a reader may see is the owner's decision alone.
         raise HTTPException(status.HTTP_403_FORBIDDEN, "only_owner_grants_readers")
+    if user.guest is not None:
+        # A guest only ever views, and only hand-made shelves (their contents are computed
+        # from the whole library on smart and generated ones).
+        if body.permission != "view":
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "guest_view_only")
+        if not guests.grantable_shelf(shelf):
+            raise HTTPException(status.HTTP_409_CONFLICT, "guest_shelf_kind")
     grant = db.get(ShelfGrant, (shelf.id, user_id))
     if grant is None:
         grant = ShelfGrant(shelf_id=shelf.id, user_id=user_id, granted_by=auth.user.id,

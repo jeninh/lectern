@@ -23,6 +23,11 @@ sections:
         description: Private HTTPS on your tailnet with nothing published on the LAN or the Internet.
         icon: shield
         audience: members
+      - file: guests.md
+        title: Guest accounts
+        description: Read-only guests who see only the shelves you pick, what they can and cannot reach, and how to remove them.
+        icon: shield
+        audience: owner
 
   - title: Devices
     docs:

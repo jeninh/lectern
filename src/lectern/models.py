@@ -97,6 +97,29 @@ class User(Base):
     app_passwords: Mapped[list[AppPassword]] = relationship(
         back_populates="user", cascade="all, delete"
     )
+    # Migration 0045: set for a guest (a reader with limits, lectern.guests); ``None`` otherwise.
+    guest: Mapped[GuestProfile | None] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False, lazy="joined"
+    )
+
+
+class GuestProfile(Base):
+    """What makes a reader a guest (issue #77): an optional end date and the limits the owner
+    chose. Guests only ever hold VIEW grants and reach the allowlisted routes in
+    ``lectern.guests``; everything else about them is an ordinary reader's."""
+
+    __tablename__ = "guest_profiles"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    # After this the account cannot sign in or use any credential; ``None``: no end date.
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # Downloads, app passwords, and OPDS. Off: web reading and listening only.
+    allow_opds: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    user: Mapped[User] = relationship(back_populates="guest")
 
 
 class Passkey(Base):
@@ -716,6 +739,9 @@ class Invite(Base):
         ForeignKey("users.id", ondelete="SET NULL"), default=None
     )
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    # Migration 0045: a guest invite, ``{"shelf_ids": [...], "expires_at": iso | None,
+    # "allow_opds": bool}``; ``None``: an ordinary invite.
+    guest: Mapped[dict | None] = mapped_column(JSON, default=None)
 
     def usable_at(self, now: datetime) -> bool:
         return self.used_at is None and self.revoked_at is None and now < self.expires_at

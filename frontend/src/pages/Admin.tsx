@@ -10,7 +10,7 @@ import { PageTitle } from "../components/Shell";
 import { del, get, post, put } from "../lib/api";
 import { absoluteTime, bytes, relativeTime } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { GenreMap, Invite, User } from "../lib/types";
+import type { GenreMap, GuestRow, Invite, Shelf, User } from "../lib/types";
 import { CapForm } from "./Devices";
 import { ElevenLabsCard } from "../components/ElevenLabsCard";
 import { EmailInAdminCard } from "../components/EmailIn";
@@ -228,6 +228,7 @@ export function AdminPage() {
         )}
       </section>
       <InvitesCard />
+      <GuestsCard />
       <WorkersCard />
       <LibrarySettingsCard />
       <DataSaverCard />
@@ -342,7 +343,7 @@ function InvitesCard() {
             {invites.map((i) => (
               <tr key={i.id} className={i.state === "pending" ? "" : "revoked"}>
                 <td><strong>{i.note || `Invite #${i.id}`}</strong><div className="hint">by @{i.created_by} · {relativeTime(i.created_at)}</div></td>
-                <td><span className="badge">{i.role}</span></td>
+                <td><span className="badge">{i.guest ? "guest" : i.role}</span></td>
                 <td>
                   <span className={`badge ${STATE_BADGE[i.state]}`}>{i.state}</span>
                   <div className="hint">
@@ -367,12 +368,24 @@ function InviteForm({ onCreated }: { onCreated: (i: Invite) => void }) {
   const [note, setNote] = useState("");
   const [hours, setHours] = useState(72);
   const [err, setErr] = useState<string | null>(null);
+  const [guest, setGuest] = useState(false);
+  const [shelfIds, setShelfIds] = useState<number[]>([]);
+  const [endDate, setEndDate] = useState("");
+  const [allowOpds, setAllowOpds] = useState(true);
+  const shelves = useGuestShelves();
   return (
     <form
       onSubmit={async (e) => {
         e.preventDefault();
         try {
-          onCreated(await post<Invite>("/api/invites", { role, note, expires_in_hours: hours }));
+          onCreated(
+            await post<Invite>("/api/invites", {
+              role: guest ? "reader" : role,
+              note,
+              expires_in_hours: hours,
+              ...(guest ? { guest: { shelf_ids: shelfIds, expires_at: endDate ? new Date(`${endDate}T23:59:59`).toISOString() : null, allow_opds: allowOpds } } : {}),
+            }),
+          );
         } catch (ex) {
           setErr((ex as Error).message);
         }
@@ -381,12 +394,27 @@ function InviteForm({ onCreated }: { onCreated: (i: Invite) => void }) {
       {err && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{err}</div>}
       <label className="field"><span>Who is it for? (optional)</span><input className="input" value={note} onChange={(e) => setNote(e.target.value)} maxLength={128} placeholder="e.g. Sam’s tablet" data-autofocus /></label>
       <label className="field"><span>Role</span>
-        <select className="select" value={role} onChange={(e) => setRole(e.target.value as "member" | "reader")}>
+        <select className="select" value={guest ? "guest" : role} onChange={(e) => { setGuest(e.target.value === "guest"); if (e.target.value !== "guest") setRole(e.target.value as "member" | "reader"); }}>
+          <option value="guest">Guest — read-only, only the shelves you pick</option>
           <option value="reader">Reader — sees only shelves you share</option>
           <option value="member">Member — sees the whole library and can upload</option>
         </select>
       </label>
-      <label className="field"><span>Expires after</span>
+      {guest && (
+        <fieldset className="field">
+          <legend>Shelves the guest may see</legend>
+          {shelves.length === 0 && <div className="hint">Make a regular shelf first; smart and generated shelves cannot be shared with guests.</div>}
+          {shelves.map((s) => (
+            <label key={s.id} className="row" style={{ gap: 8 }}>
+              <input type="checkbox" checked={shelfIds.includes(s.id)} onChange={(e) => setShelfIds(e.target.checked ? [...shelfIds, s.id] : shelfIds.filter((x) => x !== s.id))} />
+              {s.path.join(" / ")}
+            </label>
+          ))}
+          <label className="field"><span>Access ends (optional)</span><input className="input" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></label>
+          <label className="row" style={{ gap: 8 }}><input type="checkbox" checked={allowOpds} onChange={(e) => setAllowOpds(e.target.checked)} /> Allow downloads and OPDS</label>
+        </fieldset>
+      )}
+      <label className="field"><span>Link expires after</span>
         <select className="select" value={hours} onChange={(e) => setHours(Number(e.target.value))}>
           <option value={24}>1 day</option>
           <option value={72}>3 days</option>
@@ -394,8 +422,60 @@ function InviteForm({ onCreated }: { onCreated: (i: Invite) => void }) {
           <option value={720}>30 days</option>
         </select>
       </label>
-      <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn primary"><Plus /> Create link</button></div>
+      <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn primary" disabled={guest && shelfIds.length === 0}><Plus /> Create link</button></div>
     </form>
+  );
+}
+
+/** Hand-made shelves a guest may be given (smart and generated ones are refused by the server). */
+function useGuestShelves(): Shelf[] {
+  const [shelves, setShelves] = useState<Shelf[]>([]);
+  useEffect(() => {
+    get<{ shelves: Shelf[] }>("/api/shelves").then((d) => setShelves(d.shelves.filter((s) => !s.smart && !s.auto))).catch(() => setShelves([]));
+  }, []);
+  return shelves;
+}
+
+function GuestsCard() {
+  const { toast } = useStore();
+  const [rows, setRows] = useState<GuestRow[] | null>(null);
+  const load = useCallback(() => get<{ guests: GuestRow[] }>("/api/admin/guests").then((d) => setRows(d.guests)), []);
+  useEffect(() => {
+    load().catch(() => setRows([]));
+  }, [load]);
+  const revoke = async (g: GuestRow) => {
+    try {
+      await post(`/api/admin/guests/${g.id}/revoke`, {});
+      toast(`Revoked @${g.username}`);
+      await load();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  };
+  return (
+    <section className="card" id="guests" aria-labelledby="guests-h" style={{ marginTop: 18 }}>
+      <h2 id="guests-h">Guests</h2>
+      <p className="sub">Read-only people who see only the shelves you picked. Invite one above; revoking signs them out everywhere.</p>
+      {rows === null ? (
+        <div className="hint">Loading…</div>
+      ) : rows.length === 0 ? (
+        <div className="hint">No guests yet.</div>
+      ) : (
+        <table className="list">
+          <thead><tr><th scope="col">Guest</th><th scope="col">Shelves</th><th scope="col">Last activity</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+            {rows.map((g) => (
+              <tr key={g.id} className={g.is_active && !g.expired ? "" : "revoked"}>
+                <td><strong>{g.display_name}</strong><div className="hint">@{g.username} · {!g.is_active ? "revoked" : g.expired ? "expired" : g.expires_at ? `until ${absoluteTime(g.expires_at)}` : "no end date"}{g.allow_opds ? "" : " · no downloads"}</div></td>
+                <td>{g.shelves.map((s) => s.name).join(", ") || "none"}</td>
+                <td>{g.last_activity_at ? relativeTime(g.last_activity_at) : "never"}</td>
+                <td style={{ textAlign: "right" }}>{g.is_active && <button className="btn sm danger" onClick={() => revoke(g)}>Revoke</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 
@@ -422,7 +502,7 @@ function InviteLink({ inv, onDone }: { inv: Invite; onDone: () => void }) {
         </button>
         <button className="btn primary" onClick={onDone} data-autofocus>Done</button>
       </div>
-      <p className="hint">{inv.role === "reader" ? "After they join, share shelves with them from Library → Shelves." : "Members see the whole library as soon as they join."}</p>
+      <p className="hint">{inv.guest ? "The guest sees only the shelves you picked, and nothing can be changed." : inv.role === "reader" ? "After they join, share shelves with them from Library → Shelves." : "Members see the whole library as soon as they join."}</p>
     </div>
   );
 }

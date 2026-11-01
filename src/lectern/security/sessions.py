@@ -8,6 +8,7 @@ from fastapi import Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
+from lectern import guests
 from lectern.config import Settings
 from lectern.models import Session, User, utcnow
 from lectern.security.proxy import resolve_client_ip
@@ -74,7 +75,7 @@ def load_session(db: DbSession, request: Request) -> tuple[Session, User] | None
     if row is None or row.revoked or row.expires_at <= utcnow():
         return None
     user = db.get(User, row.user_id)
-    if user is None or not user.is_active:
+    if not guests.account_usable(user):
         return None
     return row, user
 

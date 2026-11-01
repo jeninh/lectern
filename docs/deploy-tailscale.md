@@ -518,6 +518,35 @@ the Tailscale backup, first **remove the old `lectern` machine** on the Machines
 put a fresh auth key in `.env`: otherwise the new node is named `lectern-1`, the address
 changes, and passkeys (bound to the old name) stop working.
 
+## Guests
+
+Guest accounts (see [Guest accounts](guests.md)) are for friends and family who may read part of the library. Lectern enforces what a guest can see; the tailnet decides where a guest's devices can connect. Lectern never changes your tailnet: this section lists what you would change yourself, in the admin console, after checking your live policy (it is not stored in this repository).
+
+**How guests join.** Two ways, with different trade-offs:
+
+- *Node sharing* (recommended): share only the Lectern node with the guest's own Tailscale account. They stay in their own tailnet, see no other node of yours, and the share can be removed in one step. A shared-in node is reachable only on what the share and your policy allow, so the rule below still applies to it.
+- *Invite them to your tailnet* as a user whose devices carry a dedicated tag. This gives you one ACL source, but their devices become members of your tailnet, so everything depends on the policy being right.
+
+**Example policy** (adapt it; use Lectern's Tailscale address and port from `.env`, `8080` by default, or `443` if you serve through `tailscale serve`). This follows the pattern used for `tag:kindle`, limited to Lectern's address, for example `100.80.201.43:8080`:
+
+```jsonc
+"tagOwners": {
+  "tag:lectern-guest": ["autogroup:admin"]
+},
+"acls": [
+  // Guests may reach Lectern's web app and OPDS port and nothing else.
+  { "action": "accept", "src": ["tag:lectern-guest"], "dst": ["100.80.201.43:8080"] }
+  // No other rule may grant tag:lectern-guest anything: confirm that no
+  // autogroup:member or wildcard rule matches these devices.
+]
+```
+
+**Checks after applying.** From a guest device: Lectern loads; every other tailnet host and port is unreachable (try `tailscale ping` and `nc -vz <host> <port>` against a few); the guest sees no other nodes beyond what Tailscale shows by default.
+
+**Not over the LAN listener.** Guests do not get home Wi-Fi access: the LAN listener ([home network](home-network.md)) answers household e-readers only, and a guest's credentials are refused there like everywhere else outside the guest routes.
+
+**Removing a guest.** Revoke them in Admin → Guests, then remove the node share or the tag in Tailscale.
+
 ## Troubleshooting
 
 - **`required variable LECTERN_BASE_URL is missing a value`**: you ran Compose without
