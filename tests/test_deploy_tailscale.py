@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.test_compose_env import DEPRECATED_ALIASES
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / "deploy" / "tailscale"
@@ -263,7 +264,11 @@ def test_env_example_documents_every_compose_variable():
         for line in ENV_EXAMPLE.read_text().splitlines()
         if re.match(r"^[A-Z_]+=", line)
     }
-    assert used == documented
+    # Deprecated aliases stay passed through (test_compose_env checks how) but are not
+    # documented: .env.example names only the canonical key that replaces each one.
+    assert DEPRECATED_ALIASES <= used
+    assert not DEPRECATED_ALIASES & documented
+    assert used - DEPRECATED_ALIASES == documented
     assert "COMPOSE_FILE" not in documented
 
 

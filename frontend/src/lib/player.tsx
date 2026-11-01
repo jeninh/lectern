@@ -152,7 +152,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [clip, setClip] = useState<{ workId: number; start: number; end: number } | null>(null);
   const clipRef = useRef(clip);
   clipRef.current = clip;
-  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate, endAt: null as number | null, ending: false });
+  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate, endAt: null as number | null, ending: false, waitAt: 0 });
 
   const duration = useMemo(() => tracks.reduce((s, tr) => s + tr.duration_s, 0), [tracks]);
   const chapters = useMemo(() => chaptersOf(tracks), [tracks]);
@@ -423,7 +423,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // Element events.
   useEffect(() => {
     const el = audio.current!;
+    // "Loading" runs from `waiting` until playback moves again. `canplay` usually says so, but
+    // WebKit can resume after a seek without sending it (or `playing`), so the position moving
+    // past where the wait or seek began also ends it, and so does pausing.
     const onTime = () => {
+      if (!el.paused && !el.seeking && el.currentTime > state.current.waitAt) setLoading(false);
       const tr = state.current.tracks[state.current.index];
       const endAt = state.current.endAt;
       if (tr) setT(tr.offset_s + el.currentTime);
@@ -457,6 +461,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
     const onPause = () => {
       setPlaying(false);
+      setLoading(false); // paused is not waiting for data
       save().catch(() => {});
     };
     const onEnded = () => {
@@ -477,7 +482,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         el.play().catch(() => {});
       }
     };
-    const onWait = () => setLoading(true);
+    const onWait = () => {
+      state.current.waitAt = el.currentTime;
+      setLoading(true);
+    };
+    const onSeeking = () => (state.current.waitAt = el.currentTime);
     const onCan = () => setLoading(false);
     el.addEventListener("timeupdate", onTime);
     el.addEventListener("loadedmetadata", onMeta);
@@ -487,6 +496,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     el.addEventListener("error", onError);
     el.addEventListener("waiting", onWait);
     el.addEventListener("canplay", onCan);
+    el.addEventListener("seeking", onSeeking);
     const onHide = () => document.hidden && state.current.work && save(undefined, true).catch(() => {});
     document.addEventListener("visibilitychange", onHide);
     return () => {
@@ -498,6 +508,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       el.removeEventListener("error", onError);
       el.removeEventListener("waiting", onWait);
       el.removeEventListener("canplay", onCan);
+      el.removeEventListener("seeking", onSeeking);
       document.removeEventListener("visibilitychange", onHide);
     };
   }, [save, load, advanceQueue, duration]);

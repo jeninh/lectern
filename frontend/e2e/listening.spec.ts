@@ -3,8 +3,11 @@ import { expect, test, type Page } from "@playwright/test";
 import { MAGI, signIn, userOf } from "./helpers";
 
 // Desktop-sized window with a mouse wheel, in each phone project's engine (WebKit and Chromium).
-// No service worker, so the routes below see the app's API requests.
-test.use({ viewport: { width: 1280, height: 800 }, isMobile: false, hasTouch: false, serviceWorkers: "block" });
+// No service worker, so the routes below see the app's API requests. Desktop density too: the
+// phones' 3x scale at this size is a 3840x2400 surface, which headless WebKit paints on the CPU
+// so slowly (about one frame a second while the player updates) that clicks never see a stable
+// element.
+test.use({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1, isMobile: false, hasTouch: false, serviceWorkers: "block" });
 
 /** A long audiobook (40 chapters) and enough other audiobooks that the page itself scrolls. */
 async function longListening(page: Page) {
@@ -40,6 +43,10 @@ test("the page scrolls with the wheel over the chapter list while audio plays, a
 
   // A long chapter list is part of the page, not a scroll box that swallows the wheel.
   const chapters = page.locator("ol.chapters");
+  // Each chapter row has a play-from-here button ("<n> Chapter <n> <length>") and its own
+  // "Add Chapter <n> to Up next" queue button; count each kind on its own.
+  const rows = chapters.getByRole("button", { name: /^\d+\s*Chapter \d+\b/ });
+  const queueButtons = chapters.getByRole("button", { name: /^Add Chapter \d+ to Up next$/ });
   await expect(chapters.locator('[aria-current="true"]')).toBeVisible();
   const box = (await chapters.boundingBox())!;
   await page.mouse.move(box.x + 60, box.y + 40);
@@ -58,12 +65,13 @@ test("the page scrolls with the wheel over the chapter list while audio plays, a
   expect(await scrollY(page)).toBe(held);
 
   // A window around the current chapter; every chapter is still reachable.
-  await expect(chapters.getByRole("button")).toHaveCount(8);
+  await expect(rows).toHaveCount(8);
+  await expect(queueButtons).toHaveCount(8);
 
   // The window never moves out from under keyboard focus: with a row focused, playback moving
   // past the window keeps that row (and focus); once focus leaves, the window catches up.
   await page.locator(".now-playing").getByRole("button", { name: "Pause" }).click();
-  const first = chapters.getByRole("button").first();
+  const first = rows.first();
   const firstLabel = await first.textContent();
   await first.focus();
   const jumpTo = async (chapter: number) =>
@@ -75,7 +83,9 @@ test("the page scrolls with the wheel over the chapter list while audio plays, a
   await page.locator("#np-title").click();
   await expect(chapters.locator('[aria-current="true"]')).toContainText("Chapter 31");
   await page.getByRole("button", { name: "Show all 40 chapters" }).click();
-  await expect(chapters.getByRole("button")).toHaveCount(40);
+  await expect(rows).toHaveCount(40);
+  await expect(queueButtons).toHaveCount(40);
   await page.getByRole("button", { name: "Show fewer chapters" }).click();
-  await expect(chapters.getByRole("button")).toHaveCount(8);
+  await expect(rows).toHaveCount(8);
+  await expect(queueButtons).toHaveCount(8);
 });
