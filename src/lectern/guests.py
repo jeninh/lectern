@@ -52,6 +52,7 @@ log = logging.getLogger("lectern.guests")
 SESSION_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/me"),
+        ("GET", "/api/export"),
         ("POST", "/api/me/preferences"),
         ("PUT", "/api/me/reader-settings"),
         ("GET", "/api/library"),

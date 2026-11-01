@@ -204,6 +204,12 @@ export function SecurityPage() {
           )}
         </section>
 
+        <section className="card" id="export" aria-labelledby="exp-h" data-highlight={hash === "export" || undefined}>
+          <h2 id="exp-h">Export your data</h2>
+          <p className="sub">One zip of your own highlights, notes, ratings, reading stats, vocabulary, shelves, and queues, as Markdown, CSV, and JSON. No passwords or keys.</p>
+          <a className="btn" href="/api/export" download>Download my data</a>
+        </section>
+
         <section className="card" id="password" aria-labelledby="pw-h" data-highlight={hash === "password" || undefined}>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
