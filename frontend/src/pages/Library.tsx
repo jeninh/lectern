@@ -25,6 +25,7 @@ import { clausesOf, extractChips, formatQuery, SORTS, type Clause } from "../lib
 import type { Items } from "../lib/folders";
 import { childrenOf, pathLabel, shelfCan, shelfKey, splitKeys, workKey, worksIn, type FolderId } from "../lib/shelves";
 import { clock, usePlayer } from "../lib/player";
+import { enqueueListening } from "../lib/listeningQueue";
 import type { MatchSuggestion, MetaSuggestions, Shelf, ShelfGrant, User } from "../lib/types";
 import { fold } from "../lib/fuzzy";
 import { Sheet } from "../components/Sheet";
@@ -832,6 +833,7 @@ function WorkDetail({ work, shelves, onShelvesChanged }: { work: Work; shelves: 
                 <Headphones /> {pos?.audio_s ? `Listen from ${clock(pos.audio_s)}` : "Listen"}
               </button>
             )}
+            {work.audio && <button className="btn" onClick={() => enqueueListening(work.id).then(() => toast("Added to Up next.")).catch((e) => toast((e as Error).message, "error"))}>Add to Up next</button>}
             {canEdit && (
               <button className="btn ghost" onClick={() => { nav(`/app/library${loc.search}`); openEditor(work.id); }}>
                 <Pencil /> Edit

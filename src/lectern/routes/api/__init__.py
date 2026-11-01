@@ -21,6 +21,7 @@ from lectern.routes.api import (
     highlights,
     imports,
     jobqueue,
+    listening_queue,
     notifications,
     ocr,
     offline,
@@ -50,6 +51,7 @@ router.include_router(stats.router)
 router.include_router(devices.router)
 router.include_router(ai_keys.router)
 router.include_router(queues.router)
+router.include_router(listening_queue.router)
 router.include_router(security.router)
 router.include_router(health.router)
 router.include_router(admin.router)
