@@ -179,3 +179,68 @@ def test_summary_uses_visible_daily_aggregates_across_toronto_dst(app, owner):
         assert summary["totals"] == {"read_seconds": 122, "listened_seconds": 61, "pages": 0.0}
         assert summary["streak"]["longest"] == 3
         assert [day["day"] for day in summary["days"]] == ["2026-03-07", "2026-03-08", "2026-03-09"]
+
+
+def _read(db, user, work_id, at, before=0.1, after=0.11, secs=30):
+    reading_stats.record(
+        db,
+        user=user,
+        work_id=work_id,
+        source="web",
+        before_fraction=before,
+        after_fraction=after,
+        before_at=at - timedelta(seconds=secs),
+        at=at,
+        pages=300,
+    )
+
+
+def test_pruning_raw_events_is_off_by_default_and_keeps_summaries_identical(app, owner):
+    from lectern.config import Settings
+
+    assert Settings().stats_retention_days == 0
+    user_id, work_id = _owner_and_work()
+    with session_factory()() as db:
+        user = db.get(User, user_id)
+        user.reading_timezone = "America/Toronto"
+        # Old: a 3-write session that crosses local midnight, and a second day.
+        old = datetime(2026, 2, 3, 4, 59, tzinfo=UTC)  # 23:59 Feb 2 in Toronto
+        for i in range(3):
+            _read(
+                db, user, work_id, old + timedelta(minutes=2 * i), 0.1 + i * 0.01, 0.11 + i * 0.01
+            )
+        _read(db, user, work_id, datetime(2026, 2, 9, 15, 0, tzinfo=UTC))
+        # Recent: stays raw.
+        now = datetime(2026, 10, 1, 15, 0, tzinfo=UTC)
+        _read(db, user, work_id, now - timedelta(days=1))
+        db.commit()
+        before = reading_stats.summary(db, user, 2026)
+        assert before["longest_session_seconds"] == 90
+        assert reading_stats.prune_raw(db, 0, now=now) == 0  # off
+        assert db.query(ReadingActivity).count() == 5
+        assert reading_stats.prune_raw(db, 90, now=now) == 4
+        db.commit()
+        assert db.query(ReadingActivity).count() == 1
+        assert reading_stats.summary(db, user, 2026) == before
+        # Nothing left to prune; running again is harmless.
+        assert reading_stats.prune_raw(db, 90, now=now) == 0
+        assert reading_stats.summary(db, user, 2026) == before
+        assert db.query(ReadingStatsDay).count() >= 3
+
+
+def test_rebuilding_days_after_a_prune_keeps_frozen_totals(app, owner):
+    user_id, work_id = _owner_and_work()
+    with session_factory()() as db:
+        user = db.get(User, user_id)
+        old = datetime(2026, 2, 3, 4, 59, tzinfo=UTC)
+        _read(db, user, work_id, old)
+        _read(db, user, work_id, datetime(2026, 9, 30, 12, 0, tzinfo=UTC))
+        db.commit()
+        reading_stats.prune_raw(db, 30, now=datetime(2026, 10, 1, tzinfo=UTC))
+        user.reading_timezone = "America/Toronto"
+        reading_stats.rebuild_days(db, user)
+        db.commit()
+        days = {d.day: d.read_seconds for d in db.query(ReadingStatsDay)}
+        # The pruned event stays on its original UTC day; the retained one is rebucketed.
+        assert days == {"2026-02-03": 30, "2026-09-30": 30}
+        assert db.query(ReadingActivity).count() == 1

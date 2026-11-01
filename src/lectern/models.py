@@ -412,6 +412,25 @@ class ReadingStatsDay(Base):
     read_seconds: Mapped[int] = mapped_column(Integer, default=0)
     listened_seconds: Mapped[int] = mapped_column(Integer, default=0)
     pages: Mapped[float] = mapped_column(Float, default=0.0)
+    # The part of the totals above whose raw events were pruned (opt-in retention). A timezone
+    # rebuild keeps it as is: those events can no longer be rebucketed.
+    frozen_read_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    frozen_listened_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    frozen_pages: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+
+
+class ReadingSessionRollup(Base):
+    """One counted session segment whose raw events were pruned; keeps the longest session honest."""
+
+    __tablename__ = "reading_session_rollups"
+    __table_args__ = (Index("ix_reading_session_rollups_user_start", "user_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    ended_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    seconds: Mapped[int] = mapped_column(Integer, default=0)
 
 
 # --- Audio, alignment, and canonical positions (contracts for milestones 2-4) --------------
