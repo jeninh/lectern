@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { bookCss, clean, DEFAULTS, effective, fontFaces, reconcile } from "../reader";
+import { bookCss, clean, DEFAULTS, effective, fontFaces, PALETTE, reconcile } from "../reader";
 
 const ORIGIN = "https://lectern.tailnet.ts.net";
+
+/** WCAG 2.x contrast ratio of two #rrggbb colours. */
+function contrast(a: string, b: string) {
+  const lum = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+describe("reader themes", () => {
+  it.each(Object.entries(PALETTE))("%s: text and links meet WCAG AA against the page", (_, p) => {
+    expect(contrast(p.ink, p.bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(p.link, p.bg)).toBeGreaterThanOrEqual(4.5);
+  });
+});
 
 describe("bookCss", () => {
   it("leaves the book's own font and spacing alone by default", () => {

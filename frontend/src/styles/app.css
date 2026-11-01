@@ -1143,7 +1143,7 @@ tr.revoked td:first-child {
 }
 .chip .n {
   font-size: 11.5px;
-  opacity: 0.65;
+  opacity: 0.85;
   font-variant-numeric: tabular-nums;
 }
 .seg {
@@ -1163,7 +1163,8 @@ tr.revoked td:first-child {
   display: grid;
   place-items: center;
 }
-.seg button[aria-pressed="true"] {
+.seg button[aria-pressed="true"],
+.seg button[aria-checked="true"] {
   background: var(--surface-2);
   color: var(--ink);
 }
@@ -3611,8 +3612,12 @@ pre.ra-b {
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .swatch.auto {
-  background: linear-gradient(135deg, #fffcf6 50%, #1b1712 50%);
-  color: #8a7f6f;
+  /* Light above, dark below, so the sample sits on the light half and the label on the dark one. */
+  background: linear-gradient(180deg, #fffcf6 50%, #1b1712 50%);
+  color: #e6dccb;
+}
+.swatch.auto > span {
+  color: #221d17;
 }
 .swatch.light {
   background: #fffcf6;
@@ -4987,6 +4992,7 @@ table.compare td:first-child {
   opacity: 0.7;
 }
 .pages-tools .seg button[aria-pressed="true"],
+.pages-tools .seg button[aria-checked="true"],
 .pages-tools .btn[aria-pressed="true"] {
   opacity: 1;
   font-weight: 600;
@@ -6942,12 +6948,12 @@ table.compare td:first-child {
 .star {
   position: relative;
   display: inline-block;
-  width: 26px;
+  width: 48px; /* each half is a 24px target (WCAG 2.5.8) */
   height: 26px;
   font-size: 24px;
   line-height: 26px;
   text-align: center;
-  color: var(--line);
+  color: var(--muted); /* an empty star is a control: 3:1 against the surface (WCAG 1.4.11) */
 }
 .star .star-glyph {
   display: block;
@@ -6957,7 +6963,7 @@ table.compare td:first-child {
   color: var(--tint);
 }
 .star[data-fill="0.5"] .star-glyph {
-  background: linear-gradient(90deg, var(--tint) 50%, var(--line) 50%);
+  background: linear-gradient(90deg, var(--tint) 50%, var(--muted) 50%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;

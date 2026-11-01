@@ -121,10 +121,10 @@ export function JobsPage() {
           <td className="hint">{relativeTime(b.created_at)}</td>
           <td>
             <div className="row job-actions">
-              {manage && b.counts.waiting > 0 && <button className="btn sm" onClick={() => act(`${url}/pause`, {}, "Paused the rest of the batch")} aria-label={`Pause the rest: ${name}`}><Pause /> Pause rest</button>}
+              {manage && b.counts.waiting > 0 && <button className="btn sm" onClick={() => act(`${url}/pause`, {}, "Paused the rest of the batch")} aria-label={`Pause rest: ${name}`}><Pause /> Pause rest</button>}
               {manage && b.counts.paused > 0 && <button className="btn sm" onClick={() => act(`${url}/resume`, {}, "Resumed the batch")} aria-label={`Resume: ${name}`}><Play /> Resume</button>}
               {live && (manage || b.mine) && (
-                <button className="btn sm danger" onClick={() => act(`${url}/cancel`, {}, "Cancelled the rest of the batch", `Cancel the rest of this batch (${b.counts.running + b.counts.waiting + b.counts.paused} jobs)?`)} aria-label={`Cancel the rest: ${name}`}>
+                <button className="btn sm danger" onClick={() => act(`${url}/cancel`, {}, "Cancelled the rest of the batch", `Cancel the rest of this batch (${b.counts.running + b.counts.waiting + b.counts.paused} jobs)?`)} aria-label={`Cancel rest: ${name}`}>
                   Cancel rest
                 </button>
               )}
