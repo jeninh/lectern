@@ -102,6 +102,9 @@ packages = ["src/lectern"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+markers = [
+    "legacy_sqlite: real SQLite < 3.35 migration suite (scripts/test-sqlite-legacy.sh); skips on newer SQLite",
+]
 filterwarnings = ["error::DeprecationWarning:lectern.*"]
 
 [tool.ruff]
