@@ -195,6 +195,56 @@ target, a restore that fails half-way, and one killed with `kill -9` half-way th
 swap (with the library on the same and on another volume), then undone byte for byte or
 resumed.
 
+## Schema upgrades at startup
+
+When a new Lectern version brings database changes, the server upgrades the schema as it
+starts. Before it does, it takes a snapshot of the database, and if the upgrade fails it puts
+the snapshot back and refuses to start. On a normal restart (nothing to upgrade) nothing is
+copied.
+
+- **Where:** `data/lectern/premigration-snapshots/` (folder mode 700, files mode 600), named
+  `<UTC time>-<from revision>-to-<to revision>-<random>.db`, for example
+  `20261101T120000123456Z-0043_reading_stats-to-0044_listening_queue-1a2b3c4d.db`. A
+  snapshot is a complete SQLite database made with SQLite's online backup API (consistent even with a WAL), checked, and flushed to disk
+  before the upgrade starts. Nothing in the data directory is ever served over the web.
+- **Free space first:** the volume needs room for the snapshot and, for a restore, a second
+  copy next to the database (the database and its WAL, twice), plus a margin. Without it
+  Lectern **refuses to start and changes nothing**; the log names the folder, what it needs,
+  and what is free. A snapshot that cannot be written refuses the same way: the database is
+  never upgraded without one.
+- **Retention:** the newest 5 snapshots are kept (the one just taken always counts, even if
+  the clock was wrong); older ones are deleted only after an upgrade succeeded, never after a
+  failure.
+- **If the upgrade fails:** Lectern closes every database connection, checks the snapshot,
+  copies it next to the database, flushes it, removes the failed database's `-wal` and `-shm`
+  files, renames the copy into place, and checks the result (`PRAGMA integrity_check` and the
+  revision). It then exits with an error naming the revisions and the snapshot, and writes
+  `premigration-snapshots/failed-upgrade.json`. While that file is there, later starts of the
+  same version refuse straight away instead of retrying the same upgrade (so a restart loop
+  cannot fill the disk); a version with different migrations tries again. Fix the cause, then
+  delete the file to retry, or go back to the previous Lectern version.
+- **If the restore fails too** (say, the disk died), the error says so, the database may be
+  half-upgraded, and the snapshot is kept. With Lectern stopped, copy the snapshot over
+  `data/lectern/lectern.db`, delete `lectern.db-wal` and `lectern.db-shm`, and start the
+  previous version; or restore a nightly backup (above).
+- Two servers starting on the same data directory take turns (`premigration.lock`); the
+  second finds the schema already upgraded and copies nothing.
+
+Errors and logs name revisions, paths, and the kind of failure only: never a setting, a key,
+or the database's contents.
+
+Settings (in `.env`; empty = the default):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LECTERN_PREMIGRATION_SNAPSHOT_KEEP` | `5` | Snapshots kept (at least 1). |
+| `LECTERN_PREMIGRATION_FREE_MARGIN_MB` | `64` | Free space, in MiB, required on top of the copies. |
+| `LECTERN_PREMIGRATION_SNAPSHOT` | `1` | `0` upgrades **without** a snapshot. |
+
+`LECTERN_PREMIGRATION_SNAPSHOT=0` is a deliberate escape hatch for a disk too full for a
+snapshot when you have a recent backup; the log warns on every upgrade it lets through. Set it
+back afterwards.
+
 ## Restore drill
 
 A backup is only known to be good once it has been restored. The optional restore drill
