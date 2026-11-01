@@ -51,10 +51,12 @@ router = APIRouter()
 @router.get("/me")
 def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
     now = utcnow()
+    guest = auth.user.guest is not None
     counts = {
         "works": db.scalar(select(func.count()).select_from(Work).where(visible_works(auth.user)))
         or 0,
-        "users": db.scalar(select(func.count()).select_from(User)) or 0,
+        # A guest is not told how many people use this library.
+        "users": 0 if guest else db.scalar(select(func.count()).select_from(User)) or 0,
         "unread_notifications": db.scalar(
             select(func.count())
             .select_from(Notification)
@@ -69,7 +71,7 @@ def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
         "passkeys_possible": settings.is_https,
         "opds_url": f"{settings.base_url}/opds",
         "sync_url": f"{settings.base_url}/",
-        "inbox_path": str(settings.inbox_path),
+        "inbox_path": "" if guest else str(settings.inbox_path),
         "counts": counts,
         "preferences": _preferences(auth.user),
         "upload": {
@@ -77,7 +79,7 @@ def me(auth: Auth, settings: SettingsDep, db: DbDep) -> dict:
             "chunk_bytes": UPLOAD_CHUNK_MAX_BYTES,
             "max_active": settings.upload_max_active,
         },
-        "library_settings": instance.all_settings(db),
+        "library_settings": {} if guest else instance.all_settings(db),
         # Offline mode (docs/offline-mode.md): no outbound internet connections at all.
         "offline_mode": egress.offline(),
         "can_edit": can_edit_library(auth.user),
@@ -484,6 +486,9 @@ _ACTIVITY_ACTIONS = {
     "invite.create",
     "invite.accept",
     "invite.revoke",
+    "guest.create",
+    "guest.update",
+    "guest.revoke",
     "user.role",
     "listen.start",
     "work.merge",

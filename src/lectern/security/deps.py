@@ -12,6 +12,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
+from lectern import guests
 from lectern.config import Settings
 from lectern.db import get_db
 from lectern.models import AppPassword, Role, Session, SyncKey, User, WorkerCredential, utcnow
@@ -59,9 +60,12 @@ def current_auth_optional(request: Request, db: DbDep) -> AuthContext | None:
 AuthOptional = Annotated[AuthContext | None, Depends(current_auth_optional)]
 
 
-def require_auth(auth: AuthOptional) -> AuthContext:
+def require_auth(request: Request, auth: AuthOptional) -> AuthContext:
+    """Every authenticated route depends on this (directly or through ``Auth``/``AuthCsrf``/
+    ``require_role``), so it is where a guest is held to the allowlist in ``lectern.guests``."""
     if auth is None:
         raise LoginRequired()
+    guests.enforce(request, auth.user, "session")
     return auth
 
 
@@ -123,8 +127,9 @@ def opds_user(request: Request, db: DbDep) -> User:
     if row is None or row.revoked_at is not None:
         raise _basic_unauthorized()
     user = db.get(User, row.user_id)
-    if user is None or not user.is_active or user.username != username:
+    if not guests.account_usable(user) or user.username != username:
         raise _basic_unauthorized()
+    guests.enforce(request, user, "basic")
     if row.last_used_at is None:
         from lectern.security.alerts import on_credential_first_use
 
@@ -151,6 +156,7 @@ def library_auth(request: Request, db: DbDep) -> LibraryAuth:
     found = load_session(db, request)
     if found is not None:
         session, user = found
+        guests.enforce(request, user, "session")
         return LibraryAuth(user, Device.session(session.id))
     if request.headers.get("authorization", "").lower().startswith("basic "):
         user = opds_user(request, db)
@@ -232,7 +238,8 @@ def kosync_auth(request: Request, db: DbDep) -> SyncAuth:
     if row is None or row.revoked_at is not None:
         raise _sync_unauthorized()
     user = db.get(User, row.user_id)
-    if user is None or not user.is_active or user.username != username:
+    # KOReader pairing is not offered to guests: a guest's sync key (there should be none) is dead.
+    if not guests.account_usable(user) or user.guest is not None or user.username != username:
         raise _sync_unauthorized()
     if row.last_used_at is None:
         from lectern.security.alerts import on_credential_first_use

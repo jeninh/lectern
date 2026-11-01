@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from lectern import access, annotations, device_queue, device_report, koplugin, lan
+from lectern import access, annotations, device_queue, device_report, guests, koplugin, lan
 from lectern.models import BookFile, DeviceFollow, FileKind, Shelf, SyncKey, User, Work, utcnow
 from lectern.routes.api.serializers import iso
 from lectern.security.deps import DbDep, KoSync, OpdsUser, SettingsDep
@@ -90,7 +90,8 @@ def pair(request: Request, db: DbDep, settings: SettingsDep, body: PairIn) -> di
     limiters = request.app.state.limiters
     user_key = f"user:{username.lower()}"
     user = db.scalar(select(User).where(User.username == username))
-    active = user if user is not None and user.is_active else None
+    # Guests are never paired with a device: their account is not "active" here.
+    active = user if guests.account_usable(user) and user.guest is None else None
 
     def refuse(
         reason: str, label: str | None = None, code: int = 401, detail: str = "invalid_code"

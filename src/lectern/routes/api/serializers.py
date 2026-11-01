@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from lectern import guests
 from lectern.covergen import cover_fields
 from lectern.models import (
     AppPassword,
@@ -31,6 +32,19 @@ def user_json(u: User) -> dict:
         "created_at": iso(u.created_at),
         "last_login_at": iso(u.last_login_at),
         "download_cap_per_hour": u.download_cap_per_hour,
+        "guest": guest_json(u),
+    }
+
+
+def guest_json(u: User) -> dict | None:
+    """A guest's end date and limits (``None``: not a guest)."""
+    g = u.guest
+    if g is None:
+        return None
+    return {
+        "expires_at": iso(g.expires_at),
+        "expired": guests.expired(u),
+        "allow_opds": g.allow_opds,
     }
 
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import func, select
 
+from lectern import guests
 from lectern.models import LoginAttempt, Passkey, Session, User, utcnow
 from lectern.security import alerts, audit
 from lectern.security.deps import AuthOptional, DbDep, SettingsDep
@@ -102,9 +103,9 @@ def login_password(
 
     user = db.scalar(select(User).where(User.username == username))
     ok = verify_password(user.password_hash if user else None, password)
-    if ok and user and user.is_active and user.totp_enabled:
+    if ok and user and guests.account_usable(user) and user.totp_enabled:
         ok = bool(user.totp_secret) and verify_totp(user.totp_secret, totp)
-    if not ok or user is None or not user.is_active:
+    if not ok or user is None or not guests.account_usable(user):
         _record_attempt(db, username, False)
         audit.record(db, "login.failed", target=username, ip=ip, detail="password")
         db.commit()
@@ -173,7 +174,7 @@ async def passkey_login_verify(request: Request, settings: SettingsDep, db: DbDe
         )
         db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Passkey verification failed") from None
-    if user is None or not user.is_active:
+    if not guests.account_usable(user):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account disabled")
     passkey.sign_count = result.new_sign_count
     passkey.last_used_at = utcnow()

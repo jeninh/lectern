@@ -51,7 +51,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import Receive, Scope, Send
 
-from lectern import __version__, ai_keys, device_queue, filters, imports, reviews
+from lectern import __version__, ai_keys, device_queue, filters, guests, imports, reviews
 from lectern.access import can_edit_library, can_see_work, visible_works
 from lectern.config import Settings
 from lectern.db import session_factory
@@ -280,7 +280,12 @@ def _call(ctx: Context, tool: str, scope: str) -> Iterator[Call]:
     with session_factory()() as db:
         key = db.get(AIKey, key_id)
         user = db.get(User, key.user_id) if key else None
-        if key is None or key.revoked_at is not None or user is None or not user.is_active:
+        if (
+            key is None
+            or key.revoked_at is not None
+            or not guests.account_usable(user)
+            or user.guest is not None
+        ):
             raise ToolError("unauthenticated: this AI key was revoked")
         call = Call(db, request, settings, user, key)
         who = f"key {key.label} #{key.id}"

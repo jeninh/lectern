@@ -174,7 +174,8 @@ def test_migration_chain_and_round_trip(tmp_path):
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0040_series_want_to_read"]
+    assert script.get_heads() == ["0045_guest_accounts"]
+    assert script.get_revision("0045_guest_accounts").down_revision == "0040_series_want_to_read"
     assert script.get_revision("0040_series_want_to_read").down_revision == "0044_listening_queue"
     assert "want_to_read_items" in sa.inspect(engine).get_table_names()
     with engine.begin() as conn:

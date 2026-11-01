@@ -42,7 +42,8 @@ _RANK = {"view": 1, "edit": 2, "owner": 3}
 
 
 def sees_whole_library(user: User) -> bool:
-    return user.role in (Role.OWNER, Role.MEMBER)
+    # A guest is held to their grants whatever role the row says (deny by default).
+    return user.guest is None and user.role in (Role.OWNER, Role.MEMBER)
 
 
 def _subtree_ids(roots: Select) -> Select:
@@ -61,6 +62,8 @@ def granted_shelf_ids(user: User) -> Select:
 def own_shelf_ids(user: User) -> Select:
     """Shelves ``user`` owns or holds a grant on, and everything nested inside them: "their"
     shelves (Up next), as opposed to every shelf the owner role can see."""
+    if user.guest is not None:  # a guest owns no shelf
+        return granted_shelf_ids(user)
     granted = select(ShelfGrant.shelf_id).where(ShelfGrant.user_id == user.id)
     return _subtree_ids(
         select(Shelf.id).where(or_(Shelf.owner_id == user.id, Shelf.id.in_(granted)))
@@ -69,7 +72,7 @@ def own_shelf_ids(user: User) -> Select:
 
 def visible_shelf_ids(user: User) -> Select:
     """Every shelf ``user`` may see (SQL); :func:`shelf_perms` is the same in Python."""
-    if user.role == Role.OWNER:
+    if user.role == Role.OWNER and user.guest is None:
         return select(Shelf.id)
     return own_shelf_ids(user)
 
@@ -92,8 +95,8 @@ def can_see_work(db: Session, user: User, work_id: int) -> bool:
 
 
 def can_edit_library(user: User) -> bool:
-    """Adding, editing, and trashing works: owners and members, never readers."""
-    return user.role in (Role.OWNER, Role.MEMBER)
+    """Adding, editing, and trashing works: owners and members, never readers or guests."""
+    return user.guest is None and user.role in (Role.OWNER, Role.MEMBER)
 
 
 def lineage(shelf: Shelf) -> list[Shelf]:
@@ -109,6 +112,8 @@ def lineage(shelf: Shelf) -> list[Shelf]:
 def can_manage_shelf(user: User, shelf: Shelf) -> bool:
     """Rename, move, delete, and share: the owner role, or the owner of this shelf or of any
     shelf above it."""
+    if user.guest is not None:
+        return False
     return user.role == Role.OWNER or any(s.owner_id == user.id for s in lineage(shelf))
 
 
@@ -131,7 +136,7 @@ def shelf_permission(db: Session, user: User, shelf: Shelf) -> Perm | None:
             )
         )
     )
-    if ShelfPermission.EDIT in perms:
+    if ShelfPermission.EDIT in perms and user.guest is None:  # a guest only ever views
         return "edit"
     return "view" if perms else None
 
@@ -142,7 +147,7 @@ def can_edit_shelf(db: Session, user: User, shelf: Shelf) -> bool:
 
 def can_create_shelf(user: User) -> bool:
     """Top-level shelves; sub-shelves also need edit on the parent (:func:`can_edit_shelf`)."""
-    return user.role in (Role.OWNER, Role.MEMBER)
+    return user.guest is None and user.role in (Role.OWNER, Role.MEMBER)
 
 
 def shelf_perms(db: Session, user: User) -> tuple[dict[int, Shelf], dict[int, Perm]]:
@@ -172,8 +177,10 @@ def shelf_perms(db: Session, user: User) -> tuple[dict[int, Shelf], dict[int, Pe
         s = shelves.get(sid)
         if s is None or depth > MAX_DEPTH + 1:
             return None
-        if user.role == Role.OWNER or s.owner_id == user.id:
-            own: Perm | None = "owner"
+        if user.guest is not None:  # a guest owns nothing and only views what is granted
+            own: Perm | None = "view" if sid in grants else None
+        elif user.role == Role.OWNER or s.owner_id == user.id:
+            own = "owner"
         elif sid in grants:
             own = "edit" if grants[sid] == ShelfPermission.EDIT else "view"
         else:

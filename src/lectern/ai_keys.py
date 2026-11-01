@@ -29,7 +29,7 @@ from datetime import timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from lectern import notify
+from lectern import guests, notify
 from lectern.access import can_edit_library
 from lectern.models import AIKey, User, utcnow
 from lectern.security import audit
@@ -85,7 +85,8 @@ def authenticate(db: Session, secret: str) -> tuple[AIKey, User] | None:
     if key is None or key.revoked_at is not None:
         return None
     user = db.get(User, key.user_id)
-    if user is None or not user.is_active:
+    # AI keys and MCP are never open to guests.
+    if not guests.account_usable(user) or user.guest is not None:
         return None
     return key, user
 
