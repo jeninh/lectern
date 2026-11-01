@@ -185,6 +185,8 @@ def test_root_lists_continue_up_next_and_this_devices_queue_first(home):
     assert titles(root) == [
         "Continue reading",
         "Up next",
+        "Next in series",
+        "Want to read",
         "Queued for this device",
         "Shelves",
         "All books",

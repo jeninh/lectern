@@ -4,6 +4,7 @@ import { ContinueCard } from "../components/ContinueCard";
 import { Cover, tintStyle } from "../components/Cover";
 import { EmptyState } from "../components/EmptyState";
 import { Book, Devices as DevicesIcon, Plus, Reader, Upload } from "../components/Icons";
+import { NextInSeriesRow, WantToReadRow } from "../components/ReadingRows";
 import { QuoteOfTheDayCard } from "../components/QuoteFeed";
 import { PageTitle } from "../components/Shell";
 import { get, OfflineError } from "../lib/api";
@@ -89,6 +90,9 @@ export function HomePage() {
               </div>
             )}
           </section>
+
+          <NextInSeriesRow />
+          <WantToReadRow />
 
           <QuoteOfTheDayCard />
 

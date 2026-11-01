@@ -31,6 +31,7 @@ from lectern.routes.api import (
     queues,
     readalong,
     reader,
+    reading_order,
     reviews,
     search,
     security,
@@ -52,6 +53,7 @@ router.include_router(devices.router)
 router.include_router(ai_keys.router)
 router.include_router(queues.router)
 router.include_router(listening_queue.router)
+router.include_router(reading_order.router)
 router.include_router(security.router)
 router.include_router(health.router)
 router.include_router(admin.router)
