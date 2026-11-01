@@ -172,3 +172,8 @@ sections:
         description: The schema and interfaces the features build on.
         icon: toc
         audience: members
+      - file: testing-legacy-sqlite.md
+        title: Testing on old SQLite
+        description: Run the migration chain on a real SQLite older than 3.35, in Docker.
+        icon: gear
+        audience: members
