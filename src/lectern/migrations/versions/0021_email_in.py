@@ -37,10 +37,16 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("token", name="uq_email_inboxes_token"),
     )
-    # Plain ADD COLUMN, never a batch rebuild (see 0017): nullable, no default.
-    op.add_column("imports", sa.Column("shelf_id", sa.Integer(), nullable=True))
+    # Plain ADD COLUMN, never a batch rebuild (see 0017): nullable, no default. Already there
+    # after a downgrade on SQLite before 3.35 (see downgrade): kept, since a shelf an import
+    # was meant for is still its person's choice (a shelf deleted since is noticed at filing).
+    if "shelf_id" not in {c["name"] for c in sa.inspect(op.get_bind()).get_columns("imports")}:
+        op.add_column("imports", sa.Column("shelf_id", sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("imports", "shelf_id")
+    # ALTER TABLE … DROP COLUMN needs SQLite 3.35. Before that the column stays: it is
+    # nullable and 0020's code never reads it. Never a batch rebuild of imports (see 0017).
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("imports", "shelf_id")
     op.drop_table("email_inboxes")

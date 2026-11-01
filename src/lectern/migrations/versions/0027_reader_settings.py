@@ -24,8 +24,10 @@ depends_on = None
 
 def upgrade() -> None:
     # Plain ADD COLUMN, never a batch rebuild: rebuilding users on SQLite with foreign_keys=ON
-    # would cascade into everything that references it.
-    op.add_column("users", sa.Column("reader_settings", sa.JSON(), nullable=True))
+    # would cascade into everything that references it. Already there after a downgrade on
+    # SQLite before 3.35 (see downgrade): kept, as the settings the person last saved.
+    if "reader_settings" not in {c["name"] for c in sa.inspect(op.get_bind()).get_columns("users")}:
+        op.add_column("users", sa.Column("reader_settings", sa.JSON(), nullable=True))
     op.create_table(
         "reader_overrides",
         sa.Column("user_id", sa.Integer(), nullable=False),
@@ -42,5 +44,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_reader_overrides_work_id", table_name="reader_overrides")
     op.drop_table("reader_overrides")
-    # DROP COLUMN in place (SQLite 3.35+), for the same reason.
-    op.drop_column("users", "reader_settings")
+    # DROP COLUMN in place, for the same reason. It needs SQLite 3.35; before that the column
+    # stays: it is nullable and 0026's code never reads it.
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("users", "reader_settings")
