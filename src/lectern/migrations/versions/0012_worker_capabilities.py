@@ -18,19 +18,27 @@ depends_on = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("jobs") as batch:
-        batch.add_column(sa.Column("capability", sa.String(length=48), nullable=True))
-    # Every job before this revision is "align" or "transcode": the capability is the kind.
-    op.execute("UPDATE jobs SET capability = kind")
-    with op.batch_alter_table("jobs") as batch:
-        batch.alter_column("capability", existing_type=sa.String(length=48), nullable=False)
-        batch.create_index("ix_jobs_capability", ["capability"])
+    insp = sa.inspect(op.get_bind())
+    # Already there after a downgrade on SQLite before 3.35 (see downgrade): kept as it was.
+    if "capability" not in {c["name"] for c in insp.get_columns("jobs")}:
+        with op.batch_alter_table("jobs") as batch:
+            batch.add_column(sa.Column("capability", sa.String(length=48), nullable=True))
+        # Every job before this revision is "align" or "transcode": the capability is the kind.
+        op.execute("UPDATE jobs SET capability = kind")
+        with op.batch_alter_table("jobs") as batch:
+            batch.alter_column("capability", existing_type=sa.String(length=48), nullable=False)
+            batch.create_index("ix_jobs_capability", ["capability"])
+    have = {c["name"] for c in insp.get_columns("worker_credentials")}
     with op.batch_alter_table("worker_credentials") as batch:
-        batch.add_column(sa.Column("capabilities", sa.JSON(), nullable=True))
-        batch.add_column(sa.Column("advertised", sa.JSON(), nullable=True))
-        batch.add_column(sa.Column("state", sa.String(length=16), nullable=True))
-        batch.add_column(sa.Column("info", sa.JSON(), nullable=True))
-        batch.add_column(sa.Column("status_at", sa.DateTime(timezone=True), nullable=True))
+        for column in (
+            sa.Column("capabilities", sa.JSON(), nullable=True),
+            sa.Column("advertised", sa.JSON(), nullable=True),
+            sa.Column("state", sa.String(length=16), nullable=True),
+            sa.Column("info", sa.JSON(), nullable=True),
+            sa.Column("status_at", sa.DateTime(timezone=True), nullable=True),
+        ):
+            if column.name not in have:
+                batch.add_column(column)
     op.create_table(
         "worker_enrollments",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -68,7 +76,12 @@ def downgrade() -> None:
     # Plain ALTER TABLE … DROP COLUMN (SQLite ≥ 3.35), not a batch copy: recreating
     # worker_credentials would fire jobs.leased_by_id's ON DELETE SET NULL and turn every
     # external align lease into an orphaned local one.
-    for column in ("status_at", "info", "state", "advertised", "capabilities"):
-        op.drop_column("worker_credentials", column)
-    op.drop_index("ix_jobs_capability", table_name="jobs")
-    op.drop_column("jobs", "capability")
+    #
+    # That needs SQLite 3.35. Before that the columns stay, and a batch copy is no way out: jobs
+    # is referenced by ON DELETE SET NULL keys too (alignments and others). jobs.capability stays
+    # NOT NULL, so older code cannot enqueue jobs on such a database until it is upgraded again.
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        for column in ("status_at", "info", "state", "advertised", "capabilities"):
+            op.drop_column("worker_credentials", column)
+        op.drop_index("ix_jobs_capability", table_name="jobs")
+        op.drop_column("jobs", "capability")
