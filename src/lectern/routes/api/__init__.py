@@ -17,6 +17,7 @@ from lectern.routes.api import (
     dictionary,
     editor,
     email_in,
+    export,
     health,
     highlights,
     imports,
@@ -49,6 +50,7 @@ router = APIRouter(prefix="/api")
 router.include_router(selection.router)
 router.include_router(core.router)
 router.include_router(stats.router)
+router.include_router(export.router)
 router.include_router(devices.router)
 router.include_router(ai_keys.router)
 router.include_router(queues.router)
