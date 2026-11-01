@@ -159,9 +159,9 @@ export function Shell({ children }: { children: ReactNode }) {
             <Sidebar />
           </button>
         </div>
-        <button className="sidebar-search" onClick={() => setPaletteOpen(true)} aria-label="Search books, pages, and actions" aria-keyshortcuts="Meta+K Control+K" title={collapsed ? `Search (${MOD} K)` : undefined}>
+        <button className="sidebar-search" onClick={() => setPaletteOpen(true)} aria-keyshortcuts="Meta+K Control+K" title={collapsed ? `Search (${MOD} K)` : undefined}>
           <Search />
-          <span className="label">Search</span>
+          <span className="label">Search<span className="sr-only"> books, pages, and actions</span></span>
           <kbd aria-hidden="true">{MOD} K</kbd>
         </button>
         <nav className="nav-groups" aria-label="Primary">

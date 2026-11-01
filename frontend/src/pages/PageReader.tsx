@@ -489,8 +489,8 @@ export function PageReader({ workId, fileId }: { workId: number; fileId: number 
         </div>
         <div className="pages-tools" role="toolbar" aria-label="View">
           <div className="seg" role="radiogroup" aria-label="Fit">
-            <button role="radio" aria-checked={view.fit === "width"} aria-pressed={view.fit === "width"} onClick={() => setView({ fit: "width" })} title="Fit width">Width</button>
-            <button role="radio" aria-checked={view.fit === "page"} aria-pressed={view.fit === "page"} onClick={() => setView({ fit: "page" })} title="Fit page">Page</button>
+            <button role="radio" aria-checked={view.fit === "width"} onClick={() => setView({ fit: "width" })} title="Fit width">Width</button>
+            <button role="radio" aria-checked={view.fit === "page"} onClick={() => setView({ fit: "page" })} title="Fit page">Page</button>
           </div>
           <button className="btn sm ghost" aria-pressed={view.spread} onClick={() => setView({ spread: !view.spread })} title="Show two pages side by side">Two pages</button>
           <span className="pages-zoom">

@@ -206,7 +206,7 @@ test("Ctrl+K opens a shelf by its path", async ({ page }) => {
 });
 
 test("Auto-shelves: an Authors group shows in the tree and the folder; its shelves cannot be renamed or deleted", async ({ page }) => {
-  await page.getByRole("button", { name: "Add a shelf or auto-shelves" }).click();
+  await page.getByRole("button", { name: "New: add a shelf or auto-shelves" }).click();
   await page.getByRole("menuitem", { name: "Auto-shelves…" }).click();
   const dialog = page.getByRole("dialog", { name: "New auto-shelves" });
   await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("Authors");

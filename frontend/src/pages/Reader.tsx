@@ -523,7 +523,7 @@ function Seg<T extends string>({ label, value, options, onChange }: { label: str
       <span id={`seg-${label}`}>{label}</span>
       <div className="seg" role="radiogroup" aria-labelledby={`seg-${label}`}>
         {options.map(([v, l]) => (
-          <button key={v} role="radio" aria-checked={value === v} aria-pressed={value === v} onClick={() => onChange(v)}>{l}</button>
+          <button key={v} role="radio" aria-checked={value === v} onClick={() => onChange(v)}>{l}</button>
         ))}
       </div>
     </div>
@@ -578,9 +578,9 @@ function TypePanel({ prefs, reset }: { prefs: ReturnType<typeof useReaderSetting
       <div className="type-row">
         <label htmlFor="size">Size <span className="hint tabular">{s.size}%</span></label>
         <div className="row">
-          <button className="btn sm" aria-label="Smaller text" onClick={() => set("size", Math.max(70, s.size - 10))}>A−</button>
+          <button className="btn sm" aria-label="A−, smaller text" onClick={() => set("size", Math.max(70, s.size - 10))}>A−</button>
           <input id="size" type="range" min={70} max={200} step={5} value={s.size} onChange={(e) => set("size", Number(e.target.value))} />
-          <button className="btn sm" aria-label="Larger text" onClick={() => set("size", Math.min(200, s.size + 10))}>A+</button>
+          <button className="btn sm" aria-label="A+, larger text" onClick={() => set("size", Math.min(200, s.size + 10))}>A+</button>
         </div>
       </div>
       <Slider id="lh" label="Line spacing" value={s.lineHeight} min={1.1} max={2.2} step={0.1} show={s.lineHeight.toFixed(1)} onChange={(v) => set("lineHeight", v)} />
