@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from lectern import device_queue
+from lectern import device_queue, series, want_to_read
 from lectern.access import visible_works
 from lectern.models import Work
 from lectern.reading_lists import continue_items, up_next_ids
@@ -104,6 +104,8 @@ def root(request: Request, user: OpdsUser, db: DbDep) -> Response:
     device_queue.sync_follow(db, pw.id)
     n_continue = len(continue_items(db, user, PAGE_SIZE))
     n_next = len(up_next_ids(db, user))
+    n_series = len(series.next_in_series_ids(db, user))
+    n_want = len(want_to_read.work_ids(db, user))
     n_queue = device_queue.pending_count(db, pw.id, user)
     body = (
         '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">'
@@ -129,6 +131,20 @@ def root(request: Request, user: OpdsUser, db: DbDep) -> Response:
             f"{_books(n_next)} on your shelves, not started"
             if n_next
             else "Nothing on your shelves to start",
+        )
+        + _nav_entry(
+            "Next in series",
+            "next-in-series",
+            "/opds/next-in-series",
+            f"{_books(n_series)}, next of each series you started"
+            if n_series
+            else "No series started",
+        )
+        + _nav_entry(
+            "Want to read",
+            "want-to-read",
+            "/opds/want-to-read",
+            f"{_books(n_want)} you queued" if n_want else "Nothing queued",
         )
         + _nav_entry(
             "Queued for this device",
@@ -219,6 +235,34 @@ def up_next_feed(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
     ids = up_next_ids(db, user)
     return _acquisition(
         "Up next", f"/opds/up-next?page={page}", _works_page(db, ids, page), page, len(ids)
+    )
+
+
+@router.get("/next-in-series", include_in_schema=False)
+def next_in_series_feed(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
+    """The next unread book of each series the person has started (lectern.series)."""
+    page = max(1, page)
+    ids = series.next_in_series_ids(db, user)
+    return _acquisition(
+        "Next in series",
+        f"/opds/next-in-series?page={page}",
+        _works_page(db, ids, page),
+        page,
+        len(ids),
+    )
+
+
+@router.get("/want-to-read", include_in_schema=False)
+def want_to_read_feed(user: OpdsUser, db: DbDep, page: int = 1) -> Response:
+    """The person's manual want-to-read queue, in their order (lectern.want_to_read)."""
+    page = max(1, page)
+    ids = want_to_read.work_ids(db, user)
+    return _acquisition(
+        "Want to read",
+        f"/opds/want-to-read?page={page}",
+        _works_page(db, ids, page),
+        page,
+        len(ids),
     )
 
 

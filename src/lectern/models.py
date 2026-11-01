@@ -580,6 +580,24 @@ class ListeningQueueState(Base):
     version: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class WantToReadItem(Base):
+    """One entry of a person's manual want-to-read queue (issue #70). Only ever added by the
+    person themselves; never populated from series or shelves."""
+
+    __tablename__ = "want_to_read_items"
+    __table_args__ = (
+        UniqueConstraint("user_id", "work_id", name="uq_want_to_read_item"),
+        Index("ix_want_to_read_items_user_position", "user_id", "position"),
+        CheckConstraint("position >= 0", name="ck_want_to_read_position"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
 class ReadingState(Base):
     """How far one person is with one work, whatever they read or listened on (migration
     0018, ``lectern.reading_state``): the fraction from the latest position written to

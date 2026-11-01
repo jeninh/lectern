@@ -22,12 +22,15 @@ pull, so the queue is just a personal shelf for one catalogue password.
 - **On the e-reader:** open the Lectern catalogue. The root lists, in this order:
   1. **Continue reading**: what you are reading or listening to, most recent first;
   2. **Up next**: books on your shelves you have not started;
-  3. **Queued for this device**: what was sent to *this* device;
-  4. **Shelves**: your top-level shelves; a shelf with sub-shelves opens on "Books on …"
+  3. **Next in series**: the next book you have not started in each series you have started,
+     in series order (automatic);
+  4. **Want to read**: the books you queued yourself, in your order (never filled automatically);
+  5. **Queued for this device**: what was sent to *this* device;
+  6. **Shelves**: your top-level shelves; a shelf with sub-shelves opens on "Books on …"
      and its sub-shelves, a shelf without opens straight on its books. Owners and members also
      get **Not on a shelf**. Shelves shared with a reader show at their top level, and shelves
      above them stay private.
-  5. **All books** and **Recently added**, as before.
+  7. **All books** and **Recently added**, as before.
 
   Each entry says how many books it holds ("2 books sent to Kobo Libra 2"), so a slow e-ink
   screen shows what is new without opening anything.
@@ -193,10 +196,10 @@ OPDS (HTTP Basic with the device's app password; the per-IP Basic rate limit app
 
 | Route | |
 | --- | --- |
-| `GET /opds` | navigation feed: Continue reading, Up next, Queued for this device, Shelves, All books, Recently added |
+| `GET /opds` | navigation feed: Continue reading, Up next, Next in series, Want to read, Queued for this device, Shelves, All books, Recently added |
 | `GET /opds/shelves`, `/opds/shelves/{id}` | navigation feeds: top-level shelves; one shelf's books entry and sub-shelves (`up` leads to the visible parent). Hidden shelves are 404 |
 | `GET /opds/shelves/{id}/books`, `/opds/shelves/none` | acquisition feeds: a shelf's own books in shelf order; books on no shelf |
-| `GET /opds/continue`, `/opds/up-next`, `/opds/queue` | acquisition feeds, 50 per page with `next`/`previous` links and OpenSearch counts; entries are identical to `/opds/all` (same `urn:lectern:work:<id>` ids and acquisition links) |
+| `GET /opds/continue`, `/opds/up-next`, `/opds/next-in-series`, `/opds/want-to-read`, `/opds/queue` | acquisition feeds, 50 per page with `next`/`previous` links and OpenSearch counts; entries are identical to `/opds/all` (same `urn:lectern:work:<id>` ids and acquisition links) |
 
 ## Storage
 
