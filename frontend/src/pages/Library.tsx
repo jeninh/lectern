@@ -86,6 +86,8 @@ export function ProgressRing({ value, size = 34 }: { value: number; size?: numbe
 const STATUS_LABEL: Record<Status, string> = { all: "All", reading: "Reading", unread: "Not started", finished: "Finished" };
 const SORT_LABEL: Record<string, string> = { title: "Title", author: "Author", added: "Newest" };
 
+const LIBRARY_PAGE = 500;
+
 export function LibraryPage() {
   const { works, worksLoaded, me, refreshLibrary, canUpload, canEdit, pickBooks, pickFolder, toast, imports, setReviewOpen, shelves, canCreateShelf, offlineBooks } = useStore();
   const [sendingMany, setSendingMany] = useState(false);
@@ -187,9 +189,18 @@ export function LibraryPage() {
   useEffect(() => {
     if (!serverQuery) return;
     let stale = false;
-    get<{ works: Work[] }>(`/api/library?${serverQuery}`)
-      .then((d) => !stale && setServed({ key: serverQuery, works: d.works, error: null }))
-      .catch((e) => !stale && setServed({ key: serverQuery, works: [], error: (e as Error).message }));
+    // Pages of LIBRARY_PAGE: the first one paints while the rest arrive (a few thousand books
+    // in one response is megabytes of JSON for a small server to build and a phone to parse).
+    (async () => {
+      let acc: Work[] = [];
+      for (;;) {
+        const d = await get<{ works: Work[]; total: number }>(`/api/library?${serverQuery}&limit=${LIBRARY_PAGE}&offset=${acc.length}`);
+        if (stale) return;
+        acc = acc.concat(d.works);
+        setServed({ key: serverQuery, works: acc, error: null });
+        if (!d.works.length || acc.length >= d.total) return;
+      }
+    })().catch((e) => !stale && setServed({ key: serverQuery, works: [], error: (e as Error).message }));
     return () => {
       stale = true;
     };

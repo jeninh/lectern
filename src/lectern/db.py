@@ -59,3 +59,13 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def optimize(engine: Engine) -> None:
+    """Give SQLite's query planner statistics for tables that have none (or very different
+    row counts since the last run). Without them it assumes every index is equally selective:
+    on a library of thousands of works that chose, for the shelf counts, a plan that probed
+    ``shelf_items`` once per work and shelf (116 ms instead of 3 ms). Cheap when nothing
+    changed; run at startup after the migrations."""
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA optimize=0x10002")

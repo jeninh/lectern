@@ -205,7 +205,7 @@ def _year_at(at: datetime, user: User) -> int:
 
 def _visible_activity(db: Session, user: User, start: datetime, end: datetime):
     return (
-        select(ReadingActivity)
+        select(ReadingActivity.at, ReadingActivity.read_seconds, ReadingActivity.listened_seconds)
         .join(Work, Work.id == ReadingActivity.work_id)
         .where(
             ReadingActivity.user_id == user.id,
@@ -217,8 +217,16 @@ def _visible_activity(db: Session, user: User, start: datetime, end: datetime):
 
 
 def _visible_days(db: Session, user: User, start: str, end: str):
+    """One row per day and author (summed in SQL: a year of history is tens of thousands of
+    per-work rows, which the ORM would build as entities one by one)."""
     return db.execute(
-        select(ReadingStatsDay, Work.author)
+        select(
+            ReadingStatsDay.day,
+            Work.author,
+            func.sum(ReadingStatsDay.read_seconds).label("read_seconds"),
+            func.sum(ReadingStatsDay.listened_seconds).label("listened_seconds"),
+            func.sum(ReadingStatsDay.pages).label("pages"),
+        )
         .join(Work, Work.id == ReadingStatsDay.work_id)
         .where(
             ReadingStatsDay.user_id == user.id,
@@ -226,6 +234,7 @@ def _visible_days(db: Session, user: User, start: str, end: str):
             ReadingStatsDay.day < end,
             visible_works(user),
         )
+        .group_by(ReadingStatsDay.day, Work.author)
     )
 
 
@@ -238,7 +247,7 @@ def _longest_session(db: Session, user: User, start: datetime, end: datetime) ->
     """
     units = [
         (row.at, row.at, row.read_seconds + row.listened_seconds)
-        for row in db.scalars(_visible_activity(db, user, start, end))
+        for row in db.execute(_visible_activity(db, user, start, end))
     ]
     units += [
         (row.started_at, row.ended_at, row.seconds)
@@ -274,12 +283,12 @@ def summary(db: Session, user: User, year: int) -> dict:
         lambda: {"read_seconds": 0, "listened_seconds": 0, "pages": 0.0}
     )
     by_author: dict[str, float] = defaultdict(float)
-    for row, author in _visible_days(db, user, start_day, end_day):
+    for row in _visible_days(db, user, start_day, end_day):
         bucket = by_day[row.day]
         bucket["read_seconds"] += row.read_seconds
         bucket["listened_seconds"] += row.listened_seconds
         bucket["pages"] += row.pages
-        by_author[author or "Unknown"] += row.read_seconds + row.listened_seconds
+        by_author[row.author or "Unknown"] += row.read_seconds + row.listened_seconds
     active = {
         d
         for d, total in by_day.items()
@@ -287,11 +296,20 @@ def summary(db: Session, user: User, year: int) -> dict:
     }
     # Current streak must not reset on New Year's Day merely because this review is filtered.
     today = datetime.now(zone).date()
-    current_days = {
-        row.day
-        for row, _ in _visible_days(db, user, "0001-01-01", (today + timedelta(days=1)).isoformat())
-        if row.read_seconds + row.listened_seconds >= STREAK_MIN_SECONDS
-    }
+    current_days = set(
+        db.scalars(
+            select(ReadingStatsDay.day)
+            .join(Work, Work.id == ReadingStatsDay.work_id)
+            .where(
+                ReadingStatsDay.user_id == user.id,
+                ReadingStatsDay.day < (today + timedelta(days=1)).isoformat(),
+                ReadingStatsDay.read_seconds + ReadingStatsDay.listened_seconds
+                >= STREAK_MIN_SECONDS,
+                visible_works(user),
+            )
+            .distinct()
+        )
+    )
     current, longest = _streaks(active, today, current_days)
     totals = {
         "read_seconds": sum(int(total["read_seconds"]) for total in by_day.values()),
