@@ -25,9 +25,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("user_id"),
     )
-    op.add_column("invites", sa.Column("guest", sa.JSON(), nullable=True))
+    # SQLite before 3.35 cannot drop it again, so downgrading there leaves it behind.
+    if "guest" not in {c["name"] for c in sa.inspect(op.get_bind()).get_columns("invites")}:
+        op.add_column("invites", sa.Column("guest", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("invites", "guest")
+    # ALTER TABLE ... DROP COLUMN needs SQLite 3.35; before that the nullable column stays.
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("invites", "guest")
     op.drop_table("guest_profiles")
