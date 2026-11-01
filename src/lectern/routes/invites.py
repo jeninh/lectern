@@ -9,17 +9,26 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from lectern import notify
-from lectern.models import Invite, Role, User, utcnow
+from lectern import guests, notify
+from lectern.models import (
+    GuestProfile,
+    Invite,
+    Role,
+    Shelf,
+    ShelfGrant,
+    ShelfPermission,
+    User,
+    utcnow,
+)
 from lectern.routes.api.serializers import iso
 from lectern.security import alerts, audit
 from lectern.security.csrf import _origin_ok
@@ -57,19 +66,43 @@ def invite_json(inv: Invite, users: dict[int, str]) -> dict:
         "used_at": iso(inv.used_at),
         "used_by": users.get(inv.used_by),
         "revoked_at": iso(inv.revoked_at),
+        "guest": inv.guest,
     }
+
+
+class GuestIn(BaseModel):
+    """A guest invite (docs/guests.md): a reader who sees only these shelves (VIEW)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shelf_ids: list[int] = Field(min_length=1, max_length=200)
+    expires_at: datetime | None = None  # the account's end date; null: none
+    allow_opds: bool = True  # downloads, app passwords, and OPDS
 
 
 class InviteIn(BaseModel):
     role: Literal["member", "reader"]
     note: str = Field(default="", max_length=128)
     expires_in_hours: int = Field(default=72, ge=1, le=720)
+    guest: GuestIn | None = None
 
 
 @api.post("", status_code=status.HTTP_201_CREATED)
 def create_invite(
     request: Request, auth: OwnerOnly, db: DbDep, settings: SettingsDep, body: InviteIn
 ) -> dict:
+    guest = None
+    if body.guest is not None:
+        if body.role != "reader":
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "guest_must_be_reader")
+        ends = guests.as_aware(body.guest.expires_at)
+        if ends is not None and ends <= utcnow():
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "guest_expiry_in_past")
+        guest = {
+            "shelf_ids": guests.check_guest_shelves(db, body.guest.shelf_ids),
+            "expires_at": iso(ends),
+            "allow_opds": body.guest.allow_opds,
+        }
     token = new_secret(32)
     inv = Invite(
         token_hash=sha256_hex(token),
@@ -77,6 +110,7 @@ def create_invite(
         note=body.note.strip(),
         created_by=auth.user.id,
         expires_at=utcnow() + timedelta(hours=body.expires_in_hours),
+        guest=guest,
     )
     db.add(inv)
     db.flush()
@@ -86,7 +120,7 @@ def create_invite(
         actor_user_id=auth.user.id,
         target=inv.note or f"invite:{inv.id}",
         ip=client_ip(request),
-        detail=body.role,
+        detail="guest" if guest else body.role,
     )
     db.commit()
     return {
@@ -144,7 +178,7 @@ def _form(request: Request, db, inv: Invite, token: str, status_code: int = 200,
         "invite.html",
         {
             "token": token,
-            "role": inv.role.value,
+            "role": "guest" if inv.guest is not None else inv.role.value,
             "inviter": inviter.display_name if inviter else None,
             "expires": inv.expires_at.strftime("%d %b %Y %H:%M UTC"),
             **extra,
@@ -194,6 +228,14 @@ def invite_accept(
             request, db, inv, token, 400, error=error, username=username, display_name=display_name
         )
 
+    guest = inv.guest
+    guest_ends = None
+    if guest is not None and guest.get("expires_at"):
+        guest_ends = guests.as_aware(
+            datetime.fromisoformat(guest["expires_at"].replace("Z", "+00:00"))
+        )
+        if guest_ends <= utcnow():  # the guest's end date passed before the link was used
+            return _invalid(request)
     pw_hash = hash_password(password)  # slow: before taking the write lock below
     user = User(
         username=username,
@@ -202,6 +244,8 @@ def invite_accept(
         password_hash=pw_hash,
         webauthn_user_handle=secrets.token_bytes(32),
     )
+    if guest is not None:
+        user.guest = GuestProfile(expires_at=guest_ends, allow_opds=bool(guest.get("allow_opds")))
     db.add(user)
     try:
         db.flush()
@@ -238,19 +282,33 @@ def invite_accept(
         db.rollback()
         return _invalid(request)
     db.refresh(inv)
+    if guest is not None:
+        # VIEW grants on the shelves chosen at invite time that still exist and are still
+        # hand-made; the link never grants more than that.
+        for sid in guest.get("shelf_ids", []):
+            if guests.grantable_shelf(db.get(Shelf, sid)):
+                db.add(ShelfGrant(shelf_id=sid, user_id=user.id, granted_by=inv.created_by,
+                                  permission=ShelfPermission.VIEW))  # fmt: skip
     ip = client_ip(request)
     audit.record(
         db, "invite.accept", actor_user_id=user.id, target=username, ip=ip, detail=inv.role.value
     )
     audit.record(db, "user.create", actor_user_id=user.id, target=username, ip=ip, detail="invite")
+    if guest is not None:
+        audit.record(db, "guest.create", actor_user_id=user.id, target=username, ip=ip,
+                     detail=f"shelves={guest.get('shelf_ids', [])}")  # fmt: skip
     for owner in notify.owners(db):
         notify.notify(
             db,
             owner,
             "invite.accepted",
-            f"{user.display_name} joined as a {inv.role.value}",
+            f"{user.display_name} joined as a {'guest' if guest is not None else inv.role.value}",
             f"@{username} used the invite{f' for {inv.note}' if inv.note else ''}."
-            + (" Grant them shelves in the Library." if inv.role == Role.READER else ""),
+            + (
+                " Grant them shelves in the Library."
+                if inv.role == Role.READER and guest is None
+                else ""
+            ),
             data={"user_id": user.id},
         )
     session_token = create_session(db, user, request, settings)

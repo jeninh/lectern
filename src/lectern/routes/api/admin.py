@@ -4,15 +4,26 @@ from __future__ import annotations
 
 import secrets
 import threading
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, update
 
-from lectern import backups, drill, egress, instance, offline_mode, queue
+from lectern import backups, drill, egress, guests, instance, offline_mode, queue
 from lectern.db import session_factory
-from lectern.models import AuditLog, Role, User, utcnow
+from lectern.models import (
+    AppPassword,
+    AuditLog,
+    GuestProfile,
+    Role,
+    Shelf,
+    ShelfGrant,
+    ShelfPermission,
+    User,
+    utcnow,
+)
 from lectern.routes.api.serializers import iso, user_json
 from lectern.security import audit
 from lectern.security.deps import (
@@ -164,6 +175,8 @@ def set_role(request: Request, auth: OwnerWrite, db: DbDep, user_id: int, body: 
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     if user.role == Role.OWNER:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The owner's role cannot change.")
+    if user.guest is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A guest stays a guest; revoke them instead.")
     if user.role.value != body.role:
         user.role = Role(body.role)
         audit.record(
@@ -274,10 +287,12 @@ def data_saver_status(auth: OwnerRead, db: DbDep, settings: SettingsDep) -> dict
 @router.get("/audit")
 def audit_log(auth: OwnerRead, db: DbDep) -> dict:
     users = {u.id: u.username for u in db.scalars(select(User)).all()}
+    guest_ids = set(db.scalars(select(GuestProfile.user_id)))
     rows = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(300)).all()
     return {
         "rows": [
             {
+                "guest": r.actor_user_id in guest_ids,
                 "id": r.id,
                 "at": iso(r.at),
                 "actor": users.get(r.actor_user_id),
@@ -289,6 +304,119 @@ def audit_log(auth: OwnerRead, db: DbDep) -> dict:
             for r in rows
         ]
     }
+
+
+# --- guests (issue #77, docs/guests.md) ---------------------------------------------------------
+
+
+def _guest_row(db, user: User) -> dict:
+    g = user.guest
+    shelves = db.execute(
+        select(Shelf.id, Shelf.name)
+        .join(ShelfGrant, ShelfGrant.shelf_id == Shelf.id)
+        .where(ShelfGrant.user_id == user.id)
+        .order_by(Shelf.name)
+    ).all()
+    last_device = db.scalar(
+        select(func.max(AppPassword.last_used_at)).where(AppPassword.user_id == user.id)
+    )
+    seen = [t for t in (user.last_login_at, last_device) if t is not None]
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "is_active": user.is_active,
+        "created_at": iso(g.created_at),
+        "expires_at": iso(g.expires_at),
+        "expired": guests.expired(user),
+        "allow_opds": g.allow_opds,
+        "last_login_at": iso(user.last_login_at),
+        "last_activity_at": iso(max(seen)) if seen else None,
+        "shelves": [{"id": sid, "name": name} for sid, name in shelves],
+    }
+
+
+@router.get("/guests")
+def list_guests(auth: OwnerWrite, db: DbDep) -> dict:
+    """Guests with their shelves, end dates, limits, and last activity. Also revokes the
+    credentials of any whose end date has passed (access is refused regardless)."""
+    guests.sweep_expired(db)
+    db.commit()
+    rows = db.scalars(select(User).join(GuestProfile).order_by(User.username)).unique().all()
+    return {"guests": [_guest_row(db, u) for u in rows]}
+
+
+class GuestPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expires_at: datetime | None = None  # null: no end date
+    allow_opds: bool | None = None
+    shelf_ids: list[int] | None = Field(default=None, max_length=200)
+
+
+def _guest_or_404(db, user_id: int) -> User:
+    user = db.get(User, user_id)
+    if user is None or user.guest is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    return user
+
+
+@router.patch("/guests/{user_id}")
+def update_guest(
+    request: Request, auth: OwnerWrite, db: DbDep, user_id: int, body: GuestPatch
+) -> dict:
+    """Change a guest's end date, limits, or shelves (``shelf_ids`` replaces the list; they
+    are VIEW grants). Narrowing takes effect on the guest's next request."""
+    user = _guest_or_404(db, user_id)
+    g = user.guest
+    changes = []
+    if "expires_at" in body.model_fields_set:
+        g.expires_at = guests.as_aware(body.expires_at)
+        changes.append(f"expires={iso(g.expires_at)}")
+        if g.expires_at is not None and g.expires_at <= utcnow():
+            guests.revoke_credentials(db, user)
+    if body.allow_opds is not None and body.allow_opds != g.allow_opds:
+        g.allow_opds = body.allow_opds
+        changes.append(f"opds={body.allow_opds}")
+        if not g.allow_opds:
+            db.execute(
+                update(AppPassword)
+                .where(AppPassword.user_id == user.id, AppPassword.revoked_at.is_(None))
+                .values(revoked_at=utcnow())
+            )
+    if body.shelf_ids is not None:
+        ids = set(guests.check_guest_shelves(db, body.shelf_ids))
+        have = {gr.shelf_id: gr for gr in db.scalars(
+            select(ShelfGrant).where(ShelfGrant.user_id == user.id))}  # fmt: skip
+        for sid, grant in have.items():
+            if sid not in ids:
+                db.delete(grant)
+        for sid in ids - have.keys():
+            db.add(ShelfGrant(shelf_id=sid, user_id=user.id, granted_by=auth.user.id,
+                              permission=ShelfPermission.VIEW))  # fmt: skip
+        for sid in ids & have.keys():
+            have[sid].permission = ShelfPermission.VIEW
+        changes.append(f"shelves={sorted(ids)}")
+    audit.record(db, "guest.update", actor_user_id=auth.user.id, target=user.username,
+                 ip=client_ip(request), detail=" ".join(changes) or None)  # fmt: skip
+    db.commit()
+    db.expire_all()
+    return {"guest": _guest_row(db, db.get(User, user_id))}
+
+
+@router.post("/guests/{user_id}/revoke")
+def revoke_guest(request: Request, auth: OwnerWrite, db: DbDep, user_id: int) -> dict:
+    """End a guest's access now: the account is disabled, every session and credential revoked,
+    and their shelf grants removed."""
+    user = _guest_or_404(db, user_id)
+    user.is_active = False
+    guests.revoke_credentials(db, user)
+    db.execute(delete(ShelfGrant).where(ShelfGrant.user_id == user.id))
+    audit.record(db, "guest.revoke", actor_user_id=auth.user.id, target=user.username,
+                 ip=client_ip(request))  # fmt: skip
+    db.commit()
+    db.expire_all()
+    return {"guest": _guest_row(db, db.get(User, user_id))}
 
 
 # --- backups (docs/backups.md) ------------------------------------------------------------------

@@ -101,12 +101,15 @@ def root(request: Request, user: OpdsUser, db: DbDep) -> Response:
     device's queue) before the whole library, each with its size, so the book you want is
     one tap away on a slow screen. The order never changes; empty lists say so."""
     pw = request.state.app_password
-    device_queue.sync_follow(db, pw.id)
+    # A guest has no device queue and no want-to-read list (those routes refuse guests).
+    personal = user.guest is None
+    if personal:
+        device_queue.sync_follow(db, pw.id)
     n_continue = len(continue_items(db, user, PAGE_SIZE))
     n_next = len(up_next_ids(db, user))
     n_series = len(series.next_in_series_ids(db, user))
-    n_want = len(want_to_read.work_ids(db, user))
-    n_queue = device_queue.pending_count(db, pw.id, user)
+    n_want = len(want_to_read.work_ids(db, user)) if personal else 0
+    n_queue = device_queue.pending_count(db, pw.id, user) if personal else 0
     body = (
         '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">'
         "<id>urn:lectern:root</id><title>Lectern</title>"
@@ -140,17 +143,23 @@ def root(request: Request, user: OpdsUser, db: DbDep) -> Response:
             if n_series
             else "No series started",
         )
-        + _nav_entry(
-            "Want to read",
-            "want-to-read",
-            "/opds/want-to-read",
-            f"{_books(n_want)} you queued" if n_want else "Nothing queued",
-        )
-        + _nav_entry(
-            "Queued for this device",
-            "queue",
-            "/opds/queue",
-            f"{_books(n_queue)} sent to {pw.label}" if n_queue else f"Nothing sent to {pw.label}",
+        + (
+            _nav_entry(
+                "Want to read",
+                "want-to-read",
+                "/opds/want-to-read",
+                f"{_books(n_want)} you queued" if n_want else "Nothing queued",
+            )
+            + _nav_entry(
+                "Queued for this device",
+                "queue",
+                "/opds/queue",
+                f"{_books(n_queue)} sent to {pw.label}"
+                if n_queue
+                else f"Nothing sent to {pw.label}",
+            )
+            if personal
+            else ""
         )
         + _nav_entry(
             "Shelves", "shelves", "/opds/shelves", "Browse by shelf and sub-shelf", kind=NAV

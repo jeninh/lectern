@@ -10,6 +10,8 @@ export interface User {
   created_at: string | null;
   last_login_at: string | null;
   download_cap_per_hour?: number | null;
+  /** Set for a guest: a reader limited to the shelves they were given (docs/guests.md). */
+  guest?: { expires_at: string | null; expired: boolean; allow_opds: boolean } | null;
 }
 
 export interface Me {
@@ -517,7 +519,7 @@ export interface Shelf {
   /** Names from this person's top level down to this shelf. */
   path: string[];
   owner: string | null;
-  owner_id: number;
+  owner_id: number | null;
   permission: "owner" | "edit" | "view";
   /** Books directly on it that this person sees. */
   work_count: number;
@@ -556,6 +558,21 @@ export interface Invite {
   revoked_at: string | null;
   url?: string;
   token?: string;
+  guest?: { shelf_ids: number[]; expires_at: string | null; allow_opds: boolean } | null;
+}
+
+export interface GuestRow {
+  id: number;
+  username: string;
+  display_name: string;
+  is_active: boolean;
+  created_at: string | null;
+  expires_at: string | null;
+  expired: boolean;
+  allow_opds: boolean;
+  last_login_at: string | null;
+  last_activity_at: string | null;
+  shelves: { id: number; name: string }[];
 }
 
 export interface AppNotification {

@@ -132,7 +132,10 @@ export function Shell({ children }: { children: ReactNode }) {
     { keys: "g i", handler: () => nav("/app/docs") },
   ]);
 
-  const manage = [...MANAGE, ...(canEdit ? [TRASH] : []), ...(isOwner ? [ADMIN, HEALTH] : [])];
+  const guest = !!me?.user.guest;
+  // A guest reads and listens; everything else is closed to them on the server.
+  const read = guest ? READ.filter((n) => ["/app", "/app/library", "/app/listening"].includes(n.to)) : READ;
+  const manage = guest ? [] : [...MANAGE, ...(canEdit ? [TRASH] : []), ...(isOwner ? [ADMIN, HEALTH] : [])];
   const name = me?.user.display_name || me?.user.username || "";
 
   return (
@@ -163,13 +166,13 @@ export function Shell({ children }: { children: ReactNode }) {
         </button>
         <nav className="nav-groups" aria-label="Primary">
           <div className="nav-section" aria-hidden={collapsed || undefined}>Read</div>
-          {READ.map((n) => (
+          {read.map((n) => (
             <Fragment key={n.to}>
               <NavItem n={n} collapsed={collapsed} />
               {n.to === "/app/library" && !collapsed && <ShelfTree />}
             </Fragment>
           ))}
-          <div className="nav-section" aria-hidden={collapsed || undefined}>Manage</div>
+          {manage.length > 0 && <div className="nav-section" aria-hidden={collapsed || undefined}>Manage</div>}
           {manage.map((n) => <NavItem key={n.to} n={n} collapsed={collapsed} />)}
         </nav>
         <div className="sidebar-footer">
@@ -233,7 +236,7 @@ export function Shell({ children }: { children: ReactNode }) {
       )}
 
       <nav className="bottom-nav" aria-label="Primary">
-        {[READ[0], READ[1], READ[2], READ[3], MANAGE[0]].map((n) => (
+        {(guest ? [READ[0], READ[1], READ[2]] : [READ[0], READ[1], READ[2], READ[3], MANAGE[0]]).map((n) => (
           <NavLink key={n.to} to={n.to} end={n.end}>
             {n.icon}
             <span>{n.label}</span>

@@ -45,7 +45,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from lectern import egress
+from lectern import egress, guests
 from lectern.config import Settings
 from lectern.models import (
     AppPassword,
@@ -168,7 +168,7 @@ def device_parts(db: Session, key: SyncKey) -> tuple[SyncKey, AppPassword] | Non
 
 def _active(db: Session, key: SyncKey, pw: AppPassword) -> User | None:
     user = db.get(User, key.user_id)
-    if user is None or not user.is_active or key.revoked_at or pw.revoked_at:
+    if not guests.account_usable(user) or user.guest is not None or key.revoked_at or pw.revoked_at:
         return None
     return user
 

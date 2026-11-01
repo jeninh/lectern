@@ -2,7 +2,7 @@
 {% block title %}Join Lectern{% endblock %}
 {% block content %}
 <h1>Join this Lectern</h1>
-<p>{% if inviter %}{{ inviter }} invited you{% else %}You were invited{% endif %} as a <strong>{{ role }}</strong>{% if role == "reader" %}: you will see the shelves shared with you{% else %}: you will see the whole library{% endif %}. Choose your own username and password.</p>
+<p>{% if inviter %}{{ inviter }} invited you{% else %}You were invited{% endif %} as a <strong>{{ role }}</strong>{% if role == "guest" %}: you will see only the shelves shared with you, and nothing can be changed{% elif role == "reader" %}: you will see the shelves shared with you{% else %}: you will see the whole library{% endif %}. Choose your own username and password.</p>
 <form method="post" action="/invite/{{ token }}" class="card">
   <label>Username <input name="username" required pattern="[a-z0-9][a-z0-9._-]{1,31}" value="{{ username or '' }}" autocomplete="username" autocapitalize="none"></label>
   <label>Display name <input name="display_name" maxlength="128" value="{{ display_name or '' }}"></label>
