@@ -86,3 +86,16 @@ holding the keys of the items you confirmed; one cleanup at a time. The job:
 
 Cancel a waiting or running cleanup like any job (`POST /api/jobs/{id}/cancel`); what it already
 removed stays removed.
+
+## Reading stats retention
+
+Reading stats keep one small raw row per counted reading or listening increment. By default
+they are kept forever. To cap them, set `LECTERN_STATS_RETENTION_DAYS` (empty or `0` = off, the
+default). The hourly housekeeping then rolls up raw rows older than that many days and deletes
+only those rows.
+
+Before deleting, each day's totals are marked as settled and the counted sessions are saved, so
+time read, pages, hours listened, streaks, top authors, the longest session, started/finished
+counts and the year in review come out the same. Daily totals, reading state and positions are
+never pruned. After a prune, a time-zone change re-buckets only the raw rows that remain; the
+pruned part stays on the local days it was counted on.

@@ -11,11 +11,19 @@ from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from lectern.access import visible_works
-from lectern.models import ReadingActivity, ReadingState, ReadingStatsDay, User, Work, utcnow
+from lectern.models import (
+    ReadingActivity,
+    ReadingSessionRollup,
+    ReadingState,
+    ReadingStatsDay,
+    User,
+    Work,
+    utcnow,
+)
 
 ACTIVE_GAP_S = 15 * 60
 TEXT_WRITE_CAP_S = 5 * 60
@@ -110,13 +118,19 @@ def record(
 
 
 def rebuild_days(db: Session, user: User) -> None:
-    """Rebucket all retained raw activity after a timezone edit.
+    """Rebucket retained raw activity after a timezone edit.
 
-    Raw activity is intentionally retained by default. If a future retention job removes it,
-    already-created daily/session summaries retain their original local day rather than silently
-    pretending they can be rebucketed without timestamps.
+    Events removed by opt-in retention (``prune_raw``) cannot be rebucketed; their share of each
+    day is kept in the ``frozen_*`` columns and stays on its original local day.
     """
-    db.execute(delete(ReadingStatsDay).where(ReadingStatsDay.user_id == user.id))
+    for day in db.scalars(select(ReadingStatsDay).where(ReadingStatsDay.user_id == user.id)):
+        if day.frozen_read_seconds or day.frozen_listened_seconds or day.frozen_pages:
+            day.read_seconds = day.frozen_read_seconds
+            day.listened_seconds = day.frozen_listened_seconds
+            day.pages = day.frozen_pages
+        else:
+            db.delete(day)
+    db.flush()
     rows = db.scalars(
         select(ReadingActivity)
         .where(ReadingActivity.user_id == user.id)
@@ -127,6 +141,66 @@ def rebuild_days(db: Session, user: User) -> None:
         daily.read_seconds = (daily.read_seconds or 0) + row.read_seconds
         daily.listened_seconds = (daily.listened_seconds or 0) + row.listened_seconds
         daily.pages = (daily.pages or 0.0) + row.pages
+
+
+def prune_raw(db: Session, retention_days: int, now: datetime | None = None) -> int:
+    """Delete raw activity older than ``retention_days`` after rolling it up; 0 keeps everything.
+
+    Only ``reading_activity`` rows are removed. The daily totals already include them and are
+    marked frozen, and counted session segments are saved so the longest session is unchanged.
+    Returns the number of raw rows deleted. Does not commit.
+    """
+    if retention_days <= 0:
+        return 0
+    cutoff = (now or utcnow()) - timedelta(days=retention_days)
+    deleted = 0
+    for user in db.scalars(
+        select(User).where(
+            User.id.in_(select(ReadingActivity.user_id).where(ReadingActivity.at < cutoff))
+        )
+    ):
+        rows = list(
+            db.scalars(
+                select(ReadingActivity)
+                .where(ReadingActivity.user_id == user.id, ReadingActivity.at < cutoff)
+                .order_by(ReadingActivity.at, ReadingActivity.id)
+            )
+        )
+        segment: ReadingSessionRollup | None = None
+        for row in rows:
+            daily = _day_row(db, user.id, row.work_id, day_at(row.at, user.reading_timezone))
+            daily.frozen_read_seconds = (daily.frozen_read_seconds or 0) + row.read_seconds
+            daily.frozen_listened_seconds = (
+                daily.frozen_listened_seconds or 0
+            ) + row.listened_seconds
+            daily.frozen_pages = (daily.frozen_pages or 0.0) + row.pages
+            # A segment is a run of one work's rows with no gap over ACTIVE_GAP_S, kept inside one
+            # local year so a year review can place it whole.
+            if (
+                segment is None
+                or segment.work_id != row.work_id
+                or (row.at - segment.ended_at).total_seconds() > ACTIVE_GAP_S
+                or _year_at(row.at, user) != _year_at(segment.ended_at, user)
+            ):
+                segment = ReadingSessionRollup(
+                    user_id=user.id,
+                    work_id=row.work_id,
+                    started_at=row.at,
+                    ended_at=row.at,
+                    seconds=0,
+                )
+                db.add(segment)
+            segment.ended_at = row.at
+            segment.seconds += row.read_seconds + row.listened_seconds
+        for row in rows:
+            db.delete(row)
+        deleted += len(rows)
+    db.flush()
+    return deleted
+
+
+def _year_at(at: datetime, user: User) -> int:
+    return at.astimezone(timezone(user.reading_timezone)).year
 
 
 def _visible_activity(db: Session, user: User, start: datetime, end: datetime):
@@ -159,17 +233,34 @@ def _longest_session(db: Session, user: User, start: datetime, end: datetime) ->
     """Largest contiguous counted session in a selected local-year range.
 
     Daily aggregates intentionally do not preserve session boundaries, so this bounded query is
-    the only summary field that reads raw rows. It neither assigns time to historic positions
-    nor crosses the requested year's local-calendar boundary.
+    the only summary field that reads raw rows, plus the segments saved when raw rows were pruned.
+    It neither assigns time to historic positions nor crosses the requested year's boundary.
     """
+    units = [
+        (row.at, row.at, row.read_seconds + row.listened_seconds)
+        for row in db.scalars(_visible_activity(db, user, start, end))
+    ]
+    units += [
+        (row.started_at, row.ended_at, row.seconds)
+        for row in db.scalars(
+            select(ReadingSessionRollup)
+            .join(Work, Work.id == ReadingSessionRollup.work_id)
+            .where(
+                ReadingSessionRollup.user_id == user.id,
+                ReadingSessionRollup.started_at >= start,
+                ReadingSessionRollup.started_at < end,
+                visible_works(user),
+            )
+        )
+    ]
     longest = total = 0
     previous: datetime | None = None
-    for row in db.scalars(_visible_activity(db, user, start, end).order_by(ReadingActivity.at)):
-        if previous is None or (row.at - previous).total_seconds() > ACTIVE_GAP_S:
+    for started, ended, seconds in sorted(units, key=lambda unit: unit[:2]):
+        if previous is None or (started - previous).total_seconds() > ACTIVE_GAP_S:
             total = 0
-        total += row.read_seconds + row.listened_seconds
+        total += seconds
         longest = max(longest, total)
-        previous = row.at
+        previous = ended
     return longest
 
 
