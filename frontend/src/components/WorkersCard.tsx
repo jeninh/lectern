@@ -87,20 +87,30 @@ export function WorkersCard() {
   const [rows, setRows] = useState<WorkerCredential[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [queue, setQueue] = useState<{ active: QueueJob[]; failed: QueueJob[] } | null>(null);
+  // Full load after a change; polls skip the failed-jobs list, which only changes when a job ends.
   const load = useCallback(
-    () =>
+    (full = true) =>
       Promise.all([
         get<{ credentials: WorkerCredential[] }>("/api/worker-credentials").then((d) => setRows(d.credentials)),
-        Promise.all([get<{ jobs: QueueJob[] }>("/api/jobs?status=active"), get<{ jobs: QueueJob[] }>("/api/jobs?status=failed")])
-          .then(([a, f]) => setQueue({ active: a.jobs, failed: f.jobs.slice(0, 5) }))
-          .catch(() => setQueue({ active: [], failed: [] })),
+        Promise.all([
+          get<{ jobs: QueueJob[] }>("/api/jobs?status=active"),
+          full ? get<{ jobs: QueueJob[] }>("/api/jobs?status=failed") : null,
+        ])
+          .then(([a, f]) => setQueue((q) => ({ active: a.jobs, failed: f ? f.jobs.slice(0, 5) : (q?.failed ?? []) })))
+          .catch(() => setQueue((q) => q ?? { active: [], failed: [] })),
       ]),
     [],
   );
   useEffect(() => {
     load().catch(() => setRows([]));
-    const t = window.setInterval(() => load().catch(() => {}), 10_000);
-    return () => window.clearInterval(t);
+    // Poll every 15 s, but not while the tab is hidden; catch up when it is shown again.
+    const tick = () => document.visibilityState === "visible" && load(false).catch(() => {});
+    const t = window.setInterval(tick, 15_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [load]);
   const revoke = async (w: WorkerCredential) => {
     try {
