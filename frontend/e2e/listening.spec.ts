@@ -40,6 +40,10 @@ test("the page scrolls with the wheel over the chapter list while audio plays, a
 
   // A long chapter list is part of the page, not a scroll box that swallows the wheel.
   const chapters = page.locator("ol.chapters");
+  // Each chapter row has a play-from-here button ("<n> Chapter <n> <length>") and its own
+  // "Add Chapter <n> to Up next" queue button; count each kind on its own.
+  const rows = chapters.getByRole("button", { name: /^\d+\s*Chapter \d+\b/ });
+  const queueButtons = chapters.getByRole("button", { name: /^Add Chapter \d+ to Up next$/ });
   await expect(chapters.locator('[aria-current="true"]')).toBeVisible();
   const box = (await chapters.boundingBox())!;
   await page.mouse.move(box.x + 60, box.y + 40);
@@ -58,12 +62,13 @@ test("the page scrolls with the wheel over the chapter list while audio plays, a
   expect(await scrollY(page)).toBe(held);
 
   // A window around the current chapter; every chapter is still reachable.
-  await expect(chapters.getByRole("button")).toHaveCount(8);
+  await expect(rows).toHaveCount(8);
+  await expect(queueButtons).toHaveCount(8);
 
   // The window never moves out from under keyboard focus: with a row focused, playback moving
   // past the window keeps that row (and focus); once focus leaves, the window catches up.
   await page.locator(".now-playing").getByRole("button", { name: "Pause" }).click();
-  const first = chapters.getByRole("button").first();
+  const first = rows.first();
   const firstLabel = await first.textContent();
   await first.focus();
   const jumpTo = async (chapter: number) =>
@@ -75,7 +80,9 @@ test("the page scrolls with the wheel over the chapter list while audio plays, a
   await page.locator("#np-title").click();
   await expect(chapters.locator('[aria-current="true"]')).toContainText("Chapter 31");
   await page.getByRole("button", { name: "Show all 40 chapters" }).click();
-  await expect(chapters.getByRole("button")).toHaveCount(40);
+  await expect(rows).toHaveCount(40);
+  await expect(queueButtons).toHaveCount(40);
   await page.getByRole("button", { name: "Show fewer chapters" }).click();
-  await expect(chapters.getByRole("button")).toHaveCount(8);
+  await expect(rows).toHaveCount(8);
+  await expect(queueButtons).toHaveCount(8);
 });
