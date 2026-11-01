@@ -21,7 +21,7 @@ test("owner sees, pauses, reorders, retries, and cancels jobs", async ({ page })
   await expect(waiting.getByText("Book 305")).toBeVisible();
 
   // Pausing the rest of the batch moves it under Paused.
-  await page.getByRole("button", { name: "Pause the rest: OCR, 3 books" }).click();
+  await page.getByRole("button", { name: "Pause rest: OCR, 3 books" }).click();
   await expect(section(page, "Paused").getByText("0 of 3 done · 3 paused")).toBeVisible();
 
   // OCR jumps the line.

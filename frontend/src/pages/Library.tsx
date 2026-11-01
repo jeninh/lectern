@@ -388,7 +388,7 @@ export function LibraryPage() {
             {(canCreateShelf || shelves.length > 0) && <button className="btn ghost" onClick={() => setManageShelves(true)}><ShelfIcon /> Shelves</button>}
             {!reader && canCreateHere && (
               <OverflowMenu
-                label="Add a shelf or auto-shelves"
+                label="New: add a shelf or auto-shelves"
                 className="btn ghost"
                 trigger={<>New <Down /></>}
                 actions={[
@@ -566,7 +566,7 @@ export function LibraryPage() {
       />
 
       {!worksLoaded || (serverLoading && !served) ? (
-        <div className="book-grid" aria-busy="true" aria-label="Loading">{Array.from({ length: 6 }, (_, i) => <div key={i} className="book skeleton"><div className="cover" /></div>)}</div>
+        <div className="book-grid" role="status" aria-busy="true" aria-label="Loading">{Array.from({ length: 6 }, (_, i) => <div key={i} className="book skeleton"><div className="cover" /></div>)}</div>
       ) : unknownFolder ? (
         <EmptyState icon={<ShelfIcon />} title="This shelf isn’t available" action={<button className="btn" onClick={() => openFolder(null)}>Back to the Library</button>}>
           It was deleted, or it isn’t shared with you.

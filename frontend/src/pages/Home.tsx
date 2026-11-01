@@ -63,7 +63,7 @@ export function HomePage() {
               <Link className="more" to="/app/library">All books →</Link>
             </div>
             {items === null ? (
-              <div className="skeleton-row" aria-busy="true" aria-label="Loading"><span /><span /></div>
+              <div className="skeleton-row" role="status" aria-busy="true" aria-label="Loading"><span /><span /></div>
             ) : items.length === 0 ? (
               worksLoaded && works.length === 0 ? (
                 <EmptyState icon={<Book />} title="Your shelves are empty" action={uploadAction}>

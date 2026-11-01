@@ -98,7 +98,7 @@ export function DevicesPage() {
       </PageTitle>
 
       {devices === null ? (
-        <div className="device-grid" aria-busy="true" aria-label="Loading"><div className="device-card skeleton" /><div className="device-card skeleton" /></div>
+        <div className="device-grid" role="status" aria-busy="true" aria-label="Loading"><div className="device-card skeleton" /><div className="device-card skeleton" /></div>
       ) : active.length === 0 && revoked.length === 0 ? (
         <EmptyState icon={<Reader />} title="No devices yet" action={<button className="btn primary" onClick={openAdd}><Plus /> Add your first device</button>}>
           Each e-reader or phone gets its own sync key and catalogue password, so you can revoke one without touching the others.

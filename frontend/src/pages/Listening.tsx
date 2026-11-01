@@ -35,7 +35,7 @@ export function ListeningPage() {
     <>
       <PageTitle sub={items ? `${items.length} ${items.length === 1 ? "audiobook" : "audiobooks"}` : undefined}>Listening</PageTitle>
       {items === null ? (
-        <div className="skeleton-row" aria-busy="true" aria-label="Loading"><span /><span /></div>
+        <div className="skeleton-row" role="status" aria-busy="true" aria-label="Loading"><span /><span /></div>
       ) : items.length === 0 ? (
         <EmptyState
           icon={<Headphones />}
