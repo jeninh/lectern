@@ -21,6 +21,7 @@ from lectern import (
     limits,
     mcp_server,
     offline_mode,
+    premigration,
     push_alerts,
     search,
 )
@@ -30,7 +31,6 @@ from lectern.ingest.watcher import InboxWatcher
 from lectern.jobs import JobRunner, housekeeping
 from lectern.lan import LANGuard
 from lectern.lookup import http_get as lookup_http_get
-from lectern.migrate import upgrade_to_head
 from lectern.readaloud.cache import ReadAloudBuilder
 from lectern.routes import (
     api,
@@ -150,7 +150,12 @@ def create_app(
     @asynccontextmanager
     async def _serve(app: FastAPI):
         engine = init_engine(settings)
-        upgrade_to_head(engine)
+        try:
+            premigration.upgrade(engine, settings)
+        except premigration.MigrationRefused as exc:
+            engine.dispose()
+            log.error("%s", exc)
+            raise
         search.init(settings)
         settings.resolve_secret_key()
         with session_factory()() as db:

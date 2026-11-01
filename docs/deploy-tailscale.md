@@ -459,7 +459,10 @@ docker image prune -f        # optional: drop the previous image
 `git pull` only changes tracked files; your `.env`, `data/`, and `library/` stay as they are,
 so there is nothing to merge. Upgrades to the Tailscale image arrive the same way (it is
 pinned in `deploy/tailscale/compose.yaml`). Lectern updates its database schema on start, so
-[back up](#backups-and-restore) first. If `git pull --ff-only` refuses because a tracked file
+[back up](#backups-and-restore) first. It also snapshots the database before an upgrade and
+puts it back if the upgrade fails, refusing to start (docs/backups.md, "Schema upgrades at
+startup"; settings `LECTERN_PREMIGRATION_SNAPSHOT`, `LECTERN_PREMIGRATION_SNAPSHOT_KEEP`,
+`LECTERN_PREMIGRATION_FREE_MARGIN_MB`). If `git pull --ff-only` refuses because a tracked file
 was changed locally, `git status` shows which; move your change into `.env` and
 `git restore <file>`.
 

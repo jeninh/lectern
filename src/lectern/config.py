@@ -227,6 +227,14 @@ class Settings(BaseSettings):
     # deletes them once the restore succeeded (they are copied there when the library is on
     # another volume; on a Pi that is the SD card). Data files are always kept.
     restore_keep_replaced: bool = True
+    # Schema upgrades at startup (lectern.premigration, docs/backups.md): before migrating, copy
+    # the database to <data>/premigration-snapshots/ and restore it if the upgrade fails. Keep
+    # this many snapshots (pruned only after a successful upgrade); refuse to start unless the
+    # volume has room for the copies plus this margin. 0 turns snapshots off: a deliberate
+    # escape hatch that upgrades without a way back.
+    premigration_snapshot: bool = True
+    premigration_snapshot_keep: int = Field(default=5, ge=1, le=1000)
+    premigration_free_margin_mb: int = Field(default=64, ge=0)
     # Restore drill (docs/backups.md, "Restore drill"): every this many days, right after a
     # nightly backup, restore the latest snapshot into scratch space on the backup volume,
     # check it, report on Health, and delete it. 0 = off (the default); 7 = weekly.
