@@ -402,7 +402,10 @@ class ReadingStatsDay(Base):
     """Incremental per-calendar-day cache, rebuildable from ``reading_activity`` on timezone edits."""
 
     __tablename__ = "reading_stats_days"
-    __table_args__ = (UniqueConstraint("user_id", "work_id", "day", name="uq_reading_stats_day"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "work_id", "day", name="uq_reading_stats_day"),
+        Index("ix_reading_stats_days_user_day", "user_id", "day"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
