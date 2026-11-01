@@ -7,12 +7,13 @@ import { Download, Headphones, NextChapter, Play, PrevChapter, Reader, Upload } 
 import { HandoffPrompt, PlayButton, RateMenu, Scrubber, SkipButtons, SleepMenu } from "../components/Player";
 import { PageTitle } from "../components/Shell";
 import { get, post } from "../lib/api";
+import { clearListening, enqueueListening, listeningQueue, removeListening, reorderListening } from "../lib/listeningQueue";
 import { bytes, relativeTime } from "../lib/format";
 import { useVisiblePolling } from "../lib/hooks";
 import { clock, usePlayer } from "../lib/player";
 import { useStore } from "../lib/store";
 import { bookFiles, readerPath } from "../lib/formats";
-import type { TracksResponse, Work } from "../lib/types";
+import type { ListeningQueueItem, TracksResponse, Work } from "../lib/types";
 
 export function ListeningPage() {
   const { canUpload, pickBooks, me } = useStore();
@@ -46,6 +47,7 @@ export function ListeningPage() {
       ) : (
         <div className="stack" style={{ gap: 28 }}>
           {p.work && <NowPlaying onChanged={load} />}
+          <UpNext />
           {others.length > 0 && (
             <section aria-labelledby="ab-h">
               <div className="section-head"><h2 id="ab-h">{p.work ? "More audiobooks" : "Audiobooks"}</h2></div>
@@ -76,6 +78,31 @@ export function ListeningPage() {
         </div>
       )}
     </>
+  );
+}
+
+function UpNext() {
+  const p = usePlayer();
+  const { toast } = useStore();
+  const [items, setItems] = useState<ListeningQueueItem[]>([]);
+  const load = useCallback(() => listeningQueue().then((x) => setItems(x.items)), []);
+  useEffect(() => {
+    load().catch(() => {});
+    const changed = () => load().catch(() => {});
+    window.addEventListener("lectern:listening-queue", changed);
+    return () => window.removeEventListener("lectern:listening-queue", changed);
+  }, [load]);
+  const act = async (run: () => Promise<unknown>) => {
+    try { await run(); await load(); } catch (e) { toast((e as Error).message, "error"); }
+  };
+  return (
+    <section className="card" aria-labelledby="up-next-h">
+      <div className="section-head"><div><h2 id="up-next-h">Up next</h2><p className="hint">Playback queue, separate from your reading lists.</p></div>{items.length > 0 && <button className="btn sm ghost" onClick={() => act(clearListening)}>Clear</button>}</div>
+      <label className="row" style={{ marginBottom: 10 }}><input type="checkbox" checked={p.stopAfterCurrent} onChange={(e) => p.setStopAfterCurrent(e.target.checked)} /> Stop after current item <span className="hint">This session only</span></label>
+      {items.length === 0 ? <p className="hint">Nothing queued. Add an audiobook from the Library.</p> : <ol className="slots">
+        {items.map((item, i) => <li key={item.id} className="slot"><span className="n tabular">{i + 1}</span><span><strong>{item.work.title}</strong> <span className="hint">· {item.work.author}{item.track_position != null ? ` · chapter ${item.track_position + 1}` : ""}</span></span><button className="btn sm ghost" disabled={!i} onClick={() => act(() => reorderListening(items.map((x, n) => n === i ? items[i - 1].id : n === i - 1 ? item.id : x.id)))}>Up</button><button className="btn sm ghost" onClick={() => act(() => removeListening(item.id))}>Remove</button></li>)}
+      </ol>}
+    </section>
   );
 }
 
@@ -168,6 +195,7 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
               )}
             </span>
             {ebook && <Link className="btn sm ghost" to={readerPath(w)}><Reader /> Read</Link>}
+            <button className="btn sm ghost" onClick={() => enqueueListening(w.id).then(() => toast("Added to Up next.")).catch((e) => toast((e as Error).message, "error"))}>Add to Up next</button>
           </div>
           <p className="hint" id="saver-d">
             {p.dataSaver
@@ -207,6 +235,10 @@ function NowPlaying({ onChanged }: { onChanged: () => void }) {
                     <span className="t">{c.title}</span>
                     <span className="d tabular">{clock(c.end - c.start)}</span>
                   </button>
+                  <button className="btn sm ghost" onClick={() => {
+                    const track = p.tracks.find((t) => t.offset_s <= c.start && t.offset_s + t.duration_s > c.start);
+                    if (track) enqueueListening(w.id, track.id, c.start - track.offset_s, c.end - track.offset_s).catch((e) => toast((e as Error).message, "error"));
+                  }} aria-label={`Add ${c.title} to Up next`}>Add</button>
                 </li>
               );
             })}

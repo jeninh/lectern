@@ -8,6 +8,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { get, post } from "./api";
 import { getBook, orOffline } from "./offline/store";
 import { savePosition } from "./offline/sync";
+import { consumeListening, listeningQueue } from "./listeningQueue";
 import { pickHandoff } from "./handoff";
 import { useLocalStorage } from "./hooks";
 import { legacyRate, pickRate, sleepRewind, sleepStep, type Sleep } from "./playback";
@@ -36,13 +37,16 @@ interface Player {
   /** The person's speed for books not played yet. */
   defaultRate: number;
   sleep: Sleep;
+  /** Session-only: do not move to Up next after this natural completion. */
+  stopAfterCurrent: boolean;
   /** Whether data saver is in effect here: this device's choice, else the account's default. */
   dataSaver: boolean;
   /** This device's own choice, or null when it follows the account (Security page). */
   dataSaverDevice: boolean | null;
   usingLow: boolean;
   handoff: HandoffCandidate | null;
-  open: (work: Work, opts?: { autoplay?: boolean; at?: number }) => Promise<void>;
+  /** `restartFinished`: resume a saved place, but start over when it is at the book's end. */
+  open: (work: Work, opts?: { autoplay?: boolean; at?: number; endAt?: number | null; restartFinished?: boolean }) => Promise<void>;
   close: () => void;
   toggle: () => void;
   play: () => void;
@@ -58,6 +62,7 @@ interface Player {
   /** Make the current speed the default for books not played yet. */
   setDefaultRate: () => void;
   setSleep: (s: "chapter" | number | null) => void;
+  setStopAfterCurrent: (v: boolean) => void;
   /** Choose for this device; null follows the account's default again. */
   setDataSaver: (v: boolean | null) => Promise<void>;
   nextChapter: () => void;
@@ -120,6 +125,12 @@ export function trackAt(tracks: Track[], t: number): number {
   return i;
 }
 
+/** lectern.reading_state.FINISHED: at or past this fraction of the timeline a book is finished. */
+const FINISHED = 0.985;
+
+/** A queued chapter ends on its own boundary, not at the containing audio file's end. */
+export const chapterEndReached = (t: number, endAt: number | null) => endAt != null && t >= endAt;
+
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const { deviceName, toast, me, online, setPreference } = useStore();
   const audio = useRef<HTMLAudioElement | null>(null);
@@ -135,12 +146,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [dataSaverDevice, setDataSaverState] = useLocalStorage<boolean | null>(DATA_SAVER_KEY, null);
   const dataSaver = dataSaverDevice ?? !!me?.preferences.data_saver;
   const [sleep, setSleepState] = useState<Sleep>(null);
+  const [stopAfterCurrent, setStopAfterCurrent] = useState(false);
   const [handoff, setHandoff] = useState<HandoffCandidate | null>(null);
   const [usingLow, setUsingLow] = useState(false);
   const [clip, setClip] = useState<{ workId: number; start: number; end: number } | null>(null);
   const clipRef = useRef(clip);
   clipRef.current = clip;
-  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate });
+  const state = useRef({ work: null as Work | null, tracks: [] as Track[], index: 0, pendingSeek: null as number | null, lastSave: 0, listened: new Set<number>(), local: false, rate: defaultRate, endAt: null as number | null, ending: false });
 
   const duration = useMemo(() => tracks.reduce((s, tr) => s + tr.duration_s, 0), [tracks]);
   const chapters = useMemo(() => chaptersOf(tracks), [tracks]);
@@ -210,7 +222,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
 
   const open = useCallback(
-    async (w: Work, opts: { autoplay?: boolean; at?: number } = {}) => {
+    async (w: Work, opts: { autoplay?: boolean; at?: number; endAt?: number | null; restartFinished?: boolean } = {}) => {
       if (state.current.work && state.current.work.id !== w.id) await save();
       setLoading(true);
       try {
@@ -222,6 +234,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         ]);
         if (!tr.tracks.length) throw new Error("This book has no audio yet.");
         state.current.local = !!local;
+        state.current.endAt = opts.endAt ?? null;
+        state.current.ending = false;
         state.current.work = w;
         state.current.tracks = tr.tracks;
         setWork(w);
@@ -236,7 +250,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           writeMark(w.id, { t: start, seenAt: prog.received_at });
         }
         start = start ?? 0;
-        setHandoff(opts.at == null && mark ? pickHandoff(prog, { seenAt: mark.seenAt }, { device: deviceName, mode: "listen", here: start }) : null);
+        const total = tr.tracks.reduce((s, x) => s + x.duration_s, 0);
+        const restart = opts.at == null && !!opts.restartFinished && total > 0 && start / total >= FINISHED;
+        if (restart) start = 0;
+        setHandoff(opts.at == null && !restart && mark ? pickHandoff(prog, { seenAt: mark.seenAt }, { device: deviceName, mode: "listen", here: start }) : null);
         const i = trackAt(tr.tracks, start);
         setT(start);
         load(i, start - tr.tracks[i].offset_s, !!opts.autoplay);
@@ -362,6 +379,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setHandoff(null);
   }, [save]);
 
+  const advanceQueue = useCallback(async () => {
+    if (stopAfterCurrent || sleep) return;
+    try {
+      const queue = await listeningQueue();
+      const next = queue.items[0];
+      if (!next) return;
+      await consumeListening(next.id);
+      // A queued chapter uses its selected bounds. A whole book resumes its saved place, unless
+      // that place is the end (finished), when it starts over.
+      await open(next.work, { autoplay: true, ...(next.chapter_start_s != null ? { at: next.chapter_start_s, endAt: next.chapter_end_s } : { restartFinished: true }) });
+    } catch {
+      // Playback has ended normally; a later queue refresh can retry the next action.
+    }
+  }, [open, seek, sleep, stopAfterCurrent]);
+
   // Sleep timer: fade over the last 10 s, then pause and rewind to the start of the sentence
   // being heard (exact once aligned; otherwise the last pause in the audio).
   useEffect(() => {
@@ -393,7 +425,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const el = audio.current!;
     const onTime = () => {
       const tr = state.current.tracks[state.current.index];
+      const endAt = state.current.endAt;
       if (tr) setT(tr.offset_s + el.currentTime);
+      if (tr && endAt != null && chapterEndReached(tr.offset_s + el.currentTime, endAt) && !state.current.ending) {
+        state.current.ending = true;
+        el.pause();
+        save(endAt).finally(() => advanceQueue());
+        return;
+      }
       const c = clipRef.current;
       if (tr && c && c.workId === state.current.work?.id && tr.offset_s + el.currentTime >= c.end) {
         el.pause();
@@ -422,8 +461,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
     const onEnded = () => {
       const i = state.current.index + 1;
-      if (i < state.current.tracks.length) load(i, 0, true);
-      else setPlaying(false);
+      if (i < state.current.tracks.length && state.current.endAt == null) load(i, 0, true);
+      else {
+        setPlaying(false);
+        save(duration).finally(() => advanceQueue());
+      }
     };
     const onError = () => {
       const tr = state.current.tracks[state.current.index];
@@ -458,7 +500,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       el.removeEventListener("canplay", onCan);
       document.removeEventListener("visibilitychange", onHide);
     };
-  }, [save, load]);
+  }, [save, load, advanceQueue, duration]);
 
   // Media Session: lock screen, headphones, car controls.
   useEffect(() => {
@@ -528,8 +570,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [handoff, work, t]);
 
   const value = useMemo<Player>(
-    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
-    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
+    () => ({ work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, stopAfterCurrent, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setStopAfterCurrent, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff }),
+    [work, tracks, duration, chapters, chapter, t, playing, loading, rate, defaultRate, sleep, stopAfterCurrent, dataSaver, dataSaverDevice, usingLow, handoff, open, close, toggle, play, pause, seek, playClip, clip, skip, setRate, setDefaultRate, setSleep, setDataSaver, nextChapter, prevChapter, acceptHandoff, dismissHandoff],
   );
   void index;
   return (
