@@ -37,19 +37,28 @@ def upgrade() -> None:
     op.create_index("ix_device_follows_shelf_id", "device_follows", ["shelf_id"])
     # Plain ADD COLUMN, never a batch rebuild: rebuilding app_passwords on SQLite (copy, DROP,
     # rename) with foreign_keys=ON would cascade into every queue item that references it.
-    op.add_column(
-        "app_passwords",
-        sa.Column("auto_download", sa.Boolean(), nullable=False, server_default=sa.false()),
-    )
-    op.add_column(
-        "device_queue_items",
-        sa.Column("followed", sa.Boolean(), nullable=False, server_default=sa.false()),
-    )
+    # Already there after a downgrade on SQLite before 3.35 (see downgrade): kept. Rows added
+    # since got the default; a ``followed`` item whose follow went with device_follows is what
+    # an unfollow leaves too, and nothing acts on it until the device follows a shelf again.
+    bind = op.get_bind()
+    if "auto_download" not in {c["name"] for c in sa.inspect(bind).get_columns("app_passwords")}:
+        op.add_column(
+            "app_passwords",
+            sa.Column("auto_download", sa.Boolean(), nullable=False, server_default=sa.false()),
+        )
+    if "followed" not in {c["name"] for c in sa.inspect(bind).get_columns("device_queue_items")}:
+        op.add_column(
+            "device_queue_items",
+            sa.Column("followed", sa.Boolean(), nullable=False, server_default=sa.false()),
+        )
 
 
 def downgrade() -> None:
-    # DROP COLUMN in place (SQLite 3.35+), for the same reason.
-    op.drop_column("device_queue_items", "followed")
-    op.drop_column("app_passwords", "auto_download")
+    # DROP COLUMN in place, for the same reason. It needs SQLite 3.35; before that the columns
+    # stay: they have server defaults, so 0022's code inserts rows without naming them, and
+    # never reads them.
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("device_queue_items", "followed")
+        op.drop_column("app_passwords", "auto_download")
     op.drop_index("ix_device_follows_shelf_id", table_name="device_follows")
     op.drop_table("device_follows")

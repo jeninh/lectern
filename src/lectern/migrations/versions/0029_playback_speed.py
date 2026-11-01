@@ -27,11 +27,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("work_progress", sa.Column("speed", sa.Float(), nullable=True))
-    op.add_column("users", sa.Column("playback_speed", sa.Float(), nullable=True))
+    # Already there after a downgrade on SQLite before 3.35 (see downgrade): kept, as the
+    # speeds the person last used.
+    bind = op.get_bind()
+    if "speed" not in {c["name"] for c in sa.inspect(bind).get_columns("work_progress")}:
+        op.add_column("work_progress", sa.Column("speed", sa.Float(), nullable=True))
+    if "playback_speed" not in {c["name"] for c in sa.inspect(bind).get_columns("users")}:
+        op.add_column("users", sa.Column("playback_speed", sa.Float(), nullable=True))
 
 
 def downgrade() -> None:
-    # DROP COLUMN in place (SQLite 3.35+), for the same reason.
-    op.drop_column("users", "playback_speed")
-    op.drop_column("work_progress", "speed")
+    # DROP COLUMN in place, for the same reason. It needs SQLite 3.35; before that the columns
+    # stay: they are nullable and 0027's code never reads them.
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("users", "playback_speed")
+        op.drop_column("work_progress", "speed")

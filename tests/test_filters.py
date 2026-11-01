@@ -941,6 +941,194 @@ def test_migration_0019_downgrades_keep_rows_on_any_sqlite(tmp_path):
         assert schema_diff(conn) == []
 
 
+def test_migrations_0021_to_0032_downgrade_keep_rows_on_any_sqlite(tmp_path):
+    """0021, 0023, 0027, 0029 and 0032 add columns to users, app_passwords, imports,
+    device_queue_items, work_progress and annotations, which are never rebuilt (foreign keys
+    cascade, and annotations carries the FTS triggers)."""
+    from tests.conftest import schema_diff
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'm21.db'}")
+    cfg = alembic_config(str(engine.url))
+    upgrade_to_head(engine)
+    t = "'2026-01-01'"
+    sql = [
+        "INSERT INTO users (id, username, display_name, role, totp_enabled, webauthn_user_handle,"
+        f" is_active, created_at, reader_settings, playback_speed, quote_of_the_day) VALUES"
+        f" (1, 'u', 'U', 'OWNER', 0, x'01', 1, {t}, '{{\"font\": \"serif\"}}', 1.25, 0)",
+        "INSERT INTO works (id, title, sort_title, author, sort_author, dir_path, has_cover,"
+        f" created_at, updated_at) VALUES (1, 'W', 'w', 'A', 'a', 'A/W', 0, {t}, {t}),"
+        f" (2, 'X', 'x', 'A', 'a', 'A/X', 0, {t}, {t})",
+        "INSERT INTO app_passwords (id, user_id, label, key_hash, created_at, auto_download)"
+        f" VALUES (1, 1, 'Kobo', 'h', {t}, 1)",
+        "INSERT INTO imports (id, public_id, user_id, label, status, auto_filed, version,"
+        f" created_at, updated_at, expires_at, shelf_id) VALUES (1, 'p', 1, 'L', 'PENDING', 0,"
+        f" 1, {t}, {t}, {t}, 5)",
+        "INSERT INTO device_queue_items (id, app_password_id, user_id, work_id, status, position,"
+        f" queued_at, updated_at, followed) VALUES (1, 1, 1, 1, 'PENDING', 1, {t}, {t}, 1)",
+        "INSERT INTO work_progress (user_id, work_id, sentence_n, sentence_offset, source, raw,"
+        f" device, received_at, updated_at, speed) VALUES (1, 1, 3, 0, 'WEB', '', 'd', {t}, {t},"
+        " 1.5)",
+    ]
+    with engine.begin() as conn:
+        for s in sql:
+            conn.execute(sa.text(s))
+    added = {
+        "users": {"reader_settings", "playback_speed", "quote_of_the_day"},
+        "app_passwords": {"auto_download"},
+        "imports": {"shelf_id"},
+        "device_queue_items": {"followed"},
+        "work_progress": {"speed"},
+        "annotations": {"favourite", "hidden"},
+    }
+
+    def present():
+        insp = sa.inspect(engine)
+        tables = set(insp.get_table_names())
+        return {
+            table: cols & {c["name"] for c in insp.get_columns(table)}
+            for table, cols in added.items()
+            if table in tables
+        }
+
+    def kept(triggers=3, queued=1, notes=1):
+        with engine.connect() as conn:
+            tables = set(sa.inspect(conn).get_table_names())
+            counts = {
+                table: conn.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar()
+                for table in added
+                if table in tables
+            }
+            have = conn.execute(
+                sa.text("SELECT count(*) FROM sqlite_master WHERE type = 'trigger'")
+            ).scalar()
+            fk_errors = conn.execute(sa.text("PRAGMA foreign_key_check")).all()
+        expected = {"device_queue_items": queued, "annotations": notes}
+        assert counts == {t: expected.get(t, 1) for t in counts}
+        assert have == triggers  # annotations_fts_ai/ad/au, while annotations exists
+        assert fk_errors == []
+
+    # Later revisions go down to 0032 normally; only the steps below it run under the version
+    # checked.
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, *_args):
+        statements.append(statement.upper())
+
+    def down_to(target, version, hook):
+        with engine.begin() as conn:
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0032_quotes")
+        real_version = engine.dialect.server_version_info
+        engine.dialect.server_version_info = version
+        sa.event.listen(engine, "before_cursor_execute", hook)
+        try:
+            with engine.begin() as conn:
+                cfg.attributes["connection"] = conn
+                command.downgrade(cfg, target)
+        finally:
+            sa.event.remove(engine, "before_cursor_execute", hook)
+            engine.dialect.server_version_info = real_version
+
+    def rebuilt(*tables):
+        """DROP TABLE statements for ``tables``: a batch rebuild would issue one."""
+        names = {f"DROP TABLE {t.upper()}" for t in tables}
+        return [s for s in statements if s.strip().replace('"', "") in names]
+
+    kept_tables = sorted(set(added) - {"annotations"})  # 0022's downgrade drops annotations
+
+    def values():
+        with engine.connect() as conn:
+            return tuple(
+                conn.execute(
+                    sa.text(
+                        "SELECT u.reader_settings, u.playback_speed, u.quote_of_the_day,"
+                        " p.auto_download, i.shelf_id, w.speed FROM users u, app_passwords p,"
+                        " imports i, work_progress w"
+                    )
+                ).one()
+            )
+
+    def marks():
+        with engine.connect() as conn:
+            return conn.execute(sa.text("SELECT favourite, hidden FROM annotations")).all()
+
+    def set_values():
+        with engine.begin() as conn:
+            for s in [
+                'UPDATE users SET reader_settings = \'{"font": "serif"}\','
+                " playback_speed = 1.25, quote_of_the_day = 0",
+                "UPDATE app_passwords SET auto_download = 1",
+                "UPDATE imports SET shelf_id = 5",
+                "UPDATE device_queue_items SET followed = 1",
+                "UPDATE work_progress SET speed = 1.5",
+            ]:
+                conn.execute(sa.text(s))
+
+    original = ('{"font": "serif"}', 1.25, 0, 1, 5, 1.5)
+
+    # SQLite 3.35+: the columns go, by DROP COLUMN, never by rebuilding a table.
+    down_to("0020_merge_0019_heads", engine.dialect.server_version_info, record)
+    assert "annotations" not in sa.inspect(engine).get_table_names()  # 0022 drops it
+    assert present() == dict.fromkeys(set(added) - {"annotations"}, set())
+    assert sum("DROP COLUMN" in s for s in statements) == 9
+    assert rebuilt(*kept_tables) == []
+    kept(triggers=0)
+    upgrade_to_head(engine)
+    assert present() == added
+    with engine.connect() as conn:
+        assert schema_diff(conn) == []
+
+    # SQLite before 3.35 has no ALTER TABLE … DROP COLUMN: every downgrade still works, keeps
+    # every row and the FTS triggers, and so does upgrading again.
+    def old_sqlite(conn, cursor, statement, *args):
+        if "DROP COLUMN" in statement.upper():
+            raise sa.exc.OperationalError(statement, None, Exception('near "DROP": syntax error'))
+        record(conn, cursor, statement, *args)
+
+    # 0032 alone, while annotations (with its triggers) is still there.
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO annotations (id, user_id, document, key, text, pos0, created,"
+                " updated, device, sources, synced_at, favourite, hidden) VALUES (1, 1, 'doc',"
+                f" 'k', 'quote', 'p', 'c', 'u', 'd', '[]', {t}, 1, 1)"
+            )
+        )
+    set_values()
+    statements.clear()
+    down_to("0031_device_reports", (3, 34, 1), old_sqlite)
+    assert present() == added
+    assert rebuilt(*added) == []
+    kept()
+    upgrade_to_head(engine)
+    assert values() == original
+    assert marks() == [(1, 1)]
+    kept()
+
+    # 0032 down to 0020: annotations goes with 0022; the other columns stay.
+    down_to("0020_merge_0019_heads", (3, 34, 1), old_sqlite)
+    assert present() == {t: added[t] for t in kept_tables}
+    assert rebuilt(*kept_tables) == []
+    assert not {"device_follows", "reader_overrides"} & set(sa.inspect(engine).get_table_names())
+    kept(triggers=0)
+    with engine.begin() as conn:  # 0020's code: inserts without naming the columns left behind
+        conn.execute(
+            sa.text(
+                "INSERT INTO device_queue_items (id, app_password_id, user_id, work_id, status,"
+                f" position, queued_at, updated_at) VALUES (2, 1, 1, 2, 'SENT', 2, {t}, {t})"
+            )
+        )
+    upgrade_to_head(engine)
+    assert values() == original
+    with engine.connect() as conn:
+        followed = conn.execute(
+            sa.text("SELECT id, followed FROM device_queue_items ORDER BY id")
+        ).all()
+        assert followed == [(1, 1), (2, 0)]
+        assert schema_diff(conn) == []
+    kept(queued=2, notes=0)  # annotations came back empty with 0022
+
+
 def test_page_counts_are_filled_in(settings, client, owner):
     import zipfile
 
