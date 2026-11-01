@@ -965,11 +965,14 @@ def preview_jpeg(design: Design, width: int) -> bytes:
 # --- the cache in derived/ ---------------------------------------------------------------------
 
 
-def cache_path(work_dir: Path, design: Design) -> Path:
-    return work_dir / DERIVED_DIR / f"{CACHE_PREFIX}{design.key}.jpg"
+def cache_path(work_dir: Path, design: Design, width: int = WIDTH) -> Path:
+    """The full-size cover is ``cover-<key>.jpg``; a thumbnail (smaller ``width``) beside it,
+    ``cover-<key>-<width>.jpg``."""
+    suffix = "" if width == WIDTH else f"-{width}"
+    return work_dir / DERIVED_DIR / f"{CACHE_PREFIX}{design.key}{suffix}.jpg"
 
 
-def cached_cover(work_dir: Path, design: Design) -> bytes:
+def cached_cover(work_dir: Path, design: Design, width: int = WIDTH) -> bytes:
     """The generated cover's JPEG, from ``<work>/derived/cover-<key>.jpg`` or drawn and stored
     there. Returns the bytes (not the path) so a concurrent cleanup cannot pull the file out
     from under the response.
@@ -979,12 +982,12 @@ def cached_cover(work_dir: Path, design: Design) -> bytes:
     name). Only ``derived/`` is created, inside a folder that still exists; if the folder moved,
     the image is served without being cached and the next request caches it in the new place.
     """
-    path = cache_path(work_dir, design)
+    path = cache_path(work_dir, design, width)
     try:
         return path.read_bytes()
     except OSError:
         pass
-    data = render_jpeg(design)
+    data = render_jpeg(design, width=width)
     derived = path.parent
     tmp = derived / f".{path.name}.{secrets.token_hex(6)}.tmp"
     try:
@@ -999,6 +1002,6 @@ def cached_cover(work_dir: Path, design: Design) -> bytes:
         return data
     # Best effort: drop covers drawn for earlier titles, authors, or styles.
     for old in derived.glob(f"{CACHE_PREFIX}*.jpg"):
-        if old.name != path.name:
+        if not old.name.startswith(f"{CACHE_PREFIX}{design.key}"):
             old.unlink(missing_ok=True)
     return data

@@ -9,17 +9,21 @@ streaming for playback does not.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from lectern import covergen, device_queue
 from lectern.access import can_see_work, visible_works
+from lectern.covers import THUMB_SIDE
 from lectern.http_range import etag_matches, file_response
+from lectern.ingest.cover import EMBEDDED_FORMATS, CoverRejected, thumbnail_jpeg
 from lectern.ingest.library import safe_component
 from lectern.ingest.sentences import primary_epub
 from lectern.jobs import MEDIA_TYPE, find_variant, variant_sha256
@@ -70,7 +74,9 @@ def resolve_file(db: Session, settings, file_id: int, user: User) -> tuple[BookF
     return book, path
 
 
-def resolve_cover(db: Session, settings, work_id: int, user: User) -> Path | bytes:
+def resolve_cover(
+    db: Session, settings, work_id: int, user: User, width: int = covergen.WIDTH
+) -> Path | bytes:
     """The work's cover art, or (when it has none) its generated cover, cached under
     ``derived/``. Cover art always wins: a generated cover never replaces ``cover.jpg``."""
     work = db.get(Work, work_id)
@@ -83,7 +89,32 @@ def resolve_cover(db: Session, settings, work_id: int, user: User) -> Path | byt
     path = (work_dir / "cover.jpg").resolve()
     if work.has_cover and _inside(root, path) and path.is_file():
         return path
-    return covergen.cached_cover(work_dir, covergen.design_of(work))
+    return covergen.cached_cover(work_dir, covergen.design_of(work), width)
+
+
+def cover_thumbnail(path: Path) -> Path:
+    """A ``THUMB_SIDE`` JPEG of the cover art at ``path``, cached next to it under
+    ``derived/`` (the key is the art's size and mtime, so replaced art makes a new one and
+    drops the old). The grid shows covers about 120 px wide: the full-size art (often
+    hundreds of KB, decoded by the browser) is for the reader and the editor. Art that cannot
+    be shrunk is served as it is."""
+    stat = path.stat()
+    derived = path.parent / "derived"
+    thumb = derived / f"thumb-{THUMB_SIDE}-{stat.st_size}-{stat.st_mtime_ns}.jpg"
+    if thumb.is_file():
+        return thumb
+    try:
+        data = thumbnail_jpeg(path.read_bytes(), THUMB_SIDE, formats=EMBEDDED_FORMATS)
+        derived.mkdir(exist_ok=True)
+        tmp = derived / f".{thumb.name}.{secrets.token_hex(6)}.tmp"
+        tmp.write_bytes(data)
+        os.replace(tmp, thumb)
+    except (CoverRejected, OSError):
+        return path
+    for old in derived.glob(f"thumb-{THUMB_SIDE}-*.jpg"):
+        if old != thumb:
+            old.unlink(missing_ok=True)
+    return thumb
 
 
 def cover_response(found: Path | bytes) -> Response:
@@ -167,8 +198,19 @@ def download_response(
 
 
 @router.get("/library/works/{work_id}/cover.jpg", include_in_schema=False)
-def work_cover(auth: LibraryUser, db: DbDep, settings: SettingsDep, work_id: int):
-    resp = cover_response(resolve_cover(db, settings, work_id, auth.user))
+def work_cover(
+    auth: LibraryUser,
+    db: DbDep,
+    settings: SettingsDep,
+    work_id: int,
+    w: int | None = Query(default=None, ge=THUMB_SIDE, le=THUMB_SIDE),
+):
+    """The cover; ``w=360`` the cached thumbnail the Library grid shows (a generated cover is drawn
+    at that width, and cached the same way)."""
+    found = resolve_cover(db, settings, work_id, auth.user, w or covergen.WIDTH)
+    if w is not None and isinstance(found, Path):
+        found = cover_thumbnail(found)
+    resp = cover_response(found)
     resp.headers["Cache-Control"] = "private, max-age=3600"
     return resp
 

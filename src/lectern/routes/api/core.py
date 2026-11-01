@@ -144,12 +144,17 @@ def update_preferences(auth: AuthCsrf, db: DbDep, body: PreferencesIn) -> dict:
     return {"preferences": _preferences(auth.user)}
 
 
-def _progress_by_doc(db, user_id: int) -> dict[str, tuple[ReadingProgress, SyncKey | None]]:
-    rows = db.execute(
+def _progress_by_doc(
+    db, user_id: int, documents: list[str] | None = None
+) -> dict[str, tuple[ReadingProgress, SyncKey | None]]:
+    stmt = (
         select(ReadingProgress, SyncKey)
         .outerjoin(SyncKey, SyncKey.id == ReadingProgress.sync_key_id)
         .where(ReadingProgress.user_id == user_id)
-    ).all()
+    )
+    if documents is not None:
+        stmt = stmt.where(ReadingProgress.document.in_(documents))
+    rows = db.execute(stmt).all()
     return {p.document: (p, k) for p, k in rows}
 
 
@@ -249,6 +254,11 @@ def reading_json(state: ReadingState | None) -> dict:
     }
 
 
+# One page of /api/library is at most this many works (it was the whole response, silently
+# cut here: a library past it lost books).
+MAX_LIBRARY_PAGE = 2000
+
+
 def library_query(
     db, user: User, *, f: str = "", shelf: int | None = None, subtree: bool = False,
     unshelved: bool = False, offline: frozenset[int] = frozenset(),
@@ -314,12 +324,16 @@ def library(
     subtree: bool = False,
     unshelved: bool = False,
     offline: str = Query(default="", max_length=60000),
+    limit: int = Query(default=MAX_LIBRARY_PAGE, ge=1, le=MAX_LIBRARY_PAGE),
+    offset: int = Query(default=0, ge=0),
 ) -> dict:
     """Works this person sees, each with ``shelf_ids``: the visible shelves it is directly
     on (``[]``: at the Library's root), and ``reading``: how far they are with it. ``shelf``
     narrows to one shelf's direct works (``subtree``: and its sub-shelves'; a smart shelf:
     its matches; a hidden shelf is 404), ``unshelved`` to the root, ``f`` by a filter
-    (docs/filters.md), and ``sort``/``order`` order them."""
+    (docs/filters.md), and ``sort``/``order`` order them. ``limit``/``offset`` page through
+    them (the order is total, so pages never overlap); ``total`` is how many there are in
+    all, whatever the page."""
     user = auth.user
     stmt = library_query(
         db, user, f=f, shelf=shelf, subtree=subtree, unshelved=unshelved,
@@ -332,16 +346,30 @@ def library(
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Work.title.ilike(like), Work.author.ilike(like)))
     desc = None if order is None else order == "desc"
-    works = db.scalars(stmt.order_by(*filters.order_by(sort, user, desc)).limit(2000)).all()
-    progress = _progress_by_doc(db, auth.user.id)
-    audio = _audio_summary(db, [w.id for w in works])
-    positions = _positions(db, auth.user.id, audio)
+    works = db.scalars(
+        stmt.order_by(*filters.order_by(sort, user, desc)).limit(limit).offset(offset)
+    ).all()
+    total = offset + len(works)
+    if offset and not works or len(works) == limit:
+        total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+    ids = [w.id for w in works]
+    progress = _progress_by_doc(
+        db, user.id, [f.partial_md5 for w in works for f in w.files if f.partial_md5]
+    )
+    audio = _audio_summary(db, ids)
+    positions = _positions(db, user.id, audio, ids)
     states = {
         s.work_id: s
-        for s in db.scalars(select(ReadingState).where(ReadingState.user_id == user.id))
+        for s in db.scalars(
+            select(ReadingState).where(
+                ReadingState.user_id == user.id, ReadingState.work_id.in_(ids)
+            )
+        )
     }
     shelf_ids: dict[int, list[int]] = {}
-    for wid, sid in db.execute(on_visible.order_by(ShelfItem.shelf_id)).all():
+    for wid, sid in db.execute(
+        on_visible.where(ShelfItem.work_id.in_(ids)).order_by(ShelfItem.shelf_id)
+    ).all():
         shelf_ids.setdefault(wid, []).append(sid)
     return {
         "works": [
@@ -351,7 +379,7 @@ def library(
             | {"shelf_ids": shelf_ids.get(w.id, []), "reading": reading_json(states.get(w.id))}
             for w in works
         ],
-        "total": len(works),
+        "total": total,
     }
 
 
@@ -419,7 +447,7 @@ def work_detail(auth: Auth, db: DbDep, work_id: int) -> dict:
     positions = _positions(db, auth.user.id, audio, [work.id])
     return _attach_progress(
         work_json(work, audio=audio.get(work.id), position=positions.get(work.id)),
-        _progress_by_doc(db, auth.user.id),
+        _progress_by_doc(db, auth.user.id, [f.partial_md5 for f in work.files if f.partial_md5]),
     )
 
 

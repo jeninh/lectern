@@ -160,9 +160,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       })
       .catch(() => {});
     try {
-      const data = await get<{ works: Work[] }>("/api/library");
+      // In pages (the server caps one response): the whole library, however many books.
+      let all: Work[] = [];
+      for (;;) {
+        const d = await get<{ works: Work[]; total: number }>(`/api/library?limit=500&offset=${all.length}`);
+        all = all.concat(d.works);
+        if (!d.works.length || all.length >= d.total) break;
+      }
       await tree;
-      setWorks(data.works);
+      setWorks(all);
     } catch (e) {
       if (!(e instanceof OfflineError)) throw e;
       setWorks((await listBooks()).map((b) => b.work));

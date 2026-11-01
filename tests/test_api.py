@@ -17,6 +17,7 @@ from tests.conftest import (
 
 from lectern.db import session_factory
 from lectern.ingest.watcher import InboxWatcher
+from lectern.models import Work
 
 
 def _ingest(settings, *books):
@@ -71,6 +72,77 @@ def test_library_search_sort_and_detail(client, owner, settings):
     detail = client.get(f"/api/works/{found[0]['id']}").json()
     assert detail["files"][0]["download_url"].endswith("/download")
     assert client.get(detail["cover_url"]).headers["content-type"] == "image/jpeg"
+
+
+def test_library_pages_do_not_overlap_and_keep_progress(client, owner, settings):
+    _ingest(settings, *((f"Book {c}", "Ann Author") for c in "EBDAC"))
+    full = client.get("/api/library").json()["works"]
+    assert [w["title"] for w in full] == [f"Book {c}" for c in "ABCDE"]
+    created = make_sync_key_full(client, owner["csrf"], "Kobo")
+    last = full[-1]  # "Book E": on the last page only
+    client.put(
+        "/syncs/progress",
+        json={"document": last["files"][0]["partial_md5"], "progress": "p", "percentage": 0.4},
+        headers=ko_headers("owner", created["secret"]),
+    )
+    seen = []
+    for offset in (0, 2, 4, 6):
+        page = client.get(f"/api/library?limit=2&offset={offset}").json()
+        assert page["total"] == 5  # the whole library, whatever the page
+        seen += [w["title"] for w in page["works"]]
+        for w in page["works"]:
+            assert (w["progress"] is not None) == (w["title"] == "Book E")
+    assert seen == [w["title"] for w in full]
+    assert client.get("/api/library?limit=0").status_code == 422
+    assert client.get("/api/library?offset=-1").status_code == 422
+
+
+def test_cover_thumbnail_is_cached_small_and_follows_the_art(client, owner, settings):
+    from io import BytesIO
+
+    from PIL import Image
+
+    def art(size, seed):
+        buf = BytesIO()
+        Image.effect_noise(size, 60).convert("RGB").save(buf, "JPEG", quality=90 - seed)
+        return buf.getvalue()
+
+    _ingest(settings, ("Arty", "Ann Author"))
+    wid = client.get("/api/library").json()["works"][0]["id"]
+    with session_factory()() as db:
+        work_dir = settings.library_dir / db.get(Work, wid).dir_path
+    (work_dir / "cover.jpg").write_bytes(art((1200, 1800), 0))
+    url = f"/library/works/{wid}/cover.jpg"
+    thumb = client.get(f"{url}?w=360")
+    assert thumb.status_code == 200 and thumb.headers["content-type"] == "image/jpeg"
+    assert max(Image.open(BytesIO(thumb.content)).size) == 360
+    assert len(thumb.content) < len(client.get(url).content) / 4
+    (cached,) = (work_dir / "derived").glob("thumb-360-*.jpg")
+    # Replaced art: a new thumbnail, and the one for the old art is gone.
+    (work_dir / "cover.jpg").write_bytes(art((900, 1400), 1))
+    assert client.get(f"{url}?w=360").status_code == 200
+    (fresh,) = (work_dir / "derived").glob("thumb-360-*.jpg")
+    assert fresh != cached
+    assert client.get(f"{url}?w=100").status_code == 422  # one size, so the cache stays bounded
+
+
+def test_generated_cover_thumbnail_is_drawn_small_beside_the_full_cover(client, owner, settings):
+    from io import BytesIO
+
+    from PIL import Image
+
+    _ingest(settings, ("Plain", "Ann Author"))
+    work = client.get("/api/library").json()["works"][0]
+    with session_factory()() as db:
+        row = db.get(Work, work["id"])
+        row.has_cover = False
+        db.commit()
+        work_dir = settings.library_dir / row.dir_path
+    url = f"/library/works/{work['id']}/cover.jpg"
+    small = client.get(f"{url}?w=360").content
+    full = client.get(url).content
+    assert Image.open(BytesIO(small)).size[0] == 360 and Image.open(BytesIO(full)).size[0] == 800
+    assert len(list((work_dir / "derived").glob("cover-*.jpg"))) == 2  # neither evicts the other
 
 
 def test_continue_joins_sync_progress_to_works(client, owner, settings):

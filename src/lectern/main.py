@@ -26,7 +26,7 @@ from lectern import (
     search,
 )
 from lectern.config import Settings, get_settings
-from lectern.db import init_engine, session_factory
+from lectern.db import init_engine, optimize, session_factory
 from lectern.ingest.watcher import InboxWatcher
 from lectern.jobs import JobRunner, housekeeping
 from lectern.lan import LANGuard
@@ -156,6 +156,7 @@ def create_app(
             engine.dispose()
             log.error("%s", exc)
             raise
+        optimize(engine)
         search.init(settings)
         settings.resolve_secret_key()
         with session_factory()() as db:
