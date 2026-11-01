@@ -112,4 +112,31 @@ describe("queue playback start position", () => {
     expect(player.t).toBe(100);
     expect(env.queue).not.toHaveBeenCalled();
   });
+
+  it("stops showing loading once playback moves on, or is paused, without canplay", async () => {
+    await mount();
+    await act(async () => player.open(first));
+    const el = document.querySelector("audio")!;
+    const media = { paused: false, seeking: true, currentTime: 64 };
+    for (const k of Object.keys(media)) Object.defineProperty(el, k, { configurable: true, get: () => media[k as keyof typeof media] });
+    const fire = (type: string) => act(() => void el.dispatchEvent(new Event(type)));
+    // WebKit after restoring the saved place: seeking, waiting, then playback resumes with only
+    // timeupdates (no canplay or playing).
+    fire("seeking");
+    fire("waiting");
+    expect(player.loading).toBe(true);
+    media.seeking = false;
+    fire("timeupdate");
+    fire("seeked");
+    expect(player.loading).toBe(true); // still where the wait began
+    media.currentTime = 64.3;
+    fire("timeupdate");
+    expect(player.loading).toBe(false);
+
+    fire("waiting");
+    expect(player.loading).toBe(true);
+    media.paused = true;
+    fire("pause");
+    expect(player.loading).toBe(false);
+  });
 });

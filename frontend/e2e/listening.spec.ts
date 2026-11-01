@@ -3,8 +3,11 @@ import { expect, test, type Page } from "@playwright/test";
 import { MAGI, signIn, userOf } from "./helpers";
 
 // Desktop-sized window with a mouse wheel, in each phone project's engine (WebKit and Chromium).
-// No service worker, so the routes below see the app's API requests.
-test.use({ viewport: { width: 1280, height: 800 }, isMobile: false, hasTouch: false, serviceWorkers: "block" });
+// No service worker, so the routes below see the app's API requests. Desktop density too: the
+// phones' 3x scale at this size is a 3840x2400 surface, which headless WebKit paints on the CPU
+// so slowly (about one frame a second while the player updates) that clicks never see a stable
+// element.
+test.use({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1, isMobile: false, hasTouch: false, serviceWorkers: "block" });
 
 /** A long audiobook (40 chapters) and enough other audiobooks that the page itself scrolls. */
 async function longListening(page: Page) {
