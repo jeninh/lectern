@@ -45,7 +45,8 @@ interface Player {
   dataSaverDevice: boolean | null;
   usingLow: boolean;
   handoff: HandoffCandidate | null;
-  open: (work: Work, opts?: { autoplay?: boolean; at?: number; endAt?: number | null }) => Promise<void>;
+  /** `restartFinished`: resume a saved place, but start over when it is at the book's end. */
+  open: (work: Work, opts?: { autoplay?: boolean; at?: number; endAt?: number | null; restartFinished?: boolean }) => Promise<void>;
   close: () => void;
   toggle: () => void;
   play: () => void;
@@ -123,6 +124,9 @@ export function trackAt(tracks: Track[], t: number): number {
   while (i + 1 < tracks.length && tracks[i + 1].offset_s <= t) i++;
   return i;
 }
+
+/** lectern.reading_state.FINISHED: at or past this fraction of the timeline a book is finished. */
+const FINISHED = 0.985;
 
 /** A queued chapter ends on its own boundary, not at the containing audio file's end. */
 export const chapterEndReached = (t: number, endAt: number | null) => endAt != null && t >= endAt;
@@ -218,7 +222,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
 
   const open = useCallback(
-    async (w: Work, opts: { autoplay?: boolean; at?: number; endAt?: number | null } = {}) => {
+    async (w: Work, opts: { autoplay?: boolean; at?: number; endAt?: number | null; restartFinished?: boolean } = {}) => {
       if (state.current.work && state.current.work.id !== w.id) await save();
       setLoading(true);
       try {
@@ -246,7 +250,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           writeMark(w.id, { t: start, seenAt: prog.received_at });
         }
         start = start ?? 0;
-        setHandoff(opts.at == null && mark ? pickHandoff(prog, { seenAt: mark.seenAt }, { device: deviceName, mode: "listen", here: start }) : null);
+        const total = tr.tracks.reduce((s, x) => s + x.duration_s, 0);
+        const restart = opts.at == null && !!opts.restartFinished && total > 0 && start / total >= FINISHED;
+        if (restart) start = 0;
+        setHandoff(opts.at == null && !restart && mark ? pickHandoff(prog, { seenAt: mark.seenAt }, { device: deviceName, mode: "listen", here: start }) : null);
         const i = trackAt(tr.tracks, start);
         setT(start);
         load(i, start - tr.tracks[i].offset_s, !!opts.autoplay);
@@ -379,8 +386,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const next = queue.items[0];
       if (!next) return;
       await consumeListening(next.id);
-      // Whole books restart when queued; a single queued chapter uses its selected bounds.
-      await open(next.work, { autoplay: true, ...(next.chapter_start_s != null ? { at: next.chapter_start_s, endAt: next.chapter_end_s } : { at: 0 }) });
+      // A queued chapter uses its selected bounds. A whole book resumes its saved place, unless
+      // that place is the end (finished), when it starts over.
+      await open(next.work, { autoplay: true, ...(next.chapter_start_s != null ? { at: next.chapter_start_s, endAt: next.chapter_end_s } : { restartFinished: true }) });
     } catch {
       // Playback has ended normally; a later queue refresh can retry the next action.
     }
