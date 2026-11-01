@@ -691,7 +691,7 @@ def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda 
     """The hourly sweep: abandoned uploads and imports, the 30-day trash, old undo history,
     replay records, and staged covers. Each part is independent; one failing does not stop
     the rest."""
-    from lectern import duplicates, editing, idempotency, imports, trash
+    from lectern import duplicates, editing, idempotency, imports, reading_stats, trash
     from lectern.fsops import LIBRARY_LOCK
     from lectern.tts.jobs import sweep as tts_sweep
     from lectern.uploads import sweep
@@ -704,6 +704,10 @@ def housekeeping(session_factory: sessionmaker, settings: Settings, busy=lambda 
         ("editing", lambda db: editing.sweep(db, settings, busy)),
         ("tts", lambda db: tts_sweep(db, settings.data_dir)),
         ("duplicates", lambda db: (duplicates.scan(db), db.commit())),
+        (
+            "stats retention",
+            lambda db: (reading_stats.prune_raw(db, settings.stats_retention_days), db.commit()),
+        ),
     ]
     for name, step in steps:
         with LIBRARY_LOCK, session_factory() as db:

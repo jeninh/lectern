@@ -235,6 +235,11 @@ class Settings(BaseSettings):
     premigration_snapshot: bool = True
     premigration_snapshot_keep: int = Field(default=5, ge=1, le=1000)
     premigration_free_margin_mb: int = Field(default=64, ge=0)
+    # Raw reading-stats events older than this many days are rolled up and deleted by the
+    # hourly housekeeping (docs/storage.md, "Reading stats retention"). 0 = keep forever (the
+    # default). Daily totals, streaks and year reviews are unaffected.
+    stats_retention_days: int = Field(default=0, ge=0, le=36500)
+
     # Restore drill (docs/backups.md, "Restore drill"): every this many days, right after a
     # nightly backup, restore the latest snapshot into scratch space on the backup volume,
     # check it, report on Health, and delete it. 0 = off (the default); 7 = weekly.
