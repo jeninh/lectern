@@ -87,10 +87,14 @@ def upgrade() -> None:
         "ix_match_suggestions_candidate_work_id", "match_suggestions", ["candidate_work_id"]
     )
 
-    with op.batch_alter_table("users") as batch:
-        batch.add_column(sa.Column("download_cap_per_hour", sa.Integer(), nullable=True))
-    with op.batch_alter_table("app_passwords") as batch:
-        batch.add_column(sa.Column("download_cap_per_hour", sa.Integer(), nullable=True))
+    # Plain ADD COLUMN, never a batch rebuild: rebuilding users or app_passwords on SQLite
+    # (copy, DROP, rename) with foreign_keys=ON would cascade into every row that references
+    # them. Already there after a downgrade on SQLite before 3.35 (see downgrade): kept.
+    for table in ("users", "app_passwords"):
+        if "download_cap_per_hour" not in {
+            c["name"] for c in sa.inspect(op.get_bind()).get_columns(table)
+        }:
+            op.add_column(table, sa.Column("download_cap_per_hour", sa.Integer(), nullable=True))
     with op.batch_alter_table("upload_sessions") as batch:
         batch.add_column(sa.Column("idempotency_key", sa.String(length=64), nullable=True))
         batch.add_column(sa.Column("last_chunk_sha256", sa.String(length=64), nullable=True))
@@ -102,10 +106,12 @@ def downgrade() -> None:
         batch.drop_index("ix_upload_sessions_idempotency")
         batch.drop_column("last_chunk_sha256")
         batch.drop_column("idempotency_key")
-    with op.batch_alter_table("app_passwords") as batch:
-        batch.drop_column("download_cap_per_hour")
-    with op.batch_alter_table("users") as batch:
-        batch.drop_column("download_cap_per_hour")
+    # DROP COLUMN in place, for the same reason. It needs SQLite 3.35; before that the nullable
+    # columns stay and the previous release never reads them. (upload_sessions above is safe to
+    # rebuild: no table references it.)
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("app_passwords", "download_cap_per_hour")
+        op.drop_column("users", "download_cap_per_hour")
     op.drop_index("ix_match_suggestions_candidate_work_id", table_name="match_suggestions")
     op.drop_index("ix_match_suggestions_work_id", table_name="match_suggestions")
     op.drop_table("match_suggestions")

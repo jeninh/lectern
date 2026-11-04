@@ -67,15 +67,19 @@ def _downgrade_scopes(s: set[str]) -> set[str]:
 
 def upgrade() -> None:
     _rewrite(_upgrade_scopes)
-    with op.batch_alter_table("imports") as batch:
-        batch.add_column(sa.Column("ai_key_id", sa.Integer(), nullable=True))
-        batch.create_foreign_key(
-            "fk_imports_ai_key_id", "ai_keys", ["ai_key_id"], ["id"], ondelete="SET NULL"
-        )
+    # ai_key_id is still there after a downgrade (see downgrade), with its foreign key and the
+    # values it held: kept as it was.
+    if "ai_key_id" not in {c["name"] for c in sa.inspect(op.get_bind()).get_columns("imports")}:
+        with op.batch_alter_table("imports") as batch:
+            batch.add_column(sa.Column("ai_key_id", sa.Integer(), nullable=True))
+            batch.create_foreign_key(
+                "fk_imports_ai_key_id", "ai_keys", ["ai_key_id"], ["id"], ondelete="SET NULL"
+            )
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("imports") as batch:
-        batch.drop_constraint("fk_imports_ai_key_id", type_="foreignkey")
-        batch.drop_column("ai_key_id")
+    # ai_key_id stays, on every SQLite version: it is nullable and the previous release never
+    # reads it. SQLite cannot DROP COLUMN a column in a foreign key, and the batch rebuild that
+    # drops the constraint DROPs imports, which with foreign_keys=ON cascades into every
+    # import_files row (and clears every SET NULL reference to imports).
     _rewrite(_downgrade_scopes)

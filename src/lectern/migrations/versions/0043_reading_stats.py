@@ -17,7 +17,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("reading_timezone", sa.String(length=64), nullable=True))
+    # Already there after a downgrade on SQLite before 3.35 (see downgrade): kept as it was.
+    if "reading_timezone" not in {
+        c["name"] for c in sa.inspect(op.get_bind()).get_columns("users")
+    }:
+        op.add_column("users", sa.Column("reading_timezone", sa.String(length=64), nullable=True))
     op.create_table(
         "reading_activity",
         sa.Column("id", sa.Integer(), nullable=False),
