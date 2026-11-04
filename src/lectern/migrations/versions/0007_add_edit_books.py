@@ -23,42 +23,61 @@ depends_on = None
 _FILE_KIND = sa.Enum("EBOOK", "AUDIO", name="filekind", native_enum=False, length=16)
 
 
+def _columns(table: str) -> set[str]:
+    return {c["name"] for c in sa.inspect(op.get_bind()).get_columns(table)}
+
+
+# Columns the downgrade leaves behind (see downgrade) are kept as they were: only missing ones
+# are added, and the authors backfill below fills only works that have none.
 def upgrade() -> None:
-    with op.batch_alter_table("works") as batch:
-        batch.add_column(sa.Column("authors", sa.JSON(), nullable=True))
-        batch.add_column(sa.Column("series", sa.String(length=256), nullable=True))
-        batch.add_column(sa.Column("series_index", sa.Float(), nullable=True))
-        batch.add_column(sa.Column("tags", sa.JSON(), nullable=True))
-        batch.add_column(sa.Column("narrators", sa.JSON(), nullable=True))
-        batch.add_column(sa.Column("primary_file_id", sa.Integer(), nullable=True))
-        batch.add_column(sa.Column("playback_default", sa.String(length=16), nullable=True))
-        batch.add_column(
-            sa.Column("readalong_enabled", sa.Boolean(), nullable=False, server_default=sa.true())
-        )
-        batch.add_column(sa.Column("cover_source", sa.String(length=16), nullable=True))
-        batch.add_column(sa.Column("version", sa.Integer(), nullable=False, server_default="1"))
-        batch.add_column(sa.Column("trashed_at", sa.DateTime(timezone=True), nullable=True))
-        batch.add_column(sa.Column("trashed_by", sa.Integer(), nullable=True))
-        batch.add_column(sa.Column("trash_from", sa.String(length=1024), nullable=True))
-        batch.create_foreign_key(
-            "fk_works_trashed_by", "users", ["trashed_by"], ["id"], ondelete="SET NULL"
-        )
-        batch.create_index("ix_works_series", ["series"])
-        batch.create_index("ix_works_trashed_at", ["trashed_at"])
+    new_works = [
+        sa.Column("authors", sa.JSON(), nullable=True),
+        sa.Column("series", sa.String(length=256), nullable=True),
+        sa.Column("series_index", sa.Float(), nullable=True),
+        sa.Column("tags", sa.JSON(), nullable=True),
+        sa.Column("narrators", sa.JSON(), nullable=True),
+        sa.Column("primary_file_id", sa.Integer(), nullable=True),
+        sa.Column("playback_default", sa.String(length=16), nullable=True),
+        sa.Column("readalong_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("cover_source", sa.String(length=16), nullable=True),
+        sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
+        sa.Column("trashed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("trashed_by", sa.Integer(), nullable=True),
+        sa.Column("trash_from", sa.String(length=1024), nullable=True),
+    ]
+    have = _columns("works")
+    missing = [c for c in new_works if c.name not in have]
+    if "trashed_by" in {c.name for c in missing}:
+        # The foreign key needs a table rebuild (a fresh database, or one with no rows in the
+        # tables that reference works).
+        with op.batch_alter_table("works") as batch:
+            for col in missing:
+                batch.add_column(col)
+            batch.create_foreign_key(
+                "fk_works_trashed_by", "users", ["trashed_by"], ["id"], ondelete="SET NULL"
+            )
+    else:
+        for col in missing:
+            op.add_column("works", col)
+    op.create_index("ix_works_series", "works", ["series"])
+    op.create_index("ix_works_trashed_at", "works", ["trashed_at"])
 
     conn = op.get_bind()
-    rows = conn.execute(sa.text("SELECT id, author, sort_author FROM works")).all()
+    rows = conn.execute(
+        sa.text("SELECT id, author, sort_author FROM works WHERE authors IS NULL")
+    ).all()
     for wid, author, sort_author in rows:
         conn.execute(
             sa.text("UPDATE works SET authors = :a WHERE id = :id"),
             {"a": json.dumps([{"name": author, "sort": sort_author}]), "id": wid},
         )
 
-    with op.batch_alter_table("audio_tracks") as batch:
-        batch.add_column(sa.Column("title", sa.String(length=256), nullable=True))
-    with op.batch_alter_table("users") as batch:
-        batch.add_column(
-            sa.Column("auto_file_imports", sa.Boolean(), nullable=False, server_default=sa.false())
+    if "title" not in _columns("audio_tracks"):
+        op.add_column("audio_tracks", sa.Column("title", sa.String(length=256), nullable=True))
+    if "auto_file_imports" not in _columns("users"):
+        op.add_column(
+            "users",
+            sa.Column("auto_file_imports", sa.Boolean(), nullable=False, server_default=sa.false()),
         )
 
     op.create_table(
@@ -212,7 +231,11 @@ def downgrade() -> None:
     op.drop_index("ix_work_revisions_batch", table_name="work_revisions")
     op.drop_index("ix_work_revisions_work_id", table_name="work_revisions")
     op.drop_table("work_revisions")
-    with op.batch_alter_table("upload_sessions") as batch:
+    # A batch rebuild is safe for upload_sessions, and needed (import_id is in a foreign key,
+    # which SQLite cannot DROP COLUMN): no table references it, so the DROP cascades nowhere.
+    # resolve_fks=False: imports may still carry 0013's ai_key_id foreign key to ai_keys,
+    # which 0009 already dropped, and reflecting imports to resolve this one would fail on it.
+    with op.batch_alter_table("upload_sessions", reflect_kwargs={"resolve_fks": False}) as batch:
         batch.drop_index("ix_upload_sessions_import_id")
         batch.drop_constraint("fk_upload_sessions_import", type_="foreignkey")
         batch.drop_column("import_id")
@@ -223,17 +246,18 @@ def downgrade() -> None:
     op.drop_index("ix_imports_user_status", table_name="imports")
     op.drop_index("ix_imports_public_id", table_name="imports")
     op.drop_table("imports")
-    with op.batch_alter_table("users") as batch:
-        batch.drop_column("auto_file_imports")
-    with op.batch_alter_table("audio_tracks") as batch:
-        batch.drop_column("title")
-    with op.batch_alter_table("works") as batch:
-        batch.drop_index("ix_works_trashed_at")
-        batch.drop_index("ix_works_series")
-        batch.drop_constraint("fk_works_trashed_by", type_="foreignkey")
+    # DROP COLUMN in place, never a batch rebuild: rebuilding users, audio_tracks or works
+    # (copy, DROP, rename) with foreign_keys=ON would cascade into every row that references
+    # them. It needs SQLite 3.35; before that the columns stay, and all of them are nullable or
+    # have a constant default, so the previous release is unaffected. works.trashed_by stays on
+    # every version, like import_id: it is in a foreign key.
+    op.drop_index("ix_works_trashed_at", table_name="works")
+    op.drop_index("ix_works_series", table_name="works")
+    if (op.get_bind().dialect.server_version_info or (0,)) >= (3, 35):
+        op.drop_column("users", "auto_file_imports")
+        op.drop_column("audio_tracks", "title")
         for col in (
             "trash_from",
-            "trashed_by",
             "trashed_at",
             "version",
             "cover_source",
@@ -246,4 +270,4 @@ def downgrade() -> None:
             "series",
             "authors",
         ):
-            batch.drop_column(col)
+            op.drop_column("works", col)

@@ -21,6 +21,7 @@ Create Date: 2026-10-21
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -65,9 +66,33 @@ def _downgrade_scopes(s: set[str]) -> set[str]:
     return s - {"file"}
 
 
+@contextmanager
+def _rebuild_imports():
+    """Batch-rebuild imports (copy, DROP, rename) without its dependents noticing. With
+    foreign_keys=ON the DROP cascades into import_files and clears upload_sessions.import_id,
+    so both are set aside first and put back afterwards (the copy keeps every imports.id).
+    PRAGMA foreign_keys=OFF would not do it: SQLite ignores that inside a transaction, which
+    migrations run in. SQLite cannot add or drop a column in a foreign key in place."""
+    op.execute("CREATE TEMP TABLE _keep_import_files AS SELECT * FROM import_files")
+    op.execute(
+        "CREATE TEMP TABLE _keep_upload_imports AS "
+        "SELECT id, import_id FROM upload_sessions WHERE import_id IS NOT NULL"
+    )
+    with op.batch_alter_table("imports") as batch:
+        yield batch
+    op.execute("INSERT INTO import_files SELECT * FROM _keep_import_files")
+    op.execute(
+        "UPDATE upload_sessions SET import_id = "
+        "(SELECT import_id FROM _keep_upload_imports k WHERE k.id = upload_sessions.id) "
+        "WHERE id IN (SELECT id FROM _keep_upload_imports)"
+    )
+    op.execute("DROP TABLE _keep_import_files")
+    op.execute("DROP TABLE _keep_upload_imports")
+
+
 def upgrade() -> None:
     _rewrite(_upgrade_scopes)
-    with op.batch_alter_table("imports") as batch:
+    with _rebuild_imports() as batch:
         batch.add_column(sa.Column("ai_key_id", sa.Integer(), nullable=True))
         batch.create_foreign_key(
             "fk_imports_ai_key_id", "ai_keys", ["ai_key_id"], ["id"], ondelete="SET NULL"
@@ -75,7 +100,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("imports") as batch:
+    with _rebuild_imports() as batch:
         batch.drop_constraint("fk_imports_ai_key_id", type_="foreignkey")
         batch.drop_column("ai_key_id")
     _rewrite(_downgrade_scopes)
