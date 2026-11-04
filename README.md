@@ -5,6 +5,9 @@ A self-hosted reading server that lets you store EPUBs, PDFs, Comics, audiobooks
 ## My Setup
 I have this setup on a Raspberry Pi at home, running through Tailscale so it is not accessible by anything but my own devices! [`deploy/tailscale/`](deploy/tailscale/compose.yaml)
 
+## Heads up!
+This is entirely made with AI, and AI helped me with parts of the README too. Please expect this to be buggy, and use this at your own risk. I am not responsible for anything that happens :)
+
 ## Run
 
 ```sh
