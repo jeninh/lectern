@@ -28,9 +28,12 @@ because it counts more than rows lost on old SQLite: no downgrade may delete row
 `ON DELETE SET NULL` references on any version (#149). The way to keep that true: never rebuild
 a table that other tables reference. A downgrade that drops a column uses `DROP COLUMN` in place
 (guarded for 3.35, like the others), and the matching upgrade adds a column only when it is
-missing. A column inside a foreign key cannot be dropped that way (0007 `works.trashed_by`, 0013
-`imports.ai_key_id`), so it stays after the downgrade on every version; it is nullable and the
-previous release never reads it. A batch rebuild is only fine for a table nothing references
-(0007 and 0006 `upload_sessions`), or one the chain has already emptied of referencing tables.
+missing. A column inside a foreign key cannot be dropped that way. 0007 `works.trashed_by` stays
+after the downgrade on every version (nullable, never read by the previous release). 0013
+`imports.ai_key_id` is removed by rebuilding `imports`, after setting aside the `import_files`
+rows and `upload_sessions.import_id` values that the rebuild would cascade into, and restoring
+them (`PRAGMA foreign_keys=OFF` does nothing inside a migration's transaction). A batch rebuild
+is also fine for a table nothing references (0006 and 0007 `upload_sessions`), or one the chain
+has already emptied of referencing tables (0003 `app_passwords`).
 On old SQLite the suite also checks that residue column values survive the downgrade and the
 re-upgrade.
