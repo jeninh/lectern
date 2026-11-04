@@ -167,6 +167,11 @@ sections:
 
   - title: Reference
     docs:
+      - file: security-model.md
+        title: Security model
+        description: What needs an account, how credentials are stored, roles, keys, and non-goals.
+        icon: shield
+        audience: members
       - file: contracts.md
         title: Contracts
         description: The schema and interfaces the features build on.
