@@ -98,6 +98,11 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/lectern"]
 
+[tool.uv]
+# pyasn1 comes in through webauthn (needs >=0.6.2) and pyasn1-modules (<0.7). 0.6.5 fixes
+# four ASN.1 decoder DoS CVEs present in 0.6.4.
+constraint-dependencies = ["pyasn1>=0.6.5"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
